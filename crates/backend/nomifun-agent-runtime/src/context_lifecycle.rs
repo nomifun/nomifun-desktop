@@ -518,6 +518,7 @@ impl ContextLifecycle {
                 let retained_token_limit = (input_limit * 4 / 5)
                     .max(fixed_tokens + input_limit.saturating_sub(fixed_tokens) / 2)
                     .min(input_limit);
+                let mut retaining_latest = true;
                 loop {
                     if !exchange.fits_text_bound(requirements)? { break; }
                     let messages = exchange.with_required_inputs(requirements)?;
@@ -525,13 +526,19 @@ impl ContextLifecycle {
                     candidate.messages = vec![summary_message(&previous)];
                     candidate.messages.extend(messages.clone());
                     let candidate_bytes = encoded_size(&candidate)?;
+                    let candidate_token_limit = if retaining_latest { input_limit } else { retained_token_limit };
                     if candidate_bytes >= bytes
                         || candidate_bytes > self.resource.max_context_bytes
                         || candidate.messages.len() > self.resource.max_history_messages
-                        || crate::media_context::estimate_tokens(&candidate, candidate_bytes) >= retained_token_limit
+                        || crate::media_context::estimate_tokens(&candidate, candidate_bytes)
+                            >= candidate_token_limit
                     { break; }
+                    // Optional headroom may limit older history, but must not
+                    // discard a latest complete exchange that fits the frozen
+                    // input envelope. Keep its exact call/result and error.
                     mandatory_messages = messages;
                     retained_tool_call_ids = exchange.call_ids.clone();
+                    retaining_latest = false;
                     let Some(earlier) = exchange.earlier()? else { break; };
                     exchange = earlier;
                 }
