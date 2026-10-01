@@ -1507,3 +1507,14 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 普通 readonly backup 失败/空库保留；确认 writer/WAL 无后另备份 **126 events**、逐项一致、
   `ok`；凭据 exact match0。完整证据 `2026-10-01/macos/mac-gen-observe/`；源码身份另附仅 helper
   dirty patch（不在产品 binary），helper 预算/模式/来源回归 **6/6**。Windows 结果未改写。
+
+- **MAC-B-03 pipe EOF preflight**：当前产品源 `9aab28584` / 正式 App `8bb20b2fc160…` 已
+  构建、deep/strict 验签，原 MAC-B helper/三原件不变；冻结 **1 task Session / 12 requests /
+  4096 output / 360秒**，仅准备 stdin/EOF 问题簇，不把它代替失败的完整文件/B场景。
+- 两次 CUA 均明确 Mac locked，未通过其他技术解锁/截图/操作系统权限。已确认 **0 requests /
+  0 turns / 3 setup events / head ready**，没有发送用户任务，没有 StepFun authentication/额度故障
+  证据，更不是把已授权预算设为0。现为 **UI_BLOCKED / NOT_RUN**，待人手解锁后独立 fresh run。
+- 精确 owned App TERM **exit0**、fixture `/shutdown`200/exit0，App/Helper/listener 均无残留；
+  这是未发任务的清理，不是 Cmd-Q或EOF通过。原件、预算、准备状态、UI拒绝和凭据 exact
+  audit0保留于 `2026-10-01/macos/mac-b-stdin-eof/`；本批只有短进度，未额外修源码/重复回归/
+  发模型或改 Windows 结果，MAC-B/长helper/后代/N3/C/旧失败仍开放。
