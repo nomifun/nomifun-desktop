@@ -26,6 +26,7 @@ import { MESSAGE_BODY_CLASS_NAME, MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIG
 import { parseMessageFileMarker } from './messageFileMarker';
 import { projectAssistantText } from '../processTraceDisplayModel';
 import AssistantProtocolNotice from './AssistantProtocolNotice';
+import { projectCompletionOutcomes } from '../completionOutcomeDisplayModel';
 
 /**
  * Format a timestamp for message display.
@@ -89,6 +90,7 @@ const MessageText: React.FC<{
   actionsOnly?: boolean;
 }> = ({ message, hideActions = false, actionsOnly = false }) => {
   const { t } = useTranslation();
+  const messageList = useMessageList();
   // Filter think tags from content before rendering
   // 在渲染前过滤 think 标签
   const presentation = useMemo(() => {
@@ -104,7 +106,12 @@ const MessageText: React.FC<{
       ? projectAssistantText(content)
       : { text: content, hasToolPayload: false };
   }, [message.content.content, message.position]);
-  const contentToRender = presentation.text;
+  const completion = useMemo(() => presentation.hasToolPayload ? undefined
+    : projectCompletionOutcomes(message, presentation.text, messageList), [message, presentation, messageList]);
+  const contentToRender = completion
+    ? `${completion.body}\n\n${t(completion.kind === 'native_nonzero' ? 'messages.completionSummary.nativeNonzero' : 'messages.completionSummary.counts',
+      { toolCount: completion.toolCount, commandCount: completion.commandCount, codes: completion.exitCodes.join(', ') })}`
+    : presentation.text;
 
   const { text, files } = parseMessageFileMarker(contentToRender, message.position);
   const { data, json } = useFormatContent(text);
@@ -120,7 +127,6 @@ const MessageText: React.FC<{
   );
 
   // 仅 Nomi、且为最近一条用户文本消息时可编辑（与后端"仅最近一条"对齐）。
-  const messageList = useMessageList();
   const editableMessageId = message.message_id ?? message.msg_id;
   const isLatestUserMessage = useMemo(() => {
     if (!isUserMessage || !editableMessageId) return false;

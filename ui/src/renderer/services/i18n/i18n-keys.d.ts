@@ -4087,6 +4087,8 @@ export type I18nKey =
   | 'messages.availableCommands'
   | 'messages.canceledExecution'
   | 'messages.command'
+  | 'messages.completionSummary.counts'
+  | 'messages.completionSummary.nativeNonzero'
   | 'messages.conversationInProgress'
   | 'messages.copiedToClipboard'
   | 'messages.copy'
