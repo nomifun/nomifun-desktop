@@ -157,7 +157,6 @@ export async function settleCanvasImageComposeTask(input: {
       );
     }
 
-    const resultNodeIds: string[] = [];
     const at = Date.now();
     const mergeKey = `image-compose:${initialConfig.id}:${input.task.taskId}`;
     for (const [index, asset] of resultAssets.entries()) {
@@ -176,15 +175,9 @@ export async function settleCanvasImageComposeTask(input: {
         );
       }
       let resultNode: Extract<CreativeCanvasNode, { type: 'image' }> | undefined;
-      if (replacesEmptySource && index === 0) {
-        if (source.data.assetId !== null && source.data.assetId !== asset.id) {
-          throw new Error(
-            creativeStudioProductText(
-              'creativeStudio.canvas.errors.image.sourceOccupied',
-              '空图片节点在任务完成前已关联其他素材，已停止覆盖。'
-            )
-          );
-        }
+      const fillsSource = replacesEmptySource && index === 0 &&
+        (source.data.assetId === null || source.data.assetId === asset.id);
+      if (fillsSource) {
         resultNode = source.data.assetId === asset.id
           ? source
           : clearCanvasImageComposeDraftModel({
@@ -236,7 +229,7 @@ export async function settleCanvasImageComposeTask(input: {
         }
         resultNode = created;
         input.editor.dispatch(
-          canvasCommands.addNode(resultNode, { at, mergeKey })
+          canvasCommands.addNode(resultNode, { at, mergeKey, select: false })
         );
         state = input.editor.getState();
       }
@@ -245,7 +238,7 @@ export async function settleCanvasImageComposeTask(input: {
           connection.sourceNodeId === initialConfig.id &&
           connection.targetNodeId === resultNode.id
       );
-      if (!connected && !(replacesEmptySource && index === 0)) {
+      if (!connected && resultNode.id !== sourceNodeId) {
         const connection = {
           sourceNodeId: initialConfig.id,
           targetNodeId: resultNode.id,
@@ -268,12 +261,11 @@ export async function settleCanvasImageComposeTask(input: {
             targetHandle: 'target',
             at,
             mergeKey,
+            select: false,
           })
         );
       }
-      resultNodeIds.push(resultNode.id);
     }
-    input.editor.dispatch(canvasCommands.setSelection(resultNodeIds));
   }
 
   await input.editor.removePendingTask(input.task.taskId);
