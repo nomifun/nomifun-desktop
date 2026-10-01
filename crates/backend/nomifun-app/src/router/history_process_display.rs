@@ -234,6 +234,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_history_keeps_rejected_calls_without_owner_dispatch() {
+        let (journal, pool) = test_fixture().await;
+        let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let call = json!({"event":"tool_call_completed","step":1,
+            "call":{"call_id":"rejected-report","name":"report_completion","arguments":{"criteria":[]}}});
+        journal.append(call.to_string(), None, EngineJournalWrite::Progress).await.unwrap();
+        let output = json!({"status":"not_executed","code":"INVALID_TOOL_ARGUMENTS","tool":"report_completion",
+            "issues":[{"instance_path":"/criteria","error":"missing criterion"}],
+            "message":"No call in this batch was executed."}).to_string();
+        let completed = AgentEngineEvent::ToolCompleted {step:1,
+            result:AgentToolResult::text(ToolCallId::from("rejected-report"),output.clone(),true)};
+        journal.append(serde_json::to_string(&completed).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+        // An unpaired proposal never becomes an executed or rejected result.
+        journal.append(json!({"event":"tool_call_completed","step":2,
+            "call":{"call_id":"unfinished","name":"write_file","arguments":{"path":"x","content":"unexecuted"}}}
+        ).to_string(),None,EngineJournalWrite::Progress).await.unwrap();
+        journal.append(json!({"event":"tool_call_completed","step":3,
+            "call":{"call_id":"wrong-step","name":"report_completion","arguments":{}}}
+        ).to_string(),None,EngineJournalWrite::Progress).await.unwrap();
+        journal.append(serde_json::to_string(&AgentEngineEvent::ToolCompleted {step:4,
+            result:AgentToolResult::text(ToolCallId::from("wrong-step"),"foreign step",true)}).unwrap(),
+            None,EngineJournalWrite::Progress).await.unwrap();
+        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let mut other = store.get_live_session(&session_id).await.unwrap();
+        other.agent_session_id = uuid::Uuid::now_v7().to_string().into();
+        other.next_seq = 1;
+        let other_id = other.agent_session_id.clone();
+        store.create_session(nomifun_agent_session::CreateSessionRequest::new(other,1,"other-open",
+            "session_api".into(),"other-open".into(),"other-open".into())).await.unwrap();
+        let before_events:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap();
+        let before_projections:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_messages").fetch_one(&pool).await.unwrap();
+        let (history,_,total) = store.message_history_before(&session_id,None,50).await.unwrap();
+        let tool = history.iter().find(|item|item.projection["tool_summary"]["call_id"]=="rejected-report")
+            .expect("pre-dispatch failure remains inspectable after cold reload");
+        assert_eq!(tool.presentation_intent,"tool");
+        assert_eq!(tool.projection["tool_summary"]["name"],"report_completion");
+        assert!(history.iter().all(|item|item.projection["tool_summary"]["call_id"]!="unfinished"));
+        assert!(history.iter().all(|item|item.projection["tool_summary"]["call_id"]!="wrong-step"));
+        let details = load_historical_tool_observations(&pool,&session_id,&history).await.unwrap();
+        let detail = details.get(&tool.projection_id).unwrap();
+        assert_eq!(detail.args.as_ref().unwrap()["criteria"],json!([]));
+        assert_eq!(detail.output.as_deref(),Some(output.as_str()));
+        assert_eq!(detail.is_error,Some(true));
+        assert!(detail.turn_id.is_some());
+        let display_id = tool.projection["correlation_id"].as_str().unwrap();
+        let lookup = store.runtime_tool_history_message(&session_id,display_id).await.unwrap().unwrap();
+        assert_eq!(lookup,tool.clone());
+        assert!(store.runtime_tool_history_message(&other_id,display_id).await.unwrap().is_none());
+        assert!(store.runtime_tool_history_message(&session_id,&uuid::Uuid::now_v7().to_string()).await.unwrap().is_none());
+        assert!(store.runtime_tool_history_message(&session_id,"bad-id").await.unwrap().is_none());
+        let mut cursor = None;
+        let mut paged = Vec::new();
+        loop {
+            let (page,has_more,page_total) = store.message_history_before(&session_id,cursor,1).await.unwrap();
+            assert_eq!(page_total,total);
+            assert_eq!(page.len(),1);
+            cursor = Some(page[0].first_seq);
+            paged.push(page[0].projection_id.clone());
+            if !has_more { break; }
+        }
+        assert_eq!(paged.len(),total as usize);
+        assert_eq!(paged.iter().filter(|id|*id==&tool.projection_id).count(),1);
+        let (again,_,again_total) = store.message_history_before(&session_id,None,50).await.unwrap();
+        assert_eq!(total,again_total);
+        assert_eq!(tool.projection_id,again.iter().find(|item|item.projection["tool_summary"]["call_id"]=="rejected-report").unwrap().projection_id);
+        assert_eq!(before_events,sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap());
+        assert_eq!(before_projections,sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_messages").fetch_one(&pool).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn cold_history_recovers_tool_details_from_the_committed_runtime_record() {
         let (journal, pool) = test_fixture().await;
         let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
@@ -266,6 +336,8 @@ mod tests {
         let (history, _, _) = store.message_history_before(&session_id, None, 50).await.unwrap();
         let tool = history.iter().find(|projection| projection.presentation_intent == "tool")
             .expect("tool projection survives navigation");
+        assert_eq!(history.iter().filter(|projection|projection.presentation_intent=="tool").count(),1,
+            "an owner-backed call must not be duplicated by the Runtime history projection");
         let details = load_historical_tool_observations(&pool, &session_id, &history).await.unwrap();
         let detail = details.get(&tool.projection_id).expect("tool detail is rehydrated");
         assert_eq!(detail.args.as_ref().unwrap()["path"], "src/app.ts");

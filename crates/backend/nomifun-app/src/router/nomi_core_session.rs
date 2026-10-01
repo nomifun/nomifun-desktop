@@ -13169,8 +13169,12 @@ async fn get_nomi_core_agent_session_message(
                 .get("correlation_id")
                 .and_then(Value::as_str)
                 == Some(message_id.as_str())
-        })
-        .ok_or_else(|| {
+        });
+    let projection = match projection {
+        Some(projection) => Some(projection),
+        None => state.session_owner.canonical().store()
+            .runtime_tool_history_message(&session_id, &message_id).await.map_err(agent_session_store_error)?,
+    }.ok_or_else(|| {
             NomiCoreApiError::new(
                 StatusCode::NOT_FOUND,
                 "AGENT_SESSION_MESSAGE_NOT_FOUND",
