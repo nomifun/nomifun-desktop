@@ -152,6 +152,22 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn admitted_workspace_context_reaches_the_formal_turn_without_a_probe() {
+    let fixture=Fixture::new("admitted-workspace-context").await;
+    let prepared=fixture.host.prepare_turn(&fixture.message,CancellationToken::new()).await.unwrap();
+    let expected=admitted_workspace_context(&fixture.host.options.workspace).unwrap();
+    assert_eq!(prepared.model_request.input.instructions.iter().filter(|instruction|*instruction==&expected).count(),1);
+    let session=&fixture.host.options.conversation_id;
+    let models:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'")
+        .bind(session).fetch_one(fixture.pool()).await.unwrap();
+    let effects:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_effects WHERE session_id=?")
+        .bind(session).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(models,0,"context preparation must not spend a model request");
+    assert_eq!(effects,0,"admitted workspace data must not trigger a cwd or listing command");
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn cancellation_receipt_identity_rejects_altered_empty_delivery() {
     cancellation_identity_scenario(false).await;
 }

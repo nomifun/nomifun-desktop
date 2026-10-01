@@ -3477,3 +3477,18 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 未覆盖：此新防重开分支的正式模型/N3、无命令的纯读取任务、cwd范围遵守及摘要/交付一致性，完整B/GEN/C/macOS。
   修复晚于本次正式binary，未移植样本为修后PASS；运行已终态，没有为停止终态任务发送Stop，没有再付费重试。
 - 证据：仓库外2026-10-01/windows/w206-explicit-scope-live；03中途、04首次重复、05 completed及DB/UI/严格oracle，06～14原生回归/诊断分文件保存。
+
+### W207 已准入工作区数据与供应商暂停（2026-10-01；基线5c9d9d9fa，模型效果阻断）
+
+- Case/子断言：C01/C06/C07/C08，工作区默认cwd、MODEL接合及A08/A17/A19；沿W206未要求的pwd和报告重开继续验证。
+- 发现与修复：正式prepare_turn向模型加入权限/能力上下文，却没有直接给已准入workspace根信息。
+  现从EngineTurnReceipt的已验证Session workspace提供JSON数据（root、默认相对cwd、宿主OS）；路径值保持数据、正确转义，不做文件探测或扩大权限。
+  保留用户明确要求pwd/listing的场景；这是已知环境数据，不替代用户结果验证，不改用户任务/Schema/owner。
+- 验证：数据编码1/1、正式宿主prepare_turn接合1/1，后者上下文仅一次/模型请求0/效果0，fmt/diff及正式tauri/custom-protocol构建通过。
+  新目录/profile、原任务正式Coding/StepFun仅进入首个模型步，因EXECUTION_MODEL_PROVIDER_UNAVAILABLE暂停，无任务工具调用或效果。
+  UI明确“模型服务暂时不可用，任务尚未完成”，host_cleanup_proven、原件/旧事件不变、无假交付等独立9/9；不能计任务PASS或修后有效性样本。
+- 状态核对：初始外部脚本只读agent_turns.state=running，未反映turn_paused/head.paused；后以最新事件/Head及UI确认暂停，未重启或重发。
+  06暂停DB/UI已保留，再通过正式“结束本回合”清理隔离测试为cancelled，07终态另存；这不是暂停整个目标。
+- 未覆盖：已知root减少探测的模型效果、W206新防重开分支的真实/N3、完整B/GEN/C/macOS，首发引用与交付一致性。
+  模型不可用只阻断这次正式Case，2项组件与9项暂停核对分开记录，不扩大预算或不断付费试探。
+- 证据：仓库外2026-10-01/windows/w207-admitted-workspace-context；01/02组件、03构建、05中途/06暂停/07取消、事件/DB/UI与独立核对均在外部。
