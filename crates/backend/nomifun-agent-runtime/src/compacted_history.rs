@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ITEMS: usize = 4096;
+pub(crate) const PRIVATE_REASONING_NOTICE: &str = "[Private reasoning omitted from replay]";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -168,7 +169,7 @@ fn portable(
         ChatContentPart::Image { media_type, data_base64 } | ChatContentPart::Audio { media_type, data_base64 } =>
             ChatContentPart::Text { text: media_notice(media_type, data_base64.len()) },
         ChatContentPart::Reasoning { .. } | ChatContentPart::ProviderReasoning { .. } =>
-            ChatContentPart::Text { text: "[Private reasoning omitted from replay]".into() },
+            ChatContentPart::Text { text: PRIVATE_REASONING_NOTICE.into() },
         ChatContentPart::ToolCall { call_id, name, arguments, .. } => ChatContentPart::ToolCall {
             call_id: call_id.clone(), name: name.clone(), arguments: arguments.clone(), provider_metadata: None,
         },

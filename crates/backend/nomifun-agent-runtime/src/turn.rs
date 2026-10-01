@@ -4214,6 +4214,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_retains_receipts_without_replaying_private_reasoning() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let private_parts = [
+            ChatContentPart::Reasoning {text:"PRIVATE_THOUGHT_BODY".repeat(500), signature:None, encrypted_content:None},
+            ChatContentPart::Reasoning {text:"PRIVATE_THOUGHT_BODY".repeat(500),
+                signature:Some("PRIVATE_SIGNATURE".into()),encrypted_content:Some("PRIVATE_CIPHER".into())},
+            ChatContentPart::ProviderReasoning {block:nomifun_chat_model_broker::ChatProviderReasoning::AnthropicThinking {
+                text:"PRIVATE_THOUGHT_BODY".repeat(500), signature:"PRIVATE_SIGNATURE".into(),route_digest:None}},
+            ChatContentPart::ProviderReasoning {block:nomifun_chat_model_broker::ChatProviderReasoning::AnthropicRedactedThinking {
+                data:"PRIVATE_REDACTED_BODY".repeat(500),route_digest:None}},
+        ];
+        for (private_index,private) in private_parts.into_iter().enumerate() {
+            let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step("Earlier observations retained; no new execution.")]),
+                requests:Default::default()});
+            let mut request=request();
+            request.input.instructions=vec!["x".repeat(76_000)];
+            request.input.max_output_tokens=Some(4096);
+            let original=request.input.messages[0].clone();
+            request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLDER_HISTORY ".repeat(1000)));
+            let call=ChatContentPart::ToolCall {call_id:"settled-diagnostic".into(),name:"exec_command".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic","args":["PUBLIC_LITERAL"]})),
+                provider_metadata:None};
+            request.input.messages.push(ChatMessage {role:ChatRole::Assistant,
+                content:vec![private,call.clone()],provider_round_id:Some("private-live-round".into())});
+            let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
+                content:vec![ChatContentPart::ToolResult {call_id:"settled-diagnostic".into(),is_error:true,
+                    output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                        text:json!({"state":"exited","exit_code":1,"cleanup":{"reaped":true},
+                            "success":false,"output":{"text":"PUBLIC_LITERAL\n"}}).to_string()}]}]};
+            request.input.messages.push(receipt.clone());
+            let original_request=request.clone();
+            let mut oversized=request.clone();
+            if let ChatContentPart::ToolResult {output,..}=&mut oversized.input.messages.last_mut().unwrap().content[0] {
+                *output=vec![nomifun_chat_model_broker::ChatToolResultPart::Text {text:"ACTUAL_LARGE_RECEIPT".repeat(500)}];
+            }
+            let oversized_receipt=oversized.input.messages.last().unwrap().clone();
+            let resource=AgentContextBudget {max_context_bytes:80*1024,max_history_messages:64};
+            let budget=crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+            let sink=Sink::default();
+            lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&sink,CancellationToken::new()).await.unwrap();
+            assert!(request.input.messages.contains(&receipt),"private reasoning must not evict a fitting exact nonzero receipt");
+            assert!(request.input.messages.iter().flat_map(|message|&message.content).any(|part|*part==call));
+            assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+            let encoded=serde_json::to_string(&request.input).unwrap();
+            assert!(encoded.len()<=resource.max_context_bytes);
+            for marker in ["PRIVATE_THOUGHT_BODY","PRIVATE_SIGNATURE","PRIVATE_CIPHER","PRIVATE_REDACTED_BODY","private-live-round"] {
+                assert!(!encoded.contains(marker),"private continuation data must not survive the reset model round");
+                assert!(!serde_json::to_string(&model.requests.lock().unwrap()[0].input).unwrap().contains(marker));
+            }
+            assert!(encoded.contains("PUBLIC_LITERAL"));
+            println!("PRIVATE_TAIL variant={} before={} after={} byte_cap={} exact_receipt=true",private_index,
+                serde_json::to_vec(&original_request.input).unwrap().len(),encoded.len(),resource.max_context_bytes);
+            assert_eq!(model.requests.lock().unwrap().len(),1);
+            let events=sink.0.lock().unwrap();
+            let (items,ids)=events.iter().find_map(|event|match event {
+                AgentEngineEvent::ContextCompacted {retained_context:Some(items),retained_tool_call_ids,..}=>Some((items,retained_tool_call_ids)),
+                _=>None,
+            }).unwrap();
+            assert_eq!(ids.as_slice(),[ToolCallId::from("settled-diagnostic")]);
+            assert_eq!(crate::compacted_history::restore(items,std::slice::from_ref(&original),ids).unwrap(),request.input.messages[1..]);
+            assert!(original_request.input.messages.iter().any(|message|message.provider_round_id.is_some()),"source transcript remains intact");
+            request.validate().unwrap();
+            let large_model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step("Large receipt remains historical; no retry authorized.")]),
+                requests:Default::default()});
+            let mut large_lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+            large_lifecycle.prepare(&mut oversized,std::slice::from_ref(&original),&binding(),large_model,&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+            assert!(serde_json::to_vec(&oversized.input).unwrap().len()<=resource.max_context_bytes);
+            assert!(!oversized.input.messages.contains(&oversized_receipt),"projection cannot truncate real tool output to fit the cap");
+        }
+    }
+
+    #[tokio::test]
     async fn typed_prompt_overflow_cap_cannot_be_raised_for_a_large_fixed_prefix() {
         let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
         let mut request = request();
