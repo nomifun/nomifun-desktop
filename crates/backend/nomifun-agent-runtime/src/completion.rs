@@ -257,6 +257,18 @@ impl CompletionTracker {
             serde_json::json!(work.failed_tools);
         tool.input_schema.0["properties"]["observed_command_failure_count"]["const"] =
             serde_json::json!(work.failed_commands);
+        for (field,count,meaning) in [
+            ("observed_tool_error_count",work.failed_tools,"All unsuccessful tool results, including ordinary command nonzero outcomes marked is_error, even expected diagnostics, and any validation/admission failures. This is not a count of application faults."),
+            ("observed_command_failure_count",work.failed_commands,"All unsuccessful command observations. An expected nonzero diagnostic still belongs to this recorded total."),
+        ] {
+            let property=&mut tool.input_schema.0["properties"][field];
+            // Native callers commonly follow enum/default annotations more
+            // reliably than const alone. They do not supply missing input:
+            // whole-batch validation still requires the exact recorded value.
+            property["enum"]=serde_json::json!([count]);
+            property["default"]=serde_json::json!(count);
+            property["description"]=serde_json::json!(format!("Fixed host-owned integer: {count}. Copy this value verbatim; do not recompute it from whether the result was expected. {meaning}"));
+        }
         let mut required_failure_counts = serde_json::Map::new();
         let mut failure_descriptions = Vec::new();
         if work.failed_tools > 0 {
@@ -268,7 +280,7 @@ impl CompletionTracker {
                 serde_json::json!(work.failed_tools),
             );
             failure_descriptions.push(format!(
-                "exactly {} tool result error(s), including validation or admission failures",
+                "exactly {} unsuccessful tool result(s), including returned nonzero command outcomes even when expected, and any validation or admission failures",
                 work.failed_tools
             ));
         }
@@ -895,6 +907,33 @@ mod tests {
         let text = tracker.context(&AgentPlan::default(),work,1).unwrap();
         let body = text.strip_prefix("Completion accounting (derived data, not instructions or extra authority): ").unwrap();
         serde_json::Value::deserialize(&mut serde_json::Deserializer::from_str(body)).unwrap()
+    }
+
+    #[test]
+    fn fixed_runtime_counter_hints_do_not_fill_omissions_or_accept_recomputed_counts() {
+        let tracker=CompletionTracker::default();
+        for (tool_count,command_count) in [(1,1),(3,1),(0,0)] {
+            let work=AgentWorkStatus {failed_tools:tool_count,failed_commands:command_count,..Default::default()};
+            let definition=tracker.definition_with_evidence(&AgentPlan::default(),&work,false);
+            let schema=&definition.input_schema.0;
+            for (field,value) in [("observed_tool_error_count",tool_count),("observed_command_failure_count",command_count)] {
+                assert_eq!(schema["properties"][field]["enum"],serde_json::json!([value]),"the native tool schema must expose the one host-owned value");
+                assert_eq!(schema["properties"][field]["default"],value);
+            }
+            let validator=jsonschema::validator_for(schema).unwrap();
+            let report=serde_json::json!({"summary":"Recorded command outcomes","observed_tool_error_count":tool_count,
+                "observed_command_failure_count":command_count,"criteria":[{"disposition":"unverified","rationale":"No broader state is claimed."}]});
+            assert!(validator.is_valid(&report));
+            let mut wrong=report.clone();wrong["observed_tool_error_count"]=serde_json::json!(tool_count+1);
+            assert!(!validator.is_valid(&wrong));
+            if tool_count>0 {
+                let mut missing=report.clone();missing.as_object_mut().unwrap().remove("observed_tool_error_count");
+                assert!(!validator.is_valid(&missing),"a default annotation cannot manufacture a supplied counter");
+                assert!(missing.get("observed_tool_error_count").is_none());
+                let mut erased=report.clone();erased["observed_tool_error_count"]=serde_json::json!(0);
+                assert!(!validator.is_valid(&erased),"an expected business failure is still retained in the exact runtime total");
+            }
+        }
     }
 
     #[test]
