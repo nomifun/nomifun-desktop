@@ -1667,3 +1667,13 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   全同/ok、completed/ready，key audit0/264。证据`2026-10-02/macos/mac-b-report-recheck/`。
   本批无可证实新产品根因，只收短进度；未新增模型或扩大预算，完整B/N3/A/C/公开语言、
   C06-08/forced native branch/旧CEF/MM仍开放，不改写Windows结果。
+
+- **MAC-C06-10 历史恢复说明一致性**（2026-10-02，零模型）：复核W212发现tool总说明允许用
+  已展示history找回请求摘要所需既有输出，但evidence_call_ids说明及每轮Completion accounting
+  仍把history恢复和新观察/效果重放混禁，形成真实提示矛盾；不宣称它是B08语言问题唯一根因。
+- 只统一这两处description：仅already-advertised history/既有输出/请求summary；恢复不取得
+  current/eligible资格，不为修account重复观察/效果。类型/required/accept/epoch/计数/权限/
+  budget及dispatch未改，不翻译/删原文或复活旧证据。复用既有stale-report回归，首个测试签名
+  编译错误另保留，语义首红保留；修后completion **32/32**，old-read supported仍拒绝、原epoch
+  不变、historical unverified交付仍合法。证据`2026-10-02/macos/historical-guidance-consistency/`。
+  本批无native/StepFun重跑，正式交付/公开语言/完整A/B/C/N3及旧问题仍开放，Windows记录未改。
