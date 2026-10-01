@@ -26,6 +26,7 @@ import { useCanvasGenerationRuntime, type CanvasGenerationRuntimeSnapshot, type 
 import type { CreativeCanvasEditorHandle } from '../editor';
 import {
   canvasVideoComposeConfigForReference,
+  canvasVideoComposeSourceNodeId,
   canvasVideoComposeResumeRequests,
 } from './canvasVideoComposerCanvas';
 import {
@@ -49,6 +50,7 @@ export interface CanvasVideoTaskRuntimeBridgeHandle {
     order: number,
     idempotencyKey: string
   ): Promise<CanvasVideoTaskAdmission>;
+  dismissSubmission(order: number): CanvasGenerationRuntimeSnapshot;
   retryTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
   cancelTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
   recoverTask(
@@ -56,6 +58,7 @@ export interface CanvasVideoTaskRuntimeBridgeHandle {
   ): Promise<CanvasGenerationRuntimeSnapshot>;
   /** Returns false only when the backend authoritatively answers 404. */
   taskExists(reference: CreativeTaskReference): Promise<boolean>;
+  isNodeBusy(nodeId: string): boolean;
   snapshot(): CanvasGenerationRuntimeSnapshot;
 }
 
@@ -101,6 +104,16 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
     canvasVideoComposeResumeRequests(props.initialDocument)
   );
   const initialResumeRequests = initialResumeRequestsRef.current;
+
+  const nodeIdForTask = useCallback((reference: CreativeTaskReference) => {
+    const current = latest.current;
+    const editor = requiredEditor(current.editorRef, t);
+    const config = canvasVideoComposeConfigForReference(
+      { projectId: current.projectId, nodes: editor.getState().document.nodes },
+      reference
+    );
+    return canvasVideoComposeSourceNodeId(config);
+  }, [t]);
 
   const onPendingTask = useCallback(
     async (reference: CreativeTaskReference, signal: AbortSignal) => {
@@ -177,6 +190,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
     tasks: creativeTaskClient,
     assets: creativeAssetClient,
     initialResumeRequests,
+    nodeIdForTask,
     onPendingTask,
     onSettledTask,
     onRecoveryFailure,
@@ -232,6 +246,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
           idempotencyKey,
           start: () => runtime.controller.retrySubmission(order),
         }),
+      dismissSubmission: (order) => runtime.controller.dismissSubmission(order),
       retryTask: (taskId) => runtime.controller.retry(taskId),
       cancelTask: (taskId) => runtime.controller.cancel(taskId),
       recoverTask: (reference) => {
@@ -262,6 +277,7 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
           throw error;
         }
       },
+      isNodeBusy: (nodeId) => runtime.controller.isNodeBusy(latest.current.projectId, nodeId),
       snapshot: () => runtime.controller.snapshot(),
     }),
     [runtime.controller, t]

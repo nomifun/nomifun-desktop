@@ -60,6 +60,50 @@ const props = (
 });
 
 describe('CreativeCanvasVideoComposer', () => {
+  test.each(['queued', 'running'] as const)('blocks another generation on the same node while its task is %s', (state) => {
+    const generated: string[] = [];
+    const componentProps = props({
+      initialPrompt: '第一段视频', task: { state, pendingCount: 1 },
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const view = render(wrap(<CreativeCanvasVideoComposer {...componentProps} />));
+    const input = view.getByRole('combobox', { name: '视频创作提示词' }) as HTMLTextAreaElement;
+    const button = view.getByRole('button', { name: '生成视频' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(input.disabled).toBe(false);
+    fireEvent.click(button);
+    fireEvent.change(input, { target: { value: '第二段视频' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(generated).toEqual([]);
+    view.rerender(wrap(<CreativeCanvasVideoComposer {...componentProps}
+      task={{ state: 'succeeded', pendingCount: 0 }} />));
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(generated).toEqual(['第二段视频']);
+  });
+
+  test('keeps another node available while this node is running', () => {
+    const generated: string[] = [];
+    const firstNode = props({
+      nodeId: 'first-node', initialPrompt: '第一段视频',
+      task: { state: 'running', pendingCount: 1 },
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const secondNode = props({
+      nodeId: 'second-node', initialPrompt: '第二段视频',
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const view = render(wrap(<>
+      <CreativeCanvasVideoComposer {...firstNode} />
+      <CreativeCanvasVideoComposer {...secondNode} />
+    </>));
+    const buttons = view.getAllByRole('button', { name: '生成视频' }) as HTMLButtonElement[];
+    expect(buttons[0]!.disabled).toBe(true);
+    expect(buttons[1]!.disabled).toBe(false);
+    fireEvent.click(buttons[1]!);
+    expect(generated).toEqual(['第二段视频']);
+  });
+
   test('inserts a stable reference from @, preserves whitespace and blocks disconnected bindings', () => {
     const changes: CreativeCanvasReferencePromptChange[] = [];
     const generated: CreativeCanvasReferencePromptChange[] = [];
@@ -260,7 +304,7 @@ describe('CreativeCanvasVideoComposer', () => {
       dispatchCanvasVideoComposerSubmission({
         mode: 'i2v',
         disabled: false,
-        busy: true,
+        busy: false,
         prompt: '',
         hasModel: false,
         retrySubmission: true,

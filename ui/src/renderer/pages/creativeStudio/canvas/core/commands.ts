@@ -20,7 +20,7 @@ import type {
 type WithHistory<T> = T & { history: CanvasHistoryMeta };
 
 export type CanvasCommand =
-  | WithHistory<{ type: 'node/add'; node: CanvasGraphNode }>
+  | WithHistory<{ type: 'node/add'; node: CanvasGraphNode; select?: boolean }>
   | WithHistory<{ type: 'node/update'; node: CanvasGraphNode }>
   | { type: 'node/reconcile-runtime'; node: CanvasGraphNode }
   | WithHistory<{
@@ -36,7 +36,7 @@ export type CanvasCommand =
       padding?: number;
     }>
   | WithHistory<{ type: 'group/ungroup'; groupId: string }>
-  | WithHistory<{ type: 'edge/connect'; edge: CanvasEdge }>
+  | WithHistory<{ type: 'edge/connect'; edge: CanvasEdge; select?: boolean }>
   | WithHistory<{ type: 'edge/delete'; edgeIds?: string[] }>
   | WithHistory<{
       type: 'selection/delete';
@@ -76,11 +76,12 @@ function history(at: number | undefined, mergeKey?: string): CanvasHistoryMeta {
 export const canvasCommands = {
   addNode(
     node: CanvasGraphNode,
-    options: { at?: number; mergeKey?: string } = {}
+    options: { at?: number; mergeKey?: string; select?: boolean } = {}
   ): CanvasCommand {
     return {
       type: 'node/add',
       node,
+      ...(options.select !== undefined ? { select: options.select } : {}),
       history: history(options.at, options.mergeKey),
     };
   },
@@ -161,10 +162,12 @@ export const canvasCommands = {
       at?: number;
       mergeKey?: string;
       idFactory?: CanvasIdFactory;
+      select?: boolean;
     } = {}
   ): CanvasCommand {
     return {
       type: 'edge/connect',
+      ...(options.select !== undefined ? { select: options.select } : {}),
       edge: {
         id: options.edgeId ?? (options.idFactory ?? createCanvasId)('edge'),
         sourceNodeId,

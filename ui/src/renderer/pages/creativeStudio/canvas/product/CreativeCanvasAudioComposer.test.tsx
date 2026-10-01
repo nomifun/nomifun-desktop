@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 
 import type { CreativeModelOption } from '../../models';
 import CreativeCanvasAudioComposer, {
@@ -18,6 +20,7 @@ import CreativeCanvasAudioComposer, {
 const PROVIDER_ID =
   '019b0000-0000-7000-8000-000000000019' as CreativeModelOption['providerId'];
 const noop = () => undefined;
+afterEach(cleanup);
 const speechModel: CreativeModelOption = {
   providerId: PROVIDER_ID,
   model: 'tts-v1',
@@ -53,6 +56,50 @@ const props = (
 });
 
 describe('CreativeCanvasAudioComposer', () => {
+  test.each(['queued', 'running'] as const)('blocks another generation on the same node while its task is %s', (state) => {
+    const generated: string[] = [];
+    const componentProps = props({
+      initialPrompt: '第一段旁白', task: { state, pendingCount: 1 },
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const view = render(withCanvasTestI18n(<CreativeCanvasAudioComposer {...componentProps} />));
+    const input = view.getByRole('textbox', { name: '朗读文本' }) as HTMLTextAreaElement;
+    const button = view.getByRole('button', { name: '生成音频' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(input.disabled).toBe(false);
+    fireEvent.click(button);
+    fireEvent.change(input, { target: { value: '第二段旁白' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(generated).toEqual([]);
+    view.rerender(withCanvasTestI18n(<CreativeCanvasAudioComposer {...componentProps}
+      task={{ state: 'succeeded', pendingCount: 0 }} />));
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(generated).toEqual(['第二段旁白']);
+  });
+
+  test('keeps another node available while this node is running', () => {
+    const generated: string[] = [];
+    const firstNode = props({
+      nodeId: 'first-node', initialPrompt: '第一段旁白',
+      task: { state: 'running', pendingCount: 1 },
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const secondNode = props({
+      nodeId: 'second-node', initialPrompt: '第二段旁白',
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const view = render(withCanvasTestI18n(<>
+      <CreativeCanvasAudioComposer {...firstNode} />
+      <CreativeCanvasAudioComposer {...secondNode} />
+    </>));
+    const buttons = view.getAllByRole('button', { name: '生成音频' }) as HTMLButtonElement[];
+    expect(buttons[0]!.disabled).toBe(true);
+    expect(buttons[1]!.disabled).toBe(false);
+    fireEvent.click(buttons[1]!);
+    expect(generated).toEqual(['第二段旁白']);
+  });
+
   test('renders a focused speech synthesis composer', () => {
     const html = renderToStaticMarkup(
       <CreativeCanvasAudioComposer
@@ -175,7 +222,7 @@ describe('CreativeCanvasAudioComposer', () => {
     expect(
       dispatchCanvasAudioComposerSubmission({
         disabled: false,
-        busy: true,
+        busy: false,
         prompt: '',
         hasModel: false,
         requiredVoiceReady: false,

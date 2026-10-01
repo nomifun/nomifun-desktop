@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ArrowUp, BookOne, Down, Loading, SettingTwo } from '@icon-park/react';
+import { ArrowUp, BookOne, Loading, Down, SettingTwo } from '@icon-park/react';
 import { InputNumber, Radio, Select } from '@arco-design/web-react';
 import { autoUpdate, flip, offset, shift, size, useFloating } from '@floating-ui/react';
 import React, {
@@ -57,6 +57,7 @@ export interface CreativeCanvasImageComposerProps {
   modelOptions: readonly ImageGenerationModelOption[];
   task: CanvasImageComposeTaskSummary;
   disabled?: boolean;
+  submitting?: boolean;
   generateBlocked?: boolean;
   error?: string | null;
   retrySubmission?: boolean;
@@ -98,7 +99,8 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   maxCount,
   modelOptions,
   task,
-  disabled = false,
+  disabled: disabledProp = false,
+  submitting = false,
   generateBlocked = false,
   error,
   retrySubmission = false,
@@ -116,6 +118,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   onRetrySubmission,
 }) => {
   const { t } = useTranslation();
+  const disabled = disabledProp || submitting;
   const settingsHostRef = useRef<HTMLDivElement>(null);
   const { prompt, mentions, labels, change, clear } = useCanvasReferencePromptDraft(
     nodeId, initialPrompt, initialMentions, references, onPromptChange
@@ -139,10 +142,10 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     ],
     whileElementsMounted: autoUpdate,
   });
-  const busy = task.state === 'queued' || task.state === 'running';
   const hasTextInput = references.some((reference) =>
     reference.kind === 'text' && reference.textContent?.trim() && !reference.disabledReason
   );
+  const busy = task.pendingCount > 0 || task.state === 'queued' || task.state === 'running';
   const canGenerate = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
     : !disabled && !generateBlocked && !busy && (prompt.trim().length > 0 || hasTextInput) && settings.model !== null;
@@ -196,6 +199,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   const submit = (
     change: CreativeCanvasReferencePromptChange = { value: prompt, mentions }
   ): void => {
+    if (disabled) return;
     if (retrySubmission && onRetrySubmission) {
       onRetrySubmission();
       return;
@@ -470,13 +474,8 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
             disabled={!canGenerate}
             onClick={() => submit()}
           >
-            {busy ? (
-              <Loading
-                className={composerStyles.spin}
-                theme='outline'
-                size={17}
-                fill='currentColor'
-              />
+            {submitting ? (
+              <Loading className={composerStyles.spin} theme='outline' size={17} fill='currentColor' />
             ) : (
               <ArrowUp theme='outline' size={17} fill='currentColor' strokeWidth={4} />
             )}
