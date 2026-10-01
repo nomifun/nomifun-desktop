@@ -23,6 +23,7 @@ export interface UseCanvasGenerationRuntimeOptions {
   assets: CreativeAssetPort;
   poll?: Omit<CreativeTaskPollOptions, "signal" | "onTask">;
   initialResumeRequests?: readonly CanvasGenerationResumeRequest[];
+  nodeIdForTask?: CanvasGenerationRuntimeControllerOptions["nodeIdForTask"];
   onPendingTask?: CanvasGenerationRuntimeControllerOptions["onPendingTask"];
   onSettledTask?: CanvasGenerationRuntimeControllerOptions["onSettledTask"];
   onRecoveryFailure?: CanvasGenerationRuntimeControllerOptions["onRecoveryFailure"];
@@ -56,6 +57,7 @@ export function useCanvasGenerationRuntime(
     () =>
       new CanvasGenerationRuntimeController(options.tasks, options.assets, {
         poll: { intervalMs, maxWaitMs, wait, now },
+        nodeIdForTask: options.nodeIdForTask,
         onPendingTask: options.onPendingTask,
         onSettledTask: options.onSettledTask,
         onRecoveryFailure: options.onRecoveryFailure,
@@ -65,6 +67,7 @@ export function useCanvasGenerationRuntime(
       maxWaitMs,
       now,
       options.assets,
+      options.nodeIdForTask,
       options.onPendingTask,
       options.onRecoveryFailure,
       options.onSettledTask,
