@@ -620,6 +620,9 @@ pub(crate) async fn run_turn(
             &discovered_tools,
             &mut adaptive_slots,
         )?;
+        let review_can_report = long_horizon.as_ref().is_some_and(|state| state.work_status.running_processes.is_empty())
+            && !patch_recovery.pending() && !patch_recovery.unresolved();
+        synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used, review_can_report);
         protocol_recovery.constrain_tool_choice(
             &mut model_request.input.tool_choice, !model_request.input.tools.is_empty(),
         );
@@ -1342,9 +1345,10 @@ pub(crate) async fn run_turn(
                         if adaptive.task_ledger() {
                             event_sink.emit(AgentEngineEvent::CompletionObservation { observation }).await?;
                         }
-                        // New observations require a fresh completion account;
-                        // the model-step bound limits repeated work/review.
-                        completion_review_used = false;
+                        // A real owner observation starts a fresh account.
+                        // A proposal held before dispatch cannot reopen the
+                        // report-only review or authorize repeating work.
+                        if attempted { completion_review_used = false; }
                         if crate::execution_policy::requires_replanning_after_result(
                             binding, &result, attempted, state.execution_plan.revision,
                         ) || (request.unscoped_tool_hooks && attempted && result.is_error) {
@@ -1749,10 +1753,37 @@ struct AdaptiveContextSlots {
     tool_history: Option<usize>,
     task_plan: Option<usize>,
     completion: Option<usize>,
+    completion_review: Option<usize>,
     discovery_catalog: Option<usize>,
     task_continuation: Option<usize>,
     failure_stop: Option<usize>,
     workspace_mutation_policy: Option<usize>,
+}
+
+fn synchronize_completion_review(
+    request: &mut ChatModelRequest,
+    slots: &mut AdaptiveContextSlots,
+    active: bool,
+    can_report: bool,
+) {
+    if active {
+        // The transcript review can be summarized with an oversized tool
+        // suffix. Keep this host-owned phase in mandatory instructions; the
+        // original inputs, evidence and authority remain unchanged.
+        upsert_instruction(&mut request.input.instructions, &mut slots.completion_review,
+            "Completion review is active for this same accepted task. The preceding assistant answer lacked a current completion report. Submit report_completion using available_evidence and exact observed failure counts. The original user inputs retained after a summary are the same inputs, not new requests to repeat work. Do not restart the task or repeat settled checks solely because history was summarized. Missing evidence must be disclosed as unverified/blocked; a summary is not proof, permission or a successful receipt. Settle any running process and preserve unresolved recovery obligations before claiming completion.".into());
+        if can_report && request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME) {
+            // Select the already exposed control after a terminal answer.
+            // Some compatible providers ignore tool_choice, so expose only
+            // this control for the review. The frozen authority is unchanged;
+            // the whole-batch exposure guard still rejects any guessed action.
+            // This cannot accept arguments or create completion evidence.
+            request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME);
+            request.input.tool_choice = ChatToolChoice::Specific { name:crate::completion::TOOL_NAME.into() };
+        }
+    } else if let Some(slot) = slots.completion_review {
+        request.input.instructions[slot].clear();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2100,7 +2131,9 @@ async fn invoke_tool_calls(
         // admission. No internal control or workspace effect ran.
         // The ordinary result path records all call/result pairs and feeds the
         // error back on the next bounded model step, without transport replay.
-        completion.invalidate();
+        // No control, discovery, admission or owner effect ran. A rejected
+        // proposed name cannot change the trusted cause of a settled gate.
+        completion.invalidate_report();
         for call in &completed {
             if plan.binding(&call.name).is_none() {
                 work_status.observe_deferred();
@@ -3993,6 +4026,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completion_review_survives_compaction_when_the_tool_suffix_cannot_fit() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new((0..8).map(|_| text_step("The accepted checks already ended; report their actual results.")).collect()),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(50_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.extend([
+            ChatMessage { role:ChatRole::Assistant, provider_round_id:None,
+                content:vec![ChatContentPart::ToolCall { call_id:"diagnostic".into(), name:"exec_command".into(),
+                    arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test"]})), provider_metadata:None }] },
+            ChatMessage { role:ChatRole::Tool, provider_round_id:None,
+                content:vec![ChatContentPart::ToolResult { call_id:"diagnostic".into(), is_error:true,
+                    output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text { text:"diagnostic output ".repeat(2400) }] }] },
+            crate::context_lifecycle::text_message(ChatRole::Assistant, "The diagnostic exited with code 1.".into()),
+        ]);
+        let work = crate::AgentWorkStatus { failed_commands:1, failed_tools:1, ..Default::default() };
+        let transcript_review = work.completion_review_message().unwrap();
+        request.input.messages.push(transcript_review.clone());
+        let mut slots = AdaptiveContextSlots::default();
+        synchronize_completion_review(&mut request, &mut slots, true, false);
+        assert!(slots.completion_review.is_some(), "active review must have a host instruction independent of the transcript");
+        let instructions = request.input.instructions.clone();
+        let tools = request.input.tools.clone();
+        let resource = AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(crate::AgentModelBudget::default(),resource).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert!(!model.requests.lock().unwrap().is_empty(), "the oversized suffix must trigger real compaction");
+        assert!(!request.input.messages.contains(&transcript_review), "this fixture must exercise omission of the transcript notice");
+        assert_eq!(request.input.instructions,instructions, "the active host phase must remain exact even when its transcript is summarized");
+        assert_eq!(request.input.tools,tools, "review context grants no new tools");
+        assert_eq!(request.input.messages.iter().filter(|message| **message==original).count(),1);
+        assert!(serde_json::to_vec(&request.input).unwrap().len()<=resource.max_context_bytes);
+        synchronize_completion_review(&mut request,&mut slots,true,false);
+        assert_eq!(request.input.instructions,instructions, "reconstruction must not append duplicate phase instructions");
+        synchronize_completion_review(&mut request,&mut slots,false,false);
+        assert!(request.input.instructions[slots.completion_review.unwrap()].is_empty(), "new input/observations clear the old phase");
+        assert_eq!(request.input.instructions[0],instructions[0]);
+        request.validate().expect("clearing the turn-local review must leave a valid model request");
+    }
+
+    #[tokio::test]
     async fn compaction_output_limit_retries_once_without_replaying_tools() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
@@ -4393,6 +4471,99 @@ mod tests {
         assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
         assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
         assert!(result.output_text.contains("no success claim"));
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_review_is_projected_into_the_next_model_instructions() {
+        let model = Arc::new(ObservingModel { requests:Default::default(),
+            steps:std::sync::Mutex::new(vec![
+                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                text_step("The diagnostic ended with code 1. This is its result, not a successful test."),
+                control_step("account", "report_completion", json!({
+                    "summary":"The diagnostic exited with code 1.","observed_tool_error_count":1,"observed_command_failure_count":1,
+                    "criteria":[{"disposition":"unverified","rationale":"Only the recorded diagnostic result is disclosed."}]
+                })),
+            ]) });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed { .. }));
+        let captured = model.requests.lock().unwrap();
+        assert_eq!(captured.len(),3);
+        assert!(captured[2].input.instructions.iter().any(|text| text.starts_with("Completion review is active")),
+            "the next model request must retain the host's review phase independently of optional transcript messages");
+        assert!(!captured[1].input.instructions.iter().any(|text| text.starts_with("Completion review is active")));
+        assert_eq!(captured[2].input.tool_choice,ChatToolChoice::Specific { name:crate::completion::TOOL_NAME.into() },
+            "a settled terminal answer needs the exact report tool, not another autonomous task attempt");
+        assert_eq!(captured[2].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            [crate::completion::TOOL_NAME], "a settled terminal answer exposes only its completion control");
+        assert!(captured[1].input.tools.iter().any(|tool| tool.name=="exec_command"));
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
+    }
+
+    #[tokio::test]
+    async fn terminal_review_with_a_running_process_keeps_process_controls_available() {
+        struct RunningTool;
+        #[async_trait]
+        impl AgentToolInvoker for RunningTool {
+            async fn invoke(&self, invocation:AgentToolInvocation, _:CancellationToken) -> Result<AgentToolResult,AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                Ok(AgentToolResult::text(invocation.call.call_id,
+                    json!({"process_id":"still-live","state":"running","success":true}).to_string(),false))
+            }
+        }
+        let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
+            control_step("plan", "update_plan", json!({"plan":[{"step":"Inspect process","status":"in_progress"}]})),
+            control_step("launch", "exec_command", json!({"command":"worker","args":[]})),
+            text_step("A process is still running."),
+            text_step("A process is still running; completion is unproven."),
+        ]) });
+        let plan = AgentToolPlan::new([
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("poll_process", "workspace.process", "workspace.process/poll", AgentEffectClass::ReadOnly, true),
+        ]).unwrap();
+        assert!(open_session(model.clone(),Arc::new(RunningTool))
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await.is_err());
+        let captured = model.requests.lock().unwrap();
+        assert_eq!(captured.len(),4);
+        assert_eq!(captured[3].input.tool_choice,ChatToolChoice::Auto,
+            "the model must still be able to settle a live process before reporting");
+        assert!(captured[3].input.tools.iter().any(|tool| tool.name=="poll_process"));
+    }
+
+    #[tokio::test]
+    async fn ignored_completion_choice_cannot_dispatch_another_command() {
+        let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+            text_step("The diagnostic exited with code 1."),
+            control_step("unrequested-plan", "update_plan", json!({"plan":[{"step":"Repeat diagnostic","status":"in_progress"}]})),
+            control_step("unrequested-repeat", "exec_command", json!({"command":"bun","args":["test"]})),
+            control_step("account", "report_completion", json!({
+                "summary":"The diagnostic exited with code 1; the additional command was not executed.",
+                "observed_tool_error_count":3,"observed_command_failure_count":1,
+                "criteria":[{"disposition":"unverified","rationale":"Only the original diagnostic result is disclosed; no repeated command ran."}]
+            })),
+            text_step("No more work is authorized"),text_step("No more work is authorized"),
+        ]) });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(),tools.clone())
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await
+            .expect("a rejected extra command must not force another effect or lose the settled result");
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed { .. }));
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"], "the frozen action can be permitted but inadmissible during report review");
+        assert_eq!(model.requests.lock().unwrap().len(),5);
+        assert_eq!(model.requests.lock().unwrap()[4].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            [crate::completion::TOOL_NAME], "a rejected proposal must not reopen the completion review's action surface");
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"));
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
     }
 
     #[tokio::test]
