@@ -1391,3 +1391,15 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   另以 immutable source 备份 **421 events**、`ok`、completed/head ready，未编辑状态。
   完整证据 `2026-10-01/macos/mac-a-terminal-review/`；本批只更新短进度，不额外重复测试/build。
   历史结果交付/自然语言、完整 A/B/C/N3 与其余退出条件仍开放，Windows 结果未改。
+
+- **MAC-C06-02 historical delivery contract**（C06-03、`CMD-136` 结果表达子断言）：只读核对
+  MAC-A-06 原模型请求 **06～09**，四行原文及 NEEDLE-present/MAC_A_NO_MATCH 均仍存在，
+  不是实际读搜未发生或压缩把所有数据清空。无新模型/Session/凭据访问、无全量 build/UI 排程。
+- 修复完成接口的歧义说明，不改验收：summary 交付已知较早实际结果并标清时点，current-state
+  不确定另外披露；不可用旧 ID 仍不能支撑当前 supported，也不借目录/命令 ID。rationale 实际
+  可能追加用户可见警告，说明改为按用户语言表达，不再错误承诺“内部且不展示”。
+- 新说明首败保留，修后 **1/1**、completion **31/31**：历史 summary 未省略、unverified 无
+  引用且原 epoch 不变；stale current supported 仍拒绝。原正文/环境/输入排除断言继续通过。
+  没有在 context/scopes 复制原 Tool output，没有新增字段/工具/权限，没有降低 schema 或真假
+  结果断言。证据 `2026-10-01/macos/c06-historical-delivery/`；真实修后是否完整交付仍待验，
+  不把说明测试记作 full MAC-A/N3，不改 Windows 验收或关闭阶段二、三。
