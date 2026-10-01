@@ -994,6 +994,8 @@ export type I18nKey =
   | 'conversation.agentError.codes.NOMIFUN_INTERNAL_ERROR.title'
   | 'conversation.agentError.codes.NOMIFUN_PERMISSION_ERROR.body'
   | 'conversation.agentError.codes.NOMIFUN_PERMISSION_ERROR.title'
+  | 'conversation.agentError.codes.NOMIFUN_SESSION_CONFIGURATION_CHANGED.body'
+  | 'conversation.agentError.codes.NOMIFUN_SESSION_CONFIGURATION_CHANGED.title'
   | 'conversation.agentError.codes.NOMIFUN_STATE_INCONSISTENT.body'
   | 'conversation.agentError.codes.NOMIFUN_STATE_INCONSISTENT.title'
   | 'conversation.agentError.codes.NOMIFUN_STREAM_BROKEN.body'

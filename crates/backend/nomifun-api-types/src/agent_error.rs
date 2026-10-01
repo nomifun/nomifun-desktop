@@ -15,6 +15,9 @@ pub enum AgentErrorCode {
     NomifunConversationBusy,
     NomifunStreamBroken,
     NomifunStateInconsistent,
+    /// Current capability/Skill provenance differs from the frozen Session.
+    /// Admission refuses execution; repeating the same request cannot fix it.
+    NomifunSessionConfigurationChanged,
     /// Nomi restored the accepted turn's in-memory root after rejecting an
     /// unsupported completion claim, but could not durably persist that root.
     /// The exact persisted Nomi session must be quarantined and reset before a
