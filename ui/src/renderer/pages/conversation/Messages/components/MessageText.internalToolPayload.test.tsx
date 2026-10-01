@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import type { IMessageText } from '@/common/chat/chatLib';
 import { parseConversationId } from '@/common/types/ids';
 import MessageText from './MessageText';
+import zhMessages from '@/renderer/services/i18n/locales/zh-CN/messages.json';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({
@@ -31,6 +32,19 @@ const renderMessage = (content: string, position: IMessageText['position']) => {
 };
 
 describe('MessageText internal tool payload display', () => {
+  test('localizes the exact runtime count footer without changing the canonical message', async () => {
+    const localized = createInstance();
+    await localized.use(initReactI18next).init({ lng:'zh-CN', resources:{'zh-CN':{translation:{messages:zhMessages}}} });
+    const raw = '诊断退出码为 1。\n\nUnsuccessful tool attempts in this turn: 1 (including argument checks and command outcomes). Details remain available in the execution steps.\n\nUnsuccessful command attempts in this turn: 1. Each command\'s exit status and output explain the result.';
+    const original = { id:'localized-footer',type:'text',position:'left',conversation_id:conversationId,created_at:1,
+      content:{content:raw} } as IMessageText;
+    const { container } = render(<MemoryRouter><I18nextProvider i18n={localized}><MessageText message={original} /></I18nextProvider></MemoryRouter>);
+    const visible = () => `${container.textContent}${container.querySelector('.markdown-shadow')?.shadowRoot?.textContent ?? ''}`;
+    await waitFor(() => expect(visible()).toContain('调用 1 次，命令 1 次'));
+    expect(visible()).not.toContain('Unsuccessful tool attempts');
+    expect(visible()).toContain('诊断退出码为 1');
+    expect(original.content.content).toBe(raw);
+  });
   test('ordinary final text retains its copy action', () => {
     const { container } = renderMessage('The file is ready.', 'left');
     expect(container.querySelector('[data-testid="message-copy-action"]')).not.toBeNull();
