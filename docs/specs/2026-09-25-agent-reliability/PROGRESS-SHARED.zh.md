@@ -201,6 +201,14 @@
   新分支晚于正式binary，未证明真实修后/N3；cwd探测、无命令纯读取、摘要/交付及完整B/C仍待验。
   证据在2026-10-01/windows/w206-explicit-scope-live，正式失败和修后回归分开，不以单元通过代判共享阶段。
 
+### C01-03 已准入工作区环境数据（2026-10-01，W207；模型效果阻断）
+
+- 正式模型请求缺少已准入workspace根信息；现由宿主验证后的Session凭据提供JSON root/默认cwd/OS，路径值是数据，不增加读取/执行权限或额外探测。
+  编码与正式prepare_turn接合2/2、fmt/diff及正式构建通过；原任务/Schema/owner不变，用户要求的pwd/list仍正常执行。
+- 正式Coding首个模型步因供应商不可用暂停，任务工具/效果0；UI正确说明未完成，host清理、磁盘/旧事件和零假交付核对9/9。
+  暂停现场先保留，再由正式结束回合取消隔离测试；初始agent_turns.running不代表当前仍活跃，以turn_paused/head/UI为准。
+  本批不是任务成功或模型有效性/N3样本，完整B/C和共享阶段未关闭；证据在2026-10-01/windows/w207-admitted-workspace-context。
+
 ### C07-01 固定开销与压缩后原收据（2026-10-01）
 
 - macOS MAC-A-01 的真实 StepFun 首败：两个指定测试已 exit 0/1，三次压缩却只留下 accepted input，
