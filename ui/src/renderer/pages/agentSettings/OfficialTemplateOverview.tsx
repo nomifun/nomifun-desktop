@@ -19,6 +19,7 @@ type Props = {
   busy: boolean;
   catalog: AgentCatalogResponse;
   onSave: (displayName: string, document: AgentPresetDocument, description: string) => void;
+  saveLabel?: string;
   onDirtyChange?: (dirty: boolean) => void;
   initialEditing?: TemplateEditingState;
   onEditingChange?: (editing: TemplateEditingState) => void;
@@ -34,7 +35,7 @@ export const documentFromTemplate = (
   skill_bindings: structuredClone(template.seed.skill_bindings),
 });
 
-const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, onSave, onDirtyChange, initialEditing, onEditingChange }) => {
+const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, onSave, saveLabel, onDirtyChange, initialEditing, onEditingChange }) => {
   const { t } = useTranslation();
   const path = TEMPLATE_I18N_PATH[template.template_key];
   const name = t(`agentSettings.template.${path}.name`);
@@ -87,7 +88,7 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
     </div>
     <AgentEditorActionBar>
       <div className={styles.templateSaveState}><span className={blocked ? styles.statusWarningDot : styles.statusReadyDot} /><span>{t(moduleBlocked ? 'agentSettings.workbench.disabledSave' : idmmPolicyBlocksSave ? 'agentSettings.workbench.runtimePolicyNeeded' : 'agentSettings.workbench.readyToSave')}</span></div>
-      <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busy} disabled={busy || blocked || !displayName.trim()} onClick={() => onSave(displayName.trim(), document, t(`agentSettings.template.${path}.description`))}>{t('agentSettings.workbench.saveAsMine')}</AgentEditorActionButton>
+      <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busy} disabled={busy || blocked || !displayName.trim()} onClick={() => onSave(displayName.trim(), document, t(`agentSettings.template.${path}.description`))}>{saveLabel ?? t('agentSettings.workbench.saveAsMine')}</AgentEditorActionButton>
     </AgentEditorActionBar>
   </main>;
 };

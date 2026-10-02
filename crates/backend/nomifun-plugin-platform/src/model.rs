@@ -50,29 +50,13 @@ pub struct StoredArtifactRecord {
 #[serde(rename_all = "snake_case")]
 pub enum PluginDraftStatus {
     Ready,
-    Generating,
     Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginDraftMessageRole {
-    User,
-    Assistant,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginDraftMessage {
-    pub role: PluginDraftMessageRole,
-    pub content: String,
-    pub created_at_ms: i64,
 }
 
 impl PluginDraftStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ready => "ready",
-            Self::Generating => "generating",
             Self::Failed => "failed",
         }
     }
@@ -87,7 +71,16 @@ pub struct PluginDraftRecord {
     pub base_revision: Option<u64>,
     pub name: String,
     pub workspace_path: String,
-    pub messages: Vec<PluginDraftMessage>,
+    pub source_conversation_id: Option<String>,
+    pub source_message_id: Option<String>,
+    /// Host-owned idempotency token for draft creation, never a product identity.
+    pub source_operation_key: Option<String>,
+    pub source_request_digest: Option<String>,
+    /// Host-produced exact-artifact verification; never writable through file tools.
+    pub verification: Value,
+    /// Immutable imported context. Historical text is data, never live dialogue
+    /// or evidence that this task executed or delivered anything.
+    pub imported_context: Value,
     pub status: PluginDraftStatus,
     pub last_error: Option<String>,
     pub created_at_ms: i64,
@@ -164,6 +157,13 @@ impl PluginMutationPhase {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftInstallAssociation {
+    pub draft_id: PluginDraftId,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginMutationRecord {
     pub mutation_id: PluginMutationId,
     pub owner_user_id: String,
@@ -175,6 +175,8 @@ pub struct PluginMutationRecord {
     pub old_data_generation: Option<String>,
     pub new_data_generation: Option<String>,
     pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub draft_association: Option<DraftInstallAssociation>,
     pub error: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,

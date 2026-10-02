@@ -5,7 +5,8 @@
  */
 
 import type * as Contract from '../types/pluginPlatform';
-import { httpGet, httpPost, httpPut, httpRequest } from './httpBridge';
+import { httpGet, httpPost, httpPut, httpRequest, wsEmitter } from './httpBridge';
+import type { PluginDevelopmentPreflight, PluginUiStep } from '../types/pluginDevelopment';
 
 type DraftIdentity = { draft_id: Contract.PluginDraftId };
 type PluginIdentity = { plugin_id: Contract.PluginId };
@@ -49,6 +50,27 @@ const surfaceOwnerPath = (
 
 /** The only frontend entry point for Unified Plugin Core. */
 export const pluginPlatform = {
+  authoring: {
+    preflight: httpPost<PluginDevelopmentPreflight, { selection: PluginDevelopmentPreflight['selection'] }>('/api/conversations/plugin-preflight'),
+    continueWithInput: httpPost<
+      import('../types/agentPlatform').ResumeNativeAgentExecutionResponse,
+      { agent_session_id: string; request: import('../types/agentPlatform').ResumeNativeAgentExecutionRequest; input: { content: string; files?: string[] } }
+    >(({ agent_session_id }) => `/api/agent-sessions/${encodeURIComponent(agent_session_id)}/plugin-continuation`,
+      ({ request, input }) => ({ request, input })),
+    details: httpGet<{
+      draft: Contract.PluginDraftDetail;
+      verification: Record<string, unknown>;
+      confirmation: Contract.PluginPermissionExpansion | null;
+      commands: Array<{ test_token: string; draft_id: string; descriptor: Contract.PluginSurfaceDescriptor; steps: PluginUiStep[]; case_name: string }>;
+    }, DraftIdentity>(({ draft_id }) => `${draftPath(draft_id)}/authoring`),
+    approve: httpPost<{ approved: boolean; revision: number }, DraftCommand<{ expected_revision: number; confirmation_id: string; approved: boolean }>>(
+      ({ draft_id }) => `${draftPath(draft_id)}/approve`, requestBody,
+    ),
+    uiResults: httpPost<boolean, DraftCommand<{
+      test_token: string; descriptor: Contract.PluginSurfaceDescriptor; observations: unknown[]; error?: string;
+    }>>(({ draft_id }) => `${draftPath(draft_id)}/ui-results`, requestBody),
+    changed: wsEmitter<{ conversation_id: string; draft_id: string; revision: number; descriptor?: Contract.PluginSurfaceDescriptor | null }>('plugin.authoring.changed'),
+  },
   drafts: {
     list: httpGet<Contract.PluginDraftListResponse, void>('/api/plugin-drafts'),
     create: httpPost<Contract.PluginDraftDetail, Contract.CreatePluginDraftRequest>(
@@ -56,20 +78,6 @@ export const pluginPlatform = {
     ),
     get: httpGet<Contract.PluginDraftDetail, DraftIdentity>(({ draft_id }) =>
       draftPath(draft_id),
-    ),
-    generate: httpPost<
-      Contract.PluginDraftDetail,
-      DraftCommand<Contract.GeneratePluginDraftRequest>
-    >(
-      ({ draft_id }) => `${draftPath(draft_id)}/generate`,
-      requestBody,
-    ),
-    cancelGeneration: httpPost<
-      Contract.PluginDraftDetail,
-      DraftCommand<Contract.CancelPluginDraftGenerationRequest>
-    >(
-      ({ draft_id }) => `${draftPath(draft_id)}/cancel`,
-      requestBody,
     ),
     replaceFile: httpPut<
       Contract.PluginDraftDetail,
@@ -110,6 +118,7 @@ export const pluginPlatform = {
 
   plugins: {
     list: httpGet<Contract.PluginLibraryResponse, void>('/api/plugins'),
+    changed: wsEmitter('plugins.changed'),
     get: httpGet<Contract.PluginDetail, PluginIdentity>(({ plugin_id }) =>
       pluginPath(plugin_id),
     ),

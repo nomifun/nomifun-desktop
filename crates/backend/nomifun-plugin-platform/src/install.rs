@@ -13,7 +13,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 use crate::{
-    ArtifactImportResult, DataGeneration, ImportCancellation, InstallCommit, NeverCancel,
+    ArtifactImportResult, DataGeneration, DraftInstallAssociation, ImportCancellation, InstallCommit, NeverCancel,
     PluginArtifactStore, PluginArtifactStoreError, PluginDataRootError, PluginDataRootHandle,
     PluginDataRootManager, PluginInventory, PluginMutationKind, PluginMutationPhase,
     PluginMutationRecord, PluginRecord, PluginRepository, PluginRepositoryError,
@@ -324,6 +324,17 @@ impl PluginInstallService {
         self.install_artifact(request, imported).await
     }
 
+    pub async fn install_draft_files(
+        &self,
+        request: InstallArtifactRequest,
+        files: &BTreeMap<String, Vec<u8>>,
+        draft: DraftInstallAssociation,
+        cancellation: Option<&dyn ImportCancellation>,
+    ) -> PluginInstallResult<InstallArtifactOutcome> {
+        let imported = self.artifacts.import_files(files, cancellation.unwrap_or(&NeverCancel))?;
+        self.install_artifact_seeded(request, imported, None, Some(draft)).await
+    }
+
     /// Restore a Backup as a new local Plugin while still entering the same
     /// Artifact validation, mutation journal, activation, and Binding path as
     /// Directory, ZIP, and Chat Draft installs. Credential bindings are never
@@ -372,6 +383,7 @@ impl PluginInstallService {
                 files: backup.files,
                 grants: restored_grants,
             }),
+            None,
         )
         .await
     }
@@ -381,7 +393,7 @@ impl PluginInstallService {
         request: InstallArtifactRequest,
         imported: ArtifactImportResult,
     ) -> PluginInstallResult<InstallArtifactOutcome> {
-        self.install_artifact_seeded(request, imported, None).await
+        self.install_artifact_seeded(request, imported, None, None).await
     }
 
     async fn install_artifact_seeded(
@@ -389,6 +401,7 @@ impl PluginInstallService {
         request: InstallArtifactRequest,
         imported: ArtifactImportResult,
         backup: Option<BackupDataSeed>,
+        draft_association: Option<DraftInstallAssociation>,
     ) -> PluginInstallResult<InstallArtifactOutcome> {
         let plugin_id = request.target.plugin_id().clone();
         let _guard = self.mutations.acquire(&plugin_id).await;
@@ -489,6 +502,7 @@ impl PluginInstallService {
             old_data_generation: old_generation.clone(),
             new_data_generation: Some(committed_generation.clone()),
             expected_revision: request.target.expected_revision(),
+            draft_association,
             error: None,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
@@ -687,6 +701,12 @@ impl PluginInstallService {
                     let _ = self
                         .data_roots
                         .delete_generation_exact(&plugin_id, generation.generation());
+                }
+                if let Some(previous) = current {
+                    self.restore_runtime(&request.owner_user_id, &previous.plugin).await
+                        .map_err(|recovery| PluginInstallError::Recovery {
+                            mutation: error.to_string(), recovery: recovery.to_string(),
+                        })?;
                 }
                 return Err(error.into());
             }
@@ -1149,6 +1169,7 @@ impl PluginInstallService {
             old_data_generation: Some(previous.plugin.data_generation.clone()),
             new_data_generation: Some(new_data_generation),
             expected_revision: Some(expected_revision),
+            draft_association: None,
             error: None,
             created_at_ms: positive_now_ms(),
             updated_at_ms: positive_now_ms(),
@@ -1214,6 +1235,7 @@ impl PluginInstallService {
             old_data_generation: Some(previous.plugin.data_generation.clone()),
             new_data_generation: None,
             expected_revision: Some(expected_revision),
+            draft_association: None,
             error: None,
             created_at_ms: now,
             updated_at_ms: now,

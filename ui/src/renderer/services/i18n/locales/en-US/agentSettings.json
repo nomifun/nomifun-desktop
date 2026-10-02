@@ -155,6 +155,7 @@
     }
   },
   "modules": {
+    "pluginDevelopment": { "name": "Plugins and small apps", "description": "Create, edit, verify and install plugins through conversations. Enables the whole development feature; installed plugins run independently." },
     "modelManagement": { "name": "Model management", "description": "Add providers and models from configuration supplied in chat, and inspect protocols and saved models. Does not overwrite models or change defaults." },
     "agentCollaboration": { "name": "Agent collaboration", "description": "Delegate bounded work, fork an authorized Agent task, or request a user decision." },
     "automationSchedule": { "name": "Schedules", "description": "Create and manage durable schedules without exposing scheduler internals." },

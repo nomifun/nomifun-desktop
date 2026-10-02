@@ -35,7 +35,7 @@ function installFetchFixture(): void {
     const data = path === '/api/plugin-drafts'
       ? method === 'GET'
         ? { drafts: [] }
-        : { summary: {}, messages: [], files: [] }
+        : { summary: {}, imported_context: {}, files: [] }
       : path === '/api/plugins'
         ? { revision: 1, plugins: [] }
         : path === '/api/plugins/library-state'
@@ -56,6 +56,7 @@ afterEach(() => {
 describe('Unified Plugin Core bridge', () => {
   test('exposes one cohesive resource tree', () => {
     expect(Object.keys(pluginPlatform)).toEqual([
+      'authoring',
       'drafts',
       'plugins',
       'libraryState',
@@ -67,8 +68,6 @@ describe('Unified Plugin Core bridge', () => {
       'list',
       'create',
       'get',
-      'generate',
-      'cancelGeneration',
       'replaceFile',
       'deleteFile',
       'preview',
@@ -77,6 +76,7 @@ describe('Unified Plugin Core bridge', () => {
     ]);
     expect(Object.keys(pluginPlatform.plugins)).toEqual([
       'list',
+      'changed',
       'get',
       'inspectImport',
       'installImport',
@@ -100,19 +100,6 @@ describe('Unified Plugin Core bridge', () => {
     await pluginPlatform.drafts.list.invoke();
     await pluginPlatform.drafts.create.invoke({ template: 'agent.before_tool' });
     await pluginPlatform.drafts.get.invoke({ draft_id: draftId });
-    await pluginPlatform.drafts.generate.invoke({
-      draft_id: draftId,
-      request: {
-        expected_revision: 1,
-        provider_id: 'provider-1',
-        model: 'model-1',
-        requirement: 'Create a file organizer',
-      },
-    });
-    await pluginPlatform.drafts.cancelGeneration.invoke({
-      draft_id: draftId,
-      request: { expected_revision: 2 },
-    });
     await pluginPlatform.drafts.replaceFile.invoke({
       draft_id: draftId,
       request: {
@@ -152,8 +139,6 @@ describe('Unified Plugin Core bridge', () => {
       { method: 'GET', path: '/api/plugin-drafts' },
       { method: 'POST', path: '/api/plugin-drafts' },
       { method: 'GET', path: `/api/plugin-drafts/${draftId}` },
-      { method: 'POST', path: `/api/plugin-drafts/${draftId}/generate` },
-      { method: 'POST', path: `/api/plugin-drafts/${draftId}/cancel` },
       { method: 'PUT', path: `/api/plugin-drafts/${draftId}/files` },
       { method: 'DELETE', path: `/api/plugin-drafts/${draftId}/files` },
       { method: 'POST', path: `/api/plugin-drafts/${draftId}/preview` },
@@ -162,7 +147,7 @@ describe('Unified Plugin Core bridge', () => {
     ]);
     expect(calls.slice(3).every(({ body }) =>
       !JSON.stringify(body).includes('draft_id'))).toBe(true);
-    expect(calls[8]?.body).toEqual({
+    expect(calls[6]?.body).toEqual({
       expected_revision: 6,
       expected_plugin_revision: 2,
       permission_confirmation_id: 'confirmation-1',
@@ -346,7 +331,7 @@ describe('Unified Plugin Core bridge', () => {
       '/projects',
       '/installations',
       '/operations',
-      '/authoring',
+      '/api/plugins/authoring',
     ]) {
       expect(bridge).not.toContain(route);
     }

@@ -203,11 +203,12 @@ export interface UpdatePluginLibraryStateRequest {
 
 export type PluginDraftStatus =
   | 'ready'
-  | 'generating'
   | 'failed';
 
 export interface PluginDraftSummary {
   draft_id: PluginDraftId;
+  source_conversation_id?: string;
+  source_message_id?: string;
   revision: number;
   plugin_id?: PluginId;
   base_plugin_revision?: number;
@@ -217,13 +218,6 @@ export interface PluginDraftSummary {
   status: PluginDraftStatus;
   error_code?: string;
   updated_at_ms: number;
-}
-
-export type PluginDraftMessageRole = 'user' | 'assistant';
-
-export interface PluginDraftMessage {
-  role: PluginDraftMessageRole;
-  content: string;
 }
 
 export interface PluginDraftFile {
@@ -236,7 +230,7 @@ export interface PluginDraftFile {
 
 export interface PluginDraftDetail {
   summary: PluginDraftSummary;
-  messages: PluginDraftMessage[];
+  imported_context: Record<string, unknown>;
   files: PluginDraftFile[];
 }
 
@@ -248,17 +242,6 @@ export interface CreatePluginDraftRequest {
   plugin_id?: PluginId;
   expected_plugin_revision?: number;
   template?: string;
-}
-
-export interface GeneratePluginDraftRequest {
-  expected_revision: number;
-  provider_id: string;
-  model: string;
-  requirement: string;
-}
-
-export interface CancelPluginDraftGenerationRequest {
-  expected_revision: number;
 }
 
 export interface ReplacePluginDraftFileRequest {

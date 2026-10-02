@@ -203,7 +203,7 @@ impl PluginServiceRuntime {
             .artifacts
             .load(&context.artifact.artifact_digest)
             .map_err(|error| PluginServiceError::InvalidConfiguration(error.to_string()))?;
-        let module_path = stored.package_root.join("service/main.mjs");
+        let module_path = stored.package_root.join(context.artifact.manifest.entrypoints.service.as_deref().ok_or_else(|| PluginServiceError::InvalidConfiguration("Plugin has no Service entrypoint".into()))?);
         let factory = NodePluginServiceProcessFactory::new(lease.executable_path().to_path_buf())?
             .with_ports(self.ports.clone());
         let process = factory

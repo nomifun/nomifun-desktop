@@ -276,6 +276,7 @@ pub(crate) async fn try_build_module_states(
             conversation_owner.clone(),
             idmm_service.clone(),
             plugin_state.agent.clone(),
+            plugin_state.clone(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
@@ -438,6 +439,7 @@ async fn build_nomi_core_agent_api_state(
     conversation_owner: Arc<NomiCoreSessionOwner>,
     idmm: Arc<nomifun_idmm::IdmmService>,
     agent_plugins: nomifun_plugin_platform::AgentPluginBindings,
+    plugin: super::plugin::PluginRouterState,
 ) -> anyhow::Result<(
     NomiCoreAgentApiState,
     Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
@@ -447,6 +449,7 @@ async fn build_nomi_core_agent_api_state(
     let builtin_plan = super::nomi_core_builtins::build(
         services,
         conversation_owner.canonical().store().clone(),
+        plugin.clone(),
     )
     .await?;
     let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
@@ -669,6 +672,7 @@ async fn build_nomi_core_agent_api_state(
             ),
             robot: robot_owner.clone(),
             agent_plugins,
+            plugin_development: plugin,
         },
     )?);
     services

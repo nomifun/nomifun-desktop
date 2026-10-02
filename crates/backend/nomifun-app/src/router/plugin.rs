@@ -19,91 +19,48 @@ use nomifun_api_types::*;
 use nomifun_auth::CurrentUser;
 use nomifun_db::sqlx::Row as _;
 use nomifun_plugin_platform::{
-    DataGeneration, ImportCancellation, InstallArtifactRequest, InstallTarget, NeverCancel,
-    PluginDataRootHandle, PluginDraftMessage, PluginDraftMessageRole, PluginDraftRecord,
+    DataGeneration, InstallArtifactRequest, InstallTarget, NeverCancel,
+    PluginDataRootHandle, PluginDraftRecord,
     PluginDraftStatus, PluginActionRegistration, PluginArtifactStoreError, PluginDraftStore,
     PluginDraftStoreError, PluginInstallError, PluginInstallService, PluginInventory,
     PluginQueryResult, PluginRecord, PluginRepository, PluginRepositoryError, PluginSqlStatement,
     PluginRuntimeContext, PluginRuntimePort, PluginSqlValue, PluginStorage, PreviewDataRoot,
-    SqlitePluginRepository, StagedPluginDraftReplacement, action_publications,
+    SqlitePluginRepository, action_publications,
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Notify};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Mutex;
 use uuid::Uuid;
+pub(super) use super::plugin_authoring::{
+    has_authoring_approval, request_authoring_approval, run_authoring_ui_test,
+    save_authoring_draft,
+};
 
-const PLUGIN_SDK: &str = include_str!(
+pub(super) const PLUGIN_SDK: &str = include_str!(
     "../../../nomifun-plugin-platform/src/assets/plugin-sdk.js"
 );
 const MAX_PERMISSION_CONFIRMATIONS: usize = 128;
 const MAX_SURFACE_CALLS: usize = 256;
-const DRAFT_GENERATION_INTERRUPTED: &str = "PLUGIN_GENERATION_INTERRUPTED";
 const PLUGIN_STARTUP_ACTIVATION_FAILED: &str = "PLUGIN_STARTUP_ACTIVATION_FAILED";
 const PLUGIN_BINDING_RECOVERY_FAILED: &str = "PLUGIN_BINDING_RECOVERY_FAILED";
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct DraftGenerationKey {
-    owner_user_id: String,
-    draft_id: String,
-}
-
-impl DraftGenerationKey {
-    fn new(owner_user_id: &str, draft_id: &PluginDraftId) -> Self {
-        Self {
-            owner_user_id: owner_user_id.to_owned(),
-            draft_id: draft_id.as_ref().to_owned(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ActiveDraftGeneration {
-    revision: u64,
-    cancellation: CancellationToken,
-    done: Arc<Notify>,
-}
-
-struct DraftGenerationCancellation(CancellationToken);
-
-impl ImportCancellation for DraftGenerationCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
-}
-
-fn register_active_generation(
-    generations: &mut HashMap<DraftGenerationKey, ActiveDraftGeneration>,
-    key: DraftGenerationKey,
-    active: ActiveDraftGeneration,
-) -> bool {
-    if generations.contains_key(&key) {
-        false
-    } else {
-        generations.insert(key, active);
-        true
-    }
-}
-
 #[derive(Clone)]
 pub struct PluginRouterState {
-    repository: Arc<SqlitePluginRepository>,
-    install: Arc<PluginInstallService>,
-    runtime: Arc<nomifun_plugin_platform::PluginServiceRuntime>,
-    artifacts: Arc<nomifun_plugin_platform::PluginArtifactStore>,
-    data_roots: Arc<nomifun_plugin_platform::PluginDataRootManager>,
-    drafts: Arc<PluginDraftStore>,
-    transfers: Arc<nomifun_plugin_platform::PluginBackupFilesystem>,
-    model: Arc<nomifun_model_invoke::ModelInvokeService>,
-    workspace: PathBuf,
-    confirmations: Arc<Mutex<HashMap<String, PermissionConfirmation>>>,
-    surfaces: Arc<Mutex<HashMap<String, SurfaceSession>>>,
-    generations: Arc<Mutex<HashMap<DraftGenerationKey, ActiveDraftGeneration>>>,
+    pub(super) repository: Arc<SqlitePluginRepository>,
+    pub(super) install: Arc<PluginInstallService>,
+    pub(super) runtime: Arc<nomifun_plugin_platform::PluginServiceRuntime>,
+    pub(super) artifacts: Arc<nomifun_plugin_platform::PluginArtifactStore>,
+    pub(super) data_roots: Arc<nomifun_plugin_platform::PluginDataRootManager>,
+    pub(super) drafts: Arc<PluginDraftStore>,
+    pub(super) transfers: Arc<nomifun_plugin_platform::PluginBackupFilesystem>,
+    pub(super) confirmations: Arc<Mutex<HashMap<String, PermissionConfirmation>>>,
+    pub(super) surfaces: Arc<Mutex<HashMap<String, SurfaceSession>>>,
     pub(crate) registry: nomifun_plugin_platform::InMemoryPluginBindingRegistry,
     pub(crate) agent: nomifun_plugin_platform::AgentPluginBindings,
     pub(crate) desktop: nomifun_plugin_platform::DesktopPluginBindings,
     host: Arc<dyn nomifun_plugin_platform::PluginServiceHostPort>,
+    pub(super) events: Arc<dyn nomifun_realtime::UserEventSink>,
+    pub(super) ui_tests: Arc<super::plugin_authoring::UiTests>,
 }
 
 impl std::fmt::Debug for PluginRouterState {
@@ -130,15 +87,14 @@ impl PluginRouterState {
             data_roots: services.plugin_data_roots.clone(),
             drafts: services.plugin_drafts.clone(),
             transfers: services.plugin_transfers.clone(),
-            model: services.model_invoke_service.clone(),
-            workspace: services.work_dir.clone(),
             confirmations: Arc::new(Mutex::new(HashMap::new())),
             surfaces: Arc::new(Mutex::new(HashMap::new())),
-            generations: Arc::new(Mutex::new(HashMap::new())),
             registry: bindings.registry,
             agent: bindings.agent,
             desktop: bindings.desktop,
             host: bindings.host,
+            events: services.event_bus.clone(),
+            ui_tests: Arc::new(super::plugin_authoring::UiTests::default()),
         }
     }
 
@@ -147,9 +103,6 @@ impl PluginRouterState {
             .cleanup_preview_roots()
             .map_err(|error| error.to_string())?;
         let owner = nomifun_db::installation_owner_id(self.repository.pool())
-            .await
-            .map_err(|error| error.to_string())?;
-        recover_interrupted_draft_generations(self.repository.as_ref(), &owner)
             .await
             .map_err(|error| error.to_string())?;
         for plugin in self
@@ -219,13 +172,14 @@ impl PluginRouterState {
     }
 }
 
-struct PermissionConfirmation {
-    owner_user_id: String,
-    artifact_digest: DigestHex,
-    permissions: BTreeSet<String>,
-    secret_slots: BTreeSet<String>,
-    trusted_local_service: bool,
-    expires_at_ms: i64,
+#[derive(Clone)]
+pub(super) struct PermissionConfirmation {
+    pub(super) owner_user_id: String,
+    pub(super) artifact_digest: DigestHex,
+    pub(super) permissions: BTreeSet<String>,
+    pub(super) secret_slots: BTreeSet<String>,
+    pub(super) trusted_local_service: bool,
+    pub(super) expires_at_ms: i64,
 }
 
 enum SurfaceDataRoot {
@@ -249,19 +203,19 @@ impl SurfaceDataRoot {
     }
 }
 
-struct SurfaceSession {
-    owner_user_id: String,
-    plugin_id: Option<PluginId>,
-    runtime_plugin_id: PluginId,
-    draft_id: Option<PluginDraftId>,
-    artifact: PluginArtifact,
-    asset_root: PathBuf,
+pub(super) struct SurfaceSession {
+    pub(super) owner_user_id: String,
+    pub(super) plugin_id: Option<PluginId>,
+    pub(super) runtime_plugin_id: PluginId,
+    pub(super) draft_id: Option<PluginDraftId>,
+    pub(super) artifact: PluginArtifact,
+    pub(super) asset_root: PathBuf,
     data_root: SurfaceDataRoot,
-    generation: u64,
-    is_preview: bool,
-    config: Value,
-    granted_permissions: BTreeSet<String>,
-    completed_calls: HashMap<String, PluginBridgeResultDto>,
+    pub(super) generation: u64,
+    pub(super) is_preview: bool,
+    pub(super) config: Value,
+    pub(super) granted_permissions: BTreeSet<String>,
+    pub(super) completed_calls: HashMap<String, PluginBridgeResultDto>,
 }
 
 pub fn read_routes(state: PluginRouterState) -> Router {
@@ -273,6 +227,7 @@ pub fn read_routes(state: PluginRouterState) -> Router {
         .route("/api/plugins/{plugin_id}", get(get_plugin))
         .route("/api/plugin-drafts", get(list_drafts))
         .route("/api/plugin-drafts/{draft_id}", get(get_draft))
+        .route("/api/plugin-drafts/{draft_id}/authoring", get(super::plugin_authoring::details))
         .with_state(state)
 }
 
@@ -314,11 +269,11 @@ pub fn write_routes(state: PluginRouterState) -> Router {
         .route("/api/plugins/{plugin_id}/surface/bridge", post(dispatch_bridge))
         .route("/api/plugins/{plugin_id}/surface/close", post(close_surface))
         .route("/api/plugin-drafts", post(create_draft))
-        .route("/api/plugin-drafts/{draft_id}/generate", post(generate_draft))
-        .route("/api/plugin-drafts/{draft_id}/cancel", post(cancel_draft_generation))
         .route("/api/plugin-drafts/{draft_id}/files", put(replace_draft_file).delete(delete_draft_file))
         .route("/api/plugin-drafts/{draft_id}/preview", post(preview_draft))
         .route("/api/plugin-drafts/{draft_id}/save", post(save_draft))
+        .route("/api/plugin-drafts/{draft_id}/approve", post(super::plugin_authoring::approve))
+        .route("/api/plugin-drafts/{draft_id}/ui-results", post(super::plugin_authoring::ui_results))
         .route("/api/plugin-drafts/{draft_id}", delete(delete_draft))
         .route("/api/plugin-drafts/{draft_id}/surface/bridge", post(dispatch_bridge))
         .route("/api/plugin-drafts/{draft_id}/surface/close", post(close_surface))
@@ -400,7 +355,11 @@ async fn list_plugins(
     State(state): State<PluginRouterState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<PluginLibraryResponseDto>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(list_plugins_owned(&state, &user.id.to_string()).await?)))
+}
+
+pub(super) async fn list_plugins_owned(state: &PluginRouterState, owner: &str) -> Result<PluginLibraryResponseDto, PluginHttpError> {
+    let owner = owner.to_owned();
     let records = state.repository.list_plugins(&owner).await?;
     let mut plugins = Vec::with_capacity(records.len());
     for record in records {
@@ -412,10 +371,10 @@ async fn list_plugins(
         plugins.push(summary_dto(&state, &inventory).await?);
     }
     let revision = plugins.iter().map(|plugin| plugin.revision).max().unwrap_or(0);
-    Ok(Json(ApiResponse::ok(PluginLibraryResponseDto {
+    Ok(PluginLibraryResponseDto {
         revision,
         plugins,
-    })))
+    })
 }
 
 async fn get_library_state(
@@ -431,6 +390,12 @@ async fn list_credential_references(
     State(state): State<PluginRouterState>,
     Extension(_user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<Vec<PluginCredentialReferenceDto>>>, PluginHttpError> {
+    Ok(Json(ApiResponse::ok(list_credential_references_owned(&state).await?)))
+}
+
+pub(super) async fn list_credential_references_owned(
+    state: &PluginRouterState,
+) -> Result<Vec<PluginCredentialReferenceDto>, PluginHttpError> {
     let mut references = Vec::new();
     for row in nomifun_db::sqlx::query(
         "SELECT provider_id, name, enabled FROM providers \
@@ -487,7 +452,7 @@ async fn list_credential_references(
                 .map_err(|error| PluginHttpError::internal(error.to_string()))?,
         });
     }
-    Ok(Json(ApiResponse::ok(references)))
+    Ok(references)
 }
 
 async fn update_library_state(
@@ -589,8 +554,12 @@ async fn get_plugin(
     Extension(user): Extension<CurrentUser>,
     AxumPath(plugin_id): AxumPath<String>,
 ) -> Result<Json<ApiResponse<PluginDetailDto>>, PluginHttpError> {
-    let inventory = inventory(&state, &user, &plugin_id).await?;
-    Ok(Json(ApiResponse::ok(detail_dto(&state, &inventory).await?)))
+    Ok(Json(ApiResponse::ok(get_plugin_owned(&state, &user.id.to_string(), &plugin_id).await?)))
+}
+
+pub(super) async fn get_plugin_owned(state: &PluginRouterState, owner: &str, plugin_id: &str) -> Result<PluginDetailDto, PluginHttpError> {
+    let inventory = inventory_owned(state, owner, plugin_id).await?;
+    Ok(detail_dto(&state, &inventory).await?)
 }
 
 async fn inspect_import(
@@ -834,7 +803,31 @@ async fn create_draft(
     Extension(user): Extension<CurrentUser>,
     Json(request): Json<CreatePluginDraftRequest>,
 ) -> Result<Json<ApiResponse<PluginDraftDetailDto>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(create_draft_owned(&state, &user.id.to_string(), request).await?)))
+}
+
+pub(super) async fn create_draft_owned(state: &PluginRouterState, owner: &str, request: CreatePluginDraftRequest) -> Result<PluginDraftDetailDto, PluginHttpError> {
+    create_draft_with_source(state, owner, request, None).await
+}
+
+pub(super) struct PluginDraftSource {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub operation_key: String,
+}
+
+pub(super) async fn create_draft_with_source(
+    state: &PluginRouterState, owner: &str, request: CreatePluginDraftRequest,
+    source: Option<PluginDraftSource>,
+) -> Result<PluginDraftDetailDto, PluginHttpError> {
+    let request_digest = nomifun_agent_contracts::digest_payload(&request)
+        .map_err(|error| PluginHttpError::internal(error.to_string()))?.as_ref().to_owned();
+    if let Some(source) = &source {
+        if let Some(existing) = find_source_draft(state, owner, source, &request_digest).await? {
+            return draft_detail(state, &existing);
+        }
+    }
+    let owner = owner.to_owned();
     if request
         .template
         .as_deref()
@@ -954,7 +947,12 @@ async fn create_draft(
         base_revision,
         name,
         workspace_path: workspace.to_string_lossy().into_owned(),
-        messages: Vec::new(),
+        source_conversation_id: source.as_ref().map(|value| value.conversation_id.clone()),
+        source_message_id: source.as_ref().map(|value| value.message_id.clone()),
+        source_operation_key: source.as_ref().map(|value| value.operation_key.clone()),
+        source_request_digest: source.as_ref().map(|_| request_digest.clone()),
+        verification: serde_json::json!({}),
+        imported_context: json!({}),
         status: PluginDraftStatus::Ready,
         last_error: None,
         created_at_ms: now,
@@ -962,16 +960,43 @@ async fn create_draft(
     };
     if let Err(error) = state.repository.create_draft(&draft).await {
         let _ = state.drafts.discard(&owner, &draft_id);
+        if let Some(source) = &source {
+            if let Some(existing) = find_source_draft(state, &owner, source, &request_digest).await? {
+                return draft_detail(state, &existing);
+            }
+        }
         return Err(error.into());
     }
-    Ok(Json(ApiResponse::ok(draft_detail(&state, &draft)?)))
+    Ok(draft_detail(&state, &draft)?)
+}
+
+async fn find_source_draft(
+    state: &PluginRouterState, owner: &str, source: &PluginDraftSource, request_digest: &str,
+) -> Result<Option<PluginDraftRecord>, PluginHttpError> {
+    let id: Option<String> = nomifun_db::sqlx::query_scalar(
+        "SELECT draft_id FROM plugin_drafts WHERE owner_user_id = ? AND source_operation_key = ?"
+    ).bind(owner).bind(&source.operation_key).fetch_optional(state.repository.pool()).await
+        .map_err(|error| PluginHttpError::internal(error.to_string()))?;
+    let Some(id) = id else { return Ok(None); };
+    let existing = draft_owned(state, owner, &id).await?;
+    if existing.source_conversation_id.as_deref() != Some(source.conversation_id.as_str())
+        || existing.source_message_id.as_deref() != Some(source.message_id.as_str())
+        || existing.source_request_digest.as_deref() != Some(request_digest)
+    {
+        return Err(PluginHttpError::conflict("Draft creation replay differs from the admitted request"));
+    }
+    Ok(Some(existing))
 }
 
 async fn list_drafts(
     State(state): State<PluginRouterState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<PluginDraftListResponseDto>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(list_drafts_owned(&state, &user.id.to_string()).await?)))
+}
+
+pub(super) async fn list_drafts_owned(state: &PluginRouterState, owner: &str) -> Result<PluginDraftListResponseDto, PluginHttpError> {
+    let owner = owner.to_owned();
     let drafts = state
         .repository
         .list_drafts(&owner)
@@ -979,7 +1004,7 @@ async fn list_drafts(
         .iter()
         .map(|draft| draft_summary(&state, draft))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Json(ApiResponse::ok(PluginDraftListResponseDto { drafts })))
+    Ok(PluginDraftListResponseDto { drafts })
 }
 
 async fn get_draft(
@@ -987,8 +1012,12 @@ async fn get_draft(
     Extension(user): Extension<CurrentUser>,
     AxumPath(draft_id): AxumPath<String>,
 ) -> Result<Json<ApiResponse<PluginDraftDetailDto>>, PluginHttpError> {
-    let draft = draft(&state, &user, &draft_id).await?;
-    Ok(Json(ApiResponse::ok(draft_detail(&state, &draft)?)))
+    Ok(Json(ApiResponse::ok(get_draft_owned(&state, &user.id.to_string(), &draft_id).await?)))
+}
+
+pub(super) async fn get_draft_owned(state: &PluginRouterState, owner: &str, draft_id: &str) -> Result<PluginDraftDetailDto, PluginHttpError> {
+    let draft = draft_owned(state, owner, draft_id).await?;
+    Ok(draft_detail(&state, &draft)?)
 }
 
 async fn replace_draft_file(
@@ -999,7 +1028,6 @@ async fn replace_draft_file(
 ) -> Result<Json<ApiResponse<PluginDraftDetailDto>>, PluginHttpError> {
     let mut draft = draft(&state, &user, &draft_id).await?;
     require_draft_revision(&draft, request.expected_revision)?;
-    require_draft_not_generating(&draft)?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(request.content_base64)
         .map_err(|_| PluginHttpError::bad_request("content_base64 is invalid"))?;
@@ -1022,7 +1050,6 @@ async fn delete_draft_file(
 ) -> Result<Json<ApiResponse<PluginDraftDetailDto>>, PluginHttpError> {
     let mut draft = draft(&state, &user, &draft_id).await?;
     require_draft_revision(&draft, request.expected_revision)?;
-    require_draft_not_generating(&draft)?;
     if request.path == "nomifun.plugin.json" {
         return Err(PluginHttpError::bad_request("the Plugin manifest cannot be deleted"));
     }
@@ -1037,369 +1064,18 @@ async fn delete_draft_file(
     Ok(Json(ApiResponse::ok(draft_detail(&state, &updated)?)))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GeneratedPackage {
-    assistant_message: String,
-    files: BTreeMap<String, String>,
-}
-
-async fn generate_draft(
-    State(state): State<PluginRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    AxumPath(draft_id): AxumPath<String>,
-    Json(request): Json<GeneratePluginDraftRequest>,
-) -> Result<Json<ApiResponse<PluginDraftDetailDto>>, PluginHttpError> {
-    let mut draft = draft(&state, &user, &draft_id).await?;
-    require_draft_revision(&draft, request.expected_revision)?;
-    require_draft_not_generating(&draft)?;
-    if request.requirement.trim().is_empty() || request.requirement.len() > 32_000 {
-        return Err(PluginHttpError::bad_request("a bounded requirement is required"));
-    }
-
-    let key = DraftGenerationKey::new(&draft.owner_user_id, &draft.draft_id);
-    let cancellation = CancellationToken::new();
-    let done = Arc::new(Notify::new());
-    let active = {
-        let mut generations = state.generations.lock().await;
-        if generations.contains_key(&key) {
-            return Err(PluginHttpError::conflict("Draft generation is already running"));
-        }
-        draft.status = PluginDraftStatus::Generating;
-        draft.last_error = None;
-        draft.updated_at_ms = now_ms();
-        let generating = state
-            .repository
-            .update_draft(&draft, request.expected_revision)
-            .await?;
-        let active = ActiveDraftGeneration {
-            revision: generating.revision,
-            cancellation: cancellation.clone(),
-            done: done.clone(),
-        };
-        let registered = register_active_generation(
-            &mut generations,
-            key.clone(),
-            active.clone(),
-        );
-        debug_assert!(registered, "generation key was checked while holding the same lock");
-        draft = generating;
-        active
-    };
-
-    let worker_state = state.clone();
-    let worker_key = key.clone();
-    let worker = tokio::spawn(async move {
-        let result = complete_draft_generation(
-            &worker_state,
-            draft,
-            request,
-            active.cancellation.clone(),
-        )
-        .await;
-        let mut generations = worker_state.generations.lock().await;
-        if generations
-            .get(&worker_key)
-            .is_some_and(|current| current.revision == active.revision)
-        {
-            generations.remove(&worker_key);
-        }
-        drop(generations);
-        active.done.notify_one();
-        result
-    });
-    let updated = worker
-        .await
-        .map_err(|error| PluginHttpError::internal(format!("Draft generation task failed: {error}")))??;
-    Ok(Json(ApiResponse::ok(draft_detail(&state, &updated)?)))
-}
-
-async fn cancel_draft_generation(
-    State(state): State<PluginRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    AxumPath(draft_id): AxumPath<String>,
-    Json(request): Json<CancelPluginDraftGenerationRequest>,
-) -> Result<Json<ApiResponse<PluginDraftDetailDto>>, PluginHttpError> {
-    let draft = draft(&state, &user, &draft_id).await?;
-    require_draft_revision(&draft, request.expected_revision)?;
-    if draft.status != PluginDraftStatus::Generating {
-        return Err(PluginHttpError::conflict("Draft generation is not running"));
-    }
-    let key = DraftGenerationKey::new(&draft.owner_user_id, &draft.draft_id);
-    let active = state
-        .generations
-        .lock()
-        .await
-        .get(&key)
-        .filter(|active| active.revision == draft.revision)
-        .cloned()
-        .ok_or_else(|| PluginHttpError::conflict("Draft generation is not active"))?;
-    active.cancellation.cancel();
-    let settled = settle_cancelled_generation(&state, &draft).await?;
-    let _ = tokio::time::timeout(Duration::from_secs(5), active.done.notified()).await;
-    let current = state
-        .repository
-        .get_draft(&settled.owner_user_id, &settled.draft_id)
-        .await?
-        .unwrap_or(settled);
-    Ok(Json(ApiResponse::ok(draft_detail(&state, &current)?)))
-}
-
-enum DraftGenerationFailure {
-    Cancelled,
-    Failed(PluginHttpError),
-}
-
-struct PreparedDraftGeneration {
-    draft: PluginDraftRecord,
-    replacement: StagedPluginDraftReplacement,
-}
-
-async fn complete_draft_generation(
-    state: &PluginRouterState,
-    generating: PluginDraftRecord,
-    request: GeneratePluginDraftRequest,
-    cancellation: CancellationToken,
-) -> Result<PluginDraftRecord, PluginHttpError> {
-    let result = run_draft_generation(state, generating.clone(), request, &cancellation).await;
-    match result {
-        Ok(prepared) => match persist_generated_draft(
-            state,
-            prepared,
-            generating.revision,
-            &cancellation,
-        )
-        .await
-        {
-            Ok(updated) => Ok(updated),
-            Err(error) => {
-                persist_failed_generation(state, generating, error, &cancellation).await
-            }
-        },
-        Err(DraftGenerationFailure::Cancelled) => {
-            settle_cancelled_generation(state, &generating).await
-        }
-        Err(DraftGenerationFailure::Failed(error)) => {
-            persist_failed_generation(state, generating, error, &cancellation).await
-        }
-    }
-}
-
-async fn persist_failed_generation(
-    state: &PluginRouterState,
-    generating: PluginDraftRecord,
-    error: PluginHttpError,
-    cancellation: &CancellationToken,
-) -> Result<PluginDraftRecord, PluginHttpError> {
-    if cancellation.is_cancelled() {
-        return settle_cancelled_generation(state, &generating).await;
-    }
-    let mut failed = generating;
-    failed.status = PluginDraftStatus::Failed;
-    failed.last_error = Some(error.code.to_owned());
-    failed.updated_at_ms = now_ms();
-    match state
-        .repository
-        .update_draft(&failed, failed.revision)
-        .await
-    {
-        Ok(_) => Err(error),
-        Err(PluginRepositoryError::Conflict) if cancellation.is_cancelled() => {
-            settle_cancelled_generation(state, &failed).await
-        }
-        Err(settle_error) => Err(PluginHttpError::internal(format!(
-            "Draft generation failed and its state could not be persisted: {settle_error}"
-        ))),
-    }
-}
-
-async fn run_draft_generation(
-    state: &PluginRouterState,
-    mut draft: PluginDraftRecord,
-    request: GeneratePluginDraftRequest,
-    cancellation: &CancellationToken,
-) -> Result<PreparedDraftGeneration, DraftGenerationFailure> {
-    require_generation_active(cancellation)?;
-    let current_files = state
-        .drafts
-        .freeze(&draft.owner_user_id, &draft.draft_id)
-        .map_err(PluginHttpError::from)
-        .map_err(DraftGenerationFailure::Failed)?;
-    let textual = current_files
-        .iter()
-        .filter_map(|(path, bytes)| String::from_utf8(bytes.clone()).ok().map(|text| (path, text)))
-        .collect::<BTreeMap<_, _>>();
-    require_generation_active(cancellation)?;
-    let config = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => return Err(DraftGenerationFailure::Cancelled),
-        result = nomifun_ai_agent::factory::provider_config::resolve_provider_config(
-            state.model.as_ref(),
-            &request.provider_id,
-            &request.model,
-            &state.workspace,
-        ) => result.map_err(|_| DraftGenerationFailure::Failed(
-            PluginHttpError::bad_gateway("the selected model is unavailable")
-        ))?,
-    };
-    let system = "Create or edit one complete NomiFun Unified Plugin package. Return only JSON {assistant_message,files}; files is a map from normalized package path to complete UTF-8 content. It must include nomifun.plugin.json using schema nomifun.plugin/v1 and at least ui/index.html or service/main.mjs. Service modules export async activate(ctx) returning invoke(action,input) and optional deactivate(). Use only Action + Binding and inline JSON Schema. UI uses window.nomi.storage.kv/db/files, cache, actions.invoke, host.invoke and config.get. Do not emit old Project/Mount/Candidate/Release/Publish contracts, npm projects, external scripts, mobile layouts, secrets, or fake APIs.";
-    let prompt = serde_json::to_string(&json!({
-        "requirement": &request.requirement,
-        "messages": &draft.messages,
-        "current_files": textual,
-        "instruction": "Return the complete package; preserve storage formats unless explicitly changed."
-    }))
-    .map_err(|error| DraftGenerationFailure::Failed(PluginHttpError::internal(error.to_string())))?;
-    let raw = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => return Err(DraftGenerationFailure::Cancelled),
-        result = nomifun_ai_agent::factory::provider_config::one_shot_completion_bounded(
-            &config,
-            system,
-            vec![nomifun_ai_agent::factory::provider_config::user_message(prompt)],
-            16_000,
-            4 * 1024 * 1024,
-        ) => result.map_err(|_| DraftGenerationFailure::Failed(
-            PluginHttpError::bad_gateway("Plugin generation failed")
-        ))?,
-    };
-    require_generation_active(cancellation)?;
-    let generated: GeneratedPackage = parse_model_json(&raw).map_err(DraftGenerationFailure::Failed)?;
-    if generated.files.is_empty() || generated.assistant_message.len() > 8_000 {
-        return Err(DraftGenerationFailure::Failed(PluginHttpError::bad_gateway(
-            "the model returned an invalid package",
-        )));
-    }
-    require_generation_active(cancellation)?;
-    let GeneratedPackage {
-        assistant_message,
-        files,
-    } = generated;
-    let replacement_files = files
-        .into_iter()
-        .map(|(path, content)| (path, content.into_bytes()))
-        .collect::<BTreeMap<_, _>>();
-    let artifact_cancellation = DraftGenerationCancellation(cancellation.clone());
-    let replacement = state
-        .drafts
-        .stage_exact_replacement(
-            &draft.owner_user_id,
-            &draft.draft_id,
-            &replacement_files,
-            &artifact_cancellation,
-        )
-        .map_err(|error| match error {
-            PluginDraftStoreError::Canceled => DraftGenerationFailure::Cancelled,
-            other => DraftGenerationFailure::Failed(other.into()),
-        })?;
-    require_generation_active(cancellation)?;
-    let artifact = state
-        .artifacts
-        .inspect_files(&replacement_files, &artifact_cancellation)
-        .map_err(PluginHttpError::from)
-        .map_err(DraftGenerationFailure::Failed)?;
-    require_generation_active(cancellation)?;
-    draft.name = artifact.manifest.name.clone();
-    draft.messages.push(PluginDraftMessage {
-        role: PluginDraftMessageRole::User,
-        content: request.requirement,
-        created_at_ms: now_ms(),
-    });
-    draft.messages.push(PluginDraftMessage {
-        role: PluginDraftMessageRole::Assistant,
-        content: assistant_message,
-        created_at_ms: now_ms(),
-    });
-    draft.status = PluginDraftStatus::Ready;
-    draft.last_error = None;
-    draft.updated_at_ms = now_ms();
-    Ok(PreparedDraftGeneration { draft, replacement })
-}
-
-fn require_generation_active(
-    cancellation: &CancellationToken,
-) -> Result<(), DraftGenerationFailure> {
-    if cancellation.is_cancelled() {
-        Err(DraftGenerationFailure::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-async fn persist_generated_draft(
-    state: &PluginRouterState,
-    prepared: PreparedDraftGeneration,
-    expected_revision: u64,
-    cancellation: &CancellationToken,
-) -> Result<PluginDraftRecord, PluginHttpError> {
-    let PreparedDraftGeneration {
-        draft: ready,
-        mut replacement,
-    } = prepared;
-    if cancellation.is_cancelled() {
-        drop(replacement);
-        return settle_cancelled_generation(state, &ready).await;
-    }
-    replacement.publish()?;
-    if cancellation.is_cancelled() {
-        replacement.rollback()?;
-        return settle_cancelled_generation(state, &ready).await;
-    }
-    match state.repository.update_draft(&ready, expected_revision).await {
-        Ok(updated) => {
-            replacement.commit()?;
-            Ok(updated)
-        }
-        Err(error) => {
-            replacement.rollback().map_err(|rollback_error| {
-                PluginHttpError::internal(format!(
-                    "Draft metadata update failed ({error}) and file rollback failed ({rollback_error})"
-                ))
-            })?;
-            if cancellation.is_cancelled() {
-                settle_cancelled_generation(state, &ready).await
-            } else {
-                Err(error.into())
-            }
-        }
-    }
-}
-
-async fn settle_cancelled_generation(
-    state: &PluginRouterState,
-    generating: &PluginDraftRecord,
-) -> Result<PluginDraftRecord, PluginHttpError> {
-    let mut ready = generating.clone();
-    ready.status = PluginDraftStatus::Ready;
-    ready.last_error = None;
-    ready.updated_at_ms = now_ms();
-    match state.repository.update_draft(&ready, generating.revision).await {
-        Ok(updated) => Ok(updated),
-        Err(PluginRepositoryError::Conflict) => {
-            let current = state
-                .repository
-                .get_draft(&generating.owner_user_id, &generating.draft_id)
-                .await?
-                .ok_or_else(PluginHttpError::not_found)?;
-            if current.status == PluginDraftStatus::Generating {
-                Err(PluginHttpError::conflict("Draft generation state changed"))
-            } else {
-                Ok(current)
-            }
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
 async fn preview_draft(
     State(state): State<PluginRouterState>,
     Extension(user): Extension<CurrentUser>,
     AxumPath(draft_id): AxumPath<String>,
     Json(request): Json<PreviewPluginDraftRequest>,
 ) -> Result<Json<ApiResponse<PluginDraftPreviewResponseDto>>, PluginHttpError> {
-    let draft = draft(&state, &user, &draft_id).await?;
+    Ok(Json(ApiResponse::ok(preview_draft_owned(&state, &user.id.to_string(), &draft_id, request).await?)))
+}
+
+pub(super) async fn preview_draft_owned(state: &PluginRouterState, owner: &str, draft_id: &str, request: PreviewPluginDraftRequest) -> Result<PluginDraftPreviewResponseDto, PluginHttpError> {
+    let draft = draft_owned(state, owner, draft_id).await?;
     require_draft_revision(&draft, request.expected_revision)?;
-    require_draft_not_generating(&draft)?;
     let files = state.drafts.freeze(&draft.owner_user_id, &draft.draft_id)?;
     let imported = state.artifacts.import_files(&files, &NeverCancel)?;
     let artifact = imported.stored.artifact.clone();
@@ -1412,9 +1088,6 @@ async fn preview_draft(
     .await?;
     if !request.access.permissions.is_subset(&artifact.manifest.permissions) {
         return Err(PluginHttpError::bad_request("Preview requested undeclared permissions"));
-    }
-    if !artifact.manifest.has_ui() {
-        return Err(PluginHttpError::bad_request("this headless Plugin has no App Surface"));
     }
     let runtime_plugin_id = PluginId::from(draft.draft_id.as_ref().to_owned());
     let mut sessions = state.surfaces.lock().await;
@@ -1487,7 +1160,7 @@ async fn preview_draft(
         created_at_ms: now_ms(),
         updated_at_ms: now_ms(),
     };
-    let entrypoint = "ui/index.html".to_owned();
+    let entrypoint = artifact.manifest.entrypoints.ui.clone().unwrap_or_default();
     let session = SurfaceSession {
         owner_user_id: draft.owner_user_id.clone(),
         plugin_id: draft.plugin_id.clone(),
@@ -1539,7 +1212,7 @@ async fn preview_draft(
         state.surfaces.lock().await.remove(&session_id);
         return Err(error.into());
     }
-    Ok(Json(ApiResponse::ok(PluginDraftPreviewResponseDto {
+    Ok(PluginDraftPreviewResponseDto {
         draft_revision: draft.revision,
         descriptor: PluginSurfaceDescriptorDto {
             plugin_id: draft.plugin_id.as_ref().map(|id| id.as_ref().to_owned()),
@@ -1550,7 +1223,7 @@ async fn preview_draft(
             entrypoint,
             is_preview: true,
         },
-    })))
+    })
 }
 
 async fn save_draft(
@@ -1559,9 +1232,12 @@ async fn save_draft(
     AxumPath(draft_id): AxumPath<String>,
     Json(request): Json<SavePluginDraftRequest>,
 ) -> Result<Json<ApiResponse<SavePluginDraftResponseDto>>, PluginHttpError> {
-    let mut draft = draft(&state, &user, &draft_id).await?;
+    Ok(Json(ApiResponse::ok(save_draft_owned(&state, &user.id.to_string(), &draft_id, request).await?)))
+}
+
+pub(super) async fn save_draft_owned(state: &PluginRouterState, owner: &str, draft_id: &str, request: SavePluginDraftRequest) -> Result<SavePluginDraftResponseDto, PluginHttpError> {
+    let draft = draft_owned(state, owner, draft_id).await?;
     require_draft_revision(&draft, request.expected_revision)?;
-    require_draft_not_generating(&draft)?;
     let files = state.drafts.freeze(&draft.owner_user_id, &draft.draft_id)?;
     let artifact = state.artifacts.inspect_files(&files, &NeverCancel)?;
     validate_config_value(&artifact.manifest, &request.config)?;
@@ -1578,6 +1254,24 @@ async fn save_draft(
     if request.expected_plugin_revision != draft.base_revision {
         return Err(PluginHttpError::conflict("Draft base Plugin revision changed"));
     }
+    if let Some(plugin) = existing.as_ref().filter(|plugin|
+        plugin.is_available() && plugin.last_error.is_none()
+            && Some(plugin.revision) == draft.base_revision
+            && plugin.active_artifact_digest == artifact.artifact_digest
+            && plugin.config == request.config)
+    {
+        let inventory = state.repository.inventory(owner, &plugin.plugin_id).await?
+            .ok_or(PluginRepositoryError::NotFound)?;
+        if inventory.credential_bindings == request.credential_bindings {
+            revoke_draft_surfaces(state, &draft.draft_id).await?;
+            return Ok(SavePluginDraftResponseDto {
+                draft: draft_summary(state, &draft)?,
+                result: PluginInstallOutcomeDto::Installed {
+                    plugin: Box::new(detail_dto(state, &inventory).await?),
+                },
+            });
+        }
+    }
     let confirmation = consume_confirmation(
         &state,
         &draft.owner_user_id,
@@ -1587,10 +1281,10 @@ async fn save_draft(
     )
     .await?;
     if let Some(confirmation) = confirmation.required {
-        return Ok(Json(ApiResponse::ok(SavePluginDraftResponseDto {
+        return Ok(SavePluginDraftResponseDto {
             draft: draft_summary(&state, &draft)?,
             result: PluginInstallOutcomeDto::ConfirmationRequired { confirmation },
-        })));
+        });
     }
     let target = match (&draft.plugin_id, draft.base_revision) {
         (Some(plugin_id), Some(expected_revision)) => InstallTarget::Existing {
@@ -1606,7 +1300,7 @@ async fn save_draft(
     }
     let outcome = state
         .install
-        .install_files(
+        .install_draft_files(
             InstallArtifactRequest {
                 owner_user_id: draft.owner_user_id.clone(),
                 target,
@@ -1618,28 +1312,24 @@ async fn save_draft(
                 trusted_local_service_confirmed: confirmation.trusted_local_service,
             },
             &files,
+            nomifun_plugin_platform::DraftInstallAssociation {
+                draft_id: draft.draft_id.clone(), expected_revision: request.expected_revision,
+            },
             None,
         )
         .await?;
-    draft.plugin_id = Some(outcome.plugin.plugin_id.clone());
-    draft.base_revision = Some(outcome.plugin.revision);
-    draft.name = outcome.plugin.name.clone();
-    draft.updated_at_ms = now_ms();
-    let updated = state
-        .repository
-        .update_draft(&draft, request.expected_revision)
-        .await?;
+    let updated = draft_owned(state, owner, draft_id).await?;
     let inventory = state
         .repository
         .inventory(&draft.owner_user_id, &outcome.plugin.plugin_id)
         .await?
         .ok_or(PluginRepositoryError::NotFound)?;
-    Ok(Json(ApiResponse::ok(SavePluginDraftResponseDto {
+    Ok(SavePluginDraftResponseDto {
         draft: draft_summary(&state, &updated)?,
         result: PluginInstallOutcomeDto::Installed {
             plugin: Box::new(detail_dto(&state, &inventory).await?),
         },
-    })))
+    })
 }
 
 async fn delete_draft(
@@ -1648,16 +1338,19 @@ async fn delete_draft(
     AxumPath(draft_id): AxumPath<String>,
     Json(request): Json<DeletePluginDraftRequest>,
 ) -> Result<Json<ApiResponse<bool>>, PluginHttpError> {
-    let draft = draft(&state, &user, &draft_id).await?;
+    Ok(Json(ApiResponse::ok(delete_draft_owned(&state, &user.id.to_string(), &draft_id, request).await?)))
+}
+
+pub(super) async fn delete_draft_owned(state: &PluginRouterState, owner: &str, draft_id: &str, request: DeletePluginDraftRequest) -> Result<bool, PluginHttpError> {
+    let draft = draft_owned(state, owner, draft_id).await?;
     require_draft_revision(&draft, request.expected_revision)?;
-    require_draft_not_generating(&draft)?;
     revoke_draft_surfaces(&state, &draft.draft_id).await?;
     state.drafts.discard(&draft.owner_user_id, &draft.draft_id)?;
     state
         .repository
         .delete_draft(&draft.owner_user_id, &draft.draft_id)
         .await?;
-    Ok(Json(ApiResponse::ok(true)))
+    Ok(true)
 }
 
 async fn export_package(
@@ -1666,7 +1359,11 @@ async fn export_package(
     AxumPath(plugin_id): AxumPath<String>,
     Json(request): Json<ExportPluginPackageRequest>,
 ) -> Result<Json<ApiResponse<PluginExportResultDto>>, PluginHttpError> {
-    let inventory = inventory(&state, &user, &plugin_id).await?;
+    Ok(Json(ApiResponse::ok(export_package_owned(&state, &user.id.to_string(), &plugin_id, request).await?)))
+}
+
+pub(super) async fn export_package_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: ExportPluginPackageRequest) -> Result<PluginExportResultDto, PluginHttpError> {
+    let inventory = inventory_owned(state, owner, plugin_id).await?;
     require_exportable(&inventory, request.expected_revision)?;
     let stored = state.artifacts.load(&inventory.plugin.active_artifact_digest)?;
     let destination = PathBuf::from(&request.destination_path);
@@ -1689,11 +1386,11 @@ async fn export_package(
             &destination,
         )?
     };
-    Ok(Json(ApiResponse::ok(PluginExportResultDto {
+    Ok(PluginExportResultDto {
         destination_path: request.destination_path,
         digest: artifact.artifact_digest.as_ref().to_owned(),
         size_bytes: exported_size(&destination)?,
-    })))
+    })
 }
 
 async fn export_backup(
@@ -1803,7 +1500,11 @@ async fn set_enabled(
     AxumPath(plugin_id): AxumPath<String>,
     Json(request): Json<SetPluginEnabledRequest>,
 ) -> Result<Json<ApiResponse<PluginDetailDto>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(set_enabled_owned(&state, &user.id.to_string(), &plugin_id, request).await?)))
+}
+
+pub(super) async fn set_enabled_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: SetPluginEnabledRequest) -> Result<PluginDetailDto, PluginHttpError> {
+    let owner = owner.to_owned();
     let plugin_id = parse_plugin_id(&plugin_id)?;
     revoke_plugin_surfaces(&state, &plugin_id).await?;
     state
@@ -1820,7 +1521,7 @@ async fn set_enabled(
         .inventory(&owner, &plugin_id)
         .await?
         .ok_or(PluginRepositoryError::NotFound)?;
-    Ok(Json(ApiResponse::ok(detail_dto(&state, &inventory).await?)))
+    Ok(detail_dto(&state, &inventory).await?)
 }
 
 async fn configure(
@@ -1829,7 +1530,11 @@ async fn configure(
     AxumPath(plugin_id): AxumPath<String>,
     Json(request): Json<ConfigurePluginRequest>,
 ) -> Result<Json<ApiResponse<PluginDetailDto>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(configure_owned(&state, &user.id.to_string(), &plugin_id, request).await?)))
+}
+
+pub(super) async fn configure_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: ConfigurePluginRequest) -> Result<PluginDetailDto, PluginHttpError> {
+    let owner = owner.to_owned();
     let plugin_id = parse_plugin_id(&plugin_id)?;
     let inventory = state
         .repository
@@ -1889,7 +1594,7 @@ async fn configure(
         .inventory(&owner, &plugin_id)
         .await?
         .ok_or(PluginRepositoryError::NotFound)?;
-    Ok(Json(ApiResponse::ok(detail_dto(&state, &inventory).await?)))
+    Ok(detail_dto(&state, &inventory).await?)
 }
 
 async fn restore(
@@ -1898,7 +1603,11 @@ async fn restore(
     AxumPath(plugin_id): AxumPath<String>,
     Json(request): Json<RestorePluginRequest>,
 ) -> Result<Json<ApiResponse<PluginDetailDto>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(restore_owned(&state, &user.id.to_string(), &plugin_id, request).await?)))
+}
+
+pub(super) async fn restore_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: RestorePluginRequest) -> Result<PluginDetailDto, PluginHttpError> {
+    let owner = owner.to_owned();
     let plugin_id = parse_plugin_id(&plugin_id)?;
     let restore_data = request.mode == PluginRestoreModeDto::PreviousCodeAndData;
     if restore_data && !request.acknowledge_data_loss {
@@ -1928,7 +1637,7 @@ async fn restore(
         .inventory(&owner, &plugin_id)
         .await?
         .ok_or(PluginRepositoryError::NotFound)?;
-    Ok(Json(ApiResponse::ok(detail_dto(&state, &inventory).await?)))
+    Ok(detail_dto(&state, &inventory).await?)
 }
 
 async fn trash(
@@ -1937,7 +1646,11 @@ async fn trash(
     AxumPath(plugin_id): AxumPath<String>,
     Json(request): Json<TrashPluginRequest>,
 ) -> Result<Json<ApiResponse<PluginDetailDto>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(trash_owned(&state, &user.id.to_string(), &plugin_id, request).await?)))
+}
+
+pub(super) async fn trash_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: TrashPluginRequest) -> Result<PluginDetailDto, PluginHttpError> {
+    let owner = owner.to_owned();
     let plugin_id = parse_plugin_id(&plugin_id)?;
     revoke_plugin_surfaces(&state, &plugin_id).await?;
     state
@@ -1949,7 +1662,7 @@ async fn trash(
         .inventory(&owner, &plugin_id)
         .await?
         .ok_or(PluginRepositoryError::NotFound)?;
-    Ok(Json(ApiResponse::ok(detail_dto(&state, &inventory).await?)))
+    Ok(detail_dto(&state, &inventory).await?)
 }
 
 async fn permanent_delete(
@@ -1958,10 +1671,14 @@ async fn permanent_delete(
     AxumPath(plugin_id): AxumPath<String>,
     Json(request): Json<DeletePluginRequest>,
 ) -> Result<Json<ApiResponse<PluginLibraryResponseDto>>, PluginHttpError> {
+    Ok(Json(ApiResponse::ok(permanent_delete_owned(&state, &user.id.to_string(), &plugin_id, request).await?)))
+}
+
+pub(super) async fn permanent_delete_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: DeletePluginRequest) -> Result<PluginLibraryResponseDto, PluginHttpError> {
     if !request.acknowledge_permanent_delete {
         return Err(PluginHttpError::bad_request("permanent delete must be acknowledged"));
     }
-    let owner = user.id.to_string();
+    let owner = owner.to_owned();
     let plugin_id = parse_plugin_id(&plugin_id)?;
     revoke_plugin_surfaces(&state, &plugin_id).await?;
     state
@@ -1979,10 +1696,10 @@ async fn permanent_delete(
         plugins.push(summary_dto(&state, &inventory).await?);
     }
     let revision = plugins.iter().map(|plugin| plugin.revision).max().unwrap_or(0);
-    Ok(Json(ApiResponse::ok(PluginLibraryResponseDto {
+    Ok(PluginLibraryResponseDto {
         revision,
         plugins,
-    })))
+    })
 }
 
 async fn open_surface(
@@ -1992,6 +1709,12 @@ async fn open_surface(
     Json(request): Json<OpenPluginSurfaceRequest>,
 ) -> Result<Json<ApiResponse<PluginSurfaceDescriptorDto>>, PluginHttpError> {
     let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(open_surface_owned(&state, &owner, &plugin_id, request).await?)))
+}
+
+pub(super) async fn open_surface_owned(
+    state: &PluginRouterState, owner: &str, plugin_id: &str, request: OpenPluginSurfaceRequest,
+) -> Result<PluginSurfaceDescriptorDto, PluginHttpError> {
     let plugin_id = parse_plugin_id(&plugin_id)?;
     let inventory = state
         .repository
@@ -2025,7 +1748,7 @@ async fn open_surface(
     state.surfaces.lock().await.insert(
         session_id.clone(),
         SurfaceSession {
-            owner_user_id: owner,
+            owner_user_id: owner.to_owned(),
             plugin_id: Some(plugin_id.clone()),
             runtime_plugin_id: plugin_id,
             draft_id: None,
@@ -2043,10 +1766,10 @@ async fn open_surface(
             completed_calls: HashMap::new(),
         },
     );
-    Ok(Json(ApiResponse::ok(descriptor)))
+    Ok(descriptor)
 }
 
-async fn revoke_draft_surfaces(
+pub(super) async fn revoke_draft_surfaces(
     state: &PluginRouterState,
     draft_id: &PluginDraftId,
 ) -> Result<(), PluginHttpError> {
@@ -2110,7 +1833,11 @@ async fn close_surface(
     Extension(user): Extension<CurrentUser>,
     Json(request): Json<ClosePluginSurfaceRequest>,
 ) -> Result<Json<ApiResponse<bool>>, PluginHttpError> {
-    let owner = user.id.to_string();
+    Ok(Json(ApiResponse::ok(close_surface_owned(&state, &user.id.to_string(), request).await?)))
+}
+
+pub(super) async fn close_surface_owned(state: &PluginRouterState, owner: &str, request: ClosePluginSurfaceRequest) -> Result<bool, PluginHttpError> {
+    let owner = owner.to_owned();
     let mut sessions = state.surfaces.lock().await;
     let session = sessions
         .get(&request.surface_session_id)
@@ -2130,7 +1857,7 @@ async fn close_surface(
             .map_err(|error| PluginHttpError::unavailable(&error))?;
         state.registry.remove_plugin(&session.runtime_plugin_id)?;
     }
-    Ok(Json(ApiResponse::ok(true)))
+    Ok(true)
 }
 
 async fn surface_asset(
@@ -2516,10 +2243,14 @@ async fn inventory(
     user: &CurrentUser,
     plugin_id: &str,
 ) -> Result<PluginInventory, PluginHttpError> {
+    inventory_owned(state, &user.id.to_string(), plugin_id).await
+}
+
+pub(super) async fn inventory_owned(state: &PluginRouterState, owner: &str, plugin_id: &str) -> Result<PluginInventory, PluginHttpError> {
     let plugin_id = parse_plugin_id(plugin_id)?;
     state
         .repository
-        .inventory(&user.id.to_string(), &plugin_id)
+        .inventory(owner, &plugin_id)
         .await?
         .ok_or_else(PluginHttpError::not_found)
 }
@@ -2529,31 +2260,16 @@ async fn draft(
     user: &CurrentUser,
     draft_id: &str,
 ) -> Result<PluginDraftRecord, PluginHttpError> {
+    draft_owned(state, &user.id.to_string(), draft_id).await
+}
+
+pub(super) async fn draft_owned(state: &PluginRouterState, owner: &str, draft_id: &str) -> Result<PluginDraftRecord, PluginHttpError> {
     let draft_id = parse_draft_id(draft_id)?;
     state
         .repository
-        .get_draft(&user.id.to_string(), &draft_id)
+        .get_draft(owner, &draft_id)
         .await?
         .ok_or_else(PluginHttpError::not_found)
-}
-
-async fn recover_interrupted_draft_generations(
-    repository: &SqlitePluginRepository,
-    owner_user_id: &str,
-) -> Result<usize, PluginRepositoryError> {
-    let mut recovered = 0usize;
-    for mut draft in repository.list_drafts(owner_user_id).await? {
-        if draft.status != PluginDraftStatus::Generating {
-            continue;
-        }
-        let expected_revision = draft.revision;
-        draft.status = PluginDraftStatus::Failed;
-        draft.last_error = Some(DRAFT_GENERATION_INTERRUPTED.to_owned());
-        draft.updated_at_ms = now_ms();
-        repository.update_draft(&draft, expected_revision).await?;
-        recovered = recovered.saturating_add(1);
-    }
-    Ok(recovered)
 }
 
 async fn summary_dto(
@@ -2784,7 +2500,7 @@ fn binding_point_dto(point: PluginBindingPoint) -> PluginBindingPointDto {
     }
 }
 
-fn draft_summary(
+pub(super) fn draft_summary(
     state: &PluginRouterState,
     draft: &PluginDraftRecord,
 ) -> Result<PluginDraftSummaryDto, PluginHttpError> {
@@ -2796,6 +2512,8 @@ fn draft_summary(
         .and_then(|bytes| PluginManifest::parse(&bytes).ok());
     Ok(PluginDraftSummaryDto {
         draft_id: draft.draft_id.as_ref().to_owned(),
+        source_conversation_id: draft.source_conversation_id.clone(),
+        source_message_id: draft.source_message_id.clone(),
         revision: draft.revision,
         plugin_id: draft.plugin_id.as_ref().map(|id| id.as_ref().to_owned()),
         base_plugin_revision: draft.base_revision,
@@ -2810,7 +2528,6 @@ fn draft_summary(
             .unwrap_or_default(),
         status: match draft.status {
             PluginDraftStatus::Ready => PluginDraftStatusDto::Ready,
-            PluginDraftStatus::Generating => PluginDraftStatusDto::Generating,
             PluginDraftStatus::Failed => PluginDraftStatusDto::Failed,
         },
         error_code: draft.last_error.clone(),
@@ -2819,7 +2536,7 @@ fn draft_summary(
     })
 }
 
-fn draft_detail(
+pub(super) fn draft_detail(
     state: &PluginRouterState,
     draft: &PluginDraftRecord,
 ) -> Result<PluginDraftDetailDto, PluginHttpError> {
@@ -2836,17 +2553,7 @@ fn draft_detail(
         .collect();
     Ok(PluginDraftDetailDto {
         summary: draft_summary(state, draft)?,
-        messages: draft
-            .messages
-            .iter()
-            .map(|message| PluginDraftMessageDto {
-                role: match message.role {
-                    PluginDraftMessageRole::User => PluginDraftMessageRoleDto::User,
-                    PluginDraftMessageRole::Assistant => PluginDraftMessageRoleDto::Assistant,
-                },
-                content: message.content.clone(),
-            })
-            .collect(),
+        imported_context: draft.imported_context.clone(),
         files,
     })
 }
@@ -2968,14 +2675,14 @@ async fn inspection_dto(
     })
 }
 
-struct ConfirmationDecision {
-    required: Option<PluginPermissionExpansionDto>,
-    permissions: BTreeSet<String>,
-    secret_slots: BTreeSet<String>,
-    trusted_local_service: bool,
+pub(super) struct ConfirmationDecision {
+    pub(super) required: Option<PluginPermissionExpansionDto>,
+    pub(super) permissions: BTreeSet<String>,
+    pub(super) secret_slots: BTreeSet<String>,
+    pub(super) trusted_local_service: bool,
 }
 
-async fn consume_confirmation(
+pub(super) async fn consume_confirmation(
     state: &PluginRouterState,
     owner: &str,
     artifact: &PluginArtifact,
@@ -3178,32 +2885,15 @@ fn config_errors(manifest: &PluginManifest, value: &Value) -> Vec<String> {
     }
 }
 
-fn parse_model_json<T: for<'de> Deserialize<'de>>(raw: &str) -> Result<T, PluginHttpError> {
-    let trimmed = raw.trim();
-    let json = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .map(|value| value.trim().strip_suffix("```").unwrap_or(value.trim()).trim())
-        .unwrap_or(trimmed);
-    serde_json::from_str(json)
-        .map_err(|_| PluginHttpError::bad_gateway("the model returned invalid Plugin JSON"))
-}
 
-fn require_draft_revision(draft: &PluginDraftRecord, expected: u64) -> Result<(), PluginHttpError> {
+pub(super) fn require_draft_revision(draft: &PluginDraftRecord, expected: u64) -> Result<(), PluginHttpError> {
     if draft.revision != expected {
         return Err(PluginHttpError::conflict("Draft revision changed"));
     }
     Ok(())
 }
 
-fn require_draft_not_generating(draft: &PluginDraftRecord) -> Result<(), PluginHttpError> {
-    if draft.status == PluginDraftStatus::Generating {
-        return Err(PluginHttpError::conflict("Draft generation is running"));
-    }
-    Ok(())
-}
-
-fn parse_plugin_id(value: &str) -> Result<PluginId, PluginHttpError> {
+pub(super) fn parse_plugin_id(value: &str) -> Result<PluginId, PluginHttpError> {
     let id = Uuid::parse_str(value).map_err(|_| PluginHttpError::not_found())?;
     if id.get_version_num() != 7 || id.to_string() != value {
         return Err(PluginHttpError::not_found());
@@ -3211,7 +2901,7 @@ fn parse_plugin_id(value: &str) -> Result<PluginId, PluginHttpError> {
     Ok(PluginId::from(value.to_owned()))
 }
 
-fn parse_draft_id(value: &str) -> Result<PluginDraftId, PluginHttpError> {
+pub(super) fn parse_draft_id(value: &str) -> Result<PluginDraftId, PluginHttpError> {
     let id = Uuid::parse_str(value).map_err(|_| PluginHttpError::not_found())?;
     if id.get_version_num() != 7 || id.to_string() != value {
         return Err(PluginHttpError::not_found());
@@ -3350,10 +3040,10 @@ fn binding_error_code(error: &nomifun_plugin_platform::PluginBindingError) -> &'
 }
 
 #[derive(Debug)]
-struct PluginHttpError {
-    status: StatusCode,
-    code: &'static str,
-    message: String,
+pub(super) struct PluginHttpError {
+    pub(super) status: StatusCode,
+    pub(super) code: &'static str,
+    pub(super) message: String,
 }
 
 impl std::fmt::Display for PluginHttpError {
@@ -3363,25 +3053,23 @@ impl std::fmt::Display for PluginHttpError {
 }
 
 impl PluginHttpError {
-    fn bad_request(message: &str) -> Self {
+    pub(super) fn bad_request(message: &str) -> Self {
         Self { status: StatusCode::BAD_REQUEST, code: "PLUGIN_INVALID_INPUT", message: message.into() }
     }
-    fn conflict(message: &str) -> Self {
+    pub(super) fn conflict(message: &str) -> Self {
         Self { status: StatusCode::CONFLICT, code: "PLUGIN_CONFLICT", message: message.into() }
     }
-    fn forbidden(message: &str) -> Self {
+    pub(super) fn forbidden(message: &str) -> Self {
         Self { status: StatusCode::FORBIDDEN, code: "PLUGIN_PERMISSION_DENIED", message: message.into() }
     }
-    fn not_found() -> Self {
+    pub(super) fn not_found() -> Self {
         Self { status: StatusCode::NOT_FOUND, code: "PLUGIN_NOT_FOUND", message: "Plugin resource was not found".into() }
     }
-    fn unavailable(message: &str) -> Self {
+    pub(super) fn unavailable(message: &str) -> Self {
         Self { status: StatusCode::SERVICE_UNAVAILABLE, code: "PLUGIN_UNAVAILABLE", message: message.into() }
     }
-    fn bad_gateway(message: &str) -> Self {
-        Self { status: StatusCode::BAD_GATEWAY, code: "PLUGIN_GENERATION_FAILED", message: message.into() }
-    }
-    fn internal(message: impl Into<String>) -> Self {
+
+    pub(super) fn internal(message: impl Into<String>) -> Self {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, code: "PLUGIN_INTERNAL", message: message.into() }
     }
 }
@@ -3559,110 +3247,9 @@ mod surface_policy_tests {
 }
 
 #[cfg(test)]
-mod draft_generation_tests {
+mod legacy_draft_recovery_tests {
     use super::*;
 
-    #[tokio::test]
-    async fn startup_recovery_closes_generating_drafts_once() {
-        let database = nomifun_db::init_database_memory().await.unwrap();
-        let owner = nomifun_db::installation_owner_id(database.pool())
-            .await
-            .unwrap();
-        let repository = SqlitePluginRepository::new(database.pool().clone());
-        let draft_id = PluginDraftId::from(Uuid::now_v7().to_string());
-        repository
-            .create_draft(&PluginDraftRecord {
-                owner_user_id: owner.clone(),
-                draft_id: draft_id.clone(),
-                revision: 7,
-                plugin_id: None,
-                base_revision: None,
-                name: "Interrupted generation".into(),
-                workspace_path: "C:/test/draft".into(),
-                messages: Vec::new(),
-                status: PluginDraftStatus::Generating,
-                last_error: None,
-                created_at_ms: 1,
-                updated_at_ms: 1,
-            })
-            .await
-            .unwrap();
 
-        assert_eq!(
-            recover_interrupted_draft_generations(&repository, &owner)
-                .await
-                .unwrap(),
-            1
-        );
-        let recovered = repository
-            .get_draft(&owner, &draft_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(recovered.status, PluginDraftStatus::Failed);
-        assert_eq!(recovered.revision, 8);
-        assert_eq!(
-            recovered.last_error.as_deref(),
-            Some(DRAFT_GENERATION_INTERRUPTED)
-        );
-        assert_eq!(
-            recover_interrupted_draft_generations(&repository, &owner)
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            repository
-                .get_draft(&owner, &draft_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .revision,
-            8
-        );
-    }
 
-    #[tokio::test]
-    async fn per_draft_generation_registry_is_single_flight_and_cancellable() {
-        let generations = Arc::new(Mutex::new(HashMap::new()));
-        let draft_id = PluginDraftId::from(Uuid::now_v7().to_string());
-        let key = DraftGenerationKey::new("owner-a", &draft_id);
-        let active = ActiveDraftGeneration {
-            revision: 2,
-            cancellation: CancellationToken::new(),
-            done: Arc::new(Notify::new()),
-        };
-        {
-            let mut locked = generations.lock().await;
-            assert!(register_active_generation(
-                &mut locked,
-                key.clone(),
-                active.clone(),
-            ));
-            assert!(!register_active_generation(
-                &mut locked,
-                key.clone(),
-                ActiveDraftGeneration {
-                    revision: 3,
-                    cancellation: CancellationToken::new(),
-                    done: Arc::new(Notify::new()),
-                },
-            ));
-            assert_eq!(locked.len(), 1);
-            assert_eq!(locked[&key].revision, 2);
-        }
-
-        let observed = active.cancellation.clone();
-        let waiter = tokio::spawn(async move {
-            observed.cancelled().await;
-        });
-        active.cancellation.cancel();
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("generation cancellation must wake the active request")
-            .unwrap();
-
-        assert!(generations.lock().await.remove(&key).is_some());
-        assert!(generations.lock().await.is_empty());
-    }
 }

@@ -39,11 +39,16 @@ pub(crate) struct NomiCoreBuiltinPlan {
 pub(crate) async fn build(
     services: &AppServices,
     effect_store: nomifun_agent_session::AgentSessionStore,
+    plugin: super::plugin::PluginRouterState,
 ) -> anyhow::Result<NomiCoreBuiltinPlan> {
     let mut registrations = Vec::new();
     registrations.push(super::nomi_core_tool_discovery::registration()?);
     registrations.push(super::model_management::registration(services)?);
     let model_management_tools = super::model_management::capability_ids();
+    registrations.push(nomifun_plugin_development::registration(Arc::new(
+        super::plugin_development::Host::new(plugin, services),
+    )).map_err(anyhow::Error::msg)?);
+    let plugin_development_tools = nomifun_plugin_development::capability_ids();
 
     #[cfg(feature = "browser-use")]
     let wave1_search = services.local_web_search.as_ref().map(|provider| {
@@ -230,6 +235,11 @@ pub(crate) async fn build(
 
     let schema_router = NomiPlatformBuiltinToolSchemaRouter::new([
         (
+            plugin_development_tools.clone(),
+            Arc::new(super::plugin_development::SchemaResolver)
+                as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
+        ),
+        (
             model_management_tools.clone(),
             Arc::new(super::model_management::SchemaResolver)
                 as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
@@ -261,6 +271,7 @@ pub(crate) async fn build(
     let tool_capability_ids = wave1_tools
         .into_iter()
         .chain(model_management_tools)
+        .chain(plugin_development_tools)
         .chain(wave2_tools)
         .chain(wave3_tools)
         .chain(wave4_tools)

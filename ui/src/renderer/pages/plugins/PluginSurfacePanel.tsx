@@ -1,4 +1,5 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { PluginUiCommand, PluginUiStep } from '@/common/types/pluginDevelopment';
 import { Button, Spin } from '@arco-design/web-react';
 import { CloseOne, Refresh } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
@@ -76,6 +77,10 @@ interface PluginSurfacePanelProps {
   closing?: boolean;
   onReload: () => void;
   onClose: () => void | Promise<void>;
+  verification?: {
+    command: PluginUiCommand;
+    onComplete: (observations: unknown[], error?: string) => Promise<void>;
+  };
 }
 
 export default function PluginSurfacePanel({
@@ -84,10 +89,58 @@ export default function PluginSurfacePanel({
   closing = false,
   onReload,
   onClose,
+  verification,
 }: PluginSurfacePanelProps) {
   const { t } = useTranslation();
   const frame = useRef<HTMLIFrameElement | null>(null);
   const port = useRef<MessagePort | null>(null);
+  const probes = useRef(new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>());
+  const runningTests = useRef(new Set<string>());
+  const probe = useCallback(async (step: PluginUiStep): Promise<unknown> => {
+    const until = Date.now() + 10000;
+    while (!port.current && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 50));
+    const bridge = port.current;
+    if (!bridge) throw new Error('The actual preview did not finish its SDK handshake');
+    const token = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        probes.current.delete(token);
+        reject(new Error('UI observation timed out'));
+      }, 5500);
+      probes.current.set(token, {
+        resolve: value => { window.clearTimeout(timer); resolve(value); },
+        reject: error => { window.clearTimeout(timer); reject(error); },
+      });
+      bridge.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: token, ...step });
+    });
+  }, []);
+  useEffect(() => {
+    const pending = verification;
+    if (!pending || runningTests.current.has(pending.command.test_token)) return;
+    runningTests.current.add(pending.command.test_token);
+    let active = true;
+    void (async () => {
+      await Promise.resolve();
+      if (!active) return;
+      const observations: unknown[] = [];
+      try {
+        for (const step of pending.command.steps) {
+          if (!active) return;
+          if (step.operation === 'reopen') {
+            port.current?.close(); port.current = null;
+            if (!frame.current) throw new Error('Preview frame is unavailable');
+            frame.current.src = frame.current.src;
+            await new Promise(resolve => setTimeout(resolve, 300));
+            observations.push(null);
+          } else observations.push(await probe(step));
+        }
+        if (active) await pending.onComplete(observations);
+      } catch (error) {
+        if (active) await pending.onComplete(observations, error instanceof Error ? error.message : String(error));
+      }
+    })();
+    return () => { active = false; runningTests.current.delete(pending.command.test_token); };
+  }, [verification?.command.test_token, probe]);
   const cleanupHandshake = useRef<(() => void) | null>(null);
   const inFlight = useRef(new Set<string>());
   const [loading, setLoading] = useState(true);
@@ -116,6 +169,17 @@ export default function PluginSurfacePanel({
     const hostPort = channel.port1;
     port.current = hostPort;
     hostPort.onmessage = (event: MessageEvent<unknown>) => {
+      const observation = asObject(event.data);
+      if (observation?.type === 'nomifun-plugin-ui-observation-v1'
+        && typeof observation.probe_token === 'string') {
+        const pending = probes.current.get(observation.probe_token);
+        if (pending) {
+          probes.current.delete(observation.probe_token);
+          if (typeof observation.error === 'string') pending.reject(new Error(observation.error));
+          else pending.resolve(observation.value);
+        }
+        return;
+      }
       const request = parsePluginBridgeRequest(event.data);
       const raw = asObject(event.data);
       const callId = typeof raw?.call_id === 'string' ? raw.call_id : 'invalid-call';

@@ -9,7 +9,7 @@ use nomifun_agent_contracts::{
     PluginMutationId,
 };
 use nomifun_plugin_platform::{
-    DataGeneration, InstallArtifactRequest, InstallCommit, InstallTarget, NeverCancel,
+    DataGeneration, DraftInstallAssociation, InstallArtifactRequest, InstallCommit, InstallTarget, NeverCancel,
     PluginArtifactStore, PluginBindingPort, PluginDataRootHandle, PluginDataRootManager,
     PluginDraftRecord, PluginDraftStatus, PluginInstallError,
     PluginInstallService, PluginMutationKind, PluginMutationPhase, PluginMutationRecord,
@@ -26,6 +26,8 @@ struct ControlledRuntime {
     quiesce_inflight: AtomicUsize,
     max_quiesce_inflight: AtomicUsize,
     active: Mutex<BTreeSet<PluginId>>,
+    block_activation: AtomicBool,
+    activation_entered: tokio::sync::Notify,
 }
 
 impl ControlledRuntime {
@@ -70,6 +72,10 @@ impl PluginRuntimePort for ControlledRuntime {
     }
 
     async fn activate(&self, context: PluginRuntimeContext) -> Result<(), String> {
+        if self.block_activation.load(Ordering::Acquire) {
+            self.activation_entered.notify_one();
+            std::future::pending::<()>().await;
+        }
         if self
             .fail_activations
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -201,6 +207,33 @@ impl Fixture {
             .plugin
     }
 
+    async fn draft(&self, plugin: Option<&PluginRecord>) -> PluginDraftRecord {
+        let draft = PluginDraftRecord {
+            owner_user_id: self.owner.clone(), draft_id: Uuid::now_v7().to_string().into(),
+            revision: 1, plugin_id: plugin.map(|plugin| plugin.plugin_id.clone()),
+            base_revision: plugin.map(|plugin| plugin.revision), name: "Working copy".into(),
+            workspace_path: self._temp.path().join("draft").to_string_lossy().into_owned(),
+            source_conversation_id: None, source_message_id: None, source_operation_key: None,
+            source_request_digest: None, verification: json!({}), imported_context: json!({}),
+            status: PluginDraftStatus::Ready, last_error: None, created_at_ms: 1, updated_at_ms: 1,
+        };
+        self.repository.create_draft(&draft).await.unwrap();
+        draft
+    }
+
+    async fn install_draft(&self, draft: &PluginDraftRecord, target: InstallTarget, version: &str)
+        -> Result<nomifun_plugin_platform::InstallArtifactOutcome, PluginInstallError> {
+        self.service.install_draft_files(InstallArtifactRequest {
+            owner_user_id: self.owner.clone(), target, local_package_id: None,
+            config: json!({}), credential_bindings: BTreeMap::new(),
+            confirmed_permissions: BTreeSet::from(["network".into()]),
+            confirmed_secret_slots: BTreeSet::from(["api_token".into()]),
+            trusted_local_service_confirmed: false,
+        }, &package(version), DraftInstallAssociation {
+            draft_id: draft.draft_id.clone(), expected_revision: draft.revision,
+        }, None).await
+    }
+
     async fn commit_interrupted_update(
         &self,
         plugin_id: &PluginId,
@@ -226,6 +259,7 @@ impl Fixture {
             old_data_generation: Some(current.data_generation.clone()),
             new_data_generation: Some(current.data_generation.clone()),
             expected_revision: Some(current.revision),
+            draft_association: None,
             error: None,
             created_at_ms: now,
             updated_at_ms: now,
@@ -259,6 +293,69 @@ impl Fixture {
             .await
             .unwrap()
     }
+}
+
+#[tokio::test]
+async fn draft_and_plugin_commit_together_before_activation_and_recover_after_cancellation() {
+    let fixture = Arc::new(Fixture::new().await);
+    let draft = fixture.draft(None).await;
+    let target = InstallTarget::new();
+    let plugin_id = target.plugin_id().clone();
+    fixture.runtime.block_activation.store(true, Ordering::Release);
+    let task_fixture = fixture.clone();
+    let task_draft = draft.clone();
+    let task = tokio::spawn(async move { task_fixture.install_draft(&task_draft, target, "1.0.0").await });
+    tokio::time::timeout(Duration::from_secs(3), fixture.runtime.activation_entered.notified()).await.unwrap();
+    let committed = fixture.repository.get_draft(&fixture.owner, &draft.draft_id).await.unwrap().unwrap();
+    assert_eq!(committed.plugin_id, Some(plugin_id.clone()));
+    assert_eq!(committed.base_revision, Some(1));
+    assert_eq!(committed.revision, 2);
+    assert_eq!(fixture.repository.list_mutations().await.unwrap()[0].phase, PluginMutationPhase::Committed);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    fixture.runtime.block_activation.store(false, Ordering::Release);
+    fixture.service.recover().await.unwrap();
+    assert!(fixture.repository.list_mutations().await.unwrap().is_empty());
+    assert_eq!(fixture.repository.list_plugins(&fixture.owner).await.unwrap().len(), 1);
+    let recovered = fixture.repository.get_draft(&fixture.owner, &draft.draft_id).await.unwrap().unwrap();
+    assert_eq!(recovered.plugin_id, Some(plugin_id));
+    assert_eq!(recovered.base_revision, Some(1));
+    assert_eq!(recovered.revision, 2, "recovery must not relink or install a second time");
+}
+
+#[tokio::test]
+async fn stale_draft_cannot_commit_an_instance_or_disable_the_previous_version() {
+    let fixture = Fixture::new().await;
+    let previous = fixture.install("1.0.0", InstallTarget::new()).await;
+    let draft = fixture.draft(Some(&previous)).await;
+    fixture.repository.update_draft(&draft, draft.revision).await.unwrap();
+    let result = fixture.install_draft(&draft, InstallTarget::Existing {
+        plugin_id: previous.plugin_id.clone(), expected_revision: previous.revision,
+    }, "1.1.0").await;
+    assert!(matches!(result, Err(PluginInstallError::Repository(nomifun_plugin_platform::PluginRepositoryError::Conflict))));
+    let current = fixture.repository.get_plugin(&fixture.owner, &previous.plugin_id).await.unwrap().unwrap();
+    assert_eq!(current.active_artifact_digest, previous.active_artifact_digest);
+    assert_eq!(current.revision, previous.revision);
+    assert!(fixture.runtime.active.lock().unwrap().contains(&previous.plugin_id));
+    fixture.service.recover().await.unwrap();
+    assert_eq!(fixture.repository.list_plugins(&fixture.owner).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn activation_rollback_restores_the_source_draft_to_the_usable_plugin_revision() {
+    let fixture = Fixture::new().await;
+    let previous = fixture.install("1.0.0", InstallTarget::new()).await;
+    let draft = fixture.draft(Some(&previous)).await;
+    fixture.runtime.fail_next_activation();
+    assert!(fixture.install_draft(&draft, InstallTarget::Existing {
+        plugin_id: previous.plugin_id.clone(), expected_revision: previous.revision,
+    }, "1.1.0").await.is_err());
+    let current = fixture.repository.get_plugin(&fixture.owner, &previous.plugin_id).await.unwrap().unwrap();
+    let source = fixture.repository.get_draft(&fixture.owner, &draft.draft_id).await.unwrap().unwrap();
+    assert_eq!(current.active_artifact_digest, previous.active_artifact_digest);
+    assert_eq!(source.plugin_id, Some(previous.plugin_id));
+    assert_eq!(source.base_revision, Some(current.revision));
+    assert_eq!(source.revision, 3, "both commit and rollback must fence stale draft writers");
 }
 
 fn package(version: &str) -> BTreeMap<String, Vec<u8>> {
@@ -553,7 +650,12 @@ async fn committed_permanent_delete_recovery_cleans_every_owned_root_and_cache()
             base_revision: Some(installed.revision),
             name: "Detached after delete".into(),
             workspace_path: "C:/managed/plugin-draft".into(),
-            messages: Vec::new(),
+        source_conversation_id: None,
+        source_message_id: None,
+        source_operation_key: None,
+        source_request_digest: None,
+        verification: serde_json::json!({}),
+            imported_context: json!({}),
             status: PluginDraftStatus::Ready,
             last_error: None,
             created_at_ms: 1,
@@ -578,6 +680,7 @@ async fn committed_permanent_delete_recovery_cleans_every_owned_root_and_cache()
         old_data_generation: Some(trashed.data_generation.clone()),
         new_data_generation: None,
         expected_revision: Some(trashed.revision),
+        draft_association: None,
         error: None,
         created_at_ms: now,
         updated_at_ms: now,

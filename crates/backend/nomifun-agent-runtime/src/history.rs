@@ -108,10 +108,14 @@ fn replay_into(
                     || !batch.calls.values().any(|call| call.name == crate::completion::TOOL_NAME
                         && batch.results.get(&call.call_id).is_some_and(|result| !result.is_error))
                     || !report.matches_delivery(text)
-                    || !matches!(events.get(index + 1), Some(AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. }))
+                    || !matches!(events.get(index + 1), Some(AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. } | AgentEngineEvent::TurnPaused { .. }))
                 {
                     return Err(invalid("completion delivery differs from its accepted terminal report"));
                 }
+                // A Host may narrow a valid completion proposal into a pause.
+                // Retain its settled batch for the authorized recovery tail;
+                // it is not a delivered terminal assistant message yet.
+                if matches!(events.get(index + 1), Some(AgentEngineEvent::TurnPaused { .. })) { continue; }
                 batch.flush(history, false)?;
                 history.push(crate::context_lifecycle::text_message(ChatRole::Assistant, text.clone()));
             }
