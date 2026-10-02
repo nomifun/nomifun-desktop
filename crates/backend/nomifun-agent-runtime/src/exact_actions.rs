@@ -41,7 +41,7 @@ pub(crate) struct ExactActionInput {
 }
 
 pub(crate) fn schema() -> serde_json::Value {
-    serde_json::json!({"type":"array","maxItems":24,"description":"Ordered exact commitments, not intent proof or authority. Declare byte-sensitive phases before effects. Use receiver_ref for stdin referencing a prior start_process ID, so start+stdin can be committed before the process lifetime begins. The host binds only its real running receipt. No env, credentials or fabricated handles. Status-only updates omit exact_actions; once/outcome state cannot reset. stdin compares actual UTF-8 input plus append_newline; no normalization. Cleanup/poll remain ordinary owner controls, not exact_actions.",
+    serde_json::json!({"type":"array","maxItems":24,"description":"Ordered commitments, not intent proof or authority. For requested create-then-modify, first commit and create the specified INITIAL bytes; after the actual receipt declare the separate modification and any fresh source guard. Never collapse intermediate states into a final-state write. Precommit known start+stdin with receiver_ref=<prior start ID> before its lifetime begins; only a real running receipt binds it. No env/credentials/fabricated handles. Status-only updates omit exact_actions; once/outcome cannot reset. stdin compares actual input plus append_newline once, without normalization. Cleanup/poll are ordinary controls.",
         "items":{"type":"object","additionalProperties":false,"required":["id","source","tool","expected_arguments"],
             "properties":{"id":{"type":"string","minLength":1,"maxLength":64},"source":crate::requirements::citation_schema(),
                 "tool":{"type":"string","minLength":1,"maxLength":128,

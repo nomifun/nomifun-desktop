@@ -3452,3 +3452,15 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
   完成失败且未消耗release才允许新settlement flight，pending/success/最终release继续缓存；
   不清unknown/panic、不跑任务或重放参数。新缓存判定1项+cleanup_retry9项通过，
   最后修复未native，Agent failed cleanup与Keychain物理阻塞不混同，Windows未代验。
+
+### macOS 晚控制真实终态与公开交付格式（2026-10-03）
+
+- 后台deadline可能先在原owner完成，scope尚无terminal便盲目stdin并报unknown。新增冻结
+  terminal只读查询，原reap成立才返回真实终态/输出且本次control未执行；lookup/未reap
+  仍unknown，不续lease/不cancel/不消费cursor。Runtime收终态但不推进未执行控制的epoch。
+- 本机原生process定向11/11、Runtime283/283；首READY重复输出观察器FAIL保持，修后核对
+  首start与terminal完整输出及cursor0重放。新宿主公开格式持久化版本、旧文本回放保持，
+  literal原文/真实计数和未知保留，已知wrapper简短显示；语言仅摘要显示回退。
+- exact邻近指导保持initial创建→实际receipt→独立修改，不自动解释任务/补字节。
+  无付费或正式UI重跑；原B/A13新源码正式证据及Keychain物理等待未闭环，Windows未代验。
+  外部证据2026-10-03/macos/late-input-terminal，不提交完整日志/数据库/模型轨迹。

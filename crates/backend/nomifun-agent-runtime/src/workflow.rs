@@ -148,9 +148,10 @@ impl AgentWorkStatus {
                     .strip_prefix("workspace.process/")
                     .unwrap_or("");
                 let launch = matches!(operation, "exec" | "start");
-                let workspace_interaction =
-                    matches!(operation, "input" | "close_stdin" | "resize");
-                let provenance_interaction = workspace_interaction || operation == "poll";
+                let rejected_terminal=crate::execution_policy::process_control_rejected_terminal(binding,result);
+                let workspace_interaction = !rejected_terminal
+                    && matches!(operation, "input" | "close_stdin" | "resize");
+                let provenance_interaction = workspace_interaction || operation == "poll" || rejected_terminal;
                 let previous_epoch = self.workspace_observation_epoch;
                 // Commands and stdin are opaque effects. Do not classify them
                 // as tests or assume a shell stayed inside a particular path.

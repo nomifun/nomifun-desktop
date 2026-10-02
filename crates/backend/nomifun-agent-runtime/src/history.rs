@@ -822,7 +822,7 @@ mod tests {
         let report = crate::AgentCompletionReport { plan_revision:1, observation_revision:1,
             input_revision:1, workspace_epoch:0, summary:"Known diagnostic result.".into(),
             criteria:vec![], observed_tool_error_count:1, observed_command_failure_count:2,
-            requirements:vec![], delivery_items:vec![] };
+            requirements:vec![], delivery_items:vec![], public_format:None };
         let events = |delivery: String| vec![
             AgentEngineEvent::TurnStarted { binding:binding(), turn_operation_id:OperationId::from("turn") },
             AgentEngineEvent::ModelStepStarted { step:1, operation_id:OperationId::from("turn:model:1") },
