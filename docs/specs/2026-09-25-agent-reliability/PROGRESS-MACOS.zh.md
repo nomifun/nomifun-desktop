@@ -28,7 +28,7 @@
 失败分支 live、旧 MM retry spinner、完整默认 GEN/N3/发布认证。保持未解决/未验状态；
 不自动补字节、放宽断言、扩大权限或改写 Windows 结果。本次收尾仅文档，不重复构建/测试/模型。
 
-## 剩余走查快速方案（2026-10-02，待执行）
+## 剩余走查快速方案（2026-10-02，执行中）
 
 本节响应用户后续要求，设计剩余项的高效走查/修复；不撤销已交付记录，不把方案当验证。
 停止以长 A/B/C 整组、五角色或 N3 填槽推进，按下面四个问题簇执行。默认 GEN 覆盖并入 R2，
@@ -71,6 +71,23 @@
 不因缩短测试任务关闭原长 Case；短任务只证明其直接子断言。优先完成 R1/R2 核心命令体验，
 再关 R3 的真实重试路径和 R4 的实际关闭问题；若有残余，明确列出而非宣布全范围完成。
 完整默认 GEN 只能由实际默认绑定样本证明；N3/20 repeats/发布认证不是这轮快速收尾的隐藏门槛。
+
+### 快速执行 R1：精确文件短链（2026-10-02）
+
+- 用现有证据确认仍无 owner/codec 改字节根因，不为凑 PASS 改执行层。源 `9889e3a22` 正式
+  Tauri/adhoc strict，本机 macOS 26.6.2/25G83 arm64、APFS 非大小写敏感 Data 卷；拆短自然任务
+  只创建→局部修改→回读→报告，不附带命令/helper/取消。冻结 8/4096/180，native300+5。
+- 实际 StepFun 5 请求、163 events、4 原生参数与 canonical 全同；write 首次含末 LF/34 bytes，
+  patch 一次用原 write receipt 的 existing SHA guard，仅改第二行，最终回读/磁盘 33 bytes、
+  SHA `e90623013b002aa3e515c47b73879eceae781b38ce946ded8d35532541824213`，完整内容/末 LF 保持。
+  report 首发接受、工具错误0/命令失败0、实际两效果各一次 returned，两原件不变、无额外文件。
+- 正式 UI 终态截图与 Cmd-Q 同控制段，native exit0/91.90秒（含准备）、无 expiry/信号，
+  CEF unused_closed；fixture shutdown200/exit0，自有 App/Helper/listener 消失。完整只读快照
+  events/heads/turns/effects 为 163/1/1/2，源/备份逐行相同、integrity ok；凭据审计0/117。
+- 只记文件操作/字节子断言 N1，未改产品源码；B09首败、完整B/N3保持。报告仍有工具/EOF及
+  `earlier observations`措辞，未宣称完整公开语言验收。外置 closure 首审误用不存在表名保留，
+  查实际 schema 后另记全表核对，不重跑模型。下一项 R2 默认GEN/多结果；本批构建可复用。
+  证据 `2026-10-02/macos/r1-exact-file-short/`，Windows结果未改。
 
 ## 上次活动问题簇（阶段性交付后不再自动排程）
 
