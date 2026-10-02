@@ -391,6 +391,17 @@
   全证据`2026-10-02/macos/empty-stop-live-recheck/`；只关闭该空答复误收尾的正式N1子断言，
   完整A/B/C/语言/N3及旧CEF/MM不关闭，Windows独立结果不代判。
 
+### C06-12 完成工具静态说明占用（2026-10-02，macOS 零模型）
+
+- MAC-A-10请求15实测27 tools/50,892 wire JSON bytes，system/23,911；report tool/10,111，
+  顶层description/4,534，含参数的全部description合计8,214，非SDK encoded_size/token。
+  四次压缩保留5/5/1/1原call IDs，不将模型重复简单归为全部回执丢失。
+- 只合并重复静态措辞3,247→2,385 bytes；Schema、动态说明、Completion context、错误计数、
+  evidence资格/接受规则源字节保持。首红保留，completion40/40，未放宽既有测试。
+  旧wire模拟仅省862 bytes/约1.7%工具总量，不当正式重验或全部上下文/重复根因闭环。
+- 新模型0/UI未启动，证据`2026-10-02/macos/completion-prompt-footprint/`；完整A/B/C/N3、
+  公开交付及原Mac/Windows失败不覆盖，不扩固定预算/权限、不丢历史结果。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
