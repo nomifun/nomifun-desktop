@@ -3559,3 +3559,16 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - Robot153、App bridge2、Robot失败隔离1、既有Agent失败隔离/重试1及独立复核通过；首次
   App测试编译错误与修后各自外置history-cursor-live。未有真实Keychain/CEF物理live，风险OPEN，
   Windows新共享关闭顺序/Robot改动未代验，未改已有Windows记录。
+
+### macOS 退出前置的资源/存储分段（2026-10-03）
+
+- BrowserResourceService资源屏障/物理工厂分段，关闭期间封全部准入，物理worker取消不丢，
+  未确认资源不调用native。storage-independent默认false，仅macOS CEF明确true；生产Host
+  已确认存储关闭后才走CEF tail，其他工厂保留旧顺序，已关DB重试不重启producer。
+- BackgroundTaskRegistry两个外层取消首红：丢剩余句柄和已join错误；RAII在owner释放前
+  归还。Knowledge后台create/resume独立持有句柄，阻止停后publication，真实local worker
+  完成才join；业务失败不假称Synced，foreground预算不变。Gateway先停、所有前置错误
+  拦native/DB。旧只观察Gateway的spy换为真实工厂计数器，失败native仍0，不放宽断言。
+- Browser21、App22(browser-use)/21(default)、Knowledge6、native state4通过。CEF返回事实
+  与ack分离，丢ack仍失败/不可重入。真实guardian接入/系统Keychain/native live未完成，
+  证据外置history-cursor-live，Windows新共享分段/消费者关闭未代验，首败保留。

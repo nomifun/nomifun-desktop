@@ -1,24 +1,35 @@
 //! Native shutdown admission and physical completion are different facts.
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[derive(Default)]
-pub(super) struct ShutdownState(AtomicU8);
+pub(super) struct ShutdownState {
+    admission: AtomicU8,
+    native_returned: AtomicBool,
+}
 
 impl ShutdownState {
     pub(super) fn begin(&self) -> bool {
-        self.0.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        self.admission.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    /// Published immediately after the actual FFI return, before any optional
+    /// acknowledgement loss. Physical return is not acknowledged cleanup.
+    pub(super) fn mark_native_returned(&self) {self.native_returned.store(true, Ordering::Release);}
+
+    pub(super) fn native_is_running(&self) -> bool {
+        self.admission.load(Ordering::Acquire)==1 && !self.native_returned.load(Ordering::Acquire)
     }
 
     pub(super) fn finish(&self) {
-        self.0.store(2, Ordering::Release);
+        self.admission.store(2, Ordering::Release);
     }
 
     pub(super) fn completed(&self) -> bool {
-        self.0.load(Ordering::Acquire) == 2
+        self.admission.load(Ordering::Acquire) == 2
     }
 
     pub(super) fn blocks_work(&self) -> bool {
-        self.0.load(Ordering::Acquire) != 0
+        self.admission.load(Ordering::Acquire) != 0
     }
 }
 
@@ -77,6 +88,18 @@ mod tests {
         release.send(()).unwrap();
         native.join().unwrap();
         assert!(state.completed());
+    }
+
+    #[test]
+    fn lost_ack_after_physical_return_is_not_a_running_native_call() {
+        let state=ShutdownState::default();assert!(!state.native_is_running());
+        assert!(state.begin());assert!(state.native_is_running());
+        state.mark_native_returned();
+        assert!(!state.native_is_running());assert!(!state.completed());
+        assert!(state.blocks_work());assert!(!state.begin());
+        state.finish();assert!(state.completed());assert!(!state.native_is_running());
+        let uninitialized=ShutdownState::default();uninitialized.finish();
+        assert!(!uninitialized.native_is_running(),"failed initialization is not a physical shutdown entry");
     }
 
     #[test]
