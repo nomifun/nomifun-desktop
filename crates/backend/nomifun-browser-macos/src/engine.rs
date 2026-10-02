@@ -292,7 +292,9 @@ impl Engine {
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
         if self.stopped.completed() { return Ok(()); }
-        if self.stopped.blocks_work() { return Err("CEF shutdown is still in progress; completion has not been acknowledged".into()); }
+        if self.stopped.blocks_work() { return Err(if self.stopped.native_is_running() {
+            "CEF shutdown is still in progress; completion has not been acknowledged"
+        } else {"CEF shutdown returned; completion has not been acknowledged"}.into()); }
         #[cfg(debug_assertions)]
         let shutdown_started = Instant::now();
         self.closing.store(true, Ordering::Release);
@@ -318,6 +320,7 @@ impl Engine {
             #[cfg(debug_assertions)]
             eprintln!("CEF_SHUTDOWN phase=native_entry elapsed_ms={}", shutdown_started.elapsed().as_millis());
             shutdown();
+            engine.stopped.mark_native_returned();
             #[cfg(debug_assertions)]
             eprintln!("CEF_SHUTDOWN phase=native_return elapsed_ms={}", shutdown_started.elapsed().as_millis());
             // Exercise the real native/desktop failure path after physical

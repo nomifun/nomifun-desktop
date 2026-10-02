@@ -27,6 +27,8 @@ impl DesktopBrowserHost {
 }
 #[async_trait]
 impl BrowserRuntimeFactory for DesktopBrowserHost {
+    fn supports_storage_independent_shutdown(&self) -> bool { true }
+
     async fn create(&self, request: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
         let engine = match &self.engine {
             HostEngine::Initialized(engine) => engine.clone(),

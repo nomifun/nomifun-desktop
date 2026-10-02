@@ -622,6 +622,11 @@ pub trait BrowserRuntimeFactory: Send + Sync {
         request: CreateBrowserRuntime,
     ) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError>;
 
+    /// Explicit host promise: after all resource closures are acknowledged,
+    /// the final factory shutdown needs neither app SQLite nor other host
+    /// consumers. Default false preserves non-CEF provider teardown ordering.
+    fn supports_storage_independent_shutdown(&self) -> bool { false }
+
     /// Stop process-wide native browser infrastructure after every runtime
     /// created by this factory has acknowledged destruction.
     ///
