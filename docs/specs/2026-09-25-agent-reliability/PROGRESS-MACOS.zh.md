@@ -298,6 +298,29 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   独立audit、完整HTTP/事件/数据库/UI。A13现格式正式受影响验证、B最终报告、native失败
   重试live与Keychain物理阻塞仍OPEN；Windows记录未改。
 
+#### A13 最新公开格式与修正反馈冲突（2026-10-03）
+
+- clean`97bbbd8dc`最新正式Tauri/当前UI/签名，复用e22e329ca未变的fixture setup/转发器
+  （仅instrumentation，不代替产品版本）；原A全文/七原件不变，arm64/macOS26.6.2/25G83。
+  StepFun6请求/5步骤/386events/五effects。**最新A仍FAIL**：尾两行从未读取，最终只交付
+  目录、行数及两个测试四bundle；cwd/头部/两搜索/Git实值未正确交付，不以测试stack中的
+  路径出现冒充cwd结果。Git槽missing使TASK_INCOMPLETE终态正确，summary“全部完成”不成立。
+- `plain_zh_v1`确已实际CompletionDelivered及UI采用，宿主中文状态/退出码/loss/2次工具失败
+  和1次命令失败统计成立、安全数据块保留；模型label/rationale仍有英文eligibility术语。
+  两指定Bun各实际一次/0和1，失败断言保留；七原件/HEAD/status/diff不变，无额外文件/哨兵。
+  正常Cmd-Q0/107.20秒，无expiry/TERM/KILL；五表386/1/1/1/5同源/ok。未用CEF不代判Keychain。
+- 真实合同冲突：首report仅因criteria的stale IDs被拒，但旧修正反馈要求“旧结果放summary、
+  omit evidence”，与新独立delivery结果发布相矛盾；下一请求仍合法的历史refs被模型删掉。
+  现仅针对criteria现状证据字段修正，明确保留合法delivery_items.results，不因不新鲜将其
+  删除或标missing；不恢复current资格、不自动重跑。例句随summary作中文显示回退、公开
+  label要求用户语言。尾部start_line说明给实际L/N算式，未新增API/自动推断/预算权限。
+- Runtime285/285，含历史delivery保留、current引用仍拒绝、原参数不改/私值不反射回归。
+  最后修复及尾部指导未live，不以组件绿关闭原A漏步骤/交付。外证据
+  `2026-10-03/macos/complex-report-closure/`，首次失败全保留，Windows结果未改。
+- 原B普通Retry会新建Turn重发原输入，不能作为旧失败Turn续接；terminal不可checkpoint重开，
+  resume_task也不继承旧once。只读结论不冒充正式恢复；B历史结果需通过新明确report-only
+  范围及等价代理恢复后验证，不覆盖旧trace/seed/原失败，仍未执行。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

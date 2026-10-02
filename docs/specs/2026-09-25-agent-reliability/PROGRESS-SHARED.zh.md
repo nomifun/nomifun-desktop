@@ -3487,3 +3487,13 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 11/11定向通过，1秒期限后未缓存scope先取得真实timed_out/reaped，stdin/close/resize均未执行；
 原片段/冻结output/cursor0回放一致，无重启/输入重放。只新增Windows回归，生产代码不改，
 正式UI/真实模型采用与原B/W250仍未验，不能把这两条拼成完整进程或Windows认证。
+
+### macOS A13 修正反馈与历史交付分离（2026-10-03）
+
+- 最新97bbbd8dc正式原A仍FAIL：尾读未做，原实值只交付4bundle；public_format plain_zh_v1
+  已实际采用，但模型仍复制公开英文证据术语。原件/Git保护、实际测试0/1、Cmd-Q0成立；
+  6请求/5步骤/386events/五effects，全证据外置complex-report-closure，旧A N1不代判新样本。
+- 定位旧argument repair通知要求将旧值转summary，与独立delivery发布合同冲突。编号报告
+  现只改criteria现状引用，保留仍合法历史delivery refs，不恢复current资格/不重跑；中文
+  显示例句与公开label语言说明补齐，尾部参数指导无API/权限扩张。Runtime285/285及
+  source/privacy/历史refs回归通过，最后未formal，不将缺项或blocked洗绿，Windows未代验。
