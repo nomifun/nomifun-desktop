@@ -3161,3 +3161,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - W241的steer message projection使用独立事件UUID，但correlation_id是拥有该输入的Turn operation；历史响应误拿operation当消息UUID而丢弃。accepted用户消息改用已有message projection ID，旧记录也恢复；不改canonical来源、Turn归属、执行或权限。
 - 双纠正独立身份回归修前红/修后绿，相关历史17项通过，fmt/diff与desktop边界通过；原失败会话正式Tauri零模型冷读7/7，纠正/failed提示可见，全表与磁盘hash不变、无复活或新动作。
 - 只关闭C冷读纠正展示；完整C执行/实际Stop、A重复/报告、B来源保护/交付及必要N3仍开放。外部2026-10-02/windows/w242-mainline-recovery保留首红/根因/回归/正式冷读，不启动未改根因的付费循环，下一项合并A复验。
+
+### W243 合并A复验仍受替换预算阻断（2026-10-02，正式FAIL）
+
+- 一次正式COD A、约2分57秒、11步/8压缩：cwd/list/专用全文及两搜索/Git各取得结果且Git未重复，第一指定测试exit0；自选PowerShell摘要脚本先exit1，修正提议未dispatch。十文件/Git/原事件不变，第二测试/报告未到达。
+- 压缩两次候选后83,681 bytes/27,894估算tokens超过27,854限制40而自行failed，UI确有Nomi内部失败；未Stop/Retry。原audit10/16与交付0/6保留，不代判W237报告反馈/语言采用或完整A。
+- 外部2026-10-02/windows/w243-mainline-a-closeout保存原始首败和终态。下一步直接核对正常压缩的触发阈值与冻结硬接纳上限，供应商margin/权限/原context保持；不继续删说明以追逐几十token，不重跑未改根因。A/B/C共享仍未结案。
