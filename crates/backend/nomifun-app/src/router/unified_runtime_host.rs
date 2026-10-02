@@ -613,6 +613,15 @@ impl ConversationRuntimeHost {
 
 #[async_trait]
 impl UnifiedRuntimeHost for ConversationRuntimeHost {
+    async fn completion_gate(
+        &self, message: &SendMessageData,
+    ) -> Result<Option<nomifun_ai_agent::engine_sdk::EngineTurnTerminal>, AppError> {
+        let receipt = self.session_host.read_turn_receipt(
+            &self.options, &self.binding, &self.snapshot_ref, message,
+        ).await?;
+        Ok(self.session_host.plugin_delivery_pending(&receipt).await?.map(|reason|
+            nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Paused { reason: reason.into() }))
+    }
     async fn recoverable_preparation_step(&self, message:&SendMessageData) -> Result<Option<u16>,AppError> {
         let active = self.active.lock().await;
         Ok(active.as_ref().filter(|turn| turn.root == self.root(message))

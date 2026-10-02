@@ -88,6 +88,11 @@ async fn general_agent_compiles_when_browser_is_attachable_but_not_yet_connected
         },
     )
     .await;
+    let plugin_development = editor.draft.document.enabled_capabilities.iter()
+        .find(|selection| selection.capability.id == nomifun_plugin_development::MODULE_ID)
+        .expect("general Agent enables plugin development by default");
+    assert_eq!(plugin_development.action_allowlist,
+        nomifun_plugin_development::CREATE_ACTIONS.iter().map(|action| (*action).to_owned()).collect());
     assert_eq!(
         editor.revision.expect("general Agent revision").reference.revision,
         1
@@ -123,6 +128,7 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("requirements", &["requirements/claim", "requirements/read", "requirements/status", "requirements/write"]),
             ("creation.media", &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/video"]),
             ("agent.tool-discovery", &["tool.discovery.rank"]),
+            ("plugin.development", nomifun_plugin_development::CREATE_ACTIONS),
         ])),
         (OfficialPresetKey::CodingCodex, actions(&[
             ("workspace.files", &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),

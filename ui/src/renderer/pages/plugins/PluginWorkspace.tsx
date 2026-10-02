@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  AddOne,
   AllApplication,
   ApiApp,
   ApplicationMenu,
@@ -19,7 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import { isDesktopShell } from '@/renderer/utils/platform';
-import { PLUGIN_LIBRARY_CHANGED } from './pluginLibraryState';
+import { subscribePluginLibraryChanges } from './pluginLibraryState';
 import {
   pluginLibraryCounts,
   type PluginLibraryCounts,
@@ -60,14 +59,17 @@ export default function PluginWorkspace({
   const [collapsed, setCollapsed] = useState(false);
   const [loadedCounts, setLoadedCounts] = useState<PluginLibraryCounts>(emptyCounts);
   const mainRef = useRef<HTMLDivElement>(null);
+  const countSequence = useRef(0);
 
   const refreshCounts = useCallback(async () => {
     if (providedCounts) return;
+    const request = ++countSequence.current;
     try {
       const [library, draftList] = await Promise.all([
         pluginPlatform.plugins.list.invoke(),
         pluginPlatform.drafts.list.invoke(),
       ]);
+      if (request !== countSequence.current) return;
       setLoadedCounts(pluginLibraryCounts(library.plugins, draftList.drafts));
     } catch {
       // Navigation remains useful while the backend reconnects; keep the last counts.
@@ -75,10 +77,11 @@ export default function PluginWorkspace({
   }, [providedCounts]);
 
   useEffect(() => {
+    if (providedCounts) return;
     void refreshCounts();
-    window.addEventListener(PLUGIN_LIBRARY_CHANGED, refreshCounts);
-    return () => window.removeEventListener(PLUGIN_LIBRARY_CHANGED, refreshCounts);
-  }, [refreshCounts]);
+    const off = subscribePluginLibraryChanges(refreshCounts);
+    return () => { countSequence.current += 1; off(); };
+  }, [refreshCounts, providedCounts]);
 
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0, left: 0 });
@@ -128,14 +131,6 @@ export default function PluginWorkspace({
 
           {desktopShell && (
             <div className={styles.workspacePrimaryActions}>
-              <button
-                type='button'
-                className={styles.createButton}
-                title={t('pluginPlatform.actions.create')}
-                onClick={() => navigate('/plugins/new')}
-              >
-                <AddOne /><span className={styles.workspaceNavText}>{t('pluginPlatform.actions.create')}</span>
-              </button>
               <button
                 type='button'
                 className={styles.importButton}

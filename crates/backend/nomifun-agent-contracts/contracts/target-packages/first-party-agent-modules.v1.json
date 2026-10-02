@@ -6,6 +6,13 @@
   },
   "packages": [
     {
+      "package": { "id": "nomifun.plugin-development", "version": "1.0.0" },
+      "source": { "source_kind": "bundled", "source_identity": "nomifun.plugin-development" },
+      "capabilities": [{ "capability": { "id": "plugin.development" }, "kind": "tool" }],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
       "package": {
         "id": "nomifun.model-management",
         "version": "1.0.0"

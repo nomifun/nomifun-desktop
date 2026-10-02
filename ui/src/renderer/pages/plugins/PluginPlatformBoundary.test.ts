@@ -3,53 +3,49 @@ import { expect, test } from 'bun:test';
 
 const read = (name: string) => readFileSync(new URL(name, import.meta.url), 'utf8');
 
-test('Library, Creator and Detail use only the unified bridge', () => {
+test('Library, conversation artifacts and Detail use only the unified bridge', () => {
   const source = [
     read('./PluginLibraryPage.tsx'),
-    read('./PluginCreatorPage.tsx'),
+    read('./ConversationPluginArtifacts.tsx'),
     read('./PluginRunPage.tsx'),
     read('./PluginImportDialog.tsx'),
   ].join('\n');
   expect(source).toContain('pluginPlatform.drafts');
   expect(source).toContain('pluginPlatform.plugins');
   expect(source).not.toMatch(/pluginRuntimes|pluginRuntimeProduct|ipcBridge\.plugins/);
+  expect(source).not.toContain('/plugins/new');
+  expect(source).not.toContain('/plugins/create/');
   expect(source).not.toMatch(/Candidate|Publish|AutoApply|AutoPublish|Mount|Project/);
 });
 
 test('Preview and installed UI share one Surface host with no in-frame fake storage', () => {
-  const creator = read('./PluginCreatorPage.tsx');
+  const creator = read('./ConversationPluginArtifacts.tsx');
   const detail = read('./PluginRunPage.tsx');
   const surface = read('./PluginSurfacePanel.tsx');
   expect(creator).toContain('<PluginSurfacePanel');
   expect(detail).toContain('<PluginSurfacePanel');
   expect(surface).toContain('pluginPlatform.surface.bridge.invoke');
   expect(`${creator}\n${surface}`).not.toContain('srcDoc');
-  expect(`${creator}\n${surface}`).not.toContain('new Map');
+
   expect(surface).toContain("sandbox='allow-scripts'");
 });
 
-test('Draft generation exposes the persisted generating revision and real cancel command', () => {
-  const creator = read('./PluginCreatorPage.tsx');
+test('creation uses the default Agent gate and no independent model worker', () => {
+  const library = read('./PluginLibraryPage.tsx');
+  const launch = read('./pluginConversationLaunch.ts');
   const bridge = read('../../../common/adapter/pluginPlatformBridge.ts');
-  expect(creator).toContain("status: 'generating'");
-  expect(creator).toContain('revision: current.summary.revision + 1');
-  expect(creator).toContain('pluginPlatform.drafts.cancelGeneration.invoke');
-  expect(bridge).toContain("`${draftPath(draft_id)}/cancel`");
-});
-
-test('every successful Chat or file edit reloads the same temporary Preview adapter', () => {
-  const creator = read('./PluginCreatorPage.tsx');
-  expect(creator).toContain('const reloadPreview = useCallback');
-  expect(creator.match(/await reloadPreview\(next\)/g)?.length).toBeGreaterThanOrEqual(3);
-  expect(creator).toContain('ownedGenerationDraft.current === draft.summary.draft_id');
-  expect(creator).toContain('permissions: previewPermissions.filter');
-  expect(creator).toContain('targetManifest.secret_slots.flatMap');
-  expect(creator).toContain('config,');
+  expect(library).toContain('launchPluginConversation');
+  expect(launch).toContain('readGuidDefaultAgentSelection');
+  expect(launch).toContain('pluginPlatform.authoring.preflight');
+  expect(launch).toContain('/agent?');
+  expect(launch).toContain('/guid?');
+  expect(bridge).not.toContain('cancelGeneration');
+  expect(bridge).not.toContain('GeneratePluginDraftRequest');
 });
 
 test('remote WebUI keeps Plugin reads while every local mutation is desktop-gated', () => {
   const library = read('./PluginLibraryPage.tsx');
-  const creator = read('./PluginCreatorPage.tsx');
+  const creator = read('./ConversationPluginArtifacts.tsx');
   const detail = read('./PluginRunPage.tsx');
   const importing = read('./PluginImportDialog.tsx');
   const configuration = read('./PluginConfigurationDialog.tsx');
@@ -60,7 +56,7 @@ test('remote WebUI keeps Plugin reads while every local mutation is desktop-gate
     expect(source).toContain('isDesktopShell');
   }
   expect(library).toContain("t('pluginPlatform.readOnly.body')");
-  expect(creator).toContain('if (!desktopShell) return');
+  expect(creator).toContain('!isDesktopShell()');
   expect(detail).toContain('desktopShell &&');
   expect(importing).toContain('if (!desktopShell) return');
   expect(configuration).toContain('if (!desktopShell || !detail) return');
@@ -70,10 +66,10 @@ test('remote WebUI keeps Plugin reads while every local mutation is desktop-gate
 });
 
 test('Preview and Config bind only listed Host Credential references', () => {
-  const creator = read('./PluginCreatorPage.tsx');
+  const creator = read('./ConversationPluginArtifacts.tsx');
   const configuration = read('./PluginConfigurationDialog.tsx');
   const importing = read('./PluginImportDialog.tsx');
-  for (const source of [creator, configuration, importing]) {
+  for (const source of [configuration, importing]) {
     expect(source).toContain('pluginPlatform.credentials.list.invoke');
     expect(source).toContain('<Select');
     expect(source).toContain('reference.enabled');
@@ -82,10 +78,7 @@ test('Preview and Config bind only listed Host Credential references', () => {
   expect(creator).not.toMatch(/provider:|connection:/);
   expect(configuration).not.toMatch(/provider:|connection:/);
   expect(configuration).toContain('credentialUnavailableSelected');
-  expect(creator).toContain('preview.credentialUnavailable');
-  expect(creator).toContain('credential_bindings: credentialBindings');
   expect(importing).toContain('credential_bindings: credentialBindings');
-  expect(creator).toContain('value={draftConfig}');
   expect(importing).toContain('value={config}');
 });
 

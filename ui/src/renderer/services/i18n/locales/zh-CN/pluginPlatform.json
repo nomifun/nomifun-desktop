@@ -1,4 +1,53 @@
 {
+  "authoring": {
+    "createPrompt": "帮我创建一个插件",
+    "templatePrompt": "请创建一个工具调用前拦截插件，使用 agent.before_tool 模板。先询问我希望采用的拦截规则，再实现、验证并保存。",
+    "resumePrompt": "已授权草稿 {{id}} 的实际权限。请继续这个已有草稿，完成试运行、业务验证、安装与交付检查，不要新建草稿。",
+    "title": "创建插件与小程序",
+    "conversationHint": "使用当前默认 Agent，在此会话描述需求。系统将实现、验证、修复并保存可用插件。",
+    "moduleNeeded": "请先在 Agent 工作台开启插件与小程序功能。",
+    "editPrompt": "请继续修改插件 {{id}}，以版本 {{revision}} 为基线，先读取实现并等待我补充修改需求。",
+    "draftPrompt": "请继续开发草稿 {{id}}，先读取已有文件并等待我补充需求。",
+    "saved": "已保存",
+    "historicalDeleted": "已交付，插件已删除",
+    "inProgress": "开发中",
+    "deliveryPending": "尚未完成生成、必要验证或安装，任务已暂停。可以在当前会话继续。",
+    "resumeTask": "继续任务",
+    "currentConversationPending": "插件已安装，当前会话的实际工具调用仍待验证。可在安全暂停点继续原任务；工具尚未接入时不能报告此要求已完成。",
+    "replyLabel": "补充需求或配置",
+    "replyPlaceholder": "补充缺少的信息。凭据请提供已配置的引用，不在会话中填写密钥。",
+    "replyContinue": "发送并继续原任务",
+    "continueTaskPrompt": "请继续原插件任务，完成尚未通过的必需功能、验证、安装和交付检查，保留已有成果。",
+    "approvalHint": "此插件需要新增执行权限。请确认实际代码能力与权限；授权后可在原会话继续。",
+    "accept": "我允许本次插件使用以上能力",
+    "approve": "授权并继续",
+    "details": "文件与验证详情",
+    "importedHistoryHint": "旧创建器历史资料，只读保留。它不代表当前任务的执行结果、授权或验证通过。",
+    "saveContinue": "保存并设为默认后继续创建",
+    "workbenchHint": "为默认 Agent 开启整个插件与小程序开发模块，并授予创建操作权限。需求会保留。",
+    "continue": "继续创建",
+    "operations": {
+      "list": "查看插件与草稿",
+      "open": "创建或打开草稿",
+      "read": "读取文件与验证结果",
+      "plan": "固化需求与验收计划",
+      "apply": "修改草稿文件",
+      "check": "检查插件结构",
+      "preview": "试运行插件",
+      "test_action": "验证业务操作",
+      "test_ui": "验证界面交互",
+      "install": "安装或更新插件",
+      "inspect": "检查已安装插件",
+      "configure": "配置插件",
+      "enable": "启用或停用插件",
+      "export": "导出插件",
+      "trash": "移入回收站",
+      "restore": "恢复插件",
+      "delete": "永久删除插件",
+      "discard": "丢弃草稿",
+      "close_preview": "关闭试运行"
+    }
+  },
   "actions": {
     "back": "返回插件",
     "cancel": "取消",
@@ -95,18 +144,46 @@
       "actions": "操作"
     },
     "views": {
-      "all": { "title": "全部插件", "subtitle": "集中查看 {{count}} 个插件与创作草稿。" },
-      "enabled": { "title": "已启用", "subtitle": "{{count}} 个插件正在为你工作。" },
-      "disabled": { "title": "已停用", "subtitle": "{{count}} 个插件已保留数据，但不会运行。" },
-      "drafts": { "title": "创作中", "subtitle": "{{count}} 个草稿等待继续完善。" },
-      "attention": { "title": "需要处理", "subtitle": "{{count}} 个项目需要确认或修复。" },
-      "trash": { "title": "回收站", "subtitle": "{{count}} 个插件已停用并等待恢复或删除。" },
-      "ui_only": { "title": "界面应用", "subtitle": "{{count}} 个可直接打开使用的界面插件。" },
-      "headless": { "title": "后台能力", "subtitle": "{{count}} 个在后台提供能力的插件。" },
-      "mixed": { "title": "App + 服务", "subtitle": "{{count}} 个同时提供界面与后台服务的插件。" }
+      "all": {
+        "title": "全部插件",
+        "subtitle": "集中查看 {{count}} 个插件与创作草稿。"
+      },
+      "enabled": {
+        "title": "已启用",
+        "subtitle": "{{count}} 个插件正在为你工作。"
+      },
+      "disabled": {
+        "title": "已停用",
+        "subtitle": "{{count}} 个插件已保留数据，但不会运行。"
+      },
+      "drafts": {
+        "title": "创作中",
+        "subtitle": "{{count}} 个草稿等待继续完善。"
+      },
+      "attention": {
+        "title": "需要处理",
+        "subtitle": "{{count}} 个项目需要确认或修复。"
+      },
+      "trash": {
+        "title": "回收站",
+        "subtitle": "{{count}} 个插件已停用并等待恢复或删除。"
+      },
+      "ui_only": {
+        "title": "界面应用",
+        "subtitle": "{{count}} 个可直接打开使用的界面插件。"
+      },
+      "headless": {
+        "title": "后台能力",
+        "subtitle": "{{count}} 个在后台提供能力的插件。"
+      },
+      "mixed": {
+        "title": "App + 服务",
+        "subtitle": "{{count}} 个同时提供界面与后台服务的插件。"
+      }
     }
   },
   "creator": {
+    "launchFailed": "无法启动插件创建会话，请检查默认 Agent 或连接后重试。",
     "title": "创建插件",
     "subtitle": "Chat 直接编辑标准 Package 文件；预览与正式运行使用同一 SDK 和存储适配器。",
     "modelRequired": "生成或修改插件前，请先连接 Chat 模型。",

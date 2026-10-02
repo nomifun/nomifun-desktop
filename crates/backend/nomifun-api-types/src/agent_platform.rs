@@ -886,6 +886,9 @@ pub enum SessionReasoningEffortDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
+    /// Launch requirements can only narrow admission; they never grant modules.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub required_modules: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]

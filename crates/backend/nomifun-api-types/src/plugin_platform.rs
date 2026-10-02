@@ -337,7 +337,6 @@ pub struct UpdatePluginLibraryStateRequest {
 #[serde(rename_all = "snake_case")]
 pub enum PluginDraftStatusDto {
     Ready,
-    Generating,
     Failed,
 }
 
@@ -345,6 +344,10 @@ pub enum PluginDraftStatusDto {
 #[serde(deny_unknown_fields)]
 pub struct PluginDraftSummaryDto {
     pub draft_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_id: Option<String>,
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
@@ -358,20 +361,6 @@ pub struct PluginDraftSummaryDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     pub updated_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginDraftMessageRoleDto {
-    User,
-    Assistant,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginDraftMessageDto {
-    pub role: PluginDraftMessageRoleDto,
-    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,7 +379,7 @@ pub struct PluginDraftFileDto {
 pub struct PluginDraftDetailDto {
     pub summary: PluginDraftSummaryDto,
     #[serde(default)]
-    pub messages: Vec<PluginDraftMessageDto>,
+    pub imported_context: serde_json::Value,
     #[serde(default)]
     pub files: Vec<PluginDraftFileDto>,
 }
@@ -411,21 +400,6 @@ pub struct CreatePluginDraftRequest {
     pub expected_plugin_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GeneratePluginDraftRequest {
-    pub expected_revision: u64,
-    pub provider_id: String,
-    pub model: String,
-    pub requirement: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CancelPluginDraftGenerationRequest {
-    pub expected_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -907,7 +881,6 @@ mod tests {
     fn draft_status_has_one_persisted_wire_vocabulary() {
         for (status, wire) in [
             (PluginDraftStatusDto::Ready, "ready"),
-            (PluginDraftStatusDto::Generating, "generating"),
             (PluginDraftStatusDto::Failed, "failed"),
         ] {
             assert_eq!(serde_json::to_value(status).unwrap(), json!(wire));

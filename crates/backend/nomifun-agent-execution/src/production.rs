@@ -67,6 +67,7 @@ impl ConversationEffects for ProductionConversationEffects {
                 conversation_id,
                 operation_id,
                 SendMessageRequest {
+                    plugin_delivery: None,
                     content: text.to_owned(),
                     files: vec![],
                     inject_skills: vec![],
