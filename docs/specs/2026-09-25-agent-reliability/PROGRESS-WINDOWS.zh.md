@@ -3771,3 +3771,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：新三项通过：字节近固定前缀一次恢复、500-token实际额外余量保持、二次失败只有两次请求且原input逐字一致/两条拒绝事件/零ContextCompacted。旧fixed-prefix/usage/硬token/typed恢复/mandatory/协议/输出过长/耗尽八项通过，共11项不同检查；fmt配置/diff通过，首红/修后分日志。
 - 未覆盖：正式Tauri/StepFun采用新纠正、完整输入/原输出保留的模型效果、W232重做及A最终引用/交付、N3/完整B/C/共享门槛。组件恢复不关闭W232首败，本批无新模型/命令/正式构建。
 - 证据：仓库外2026-10-02/windows/w233-summary-fit-recovery，01首红/02修后、token及二次失败原上下文与03事件、八项邻近检查及04/05配置/diff；Git仅两处源码、三项最小回归与短进度。
+
+### W234 全部操作完成但摘要仍不适配（2026-10-02；基线ed7a3f680，正式FAIL）
+
+- Case/子断言：综合A、C01/C02/C03/C05/C06/C07/C08与A05/A08/A09/A15/A17/A19；正式Tauri/StepFun/COD、原五项任务、新workspace/profile，desktop所需构建41.55秒，复用同frontend。
+- 8步/六压缩：cwd/list、43 bytes/4行/hash完整读、精确文件两搜索、Git status/diff各一次；两Bun按原顺序start/poll各一次exit0/1，四个精确process_id最终exited/reaped，无重做或参数错误，十文件/索引/原事件保持。1/1预期非零是合法诊断，不混成系统崩溃。
+- 完成前W233新分支两次REPLACEMENT_CONTEXT_BUDGET拒绝，回合自行failed：83,993 bytes/27,998估算tokens超过27,876余量122 tokens，原context保持。一次纠正和拒绝记录正式触发，但不是恢复PASS；UI如实显示“应用处理失败”，未执行取消/Retry或追加模型。
+- 原独立操作13/15保留：first report和canonical completed未达到，最终六项具体交付均缺失。不能由动作正确、不重做或有界失败关闭完整A/N3；下一步缩减重复完成说明的固定开销，硬预算/required input/资格仍保持。
+- 未覆盖：缩减后正式效果、成功摘要纠正N3、A引用/交付、完整B/C与共享门槛。本批无新源码/重复组件检查，W232原首败不改。
+- 证据：仓库外2026-10-02/windows/w234-summary-fit-live，01构建、02-first-fail原DB/事件/参数/13-15 audit/人工复核与六次压缩/两拒绝、03失败UI；Git仅短进度。
