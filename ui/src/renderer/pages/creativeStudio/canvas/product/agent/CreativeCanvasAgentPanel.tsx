@@ -406,6 +406,12 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           }));
           return;
         }
+        if (event.type === 'paused') {
+          replaceRunningAssistant(transientAssistantId, (message) => ({
+            id: message.id, role: 'assistant', status: 'paused', text: message.text, pause: event.pause,
+          }));
+          return;
+        }
         if (event.type === 'history-reconciled') {
           classifyCreativeCanvasAgentHistory(session, event.history);
           reconciledHistory = copyHistory(event.history);

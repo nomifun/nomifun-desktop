@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 
-import { parseProviderId } from '@/common/types/ids';
+import { parseMessageId, parseProviderId } from '@/common/types/ids';
 
 import CreativeStudioAgentPanel from './CreativeStudioAgentPanel';
 import {
@@ -178,6 +178,19 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
 
     expect(html.includes('data-agent-model-locked="true"')).toBe(true);
     expect(html.includes('Conversation model locked: chat-model')).toBe(true);
+  });
+
+  test('renders a canonical pause without a running spinner, completion or retry', () => {
+    const html = renderPanel({
+      messages: [{ id: 'paused', role: 'assistant', status: 'paused', text: '',
+        pause: { turnId: parseMessageId('0190f5fe-7c00-7a00-8000-000000000102'), cleanupProven: false, reason: undefined, pausedAt: undefined } }],
+      isRunning: true, onRetryMessage: noop,
+    });
+    expect(html.includes('data-agent-message-status="paused"')).toBe(true);
+    expect(html.includes('data-testid="execution-pause-notice"')).toBe(true);
+    expect(html.includes('data-thinking-process-state="running"')).toBe(false);
+    expect(html.includes('Retry this message')).toBe(false);
+    expect(html.includes('Stop Agent')).toBe(true);
   });
 
   test('renders removable context and explicit NomiFun Skill chips', () => {

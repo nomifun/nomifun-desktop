@@ -271,6 +271,62 @@ const collect = async <T>(
 };
 
 describe('NomiCreativeStudioAgentChatPort', () => {
+  test('keeps a canonical pause without resubmission or implicit cancellation until user Stop', async () => {
+    const transport = new FakeTransport();
+    const pause = { turnId, reason: 'EXECUTION_MODEL_INVALID_REQUEST', cleanupProven: true, pausedAt: undefined };
+    transport.snapshots = [idleSnapshot({ authority: 'unknown', activeTurnId: turnId, pause })];
+    const controller = new AbortController();
+    const iterable = await createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(), transport, recoveryPollMs: 25,
+    }).runTurn(request(controller.signal));
+    const iterator = iterable[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.value).toEqual({ type: 'paused', pause });
+    expect(transport.sendCalls).toEqual([]);
+    expect(transport.stopCalls).toEqual([]);
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(transport.stopCalls).toEqual([conversationId]);
+  });
+
+  test('an admitted turn exposes its matching pause and is not implicitly stopped', async () => {
+    const transport = new FakeTransport();
+    const pause = { turnId, reason: 'EXECUTION_MODEL_INVALID_REQUEST', cleanupProven: false, pausedAt: undefined };
+    transport.snapshots = [idleSnapshot(), idleSnapshot({ authority: 'unknown', activeTurnId: turnId, pause })];
+    const controller = new AbortController();
+    const iterable = await createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(), transport, recoveryPollMs: 25,
+    }).runTurn(request(controller.signal));
+    const iterator = iterable[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({ type: 'paused', pause });
+    expect(transport.sendCalls).toHaveLength(1);
+    expect(transport.stopCalls).toEqual([]);
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(transport.stopCalls).toEqual([conversationId]);
+  });
+
+  test('late stream content cannot replace a canonical pause with running text', async () => {
+    const transport = new FakeTransport();
+    const pause = { turnId, reason: 'EXECUTION_MODEL_INVALID_REQUEST', cleanupProven: true, pausedAt: undefined };
+    const snapshot = idleSnapshot({ authority: 'unknown', activeTurnId: turnId, pause });
+    transport.snapshots = [snapshot, snapshot];
+    const controller = new AbortController();
+    const iterable = await createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(), transport, recoveryPollMs: 25,
+    }).runTurn(request(controller.signal));
+    const iterator = iterable[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({ type: 'paused', pause });
+    transport.emitResponse({ type: 'content', data: 'LATE_BEFORE_PAUSE', msg_id: assistantMessageId, turn_id: turnId, conversation_id: conversationId });
+    const next = iterator.next();
+    const timer = setTimeout(() => controller.abort(), 1);
+    await expect(next).rejects.toMatchObject({ name: 'AbortError' });
+    clearTimeout(timer);
+    expect(transport.sendCalls).toEqual([]);
+    expect(transport.inspectCalls).toHaveLength(2);
+    expect(transport.stopCalls).toEqual([conversationId]);
+  });
+
   test('recovers failed and stopped turns without resubmission or false completion', async () => {
     for (const status of ['failed', 'stopped'] as const) {
       const restored: CreativeStudioAgentMessage[] = [...recoveredHistory.slice(0, -1), {

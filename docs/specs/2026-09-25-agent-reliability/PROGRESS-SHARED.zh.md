@@ -29,6 +29,12 @@ macOS 已执行 R1/R2 短子链：R1 5请求/精确写改读N1；R2新增完整�
 交付N1。实际15模块/Skill与官方manifest全同；旧减权模式保持、无系统权限改变。此前422
 预检和A13/B09首败保留，不关闭原完整A/B/N3或Windows结果。详见macOS进度；共9个新请求。
 
+macOS R3发现并修复Creative链路丢弃canonical暂停：复用严格pause判据，非终态消息明确暂停，
+保留pending/停止确认、不自动重发或取消；41项直接回归及正式HTTP暂停→用户Stop通过。
+另外以debug指定UUID的一次回执丢失单独进入实际失败消息retry，真实Tauri点击后原key/
+Turn/operation仅一个、模型仅一次，冷读不重发；付费0，首个native/冷观察超时仍FAIL保留。
+仅隔离等价negative N1，不代判Windows旧数据/N3/全MM。详见macOS R3记录；Windows结果未改。
+
 ## 当前活动问题簇
 
 | 簇 | 可复用基线 | 下一缺口 |

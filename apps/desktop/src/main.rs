@@ -50,7 +50,7 @@ mod updater_install_context;
 /// secret never leaks off-box). Runs before any page script.
 pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
     // `{:?}` emits properly quoted/escaped JS string literals.
-    format!(
+    let script = format!(
         r#"window.__backendPort = {port}; window.__os = {os:?}; window.__nomiLocalTrust = {secret:?};
 (function () {{
   var secret = {secret:?};
@@ -105,7 +105,48 @@ pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
         os = std::env::consts::OS,
         secret = trust_secret,
         port = port,
-    )
+    );
+    #[cfg(debug_assertions)]
+    let script = {
+        let mut script = script;
+        if let Ok(key) = std::env::var("NOMIFUN_RELIABILITY_DROP_TURN_ACK_KEY") {
+            if let Some(fault) = turn_ack_loss_fixture_script(port, &key) { script.push_str(&fault); }
+        }
+        script
+    };
+    script
+}
+
+/// Debug-only transport fault: a real authenticated submit must finish first.
+/// One exact durable key loses its reply; no request, receipt or authority is
+/// rewritten, and ordinary windows/releases have no opt-in flag.
+#[cfg(debug_assertions)]
+fn turn_ack_loss_fixture_script(port: u16, key: &str) -> Option<String> {
+    let valid = key.len() == 36 && key.bytes().enumerate().all(|(i, b)|
+        if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() });
+    if !valid { return None; }
+    Some(format!(r#"
+(function() {{
+  var target={key:?}, origin="http://127.0.0.1:{port}", used=false;
+  var realFetch=window.fetch.bind(window);
+  window.fetch=async function(input, init) {{
+    var candidate=false;
+    try {{
+      var url=new URL(typeof input==="string"?input:input.url, location.href);
+      candidate=!used && init && String(init.method).toUpperCase()==="POST" &&
+        url.origin===origin && /^\/api\/agent-sessions\/[0-9a-f-]{{36}}\/turns$/.test(url.pathname) &&
+        typeof init.body==="string" && JSON.parse(init.body).idempotency_key===target;
+    }} catch (_) {{}}
+    var response=await realFetch(input,init);
+    if (candidate && !used && response.ok) {{
+      used=true;
+      console.warn("MM_ACK_LOSS_FIXTURE_TRIGGERED");
+      throw new TypeError("MM_ACK_LOSS_FIXTURE: submit receipt unavailable");
+    }}
+    return response;
+  }};
+}})();
+"#))
 }
 
 /// Resolve an optional, non-empty `NOMIFUN_WEBUI_DIST` override once. Empty
@@ -3379,6 +3420,21 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
+    #[test]
+    fn receipt_loss_fixture_is_exact_key_scoped_and_preserves_real_authenticated_fetch() {
+        let key = "0190f5fe-7c00-7a00-8000-000000000106";
+        let script = super::turn_ack_loss_fixture_script(9123, key).unwrap();
+        assert!(script.contains(key));
+        assert!(script.contains("url.origin===origin"));
+        assert!(script.contains("idempotency_key===target"));
+        assert!(script.contains("await realFetch(input,init)"));
+        assert!(script.contains("candidate && !used && response.ok"));
+        assert!(!script.contains("headers="));
+        for invalid in ["", "*", "not-a-key", "0190f5fe-7c00-7a00-8000-000000000106\n"] {
+            assert!(super::turn_ack_loss_fixture_script(9123, invalid).is_none());
+        }
+    }
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
