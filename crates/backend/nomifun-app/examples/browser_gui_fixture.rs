@@ -1,6 +1,7 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! Deterministic modes read no user dataset or real provider credential.
-//! Opt-in --live-frontend / --live-commands / --live-general-commands accept the live key only via stdin.
+//! Opt-in --live-frontend / --live-commands / --live-general-commands /
+//! --live-default-general-commands accept the live key only via stdin.
 //! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
@@ -118,16 +119,33 @@ fn live_command_template(option: Option<&str>) -> Option<&'static str> {
     match option {
         Some("--live-commands") => Some("coding.codex"),
         Some("--live-general-commands") => Some("assistant.general"),
+        Some("--live-default-general-commands") => Some("assistant.general"),
         _ => None,
     }
 }
 
-fn command_scoped_general_document(mut document: Value) -> anyhow::Result<Value> {
+fn command_general_document(mut document: Value, preserve_default: bool) -> anyhow::Result<Value> {
+    if preserve_default {
+        return Ok(document);
+    }
     let selections = document["enabled_capabilities"].as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("General template has no exact capability selections"))?;
     selections.retain(|selection| !matches!(selection["capability"]["id"].as_str(),
         Some("computer" | "automation.schedule")));
     Ok(document)
+}
+
+fn command_resource_selections(preserve_default_general: bool) -> Value {
+    let mut resources = vec![
+        json!({"resource_kind":"workspace","resource_id":"default-workspace"}),
+        json!({"resource_kind":"process_session","resource_id":"managed-process-session"}),
+        json!({"resource_kind":"project_memory","resource_id":"default-project-memory"}),
+    ];
+    if preserve_default_general {
+        resources.push(json!({"resource_kind":"computer","resource_id":"local-desktop"}));
+        resources.push(json!({"resource_kind":"scheduler","resource_id":"installation-scheduler"}));
+    }
+    Value::Array(resources)
 }
 
 #[cfg(test)]
@@ -137,6 +155,7 @@ mod live_budget_tests {
     fn command_mode_selects_only_the_exact_official_template() {
         assert_eq!(live_command_template(Some("--live-commands")), Some("coding.codex"));
         assert_eq!(live_command_template(Some("--live-general-commands")), Some("assistant.general"));
+        assert_eq!(live_command_template(Some("--live-default-general-commands")), Some("assistant.general"));
         for option in [None, Some("--native-actions"), Some("--live-frontend"), Some("--unknown")] {
             assert_eq!(live_command_template(option), None);
         }
@@ -150,9 +169,23 @@ mod live_budget_tests {
                 {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/list"]},
                 {"capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/exec"]}
             ]});
-        let scoped = command_scoped_general_document(original.clone()).unwrap();
+        let scoped = command_general_document(original.clone(), false).unwrap();
         assert_eq!(scoped["enabled_capabilities"], json!([original["enabled_capabilities"][2]]));
         for field in ["persona","instructions","model_route_refs"] { assert_eq!(scoped[field], original[field]); }
+        assert_eq!(command_general_document(original.clone(), true).unwrap(), original,
+            "default General mode must preserve the entire document, not just selected fields");
+    }
+
+    #[test]
+    fn default_general_binds_required_resources_without_expanding_scoped_modes() {
+        let scoped = command_resource_selections(false);
+        let full = command_resource_selections(true);
+        assert_eq!(scoped.as_array().unwrap().len(), 3);
+        assert_eq!(&full.as_array().unwrap()[..3], scoped.as_array().unwrap());
+        assert_eq!(&full.as_array().unwrap()[3..], &[
+            json!({"resource_kind":"computer","resource_id":"local-desktop"}),
+            json!({"resource_kind":"scheduler","resource_id":"installation-scheduler"}),
+        ]);
     }
 
     #[test]
@@ -2686,9 +2719,11 @@ async fn main() -> anyhow::Result<()> {
         root.is_absolute() && !root.exists(),
         "refusing an existing or relative data directory"
     );
-    let command_template = live_command_template(std::env::args().nth(2).as_deref());
+    let command_option = std::env::args().nth(2);
+    let command_template = live_command_template(command_option.as_deref());
+    let preserve_default_general = command_option.as_deref() == Some("--live-default-general-commands");
     anyhow::ensure!(command_template != Some("assistant.general") || cfg!(feature = "computer-use"),
-        "general command fixture requires computer-use provider registration; build with browser-use,computer-use (no Computer resource grant)");
+        "general command fixture requires computer-use provider registration; build with browser-use,computer-use (system permissions are unchanged)");
     std::fs::create_dir(&root)?;
     let live_commands = command_template.is_some();
     let live_mode = live_commands || std::env::args().nth(2).as_deref() == Some("--live-frontend");
@@ -2994,21 +3029,22 @@ async fn main() -> anyhow::Result<()> {
             let template = command_template.expect("live command mode has an exact template");
             let general = template == "assistant.general";
             let editor = api(&app,&format!("/api/agent-presets/from-template/{template}"),json!({
-                "reuse_existing":false,"display_name":if general {"MAC-GEN 通用命令验收"}else{"MAC-A 编程命令验收"},"model":model
+                "reuse_existing":false,"display_name":if preserve_default_general {"MAC-GEN 默认通用命令验收"}else if general {"MAC-GEN 通用命令验收"}else{"MAC-A 编程命令验收"},"model":model
             })).await?;
             let selected = if general {
-                let document = command_scoped_general_document(editor["draft"]["document"].clone())?;
-                api(&app,"/api/agent-presets",json!({"display_name":"MAC-GEN 通用命令减权验收",
-                    "document":document})).await?
+                let document = command_general_document(editor["draft"]["document"].clone(), preserve_default_general)?;
+                if preserve_default_general {
+                    anyhow::ensure!(document == editor["draft"]["document"], "Default General document changed");
+                    editor
+                } else {
+                    api(&app,"/api/agent-presets",json!({"display_name":"MAC-GEN 通用命令减权验收",
+                        "document":document})).await?
+                }
             } else { editor };
             let preset = selected["preset"]["preset_id"].as_str().ok_or_else(||anyhow::anyhow!("Official-derived command preset missing"))?;
             let session = api(&app,"/api/agent-sessions",json!({
-                "preset_id":preset,"title":if general {"MAC-GEN 目录观察"}else{"MAC-A 观察、只读、小测试"},"model":model,
-                "resource_selections":[
-                    {"resource_kind":"workspace","resource_id":"default-workspace"},
-                    {"resource_kind":"process_session","resource_id":"managed-process-session"},
-                    {"resource_kind":"project_memory","resource_id":"default-project-memory"}
-                ]
+                "preset_id":preset,"title":if preserve_default_general {"MAC-GEN 默认通用结果交付"}else if general {"MAC-GEN 目录观察"}else{"MAC-A 观察、只读、小测试"},"model":model,
+                "resource_selections":command_resource_selections(preserve_default_general)
             })).await?;
             return Ok::<_,anyhow::Error>(Value::String(session["agent_session_id"].as_str()
                 .ok_or_else(||anyhow::anyhow!("Official command Session missing"))?.to_owned()));
