@@ -89,7 +89,8 @@
 
 用户明确要求完成复杂结果交付、字节/步骤、真实Keychain清理和公开报告质量，不能以短链或
 残余归类替代完成。付费调用次数上限已被用户明确取消；旧16次本地cap耗尽现场仍保留，
-产品上下文/执行窗口、进程期限及清理保护不改。本目标仍活动，未记A13/B09或Keychain PASS。
+产品上下文/执行窗口、进程期限及清理保护不改。本目标仍活动；A13原完整任务本次N1见下，
+B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证。
 
 - B09原实际HTTP确认：被拒绝的reasoning-only假写入被回放为普通assistant content；最小
   反例首红后修，不再回放该载体，不解析/执行私密参数。私密名字收窄提示在真实混批后导致
@@ -143,6 +144,34 @@
   oracle漏`./`首错全部在外另存，未发送任务的实例模型0；各结果不覆盖历史。证据
   `2026-10-02/macos/complex-delivery-repair/`。公开结果含内部元数据的呈现仍待简化；
   A13 N3/稳定性、B09生成步骤/字节及真实Keychain物理失败仍OPEN，Windows结果未改。
+
+#### B09 计划前置与强制投影去重（2026-10-03）
+
+- 去掉交付catalog重复argv，只留ref/tool/path；多编号summary说明改为简短结论+宿主精确
+  附件，所有Schema断言/真实缓存/资格/错误计数不变。最后三read的五槽/13ref回归覆盖
+  absence/32B/hash解析、不复制源正文及输出；没有靠扩大32768/4096默认包络洗绿。
+- 明确编号任务首次write/patch/stdin前单独plan；无plan整批未派发，单任务/读观察/cleanup
+  保持。已显式关闭计划的报告参数修正同样report-only，最小反例保持首次变更不派发及
+  已结算效果不重做。plan仍是模型解释，不是用户意图/顺序或字节已正确的证明。
+- 原B09正式Tauri新隔离run002：源`18d68c558`+外source.patch，本机arm64/macOS26.6.2/25G83、
+  APFS非大小写敏感Data；11 StepFun请求/376events/五effects，任务/四原件保持。
+  主动plan后before→guarded patch→cp→mv各一次；未触发plan门拒绝，不能冒充live拦错。
+  首write仍无末LF32B，patch保持无LF而成31B，temp尚未删除就进入helper；实际exec bun
+  字面argv一项、tty=true/timeout600000同步等待，只有READY\r\n，无stdin/EOF/长helper/report。
+  明确合同失败后正式UI Stop+Cmd-Q0/249.47秒，非expiry/TERM/KILL；五表全同、ok、所有
+  自有PID/listener已消失。**原B仍FAIL**，本次未到完成边界，不能代判包络live已解除。
+- 真实摘要`tool_calls:[{name,arguments}]`（未知copy_file、无call_id）被接纳为状态；补既有
+  root-only工具型摘要守卫，保留普通JSON状态、嵌套历史与空数组。未把假摘要当真实效果，
+  也不归因它是后续PTY选择的唯一原因。此新守卫仅回归，尚未新live触发。
+- 实际同步exec等不到后续模型输入，而工具说明未明确这一点；补exec同步等待、start先
+  返回handle及READY/input/close/poll pipe链、tty=false为pipe/true为PTY。仅模型说明与
+  既有字段白名单，不改owner/注册Schema/Session provenance或自动替换工具。最后这处
+  合同补充仅定向回归，未再付费复跑；首LF/遗漏delete/完整报告仍需下一步处理。
+- Runtime271/271及说明/摘要直接回归通过，正式构建/签名通过；日志仍在外
+  `2026-10-03/macos/b09-plan-envelope/`。外置setup语法及跨根seal首拒保留，修夹具后
+  冷五表376/1/1/1/5完整一致。未重复已验EOF/父子Stop正链，Windows结果未改。
+- Keychain只读核对：Browser关闭之前未证明所有SSH/robot/storage已quiesce，CEF Helper也
+  无精确退出库存；后台硬退不是可靠清理，原系统/物理风险仍OPEN，不改保护或记PASS。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 

@@ -1243,6 +1243,13 @@ pub(crate) async fn run_turn(
                         event_sink.as_ref(),
                     )
                     .await?;
+            } else if crate::delivery_review::multi_item_task(&retained_inputs)
+                && step.calls.values().filter_map(|pending| pending.completed.as_ref())
+                    .filter_map(|call| request.tool_plan.binding(&call.name))
+                    .any(|binding| matches!(binding.action_id.as_ref(),
+                        "workspace.files/write" | "workspace.files/patch" | "workspace.process/input")) {
+                adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
+                    crate::AgentRuntimeActivationReason::EffectfulToolCall,event_sink.as_ref()).await?;
             } else if multi_step {
                 adaptive
                     .activate(
@@ -1327,12 +1334,12 @@ pub(crate) async fn run_turn(
                     let healthy_settled_account = account_parameter_refusal
                         && (state.work_status.successful_commands > 0 || state.work_status.successful_workspace_mutations > 0);
                     if single_call_batch && call.name == crate::completion::TOOL_NAME && result.is_error
-                        && state.execution_plan.revision == 0
+                        && (state.execution_plan.revision == 0 || !state.execution_plan.is_open())
                         && (state.completion.settled_failure_gate() || healthy_settled_account)
                         && state.work_status.running_processes.is_empty()
                         && !patch_recovery.pending() && !patch_recovery.unresolved()
                     {
-                        // A settled optional task already entered terminal accounting.
+                        // A settled optional or explicitly closed task already entered terminal accounting.
                         // Correct this terminal account in the existing review phase;
                         // argument repair cannot restart checks or reset an absent plan.
                         completion_review_used = true;
@@ -2485,6 +2492,11 @@ async fn invoke_tool_calls(
             let cleanup = matches!(binding.action_id.as_ref(),
                 "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin");
             if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
+            else if task_ledger_active && execution_plan.revision == 0
+                && crate::delivery_review::multi_item_task(accepted_inputs)
+                && matches!(binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch" | "workspace.process/input") {
+                Some("Not executed: this explicit multi-item task needs a concise update_plan ALONE before its first file mutation or stdin write. Keep each requested intermediate state as a separate ordered step; do not replace create-then-modify with only the final state. Retain exact requested bytes, including each final LF, and compute stdin as input plus append_newline (never specify one LF twice). The plan is model interpretation, not proof, permission or a receipt. No action in this batch ran; use fresh call IDs after the plan result, without replaying earlier settled effects.")
+            }
             else if task_ledger_active
                 && !cleanup
                 && crate::execution_policy::requires_task_ledger(binding)
@@ -5577,11 +5589,14 @@ mod tests {
             "delivery_items":[{"item_id":"input_0_part_0_line_0","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]},
                 {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]}]});
         let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("premature-write","write_file",json!({"path":"a","content":"premature-final"})),
+            control_step("ordered-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"in_progress"}]})),
             control_step("created","write_file",json!({"path":"a","content":"original"})),
             control_step("original","exec_command",json!({"command":"bun","args":["test"]})),
-            control_step("bad-report","report_completion",report(1)),
+            control_step("settled-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"completed"}]})),
+            control_step("bad-report","report_completion",report(2)),
             control_step("recreated-file","write_file",json!({"path":"a","content":"replayed"})),
-            control_step("fixed-report","report_completion",report(2)),
+            control_step("fixed-report","report_completion",report(3)),
             text_step("must not replay completed work"),
         ])});
         let tools=Arc::new(HealthyTools::default());
@@ -5593,13 +5608,18 @@ mod tests {
         let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
             text:"1. Create a once.\n2. Run the original command and report without repeating it.".into()}];
         let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
-        let feedback = model.requests.lock().unwrap()[3].input.messages.iter().flat_map(|message|&message.content)
+        let feedback = model.requests.lock().unwrap()[6].input.messages.iter().flat_map(|message|&message.content)
             .find(|part|matches!(part,ChatContentPart::ToolResult{call_id,..} if call_id.as_ref()=="bad-report")).cloned();
         assert_eq!(*tools.calls.lock().unwrap(),["created","original"],"a parameter refusal cannot authorize a new write after a healthy settled command; feedback={feedback:?}");
         let result=result.unwrap();
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
-        assert_eq!(model.requests.lock().unwrap()[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert_eq!(model.requests.lock().unwrap()[6].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"));
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[1].input.tools.iter().any(|tool|tool.name=="update_plan"));
+        assert!(requests[1].input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::ToolResult {call_id,output,is_error:true} if call_id.as_ref()=="premature-write"
+                && output.iter().any(|part|matches!(part,nomifun_chat_model_broker::ChatToolResultPart::Text {text} if text.contains("intermediate state"))))));
         assert!(!result.output_text.contains("Unsuccessful command attempts"));
     }
 

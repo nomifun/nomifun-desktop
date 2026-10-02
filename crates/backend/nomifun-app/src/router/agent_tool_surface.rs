@@ -279,7 +279,7 @@ fn standard_presentation_schema(
         "workspace.process" => &[
             "/properties/cmd", "/properties/command", "/properties/args", "/properties/cwd",
             "/properties/timeout_ms", "/properties/cursor", "/properties/wait_ms",
-            "/properties/input", "/properties/append_newline",
+            "/properties/input", "/properties/append_newline", "/properties/tty",
         ],
         "workspace.files" => &[
             "/properties/path", "/properties/content",
@@ -511,6 +511,7 @@ mod tests {
     fn newline_guidance_is_model_only_and_keeps_registered_byte_contracts() {
         for (capability_id, action_id, name, field, expected) in [
             ("workspace.process", "workspace.process/input", "write_process_stdin", "append_newline", "even if input already ends in LF"),
+            ("workspace.process", "workspace.process/start", "start_process", "tty", "exec_command still waits"),
             ("workspace.files", "workspace.files/write", "write_file", "content", "no trailing newline is added"),
         ] {
             let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
@@ -527,7 +528,8 @@ mod tests {
             let mut structural = projected.0.clone();
             // Restore only whitelisted descriptions, then require exact
             // identity, including defaults, limits and required fields.
-            for property in ["input", "append_newline", "content", "path"] {
+            for property in ["cmd", "command", "args", "cwd", "timeout_ms", "cursor", "wait_ms",
+                "input", "append_newline", "content", "path", "tty"] {
                 if let Some(value) = structural["properties"].get_mut(property) {
                     if let Some(description) = original.0["properties"][property].get("description") {
                         value["description"] = description.clone();
