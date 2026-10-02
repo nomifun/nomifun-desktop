@@ -618,6 +618,7 @@ impl CompletionTracker {
             "available_evidence":self.observations.iter().filter(|item| self.is_usable(item, work.workspace_observation_epoch))
                 .map(|item| serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
                     "scope":self.scopes.get(&item.call_id),
+                    "settled_process_poll":self.settled_process_poll(item),
                     "artifact_id":self.artifacts.get(&item.call_id).map(|artifact| &artifact.artifact_id),
                     "command_exit_code":item.command_exit_code,"command":item.command})).collect::<Vec<_>>(),
             "stale_file_paths":stale_file_paths,
@@ -627,7 +628,7 @@ impl CompletionTracker {
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A settled command with a known exit, or a reaped timeout, remains eligible after later commands only for its own exact scope and terminal output; a nonzero/timeout result is evidence of that failure, not success, and never proves current workspace state. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for current-state verification. When history tools are already advertised, they may recover already-seen output for the requested summary; recovery never makes that observation current or eligible for citation. Do not repeat an observation or effect merely to repair this account. One requirement may span several criteria; each criterion has at most eight evidence_call_ids. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed within the eight-ID limit; separate scopes/results instead of repeating work or exceeding that limit. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. scope contains original requested arguments and bounded owner metadata, not proof of broader results or authority. A directory enumeration cannot prove file content or a digest. ineligible_observations records retained calls that cannot currently be cited; missing current eligibility does not mean the call never happened. Disclose earlier observed results and separate them from unverified current state; do not substitute an unrelated eligible call ID. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A settled command with a known exit, or a reaped timeout, remains eligible after later commands only for its own exact scope and terminal output; a nonzero/timeout result is evidence of that failure, not success, and never proves current workspace state. An eligible earlier poll with settled_process_poll proves only the state/output observed by that exact poll before the identified terminal. Cite it for earlier readiness/output; its earlier running state does not mean the process is still running. Use the matching terminal call for exit/timeout/cleanup, and never use either to prove current file contents. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for current-state verification. When history tools are already advertised, they may recover already-seen output for the requested summary; recovery never makes that observation current or eligible for citation. Do not repeat an observation or effect merely to repair this account. One requirement may span several criteria; each criterion has at most eight evidence_call_ids. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed within the eight-ID limit; separate scopes/results instead of repeating work or exceeding that limit. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. scope contains original requested arguments and bounded owner metadata, not proof of broader results or authority. A directory enumeration cannot prove file content or a digest. ineligible_observations records retained calls that cannot currently be cited; missing current eligibility does not mean the call never happened. Disclose earlier observed results and separate them from unverified current state; do not substitute an unrelated eligible call ID. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -861,12 +862,12 @@ impl CompletionTracker {
         Ok(value)
     }
 
-    fn is_usable(&self, observation: &AgentCompletionObservation, epoch: u32) -> bool {
+    fn is_immutable_command_result(&self, observation: &AgentCompletionObservation) -> bool {
         // A later opaque command can change the workspace, but it cannot make
         // an earlier settled command terminal un-happen. Keep that command's
         // own scope/exit/output citeable without extending file/path evidence
         // or treating a nonzero exit as success.
-        let immutable_command_result = observation.command.as_ref().is_some_and(|command| {
+        observation.invocation_attempted && observation.command.as_ref().is_some_and(|command| {
                 let exact_terminal = (command.state == "exited"
                     && command.exit_code.is_some()
                     && command.exit_code == observation.command_exit_code)
@@ -880,8 +881,9 @@ impl CompletionTracker {
                     && command.launch_call_id.as_deref().is_some_and(|launch| {
                         // A terminal poll has its own call ID. Preserve only
                         // that exact result with a retained, bound launch and
-                        // matching owner process, never earlier interactions
-                        // or current workspace contents. Missing old scope
+                        // matching owner process, never current workspace
+                        // contents. Earlier polls require their own matching
+                        // observation below. Missing old scope
                         // metadata remains conservative.
                         launch == observation.call_id
                             || (!launch.is_empty()
@@ -896,9 +898,37 @@ impl CompletionTracker {
                                         && scope["requested_arguments"]["process_id"].as_str() == Some(command.process_id.as_str())))
                     })
                     && command.observed_workspace_epoch == observation.workspace_epoch
-            });
+            })
+    }
+
+    fn settled_process_poll(&self, observation: &AgentCompletionObservation) -> Option<&str> {
+        if !observation.invocation_attempted || !observation.successful { return None; }
+        let scope = self.scopes.get(&observation.call_id)?;
+        if scope["capability"] != "workspace.process" || scope["action"] != "workspace.process/poll" {
+            return None;
+        }
+        let process_id = scope["requested_arguments"]["process_id"].as_str()?;
+        // Only a retained, exact settled owner chain qualifies a prior poll.
+        // This preserves that poll's past output/state, never file freshness,
+        // current running state, or a launch/stdin action's effect claim.
+        self.observations.iter().find_map(|terminal| {
+            let command = terminal.command.as_ref()?;
+            if terminal.call_id == observation.call_id || command.process_id != process_id
+                || !command.interaction_call_ids.contains(&observation.call_id)
+                || !self.is_immutable_command_result(terminal)
+                || observation.workspace_epoch > terminal.workspace_epoch
+            { return None; }
+            let launch = self.observations.iter().find(|item|
+                Some(item.call_id.as_str()) == command.launch_call_id.as_deref())?;
+            (observation.workspace_epoch >= launch.workspace_epoch)
+                .then_some(terminal.call_id.as_str())
+        })
+    }
+
+    fn is_usable(&self, observation: &AgentCompletionObservation, epoch: u32) -> bool {
         observation.invocation_attempted
-            && (immutable_command_result
+            && (self.is_immutable_command_result(observation)
+                || self.settled_process_poll(observation).is_some()
                 || (observation.successful
                     && ((observation.usable_at_observation
                         && observation.workspace_epoch == epoch)
@@ -1445,6 +1475,10 @@ mod tests {
     }
 
     fn settled_poll_fixture(state: &str, exit_code: Option<i32>) -> (CompletionTracker, AgentWorkStatus) {
+        process_poll_fixture(state, exit_code, false)
+    }
+
+    fn process_poll_fixture(state: &str, exit_code: Option<i32>, include_ready: bool) -> (CompletionTracker, AgentWorkStatus) {
         let mut tracker = CompletionTracker::default();
         let mut work = AgentWorkStatus::default();
         let mut commands = crate::workflow::CommandTracker::default();
@@ -1454,7 +1488,7 @@ mod tests {
         };
         tracker.observe(&work, &file_binding("workspace.files/read"), &read,
             &AgentToolResult::text(read.call_id.clone(), "earlier sample", false), true);
-        for (id, name, action, arguments, receipt, error) in [
+        let mut calls = vec![
             ("start-call", "start_process", "workspace.process/start",
                 serde_json::json!({"command":"diagnostic","args":["sample.txt"]}),
                 serde_json::json!({"process_id":"owned-process","state":"running","success":null}), false),
@@ -1467,7 +1501,15 @@ mod tests {
                 serde_json::json!({"command":"later-effect"}),
                 serde_json::json!({"process_id":"later-process","state":"exited","exit_code":0,
                     "cleanup":{"reaped":true},"success":true}), false),
-        ] {
+        ];
+        if include_ready {
+            calls.insert(1, ("ready-poll", "poll_process", "workspace.process/poll",
+                serde_json::json!({"process_id":"owned-process","cursor":0,"wait_ms":30000}),
+                serde_json::json!({"process_id":"owned-process","state":"running","success":null,
+                    "output":{"text":"READY_PARENT\nREADY_CHILD\n","next_cursor":25}}), false));
+            calls[2].3["cursor"] = serde_json::json!(25);
+        }
+        for (id, name, action, arguments, receipt, error) in calls {
             let call = ChatToolCall {call_id:id.into(), name:name.into(),
                 arguments:StrictJsonValue(arguments), provider_metadata:None};
             let mut binding = process_binding(action);
@@ -1478,6 +1520,48 @@ mod tests {
             tracker.observe(&work, &binding, &call, &result, true);
         }
         (tracker, work)
+    }
+
+    #[tokio::test]
+    async fn earlier_successful_polls_of_a_settled_process_remain_historical_evidence() {
+        for (state, exit_code) in [("exited", Some(0)), ("exited", Some(1)), ("timed_out", None)] {
+            let (mut tracker, work) = process_poll_fixture(state, exit_code, true);
+            assert!(work.running_processes.is_empty());
+            assert_eq!(work.workspace_observation_epoch, 2);
+            let ready = &tracker.observations[2];
+            assert!(ready.successful && !ready.usable_at_observation);
+            assert!(ready.command.is_none());
+            assert!(tracker.is_usable(ready, 2),
+                "the successful READY poll is evidence of its earlier output after exact {state}/{exit_code:?} cleanup");
+            assert!(!tracker.is_usable(&tracker.observations[0], 2));
+            assert!(!tracker.is_usable(&tracker.observations[1], 2));
+            assert!(!tracker.valid_through.contains_key("before-read"));
+            assert_ne!(tracker.valid_through.get("ready-poll"), Some(&2));
+            let definition = tracker.definition_with_evidence(&AgentPlan::default(), &work, false);
+            let validator = jsonschema::validator_for(&definition.input_schema.0).unwrap();
+            let report = serde_json::json!({
+                "summary":"READY_PARENT and READY_CHILD were observed earlier; the process has now ended and been reaped. No current workspace claim.",
+                "observed_tool_error_count":work.failed_tools,"observed_command_failure_count":work.failed_commands,
+                "criteria":[
+                    {"disposition":"supported","evidence_call_ids":["ready-poll"],"rationale":"Earlier output from the exact owned process."},
+                    {"disposition":"supported","evidence_call_ids":["terminal-poll"],"rationale":"The exact process terminal and cleanup."}
+                ]});
+            assert!(validator.is_valid(&report));
+            let context = context_value(&tracker, &work);
+            let entry = context["available_evidence"].as_array().unwrap().iter()
+                .find(|entry| entry["call_id"] == "ready-poll").unwrap();
+            assert_eq!(entry["settled_process_poll"], "terminal-poll");
+            assert_eq!(entry["scope"]["requested_arguments"]["process_id"], "owned-process");
+            assert_eq!(entry["command"], serde_json::Value::Null);
+            assert_eq!(entry["path"], serde_json::Value::Null);
+            let call = ChatToolCall {call_id:"report".into(), name:TOOL_NAME.into(),
+                arguments:StrictJsonValue(report), provider_metadata:None};
+            let inputs = vec![crate::context_lifecycle::text_message(
+                nomifun_chat_model_broker::ChatRole::User, "Report readiness and the settled diagnostic.".into())];
+            let result = tracker.submit(&call, &mut AgentPlan::default(), &work, &inputs,
+                false, None, &crate::NoopAgentEventSink).await.unwrap();
+            assert!(!result.is_error, "{}", result.output_text());
+        }
     }
 
     #[tokio::test]
@@ -1525,6 +1609,47 @@ mod tests {
             assert_eq!(accepted.criteria[0].evidence_call_ids, ["terminal-poll"]);
             assert_eq!(accepted.observed_command_failure_count, u32::from(exit_code != Some(0)));
             assert_eq!(accepted.observed_tool_error_count, u32::from(exit_code != Some(0)));
+        }
+    }
+
+    #[test]
+    fn earlier_polls_require_a_successful_observation_and_exact_retained_settlement() {
+        for defect in ["failed-poll", "not-dispatched", "wrong-capability", "wrong-action", "wrong-process",
+            "missing-scope", "before-launch", "after-terminal", "unreaped", "lost", "wrong-exit",
+            "wrong-terminal-call", "wrong-terminal-epoch", "missing-launch", "unknown-launch",
+            "undispatched-launch", "omitted-interaction", "missing-interaction", "wrong-last-interaction",
+            "missing-terminal", "missing-terminal-scope"] {
+            let (mut tracker, _) = process_poll_fixture("timed_out", None, true);
+            match defect {
+                "failed-poll" => tracker.observations[2].successful = false,
+                "not-dispatched" => tracker.observations[2].invocation_attempted = false,
+                "wrong-capability" => tracker.scopes.get_mut("ready-poll").unwrap()["capability"] = serde_json::json!("workspace.files"),
+                "wrong-action" => tracker.scopes.get_mut("ready-poll").unwrap()["action"] = serde_json::json!("workspace.process/input"),
+                "wrong-process" => tracker.scopes.get_mut("ready-poll").unwrap()["requested_arguments"]["process_id"] = serde_json::json!("other-process"),
+                "missing-scope" => { tracker.scopes.remove("ready-poll"); }
+                "before-launch" => tracker.observations[2].workspace_epoch = 0,
+                "after-terminal" => tracker.observations[2].workspace_epoch = 99,
+                "undispatched-launch" => tracker.observations[1].invocation_attempted = false,
+                "missing-terminal" => { tracker.observations.remove(3); }
+                "missing-terminal-scope" => { tracker.scopes.remove("terminal-poll"); }
+                _ => {
+                    let command = tracker.observations[3].command.as_mut().unwrap();
+                    match defect {
+                        "unreaped" => command.cleanup_proven = false,
+                        "lost" => command.state = "lost".into(),
+                        "wrong-exit" => command.exit_code = Some(0),
+                        "wrong-terminal-call" => command.observation_call_id = "other-poll".into(),
+                        "wrong-terminal-epoch" => command.observed_workspace_epoch = 99,
+                        "missing-launch" => command.launch_call_id = None,
+                        "unknown-launch" => command.launch_call_id = Some("other-start".into()),
+                        "omitted-interaction" => command.omitted_interactions = 1,
+                        "missing-interaction" => command.interaction_call_ids = vec!["terminal-poll".into()],
+                        "wrong-last-interaction" => command.interaction_call_ids.push("other-poll".into()),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            assert!(!tracker.is_usable(&tracker.observations[2], 2), "{defect} cannot qualify an earlier poll");
         }
     }
 

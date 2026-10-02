@@ -2997,3 +2997,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - W226修后正式Windows GEN原诊断5步/0压缩：一次start、两poll正确0→25，父子READY/实际timed_out/reaped，跳过不支持interrupt、errors=[]、清理187ms；CIM18样本/心跳/原件/旧事件独立核对。报告首次接受，无update_plan/参数拒绝或重启，原1/1超时计数仍在。
 - 只新增干净timeout/直接收尾GEN N1。旧样本首败不覆盖；复制oracle限定旧exit_code回答短语，原12/13和补充审计分开保存。公开回答的无退出码/信号说明间接，READY“可用证据”警告仍不合格，整体体验/完整B/N3不代判。
 - 仓库外2026-10-02/windows/w227-timeout-cleanup-recheck保留正式构建/DB/事件/UI/物理见证，无新源码或重复回归。A/C和共享门槛继续开放。
+
+### W228 已结算进程的早期poll事实（2026-10-02，确定性修复，正式待验）
+
+- W227真实READY回执因非终态而不合格；最小首红确认即使同进程已精确结算、后续命令已执行，早期成功poll仍不能引用。原W227内部警告/体验缺口保留。
+- 现仅为完整保留、同process_id且已清理的exit0/非零/timeout调用链保留早期成功poll的历史事实资格；context关联精确terminal ID，明确早期running不代表当前运行。启动/stdin、旧文件/产物不升格，不修改工作区epoch、valid_through、权限或原参数。
+- 实际WorkStatus/CommandTracker正向三终态及21种失败/错配/缺链反例、新旧completion共36项通过；首红/修后分日志，fmt配置/diff通过。正式Tauri/模型采用、公开语言、取消历史poll及N3、完整A/B/C仍待验，共享未结案。
+- 证据在仓库外2026-10-02/windows/w228-historical-process-poll；本批无新付费模型或原生进程，Git仅源码、两项回归和短进度。

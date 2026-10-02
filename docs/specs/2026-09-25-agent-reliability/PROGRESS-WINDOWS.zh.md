@@ -3715,3 +3715,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原复制oracle12/13保留：最后一项限定旧回答“没有 exit_code”的确切文字，新回答为“未报告退出码0或具体信号值”，另存04审计说明。动作/终态正确，但退出码/信号无值的说明间接，READY不可当前验证的警告仍出现“可用证据”等内部措辞；整个体验不记PASS。
 - 未覆盖：首发/干净清理N3/COD、READY历史回执资格、公开语言及完整A/B/C/共享门槛。本批无新源码、无需重跑已过的定向检查，正式样本与旧首败分开。
 - 证据：仓库外2026-10-02/windows/w227-timeout-cleanup-recheck，01构建、02完整事件/DB/原参数/独立audit、03正式UI、process witness及04审计复核；Git仅短进度。
+
+### W228 早期READY回执的历史资格（2026-10-02；基线090427d96，正式待验）
+
+- Case/子断言：C05/C06/C07/C08、CTRL-006/007与PROC关键poll/终态、A05/A08/A09/A17/A19；沿W227真实READY被排除的问题，不增加付费盲重跑。
+- 首红：实际WorkStatus/CommandTracker按read→start→READY poll→terminal→later command记录，已清理exit0后的早期成功poll仍不能引用；01原失败保留，不改W227的12/13或公开语言记录。
+- 修复：复用原精确terminal谓词，仅对同process_id、成功且实际尝试、完整保留互动/启动/终态及scope的早期poll赋予历史事实引用；关联settled_process_poll的terminal ID，明确其当时状态/输出不证明当前运行或文件内容。缺链/未清理/lost/矛盾终态/省略交互继续拒绝；不扩valid_through或权限，不自动改report。
+- 验证：三类真实tracker终态（exit0/非零/timeout）经后来命令后早期输出/terminal均可准确引用，文件与启动仍失效；21种反例拒绝。新两项及相关completion模块36/36，fmt配置/diff通过，首红/修后分日志。
+- 未覆盖：正式Tauri/StepFun采用该资格及公开回答、取消历史poll、进程首发N3/COD、完整A/B/C与共享门槛。本批只有确定性源码修复，不以单元结果覆盖正式失败，无新模型/进程/构建样本。
+- 证据：仓库外2026-10-02/windows/w228-historical-process-poll，01首红、02修后及03～05配置/diff/同步；Git仅源码、两项最小回归和短进度。
