@@ -278,6 +278,12 @@ mod tests {
             "这是只读验收。不要修改任何文件。"
         )]));
         assert!(workspace_mutation_forbidden(&[input(
+            "整个任务不得新增、修改或删除文件。"
+        )]));
+        assert!(!workspace_mutation_forbidden(&[input(
+            "创建临时结果并修改第二行；不要修改或删除任何原件。"
+        )]));
+        assert!(workspace_mutation_forbidden(&[input(
             "Inspect the repository without modifying any files."
         )]));
         assert!(!workspace_mutation_forbidden(&[input(
@@ -404,6 +410,10 @@ pub(crate) fn workspace_mutation_forbidden(inputs: &[ChatMessage]) -> bool {
         "不修改任何文件",
         "不要创建、修改或删除任何文件",
         "不要创建、修改或删除文件",
+        "不得创建、修改或删除文件",
+        "不得新增、修改或删除文件",
+        "不要新增、修改或删除文件",
+        "不得新增、修改或删除任何文件",
         "不要写入任何文件",
     ];
     const ALLOWED: &[&str] = &[

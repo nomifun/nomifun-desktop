@@ -302,6 +302,8 @@ fn replay_into(
                 continuation,
             } | AgentEngineEvent::ModelResponseRejected {
                 step, discarded_tool_call_ids, continuation, ..
+            } | AgentEngineEvent::DeliveryReviewSuperseded {
+                step, discarded_tool_call_ids, continuation,
             } => {
                 crate::output_limit::validate_discarded(*step, discarded_tool_call_ids)?;
                 if batch.step != Some(*step)
@@ -326,7 +328,10 @@ fn replay_into(
                 batch.order.clear();
                 batch
                     .notices
-                    .push(if matches!(event, AgentEngineEvent::ModelResponseRejected { .. }) {
+                    .push(if matches!(event, AgentEngineEvent::DeliveryReviewSuperseded { .. }) {
+                        crate::context_lifecycle::text_message(ChatRole::User,
+                            "The candidate delivery review was superseded by a new accepted user input. Its proposed calls were discarded without execution; no candidate was delivered. Reconsider the complete accepted scope.".into())
+                    } else if matches!(event, AgentEngineEvent::ModelResponseRejected { .. }) {
                         crate::protocol_recovery::notice(*continuation)
                     } else { crate::output_limit::notice(*continuation) });
             }
@@ -509,6 +514,11 @@ fn replay_into(
                 batch.completion_report = Some(report.clone());
                 batch.notices.push(crate::context_lifecycle::text_message(ChatRole::User,
                     format!("Historical completion account (model assessment with observation references, not fresh proof for this turn): {}",
+                        serde_json::to_string(report).map_err(|error| AgentEngineError::ReplayContract(error.to_string()))?)));
+            }
+            AgentEngineEvent::CompletionCandidateRecorded { report } => {
+                batch.notices.push(crate::context_lifecycle::text_message(ChatRole::User,
+                    format!("Historical candidate account, NOT delivered or accepted completion; use only actual receipts for facts: {}",
                         serde_json::to_string(report).map_err(|error| AgentEngineError::ReplayContract(error.to_string()))?)));
             }
             AgentEngineEvent::InstructionsUpdated { context } => {
@@ -808,7 +818,7 @@ mod tests {
         let report = crate::AgentCompletionReport { plan_revision:1, observation_revision:1,
             input_revision:1, workspace_epoch:0, summary:"Known diagnostic result.".into(),
             criteria:vec![], observed_tool_error_count:1, observed_command_failure_count:2,
-            requirements:vec![] };
+            requirements:vec![], delivery_items:vec![] };
         let events = |delivery: String| vec![
             AgentEngineEvent::TurnStarted { binding:binding(), turn_operation_id:OperationId::from("turn") },
             AgentEngineEvent::ModelStepStarted { step:1, operation_id:OperationId::from("turn:model:1") },

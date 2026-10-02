@@ -489,6 +489,7 @@ impl ContextLifecycle {
                         "Continue the accepted request; verify observations before claiming success",
                         Vec::new(),
                     )
+                    .with_action_schemas(request.input.tools.clone())
                     .with_max_summary_bytes(summary_hard_limit),
                     cancellation.clone(),
                     Some(sink),

@@ -148,6 +148,18 @@ pub enum AgentEngineEvent {
     CompletionReported {
         report: crate::AgentCompletionReport,
     },
+    /// Valid accounting still awaits one bounded public-result review. This
+    /// is not an accepted delivery, terminal event or independent verification.
+    CompletionCandidateRecorded {
+        report: crate::AgentCompletionReport,
+    },
+    /// A user correction superseded an in-flight report-only review. None
+    /// of that response's proposed calls was executed or delivered.
+    DeliveryReviewSuperseded {
+        step: u16,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        continuation: bool,
+    },
     /// Engine publication of the accepted report after the terminal input
     /// fence. This is not another provider/model stream event.
     CompletionDelivered {
