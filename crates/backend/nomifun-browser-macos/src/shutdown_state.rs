@@ -22,6 +22,24 @@ impl ShutdownState {
     }
 }
 
+/// Debug native acceptance may lose a completion acknowledgement, but only
+/// for an explicitly marked, isolated data root. Never read this in release.
+#[cfg(debug_assertions)]
+pub(super) fn lose_completion_ack(root: &std::path::Path) -> bool {
+    let Ok(key) = std::env::var("NOMIFUN_RELIABILITY_CEF_ACK_LOSS_KEY") else { return false; };
+    acknowledgement_scope_matches(root, &key)
+}
+
+#[cfg(debug_assertions)]
+fn acknowledgement_scope_matches(root: &std::path::Path, key: &str) -> bool {
+    let Ok(id) = uuid::Uuid::parse_str(key) else { return false; };
+    if id.to_string() != key { return false; }
+    let Some(data) = root.parent().filter(|path| path.file_name().is_some_and(|name| name == "browser-v3"))
+        .and_then(std::path::Path::parent) else { return false; };
+    root.file_name().is_some_and(|name| name == "agent-sessions")
+        && std::fs::read(data.join(".reliability-cef-ack-loss")).is_ok_and(|bytes| bytes == key.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +77,23 @@ mod tests {
         release.send(()).unwrap();
         native.join().unwrap();
         assert!(state.completed());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn native_ack_loss_requires_an_exact_isolated_root_marker() {
+        let data = tempfile::tempdir().unwrap();
+        let root = data.path().join("browser-v3/agent-sessions");
+        let key = "01a0fbba-4472-7c02-a40f-1c1a3104669d";
+        assert!(!acknowledgement_scope_matches(&root, key));
+        std::fs::write(data.path().join(".reliability-cef-ack-loss"), key).unwrap();
+        assert!(acknowledgement_scope_matches(&root, key));
+        assert!(!acknowledgement_scope_matches(&root, "01a0fbba-4472-7c02-a40f-1c1a3104669e"));
+        assert!(!acknowledgement_scope_matches(&root, "not-a-key"));
+        assert!(!acknowledgement_scope_matches(&root, &key.to_uppercase()));
+        assert!(!acknowledgement_scope_matches(&data.path().join("other/agent-sessions"), key));
+        assert!(!acknowledgement_scope_matches(&data.path().join("browser-v3/Default"), key));
+        std::fs::write(data.path().join(".reliability-cef-ack-loss"), format!("{key}\n")).unwrap();
+        assert!(!acknowledgement_scope_matches(&root, key));
     }
 }
