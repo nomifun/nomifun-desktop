@@ -4399,6 +4399,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_advertised_byte_budget_fits_the_protected_replacement_prefix() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(1500)), text_step("compact-marker")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec![String::new()];
+        let original = request.input.messages[0].clone();
+        let mut empty = request.input.clone();
+        empty.messages = vec![crate::context_lifecycle::summary_message(""), original.clone()];
+        let hard_limit = 32768 - 4096 - 512;
+        let room = 900usize;
+        let fixed = serde_json::to_vec(&empty).unwrap().len();
+        request.input.instructions[0] = "x".repeat(hard_limit * 3 - fixed - room);
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(500),
+        ));
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), AgentContextBudget::default(),
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let attempts = model.requests.lock().unwrap();
+        let advertised: usize = attempts[0].input.instructions[0].split("at most ").nth(1).unwrap()
+            .split_whitespace().next().unwrap().parse().unwrap();
+        let mut advertised_candidate = before.clone();
+        advertised_candidate.messages = vec![crate::context_lifecycle::summary_message(&"s".repeat(advertised)), original.clone()];
+        let bytes = serde_json::to_vec(&advertised_candidate).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&advertised_candidate, bytes) < hard_limit,
+            "a note complying with the requested byte ceiling must fit beside the unchanged protected prefix");
+        advertised_candidate.messages[0] = crate::context_lifecycle::summary_message(&"\0".repeat(advertised));
+        let escaped_bytes = serde_json::to_vec(&advertised_candidate).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&advertised_candidate, escaped_bytes) < hard_limit,
+            "the advertised ceiling must also account for JSON escaping, not only plain ASCII notes");
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, before.max_output_tokens);
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+    }
+
+    #[tokio::test]
     async fn valid_summary_that_cannot_fit_the_fixed_prefix_gets_one_source_preserving_repair() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step("Earlier checks recorded; finish the accepted task without replay.")]),
