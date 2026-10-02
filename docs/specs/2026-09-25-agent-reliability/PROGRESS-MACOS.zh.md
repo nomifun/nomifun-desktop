@@ -7,7 +7,339 @@
 旧 675 共享 + 72 macOS 专属、2,366 槽与五角色分配仅为历史口径，不再作本轮完成率或结束门槛；
 范围外、复用、手测与未验分开，原 Case 定义、首败及修复证据不删除、不自动记 PASS。
 
-## 当前活动问题簇
+## 2026-10-02 阶段性 P0 交付（用户选择方案 1）
+
+用户明确选择先交付已修且已验证的 P0 产品机制，生成精度残余留待后续安排。
+本机自动走查在本次交付后停止；不再新增付费复跑或扩展旧矩阵。此为阶段性收尾，
+不宣称阶段二、三全范围、完整 A/B/C、N3 或发布认证通过，下方首败和原验收缺口保持。
+
+| 已交付产品机制 | 源码提交 | 验证与限制 |
+| --- | --- | --- |
+| C06-15 历史命令结果与当前文件状态策略一致 | `ace29cdd0` | 3 项定向回归；正式 Tauri/StepFun 两命令实际结果完整交付 N1；不等于复杂 A 漏项全部解决 |
+| C05-09 原生事件循环保留清理失败退出码 | `6f1aaa270` | 12 项定向退出/生命周期回归，正式冷读正常退出；失败分支修后未 live 再触发 |
+| C05-10 未用 CEF 不初始化，首次使用仍走真实生命周期 | `a3a0bf001` | 4 项回归，正式未用冷读及首次 Browser 使用/清理；已用 CEF 的系统 Keychain 等待未修复 |
+
+交付前核对当前源码与上述验证版本：C06-15/CEF 代码无差异，退出码路径保持；
+文件原样写入/保留 LF 与恢复目标回归 4/4 仅证明产品保障，不替代生成精度。
+证据分别在 `2026-10-02/macos/delivery-policy/`、`mac-gen-continuous/`、`cef-on-demand/`、
+`file-generation-residual/run-001/`；完整日志/数据库/截图/轨迹仍在仓库外。
+
+后续待用户安排：B09 缺末 LF/先修改后创建、复杂 A 结果漏项、已用 CEF Keychain 等待及
+失败分支 live、旧 MM retry spinner、完整默认 GEN/N3/发布认证。保持未解决/未验状态；
+不自动补字节、放宽断言、扩大权限或改写 Windows 结果。本次收尾仅文档，不重复构建/测试/模型。
+
+## 剩余走查快速方案（2026-10-02，四簇执行与交付完成，残余保留）
+
+本节响应用户后续要求，设计剩余项的高效走查/修复；不撤销已交付记录，不把方案当验证。
+停止以长 A/B/C 整组、五角色或 N3 填槽推进，按下面四个问题簇执行。默认 GEN 覆盖并入 R2，
+不单开第五套流程；统计重复、全生态、x86/release/soak 留在独立认证范围，未验状态保持。
+
+| 顺序 | 目标 / 依据 | 先做的零付费定位 | 需要时的最小正式验证 / 独立判据 |
+| --- | --- | --- | --- |
+| R1 | 精确文件字节、创建/修改顺序；B09，FILE-019/025/029/030、REAL-016 | 复用三次 raw/canonical、B08 正链、4 项恢复/字节回归；核对冻结要求与实际展示合同，找具体矛盾，不再排查已排除的 codec 裁字节 | 只做“中文空格文件：两行含末 LF → 修改第二行 → 回读 → 报告”；独立比对前后完整 bytes/hash、首次操作顺序、原件、工具错误、UI/canonical。文件内容/hash准确，不能靠纠错后正确冒充首发通过 |
+| R2 | 多项结果漏交付；A13，C06-15、OBS-020、REAL-021/024 | 从 A13 最后请求到原始 report 找具体丢失点；复用已验两命令结果，不重跑 Git/测试/搜索；检查冻结要求、证据资格、报告及 UI 投影 | 只做“cwd、含隐藏项的名称、原文件头尾”三项结果交付；各自真实值在同次报告/UI存在、调用不重做。用正式默认 GEN 入口承载；资源不满足只阻断该入口，不减模块后冒充默认 GEN |
+| R3 | 旧 MM retry/spinner；M04-04，AMUL-001、OBS-008/014/020 | 复用旧失败数据和 pending/terminal 两种既有夹具，先核对 controller/panel 既有 retry 回归；旧 terminal 无按钮是入口状态断言，不是点击重试已验 | 正式 Tauri：可重试的提交未确认失败消息 → 实际点 retry → terminal → 同 data 冷读；同时旧 settled failure 不开无效 retry。记录按钮/请求/operation/Canvas pending 与错误卡片、事件增量，禁止用新 Session 首发成功关闭旧问题 |
+| R4 | 已用 CEF 退出等待、失败退出分支；C05-09/10，A11/A13/A17、OBS-019 | 直接分析旧主线程/Keychain 样本、现有 shutdown/退出映射回归；不重复未用 CEF 正链，不更改钥匙串/系统保护 | 修复成立才跑一次实际 Browser 使用后关闭，采样自有 PID、真实 shutdown ack/退出码、后代及 listener。故障注入若仅覆盖协调器，明确不算已用 CEF/系统 Keychain live 证明；无法重现不记 PASS |
+
+### 固定工作循环与停止线
+
+1. 每簇先用已有证据定位，时间盒 30～45 分钟（是排查预算，不保证修复耗时）。输出一个
+   可证伪根因或明确缺少的事实；到点不扩到相邻业务、不新造全套夹具，转下一可执行簇。
+2. 发现产品缺陷：先做最小失败断言，再修源码，运行该函数/文件直接相关回归；不要整库测试。
+   R1/R2 若仅是原始生成提议不合格，不把归因当解决：允许一个有明确机制假设的生成策略候选，
+   先检验不扩权、不加表单负担、不丢要求/证据，再一次验证；无候选或无改善则保留残余并转项。
+   禁止自动补 LF、猜 argv、放松 guard/恢复门槛，或连续纯文案微调/付费碰运气。
+3. R1/R2 共享修复稳定后产出一个正式 Tauri 验证构建，两项用同包不同 Session/run；
+   R3/R4 优先零付费 provider fixture。复用签名、隔离启动、owned deadline、闭库和审计脚本，
+   不复制完整 runner。期间另有修复则明确新 build digest，只补受影响项。
+4. 付费任务上限先冻结：R1 最多 8、R2 最多 6 个 provider requests（含摘要/纠正）；
+   每任务 output_limit=4096、任务 180 秒、native 300 秒 + 5 秒清理宽限。不是永久零额度；
+   所有尝试合计最多 14 requests，不自动扩额或重复任务。R3 若实际 provider 成为直接必要，
+   另外先冻结最多 2 requests；总上限 16。预算到达/观察者超时都是未完成，不算通过。
+5. UI 发送前一次预检模型路由/资源/桌面解锁与预算，记录 OS/架构/APFS 卷属性和必要环境；使用本机已有加密 StepFun 配置，
+   不从聊天明文复制 key。正式终态截图/AX 与 Cmd-Q 放同一短控制段，保留 >=15 秒关闭余量；
+   native handle 未终止前不重启任务或读 immutable DB，禁止访问已关闭 App 造成默认数据重启。
+6. 每簇只记录“首败、修后、限制、提交”；修后报错立即封存，下一动作必须针对新发现的根因。
+   没有新根因不重跑；正常/参数拒绝/业务非零/unknown/取消分开，A01～A20 底线全部保持。
+7. 每批检查 staged、同步远端、配置身份正常 commit+push；证据在仓库外按日期/批次/run 保存。
+   UI 改动才补桌面边界检查；仅计划文档不构建、不调用模型。共享根因同步共享进度，Windows
+   结果与排程不改。出现一个簇的真实外部阻断继续其余簇，不反复等待同一阻断。
+
+### 本轮交付口径
+
+四簇各只有“修复并验证 / 原机制复用 / 仍开放且责任明确 / 资源阻断 / 独立认证待安排”之一。
+不因缩短测试任务关闭原长 Case；短任务只证明其直接子断言。优先完成 R1/R2 核心命令体验，
+再关 R3 的真实重试路径和 R4 的实际关闭问题；若有残余，明确列出而非宣布全范围完成。
+完整默认 GEN 只能由实际默认绑定样本证明；N3/20 repeats/发布认证不是这轮快速收尾的隐藏门槛。
+
+### 四簇最终交付状态
+
+| 簇 | 本轮处置 | 明确保留的限制 |
+| --- | --- | --- |
+| R1 字节/步骤 | 当前正式文件短链N1，精确创建/局部改/回读首次正确；无有据的新执行层改动 | B09原复杂生成失败未改PASS，生成稳定性/N3未认证 |
+| R2 结果交付 | 完整默认GEN未减权配置、三项实际结果正式N1；修复验证入口缺资源选择 | A13复杂漏项、全GEN其他业务/N3仍未关闭 |
+| R3 MM retry/pause | 产品pause链路修复、真实失败消息retry/同key核对/冷读negative N1已交付 | 隔离等价数据，不冒充原Windows历史或全MM/N3；首次观察超时保留FAIL |
+| R4 退出清理 | 原真实已用CEF证据复用；后续重开已补正式native确认丢失失败码/不重入N1，见下节 | 系统Keychain等待仍OPEN，真实物理CEF失败/阻塞未修后重现；不记完整风险PASS |
+
+本表是最新快速方案的执行/交付结果，不是所有实际体验问题或原阶段二、三全范围达标。
+本轮实际StepFun请求共9；R3/R4付费0，未扩大权限/关闭保护/放宽断言，完整证据在仓库外。
+后续仅在新根因、受影响源码或明确新风险出现时重开对应簇，不恢复长A/B/C或旧全量矩阵。
+
+### 当前重开目标：A13/B09 优先闭环（2026-10-02，实施中）
+
+用户明确要求完成复杂结果交付、字节/步骤、真实Keychain清理和公开报告质量，不能以短链或
+残余归类替代完成。付费调用次数上限已被用户明确取消；旧16次本地cap耗尽现场仍保留，
+产品上下文/执行窗口、进程期限及清理保护不改。本目标仍活动；A13原完整任务本次N1见下，
+B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证。
+
+- B09原实际HTTP确认：被拒绝的reasoning-only假写入被回放为普通assistant content；最小
+  反例首红后修，不再回放该载体，不解析/执行私密参数。私密名字收窄提示在真实混批后导致
+  剩余工具误判缺失，已撤回；仅要求原生格式，原冻结操作面保持，错误修正/交付复核边界不变。
+  兼容Chat编码器也不将有效轮私密思考转换为普通正文；无签名思考不计事实历史/后续预算，
+  签名/加密续接、真实调用参数和回执不变。Broker18+35、Runtime相关首败/修后均外置。
+- A13增加候选/最终两阶段：复杂编号任务有足够实际观察时，一次report-only交付复核；
+  candidate不是CompletionReported/Delivered，不冻结终态输入、不允许新操作。冷恢复、
+  流中纠正、超限/非法复核和中断不自动再试有回归。不是独立语义证明，仍需原任务验收。
+- 本次三个正式原A任务均未通过，分别封存：run003本地cap16/无报告；run006冻结替换包络
+  失败（不是StepFun限流）；run009普通进度被旧completion review过早关闭操作面、余项
+  blocked。发现只读中文禁止句未识别、重复完成工具说明占据包络及过早收尾，新增首红后修。
+  普通未完任务进度与已结算报告参数修正分开，后者保持禁止重做并保存checkpoint状态。
+- 撤回私密名字推断后Runtime268/268、Broker18+35、journal6/6、显式无限调用夹具8/8；
+  只证明机制边界。run012保留私密提示收窄导致混批拒绝/虚假缺工具首败；run015撤回后
+  原A实际操作到达completed，11请求/9步骤、候选和最终报告各1，真实UI/正常退出/五表
+  闭库通过，但严格原验收仍FAIL：最终未交付cwd和头尾原文，单次自检不足以关闭语义漏项。
+  原oracle另报grep代专用搜索、git argv的`--`差异，原产物保留、不改其FAIL。
+  证据`2026-10-02/macos/complex-delivery-repair/`；
+  原任务、原件、字节/顺序/真假结果断言未放宽，旧失败及每次新结果分别保留。
+
+#### 原复杂任务修后结果（2026-10-02，run023/024）
+
+- 单次自检未解决run015漏项，替为编号交付槽及显式受限结果引用；宿主交付已保存真实值，
+  不由模型重抄、不重跑、不自动公开所有日志、不赋予历史证据新鲜性。缺槽/无结果/伪造data
+  拒绝；missing不能completed，later scope变更需精确后续输入引用。新交付不接受旧summary-only
+  历史匹配；实际结构报告不追加候选复核。私密carrier/真实原生参数合同保持。
+- **原完整A13本次N1 PASS**：正式Tauri/ad-hoc deep-strict、arm64/macOS26.6.2/25G83、APFS
+  非大小写敏感Data卷；原任务13真实StepFun请求/9步骤/4压缩/540events，18原生参数全同，
+  11必要进程各一次/reaped。最终正文与真实UI完整交付cwd/十名称/四行头尾和行数/正零搜索/
+  Git字节/两指定测试0、1与失败断言。七原件/HEAD/status/diff不变，无哨兵/无额外文件。
+  未成功6=四未执行Git提议+两真实非零，报告/UI/WorkStatus6/2；非首发全提议无错。
+  candidate0/final1，正常Cmd-Q0/99.79秒，自有PID/listener消失，五表540/1/1/1/11全同且ok。
+  旧accept的专用read/search工具名、Git argv、summary-only假设FAIL保留；独立验收按原正文
+  和实际CompletionDelivered/UI检查，未放宽结果/保护。AX摘要截段不是真实UI遗漏。
+- **B09 run016/024仍FAIL**：run016漏末LF、修改前提前复制并成功复制两次，末尾将shell串
+  当command，后实际重启已完成helper；stop/Cmd-Q0/416.76秒不代判任务完成。run024最终32B/
+  LF/hash正确、copy/move/delete各一次、原件不变、无helper重启；但首次直接创建after，跳过
+  before33B→修改步骤，stdin含LF又append_newline=true，实物14B/双LF、stdout41B而非13/40。
+  首helper真实EOF/exit0、长helper父子曾同PGID存活后均消失成立；29请求/21步骤/770events/
+  九effects，最终强制上下文无摘要槽而失败、report0；不是付费次数cap/供应商限流。
+  正常Cmd-Q0/198.03秒、五表全同；不以正确终版或已验helper机制抵扣错误步骤/输入。
+- run016裸write参数JSON被错误接纳为摘要：现按原冻结工具schema拒绝完整匹配的动作参数，
+  schema内部传递但不发送给摘要模型，禁止外部schema读取；正常JSON状态笔记允许。run024
+  实际仅触发XML摘要拒绝及一次纠正，不冒充裸JSON live证据。Chat编码不再发送内部私密
+  省略占位普通正文，本次public OutputTextDelta0，未复制占位但不等于有合格进度文案。
+- Runtime270/270、Broker18及原35协议回归、正式App/fixture构建通过；最后另去掉交付目录
+  重复精确正文/source文本投影，仅保留引用定位，原始值/宿主解析/错误计数不变。该最后
+  轻量投影修复仅本机回归，尚未新formal B复验，未宣称已解除全部强制包络问题。
+- 构建feature/外置runner metadata/日志路径、无fixture首次App SIGABRT、readonly DB14、
+  oracle漏`./`首错全部在外另存，未发送任务的实例模型0；各结果不覆盖历史。证据
+  `2026-10-02/macos/complex-delivery-repair/`。公开结果含内部元数据的呈现仍待简化；
+  A13 N3/稳定性、B09生成步骤/字节及真实Keychain物理失败仍OPEN，Windows结果未改。
+
+#### B09 计划前置与强制投影去重（2026-10-03）
+
+- 去掉交付catalog重复argv，只留ref/tool/path；多编号summary说明改为简短结论+宿主精确
+  附件，所有Schema断言/真实缓存/资格/错误计数不变。最后三read的五槽/13ref回归覆盖
+  absence/32B/hash解析、不复制源正文及输出；没有靠扩大32768/4096默认包络洗绿。
+- 明确编号任务首次write/patch/stdin前单独plan；无plan整批未派发，单任务/读观察/cleanup
+  保持。已显式关闭计划的报告参数修正同样report-only，最小反例保持首次变更不派发及
+  已结算效果不重做。plan仍是模型解释，不是用户意图/顺序或字节已正确的证明。
+- 原B09正式Tauri新隔离run002：源`18d68c558`+外source.patch，本机arm64/macOS26.6.2/25G83、
+  APFS非大小写敏感Data；11 StepFun请求/376events/五effects，任务/四原件保持。
+  主动plan后before→guarded patch→cp→mv各一次；未触发plan门拒绝，不能冒充live拦错。
+  首write仍无末LF32B，patch保持无LF而成31B，temp尚未删除就进入helper；实际exec bun
+  字面argv一项、tty=true/timeout600000同步等待，只有READY\r\n，无stdin/EOF/长helper/report。
+  明确合同失败后正式UI Stop+Cmd-Q0/249.47秒，非expiry/TERM/KILL；五表全同、ok、所有
+  自有PID/listener已消失。**原B仍FAIL**，本次未到完成边界，不能代判包络live已解除。
+- 真实摘要`tool_calls:[{name,arguments}]`（未知copy_file、无call_id）被接纳为状态；补既有
+  root-only工具型摘要守卫，保留普通JSON状态、嵌套历史与空数组。未把假摘要当真实效果，
+  也不归因它是后续PTY选择的唯一原因。此新守卫仅回归，尚未新live触发。
+- 实际同步exec等不到后续模型输入，而工具说明未明确这一点；补exec同步等待、start先
+  返回handle及READY/input/close/poll pipe链、tty=false为pipe/true为PTY。仅模型说明与
+  既有字段白名单，不改owner/注册Schema/Session provenance或自动替换工具。最后这处
+  合同补充仅定向回归，未再付费复跑；首LF/遗漏delete/完整报告仍需下一步处理。
+- Runtime271/271及说明/摘要直接回归通过，正式构建/签名通过；日志仍在外
+  `2026-10-03/macos/b09-plan-envelope/`。外置setup语法及跨根seal首拒保留，修夹具后
+  冷五表376/1/1/1/5完整一致。未重复已验EOF/父子Stop正链，Windows结果未改。
+- Keychain只读核对：Browser关闭之前未证明所有SSH/robot/storage已quiesce，CEF Helper也
+  无精确退出库存；后台硬退不是可靠清理，原系统/物理风险仍OPEN，不改保护或记PASS。
+
+#### B09 源绑定精确动作契约（2026-10-03，run002）
+
+- 计划增加有限exact_actions：来源quote仅定位，不证明自然语言解释；保存参数digest/状态，
+  不复制file/stdin正文/env或live handle到checkpoint。编号写/patch/stdin须先声明当前精确
+  参数；整批owner前匹配，错中间状态/漏LF/双LF不归一化、不派发。stdin绑定新鲜process_id
+  摘要，两种13B表达等价、另一owned目标拒绝；合法双LF声明仍合法，不改原工具字节语义。
+- 先持久化reservation再admission，正向typed owner回执才推进；空/partial/lost对象不成功，
+  未派发reservation与已派发未知在恢复中分开，真实回执断点恢复不重放。成功后新ID同源
+  同payload不能绕once；后续用户新input可授权新动作。未完成契约不能非blocked收尾。
+  最后将未知结果settled标志保持false，仅回归；正式样本旧字段仍保留，不改写历史。
+- Runtime277/277与六个直接字节/零派发/once/恢复/正向回执回归通过；正式Tauri/签名及
+  fixture构建通过。源`e2df86c08`+外tracked patch+exact_actions.rs（另存hash），arm64/
+  macOS26.6.2/25G83、APFS非大小写敏感Data。原B task/seed不变，真实31请求/594events/
+  八effects；首次两个缺LF提议0dispatch，假SHA占位与不支持cleanup契约声明拒绝保留。
+- 实际创建before33B SHA f6a612…→guarded patch after32B SHA6ab0c427…，cp/mv/shasum/rm
+  各一次、四原件不变。**原完整B仍FAIL**：步骤2没有内容回读便删临时；首helper虽已正确
+  start pipe/wait0并观察READY，但未给timeout_ms，用原默认30秒。运行中stdin契约声明/
+  五次付费压缩耗时约76.85秒，实际input距start90.69秒，回执EFFECT_OUTCOME_UNKNOWN、
+  effect仍pending，实物仅ready。原13B参数正确不证明13B已送达，无EOF/长helper/最终报告。
+- 暂停EXECUTION_CLEANUP_UNPROVEN/cleanup_proven=false，未知动作未复位/未重发。桌面途中
+  锁定，正式UI收尾阻断；用户解锁到达时同实例已按原480+5期限TERM退出1、expired=true、
+  forceKill=false（483.09秒）。失败专用冷封存五表594/1/1/1/8全同/ok，自有PID/listener
+  消失；不是正常Quit，不以进程消失证明原任务/清理通过。完整失败在仓库外，不重启旧任务。
+- 下一直接缺口是活动helper期间新增声明/压缩的成本与真实读/顺序覆盖；不自动延长寿命，
+  不拿契约匹配当语义proof。A13旧N1不移植为新schema全认证，Keychain/公开元数据仍OPEN。
+  证据`2026-10-03/macos/b09-exact-actions/`；测试夹具路径/未暴露计划首错均在外，
+  Windows结果未代判、无权限/加密/保护/断言放宽。
+
+#### B09 receiver_ref 预声明与定位反馈（2026-10-03）
+
+- stdin可在启动前receiver_ref引用同计划前序start_process ID；仅真实匹配running回执
+  绑定receiver digest，不改原生process_id/input/LF/TTL。未知/已结束start不绑定，晚引用
+  拒绝，同ID重声明保留host绑定，cold关闭执行资格但历史结算可匹配；不复活句柄或重启once。
+- 编号completion三处重复字段说明缩短，原types/required/enum/长度/计数/资格完全保持，
+  结构等价回归通过；未改变frozen平台工具Schema。receiver及冷/错目标/重声明回归成立。
+- 正式原B新隔离样本：源`29911b473`+外patch+exact_actions.rs，Tauri/签名/fixture通过，
+  本机arm64/macOS26.6.2/25G83、APFS非大小写敏感Data；原task/四seed不变。9真实StepFun
+  请求/6步骤/116events/0effects，连续update_plan声明拒绝→bounded no-progress失败。
+  **整组仍FAIL**：虽原声明已有正确末LF和receiver_ref，但缺source、错误patch顶层path/
+  hunks、cleanup/poll与PLACEHOLDER混入；反馈没有指出具体动作，后续修错处。没有file/
+  helper/report效果，不能记receiver live采用、字节/完整交付已验或以零副作用作PASS。
+- 正常正式UI终态+Cmd-Q0/102.47秒，无expiry/TERM/KILL；冷五表116/1/1/1/0全同/ok，
+  自有App/fixture/listener消失，未遇锁屏。首声明与全部失败保存于外部
+  `2026-10-03/macos/b09-receiver-ref/`，不重发同一任务或放宽4次控制停滞守卫。
+- 该真实缺口修后：exact声明tool枚举明确支持范围；复用脱敏schema issue反馈，给动作
+  索引/参数路径与schema自有expected字段，不回显文件/stdin/私密属性值。成功同源stdin
+  换receiver别名不能新ID重入。Runtime279/279及定位/脱敏/别名负例通过，最后两处仅回归，
+  尚未新formal采用；原Task语义/回读/EOF/长helper与报告保持OPEN。Windows结果未代判。
+
+### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
+
+- 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
+  macOS26.6.2/25G83 arm64、APFS 非大小写敏感 Data 卷/普通用户。保留原 Keychain/exit0
+  首败；不恢复旧矩阵，不把复杂 A13/B09 的生成残余改为 PASS。
+- 真实风险边界进一步确认：旧样本的 CEF worker 在 `SecItemCopyMatching → SecurityServer`
+  decrypt RPC 等待，`cef_shutdown` 占用应用主线程。后端30秒 timeout 和 `app.exit` 排队
+  **不能取消这次 FFI，也不保证主线程卡住时按期限退出**。本次未安全重现系统等待；没有改
+  Keychain、加密、Sandbox/TCC，未将 shutdown 移出要求的主线程或跳过物理清理。此风险未修。
+- 补可重复的最小 native 验证入口：仅 debug、有效 UUID 与当前隔离数据根标记同时匹配，
+  **实际 `cef_shutdown` 返回后**才丢弃完成确认；保持未确认状态，所有重试禁止再次进入 CEF。
+  release 不包含入口，原正常机制不变。这是确认丢失故障，不伪称物理 CEF 故障或 Keychain 阻塞。
+- 源 `513a8efcd` + 外置 source.patch 的正式 Tauri/adhoc strict 包，两独立 Session 均实际
+  打开 Browser、导航本地页、真实点击；独立 witness trusted/count1/model0，终态截图后 Cmd-Q。
+  正常 PID36232：CEF return51ms、native exit0、Quit后约127ms；确认丢失 PID36834：实际
+  return57ms、原有限重试4次，native **exit1**、Quit后约3.195秒，无虚假清理成功/原生重入。
+  两样本均无 expiry/TERM/KILL，模型调用0；生命周期分别73.69/82.74秒，未增加180+5期限。
+- 3项 native 状态/故障根绑定与2项正式进程退出码回归通过。闭库后五表源/备份逐行全同，
+  integrity ok，Turns/effects0、精确3个 bootstrap lifecycle events，无模型事件；两独立
+  Principal/Session profile 的真实URL仅在绑定History而非全局Default。App/Helper/fixture/
+  listeners全部消失。首地址粘贴拒绝、首次导航未结算、首审SQLite14及错误events0假设分别
+  保留，后续输入/观察/只读审计另记，不重复任务、不覆盖首败或放宽产品断言。
+- 结果：**native 确认丢失 → 不重入 → 未确认退出码1**正式 N1 已补；真实系统 Keychain
+  等待/物理清理失败仍 OPEN，不可由本样本关闭。复杂 A13/B09 尚未在本批复跑或修复；
+  无权限绕过或新的共因，故共享/Windows结果不改。完整证据
+  `2026-10-02/macos/native-cleanup-failure/`，Git仅保留2处最小debug验证源码和本进度。
+
+### 快速执行 R1：精确文件短链（2026-10-02）
+
+- 用现有证据确认仍无 owner/codec 改字节根因，不为凑 PASS 改执行层。源 `9889e3a22` 正式
+  Tauri/adhoc strict，本机 macOS 26.6.2/25G83 arm64、APFS 非大小写敏感 Data 卷；拆短自然任务
+  只创建→局部修改→回读→报告，不附带命令/helper/取消。冻结 8/4096/180，native300+5。
+- 实际 StepFun 5 请求、163 events、4 原生参数与 canonical 全同；write 首次含末 LF/34 bytes，
+  patch 一次用原 write receipt 的 existing SHA guard，仅改第二行，最终回读/磁盘 33 bytes、
+  SHA `e90623013b002aa3e515c47b73879eceae781b38ce946ded8d35532541824213`，完整内容/末 LF 保持。
+  report 首发接受、工具错误0/命令失败0、实际两效果各一次 returned，两原件不变、无额外文件。
+- 正式 UI 终态截图与 Cmd-Q 同控制段，native exit0/91.90秒（含准备）、无 expiry/信号，
+  CEF unused_closed；fixture shutdown200/exit0，自有 App/Helper/listener 消失。完整只读快照
+  events/heads/turns/effects 为 163/1/1/2，源/备份逐行相同、integrity ok；凭据审计0/117。
+- 只记文件操作/字节子断言 N1，未改产品源码；B09首败、完整B/N3保持。报告仍有工具/EOF及
+  `earlier observations`措辞，未宣称完整公开语言验收。外置 closure 首审误用不存在表名保留，
+  查实际 schema 后另记全表核对，不重跑模型。下一项 R2 默认GEN/多结果；本批构建可复用。
+  证据 `2026-10-02/macos/r1-exact-file-short/`，Windows结果未改。
+
+### 快速执行 R2：默认 GEN 三项实际结果（2026-10-02）
+
+- 修复验证入口缺口：现有 General fixture 会减去 Computer/自动化，新增明确 opt-in
+  `--live-default-general-commands`，原减权模式不变；默认模式保持完整模板文档，只选择正式
+  `local-desktop`/`installation-scheduler` 两个必需资源，不授予系统权限或执行其动作。
+  模式断言首红保留，模式/全文保持/资源选择/原预算四个定向回归均1/1。
+- 第一次完整配置预检422 `RESOURCE_SELECTION_REQUIRED`（缺computer/scheduler）保留；
+  未运行模型/Turn/events均0。按产品实际资源ID补齐后在独立run建立正式会话，不重置付费
+  任务预算；复用R1正式签名App，fixture源码/patch单独冻结，6/4096/180、native300+5。
+- 完整默认General配置选择经正式Tauri入口验证：15个capability selections及Skill与官方
+  `assistant.general` manifest逐项全同，完整revision/Session绑定前后不变，5个正式资源
+  精确绑定。真实StepFun4请求/150events/4原生参数全同；`/bin/pwd -P`、`/bin/ls -a`各一次
+  exit0/reaped，指定原文一次读取、report首发接受/错误0。cwd、五名称（含`.`/`..`/hidden）、
+  文件首尾原文均在报告/真实UI完整交付，三原件全同、无额外文件、两命令证据分别引用正确。
+- 终态截图/正常Cmd-Q同段，native0/163.86秒（含准备）、无expiry/信号/CEF初始化；fixture
+  shutdown200/exit0、自有App/Helper/listener消失。闭库七表逐行全同/ok，核心四表150/1/1/2；
+  凭据0/149。仅记默认GEN命令入口和三项结果N1，原A13复杂漏项/全A/N3/默认GEN其他业务
+  未关闭，Computer/自动化实际动作未验。本轮共9个模型请求，不为同根因再补重复。
+  证据`2026-10-02/macos/r2-multi-result-default-gen/`；下一簇R3实际旧MM retry，Windows结果不变。
+
+### 快速执行 R3：真实重试与暂停不冒充运行（2026-10-02）
+
+- 新本地HTTP拒绝现场揭示真实缺口：Runtime已记`EXECUTION_MODEL_INVALID_REQUEST`暂停，
+  Creative transport却丢弃pause信息、port当unknown处理。复用严格canonical pause helper，
+  增加非终态paused观察/消息行，显示正式暂停提示、不显示运行spinner；pending/发送屏障和
+  原Stop确认保留，不自动重发/取消/完成，匹配恢复才继续，迟到旧内容不抬回running。
+  最小pause反例首红保留；直接UI/port/共享pause回归41/41（含迟到内容）、类型/桌面边界/构建通过。
+- 单独复现实际失败消息retry：debug opt-in仅匹配指定提交UUID、同一loopback turn端点，
+  真实鉴权请求成功后只丢一次返回，不改参数/权限/receipt；release无此注入。Rust范围1/1、
+  六种JS行为断言通过。正式Tauri出现“提交结果尚未确认”及真实retry按钮，实际点击同一
+  消息再沿原key核对；仅1个Turn/operation、1次本地模型调用、0效果，30events/completed，
+  pending清除/两canonical消息、空画布不变。不是新Session首发成功或UI绘图代验。
+- 另一个HTTP暂停子样本：正式UI显示已暂停、无retry、pending保持；显式Stop才cancelled/
+  ready，28events/0效果。本地模型1次，native0/22.49秒；重试native0/18.37秒，修后冷读
+  同data0/15.83秒、原30events/同Turn/operation保持、本地调用仍1，无旧任务复活或再次发送。
+  两源/备份八表逐行全同/ok，App/Helper/listener无残留。真实StepFun/付费请求0。
+- 首次240秒native观察超时TERM0、首次90秒冷读超时TERM0均FAIL保留；控制段修正后另记，
+  不增加时限洗绿。外置首审误将暂停当turn.state=paused、把scope key当裸UUID亦保留，按
+  真实schema/owner/session构造完整key后另审，不改数据/断言目标/重跑模型。仅本机隔离等价
+  失败/实际retry及pause子断言N1，不冒充原Windows数据、N3/完整MM；下一簇R4。
+  证据`2026-10-02/macos/r3-mm-actual-retry/`，原旧MM首败/历史冷读记录未改。
+
+### 快速执行 R4：退出边界复核与残余归类（2026-10-02）
+
+- 旧真实线程样本仍证明CEF worker停在`SecItemCopyMatching→CSSM_DecryptDataFinal→SecurityServer`
+  RPC，native退出等待；未用CEF的初始化已由C05-10避开、失败码由C05-09修复，原首败不删除。
+  不把OS等待当新的argv/文件/会话根因，不跳过CEF shutdown、不改系统钥匙串或线程要求。
+- CEF engine/lifecycle/host自`a3a0bf001`逐字节无差异，退出码方法与`6f1aaa270`全同。只读复核
+  已有正式Browser真实点击/独立trusted witness、精确principal/session/binding profile，URL不落
+  Default；actual native_return119ms、正常退出/无expiry或信号仍是有效复用，不追加同构native。
+- 当前`process_exit`保留清理失败、未验证不宣称零退出、held native cleanup不可由另一waiter
+  判成功三项定向各1/1。首次native过滤命令实际0 tests保留，不计通过；核对全名后另跑1/1。
+  不把模拟held cleanup或协调器断言代替真实CEF/Keychain故障分支。新模型/native运行均0。
+- 本簇结果：已验机制复用，系统Keychain等待OPEN/未修，修后失败分支live未覆盖；没有新有据
+  的产品改动，不扩为Browser进程隔离、权限变更或全生态认证。按方案停止线如实交付残余，
+  完整R4风险不记PASS。证据`2026-10-02/macos/r4-closeout/run-001/`，Windows结果未改。
+
+## 上次活动问题簇（阶段性交付后不再自动排程）
+
+### 2026-10-02 再收敛：当前只处理两项核心缺口
+
+用户要求停止低效发散。C05按需CEF已交付后，准备中的MAC-C-04追加复跑在发送前关闭：
+StepFun请求0、原生App未启动、fixture shutdown200/exit0、PID/listener消失；不记验收PASS。
+后续按具体缺陷而非“复杂A/B/C整组全绿”推进，不再为N3/角色矩阵机械复跑已有子链。
+
+| 活动缺口 | 现有事实 | 下一步边界 |
+| --- | --- | --- |
+| 结果完整交付 | C06-15修高优先级策略与历史命令资格矛盾，日常两命令实际结果已完整交付N1；A13复杂样本首败仍保留 | 本直接产品矛盾已修/针对性验证，不循环整组A或宣称全部模型漏项解决；无新事实不追加 |
+| 精确文件字节/步骤 | B09三次原始write均缺末LF，参数原样；修改hunk先于创建，源guard实际可选；现有字节/恢复回归4/4 | 用户选择方案1：未解决的生成精度残余后续安排；不改执行层凑PASS、不复跑同根因 |
+
+直接复用已有相关源码未受影响的证据：A13真实命令/两指定测试，B08精确文件链、B03stdin/EOF，
+GEN-C02纠正/活体Stop/冷读，C05-09退出状态传递及C05-10未用/首次使用CEF。它们是各自子链
+的有效证据，不拼成旧整组Case/N3全PASS。已用CEF的Keychain等待、完整默认GEN、旧MM等风险
+另列，不继续展开生态认证。每个有证据的新修复只做最小回归及必要的一次正式UI验证。
 
 | 簇 | macOS 候选复用证据（保留原构建及覆盖限制） | 本轮下一缺口 |
 | --- | --- | --- |
@@ -23,23 +355,23 @@
 以上是候选复用，不代表三组综合任务已通过。先核对原始断言、制品和相关源码差异；只有受变更影响、
 真实现场反例或明确新风险才运行最小回归，不重跑全仓/全领域或新建同构底层测试。
 
-## 三组正式会话与活动状态
+## 三组正式会话与原验收状态（保留）
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-12 历史97-byte文本保留正式N1；literal脚本错误→重复观察/预期非零未执行/无report、本地cap与观察者480秒超时仍FAIL，完整A/N3未达 |
-| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-08 原文件任务报告形态N1，公开交付/整体超时仍FAIL；B07联合未close/EOF/交付，03 EOF/04 Stop各N1，完整链/N3仍开放 |
-| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；按最新B→C→A主线推进，不等待A/B全部稳定，不扩成长稳全矩阵 |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-13合并复验7请求/两压缩、全部实际操作N1、六命令各一次exit0/1/reaped；report修正无重做、中文UI计数准确，但漏cwd/隐藏项名称/原文头尾，完整A/N3仍FAIL |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-09 完整链24-call样本仍FAIL：先patch后create、写入漏LF、只到cp；未到helper/report且观察者超时；转C，不循环B，旧03/04子链保持 |
+| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | GEN-C-02补准备公开一次/GEN连续链N1；冷退出实际CEF/Keychain等待及未验证清理exit0首败已采样，C05-09修失败码传递，正常native另验；卡顿/失败分支live/N3未闭 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
-MAC-GEN-01 已有通用模板仅减去 Computer/自动化资源模块的正式目录观察 N1；不代表完整默认
+MAC-GEN-01 的目录观察、GEN-C-02 的连续纠正/Stop N1均为通用模板仅减去 Computer/自动化资源模块；不代表完整默认
 通用配置、完整 A/B/C 或 N3。原 persona/instructions/模型路由/其余授权逐项保持，未扩权限。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
 M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后真实请求已恢复。
 MAC-A-03～06 已经正式 UI 运行；解锁后 MAC-A-06 完成 C06-02 正式子样本及 completed-session Cmd-Q。
 每次 live 先冻结次数/输出/时限，不把已授权模型预算设为永久 0，不由组件或回包代判通过。
 
-## 收敛处置与本轮结束条件
+## 收敛处置与原综合验收条件（保留）
 
 - **复用**：Schema/整批预检/decoder/CAS、argv/PTY/游标、APFS/文件原子性、权限、lease/fence/receipt、
   secret 隔离等已有定向回归。保留覆盖边界，受影响才最小重跑，安全和真实性断言不缩减。
@@ -51,8 +383,9 @@ MAC-A-03～06 已经正式 UI 运行；解锁后 MAC-A-06 完成 C06-02 正式�
   不能用新 Session 首发成功关闭，但不阻断本轮命令收尾。
 - **独立发布认证**：x86_64、其他 OS、signing/notarization、全 CMD/五角色矩阵、每 Case 20 次、全部竞态
   100 seed、LONG/4h/8h soak、408 样本/99% 声明保留原标准，移出本轮结束条件，不宣称已认证。
-- **结案**：A/B/C 的本机关键链与 GEN/COD 实际入口达标，核心命令 bad-case 根因闭环，UI/API/canonical/
+- **原综合结案条件**：A/B/C 的本机关键链与 GEN/COD 实际入口达标，核心命令 bad-case 根因闭环，UI/API/canonical/
   exit/stdout/stderr/磁盘结果一致，取消无新副作用或孤儿，历史失败如实披露。尚未达到该条件。
+  用户本次选择阶段性 P0 交付，不将尚未达到的综合条件改记达标。
 
 ### 本次收敛执行（2026-10-01）
 
@@ -1784,3 +2117,114 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 同步远端`67617e1cf`的主线收尾约束：按B→C→A推进；同一未改根因不付费循环，暂停纯说明
   微调/相邻边界/历史矩阵扩展。A12为已完成的新修复正式样本，不继续加跑A；原失败保持。
   同步的null元数据省略只复核完成合同，未递归删原参数/输出的null、0或false，不代判live。
+
+- **MAC-B-09 完整文件/EOF/父子取消/末尾回读**（2026-10-02）：源`7033e254e`/正式Tauri，
+  一Task提前冻结24总请求含摘要/4096/360秒/native480秒；在原B07文件与EOF要求上合并长helper，
+  不改32-byte/13-byte或清理断言。run002锁屏前置0请求/0Turn，人工明确解锁后新隔离run003，
+  同冻结额度未重置；旧绑定闭包误读旧control被guard拒绝、另以新绑定继续，未重开默认数据。
+- 实际 **24请求/5压缩/546events/17组参数全同**，整组 **FAIL**：先对不存在target读/patch，
+  缺expected_source；missing_ok/replan后才实际write，全部write提议漏末尾LF，patch/cp后临时/
+  副本31 bytes而非32，未move/delete/helper/EOF/父子取消/report；五失败结果保持，四原件不变。
+- 观察者再未及时结束UI，native480秒expired/TERM0非Cmd-Q通过，终态UI缺失、headpaused/
+  Turnrunning不伪装cancel。App/helper/listener无，fixture200/0，WAL-aware readonly备546rows同/ok；
+  阻断run首次错误immutable源副本不作验收，正确WAL备份3rows另存；Task文件尾NL验证器错误
+  保留，按实际接纳输入的外围trim核对五原文，规范化来源层未定位，FILE末尾LF仍严格失败。
+  证据`2026-10-02/macos/mac-b-mainline-recheck/`；
+  无猜修/第二付费任务，B/N3开放，按主线转C，Windows不代判。
+
+- **MAC-C-02 纠正/压缩/取消冷读主链**（2026-10-02）：源`e46e63a90`/正式Tauri/StepFun新隔离
+  COD，一Task/一steer提前16总请求/4096/360秒/native480秒、cold0模型/90秒。实际12请求/
+  2压缩/233events/9组参数全同，正式按钮接受seq92纠正后仅写/读正确20-byte目标一次，旧目标
+  不存在、三原件保持；旧poll因steer优先拒绝，不能计成功READY观察。主链 **N1**，非N3。
+- 真实UI Stop→cancelled/headready，父子消失/心跳停，先存UI再Cmd-Q0/88.41秒/无expiry或信号。
+  同制品/同数据零模型冷读看见两用户输入，233events逐字同、文件/旧Turn不复活；但cold
+  Cmd-Q实际CEF completion未确认、90秒TERM→KILL，95.03秒 **FAIL**，非观察者拖延或正常退出。
+- 上游response08公开delta.content确发39-byte英文private-omission占位，UI原样保留，不翻译/
+  删除来通过；成功后续poll/完整中文交付未验证，完整C仍FAIL。冷强退WAL存在，初错immutable
+  副本不作验收，普通readonly WAL备233rows同/ok另存；首个审计误用event kind失败保留后按
+  turn/steer-accepted修正。证据`2026-10-02/macos/mac-c-mainline/`；无付费重跑/猜修/Windows代判。
+
+- **MAC-C05-08 冷退出零模型定位**（2026-10-02）：同C02制品/数据，GUID直接Cmd-Q0/13.90秒、
+  进入cancelled会话后Cmd-Q0/21.85秒，两不同条件均无expiry/信号，未卡住故采样0。原C02
+  95秒/KILL首败不覆盖，233events/取消状态只读复核全同；未诊断为钥匙串或特定线程根因。
+- 仅加10行debug阶段记录：page close/context release/native entry/native return，数目/耗时不含
+  profile或凭据，无新锁/等待/CEF调用/完成判定，release不变；Mac lib13/13。路径替换造成的一次
+  launcher ENOENT先留、未启动进程后按精确原制品修正；不重跑同条件循环。证据
+  `2026-10-02/macos/cold-exit-stack/`；记录版正式native未重编/重验，完整C05/C/N3仍开放。
+
+- **MAC-C-03 正式连续/Stop/冷读补缺口**（2026-10-02）：源`e2f7e47ca`，arm64/APFS，正式Tauri
+  `e270148c33ff…`；沿用C02原任务/纠正与16/4096/360预算，13请求/两压缩/335events/15原生参数
+  与canonical全同。先成功READY poll再实际steer；一helper/一20-byte正确写，真实回读/hash和中文
+  说明后继续cursor=60/wait30000 poll，无模型cancel/report。Stop前父子存活，866ms后检查均消失，
+  cancelled/host_cleanup_proven及后续零派发；三原件不变。live Cmd-Q0/124.83秒、冷0/18.77秒，
+  均无expiry/信号，debug native entry/return实际成对；冷读四表/全部文件全同、UI空闲/保留纠正。
+- 四拒绝原样保留：new-input阻止一poll，plan+read+poll整批三拒绝后恢复；未证明准备状态公开报告。
+  首审误把伴随poll的公开回复当无tool收尾，缺新review notice断言首败保留；新分支live未覆盖，
+  不代判W248修复或覆盖C02冷KILL/占位首败。完整C/N3仍开放，旧MM未关闭，不追加未改根因循环。
+- 零模型复用B09：原末LF要求在接受输入和供应商请求15/17/20均保持，三原始SSE写提议已缺LF、
+  canonical参数全同；不能归因owner裁剪，不自动补字节。证据`2026-10-02/macos/mac-c-live-progress/`；
+  首败/修后/完整DB与UI在外，凭据审计0/348，未改Windows结果；下一步只补A/B直接缺口及必要N3。
+
+- **MAC-A-13 共享修复合并正式复验**（2026-10-02）：复用C03正式源`e2f7e47ca`/App
+  `e270148c33ff…`，确认当前仅两进度页差异；原A任务/七文件及16/4096/360预算不变，无重编。
+  7请求/两压缩/385events/12原生参数与canonical全同；读搜正确，pwd/ls/Git两条/指定两测试各
+  一次，exit0/1均reaped，七原件/Git/哨兵保持。report首发旧三ID拒绝后仅修报告，无重做；
+  中文报告/UI保留真实非零1及预检1、计数2/1，完成/实际Cmd-Q0/97.23秒，无expiry/信号。
+- **整组仍FAIL_PUBLIC_DELIVERY_3_MISSING_RESULTS**：末请求07仍含精确cwd、完整含隐藏项列表、
+  原97-byte文本/两搜索，答案却省略cwd/隐藏项名称/原文头尾；不能归因输出缓存丢失，不另加
+  缓存或纯文案微调、不付费循环。操作主链N1不抵扣完整A/N3，结果行详情未展开。零模型复核
+  A12三后续请求六组pwd/ls全文/游标也全同。close wrapper ENOENT、snapshot把.git当文件EISDIR
+  及缺status首错保留后只修外置夹具；原完整385-row备份不替换，readonly复核/前缀/ok成立。
+  证据`2026-10-02/macos/mac-a-shared-results/`，无产品源码修改、Windows结果未动。
+
+- **MAC-GEN-C-02 / C05-09**（2026-10-02）：源`e2f7e47ca`正式App/命令减权General，原C任务/
+  16/4096/360预算；12请求/一压缩/302events/9原生参数与canonical全同。先READY和一次公开
+  准备再实际steer；首write因需replan未派发保留，二提议/一实际20-byte写、回读/hash/中文说明/
+  后续cursor poll成立。Stop前父子活、883ms后检查消失/cleanup证明；冷四表/全部文件全同，
+  未复活。独立General文档只减computer/automation.schedule，其余全同，不代判完整默认配置。
+- 冷首败 **FAIL_UNVERIFIED_CLEANUP_ZERO_EXIT**：0/85.13秒无信号，却四轮清理未验证；实际
+  native entry等待61.851秒后才return，page/context均0。一秒自有PID样本：主线程CEF shutdown，
+  CEF foreground worker停SecItemCopyMatching→CSSM解密RPC；不外推所有历史原因或改钥匙串保护。
+- 锁定Tauri/Wry2.11.2的RequestExit回调收到code却用ControlFlow::Exit，App::run在Tao直接exit0。
+  改run_return后按协调器终态显式退出：未验证/未获终态不为0，已验正常/原非零/失败及restart
+  所有权保持；两最小回归及原邻近共12项不同定向通过、正式Tauri/签名通过。修后同数据零模型
+  正式冷读0/32.51秒、CEF12.412秒返回且无清理失败、302events/四表/六文件全同；未再触发失败
+  分支，不宣称卡顿根因/N3/完整C闭环。原C02强杀、GEN冷首敗及断言红均保留。
+- 发送前只读SQL14/观察器动态代码拒绝/暂白屏、冷尚活时snapshot ENOENT、打包替换路径及签名
+  字节比较首错均在外另存；不重启任务/扩预算，改静态观察器及正确包复制前hash/签名校验。
+  证据`2026-10-02/macos/mac-gen-continuous/`，凭据0/421；Windows原生/真实重启未验、结果未改。
+
+- **MAC-C05-10 CEF按需生命周期**（2026-10-02）：沿GEN冷样本未用Browser却在CEF/Keychain
+  卡住，启动阶段现只检查原包路径/二进制；首次已授权Browser资源创建才在主线程初始化。
+  宿主持有单次结果，调用者取消不丢Engine；关闭阻止迟到初始化并等已启动结果，真实初始化
+  错误仍失败，已用Engine仍原真实shutdown。无加密/Sandbox/权限/清理时限改动，Windows不变。
+- 本机生命周期4/4、正式Tauri/签名通过；同旧cancelled数据正式零模型冷读23.05秒/exit0，无
+  CEF初始化/加载后shutdown，只有unused_closed；原302events/四表/六文件全同，无复活。
+- 独立Browser会话正式UI：首次使用前vmmap无CEF，实际POST Browser后仅一次初始化；本地真实
+  页面点击计数1与独立witness trusted=true一致，模型0/Turn0。URL只在精确principal/session/
+  binding hash profile，Default无该URL；真实shutdown119ms、native0/114.85秒，全部自有PID/
+  listener消失。证明没有通过禁用Browser洗绿，不宣称已用CEF的系统钥匙串等待/N3/完整C关闭。
+- 原GEN首败/线程样本/失败码红保持；本批是mac专属根因，不另改共享/Windows结果。证据
+  `2026-10-02/macos/cef-on-demand/`；未跑无关媒体/生态矩阵，无新增付费调用或范围收缩。
+
+- **MAC-C06-15 过去命令结果/当前文件状态策略矛盾**（2026-10-02）：A13真实请求7的高优先
+  policy仍说后续process使旧命令证据失效/只引最新，与已advertised的历史terminal/output相矛盾。
+  仅统一这两句：当前文件需当前资格，已reaped命令是过去结果、逐项引用matching advertised
+  IDs，不以generic done/最后一条替代多结果；权限/Schema/资格/epoch/计数/预算未变。
+- 强化原两命令缓存回归首红保留，修后及旧stale/instruction边界3项通过；正式Tauri/签名后仅
+  一次日常pwd-P/ls-a任务，冻结6/4096/180（native300+5），实际3请求/127events/3原生参数全同。
+  两命令各一次0/reaped，真实cwd/五名称（含dot/hidden/中文）在report/UI全交付，分别匹配两ID，
+  report首发接受、error0/无其他模型工具或副作用，三原件不变；正常Cmd-Q0/67.10秒无expiry/
+  信号/CEF初始化。完整readonly快照全同/ok，自有App/fixture/listener无残留。
+- 不重跑全A/B/C，不宣称该矛盾是所有漏项唯一原因，A13旧遗漏与B字节/步骤残余保持。首审误
+  限dot名称Markdown格式保留，另按实际中文枚举比对完整五名称，原数据不改。证据
+  `2026-10-02/macos/delivery-policy/`；公共策略根因同步共享，Windows结果未代判。
+
+- **MAC-B-09 字节/步骤责任核对收尾**（2026-10-02）：零新增模型/UI复跑。实际请求Schema中
+  `expected_source`可选，不能把未带guard归为合同缺陷；首patch是在文件尚未创建时提出修改
+  hunk，零publication拒绝符合合同。后续重读/独立replan门槛未放宽，已证明零效果不产生永久
+  未修复义务。三次原始write已缺末LF、canonical逐项相同，不是codec/文件owner裁掉换行。
+- 原样写入、patch保留末LF、零publication恢复、成功write只解除对应目标四个已有小回归
+  本机arm64均1/1；无新测试/产品改动/新增付费调用，不把这些回归替代完整B或生成准确性。
+  B09首败及B08精确文件链保留；生成层是否继续纳入本轮已请求用户选择，本轮不自行扩展。
+  证据`2026-10-02/macos/file-generation-residual/run-001/`；无新公共产品根因，Windows结果未改。

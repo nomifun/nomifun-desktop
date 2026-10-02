@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 use nomifun_agent_contracts::MAX_NATIVE_HISTORY_WINDOW_BYTES;
-use nomifun_agent_runtime::{AgentEngineEvent, AgentPriorTask, EngineBinding, replay_closed_turn};
+use nomifun_agent_runtime::{AgentEngineEvent, AgentPriorTask, EngineBinding, replay_closed_history};
 use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
 use nomifun_common::AppError;
 
@@ -186,11 +186,8 @@ pub(super) async fn load(
             .await?;
         history = project_messages(prefix.messages, prefix_budget)?;
     }
-    for (requirement, events, unresolved) in closed_turns.into_iter().rev() {
-        replay_closed_turn(&mut history, requirement, &events)
-            .map_err(|error| fail(error.to_string()))?;
-        history.extend(unresolved);
-    }
+    replay_closed_history(&mut history, closed_turns.into_iter().rev())
+        .map_err(|error| fail(error.to_string()))?;
     Ok(Some(AgentHistory {
         messages: history,
         prior_task,

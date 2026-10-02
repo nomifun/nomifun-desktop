@@ -1957,6 +1957,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
             plan: nomifun_agent_runtime::AgentPlan {
                 revision: 1,
                 explanation: "Continue after the Agent boundary".to_owned(),
+                exact_actions:Vec::new(),
                 steps: vec![nomifun_agent_runtime::AgentPlanStep {
                     step: "Re-read and verify the current workspace".to_owned(),
                     status: nomifun_agent_runtime::AgentPlanStatus::Pending,

@@ -1,5 +1,5 @@
 //! Deterministic acceptance through the real desktop, Runtime, tools and history.
-//! cargo run -p nomifun-app --example conversation_gui_fixture -- <new-data-dir> [--creative-failure]
+//! cargo run -p nomifun-app --example conversation_gui_fixture -- <new-data-dir> [--creative-failure|--creative-submit-failure|--creative-retry-ack-loss]
 //! Launch NomiFun with that NOMIFUN_DATA_DIR; send a normal request, inspect the
 //! live journal, POST /finish to release the final response, then reload. Send
 //! "格式异常" in a second turn to exercise split pseudo-tool-call rejection.
@@ -17,6 +17,8 @@ use tokio_util::sync::CancellationToken;
 struct Fixture {
     calls: AtomicUsize,
     creative_failure: bool,
+    creative_submit_failure: bool,
+    creative_retry_ack_loss: bool,
     shutdown_wait: bool,
     waiting_streams: AtomicUsize,
     finish: Semaphore,
@@ -40,6 +42,38 @@ fn frame(delta: Value, finish: Option<&str>) -> String {
 
 async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> axum::response::Response {
     fixture.calls.fetch_add(1, Ordering::SeqCst);
+    if fixture.creative_retry_ack_loss {
+        let stream = futures_util::stream::unfold((fixture, 0_u8), |(fixture, phase)| async move {
+            match phase {
+                0 => {
+                    let current = Arc::clone(&fixture);
+                    tokio::select! {
+                        _ = current.stop.cancelled() => None,
+                        permit = current.finish.acquire() => {
+                            permit.ok()?.forget();
+                            Some((Ok::<_, std::io::Error>(frame(json!({"role":"assistant",
+                                "content":"MM_RETRY_VERIFIED_FIXTURE：建议以蓝色与留白设计主题海报。本次仅提供创作方案，未改动画布。"}), None)), (fixture, 1)))
+                        },
+                        _ = tokio::time::sleep(Duration::from_millis(250)) =>
+                            Some((Ok(": fixture keepalive\n\n".to_owned()), (fixture, 0))),
+                    }
+                },
+                1 => Some((Ok(format!("{}data: [DONE]\n\n", frame(json!({}), Some("stop")))), (fixture, 2))),
+                _ => None,
+            }
+        });
+        return axum::response::Response::builder().header("content-type", "text/event-stream")
+            .body(axum::body::Body::from_stream(stream)).unwrap();
+    }
+    if fixture.creative_submit_failure {
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::BAD_REQUEST)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({"error":{
+                "message":"MM_SUBMIT_UNCONFIRMED_FIXTURE", "type":"invalid_request_error"
+            }}).to_string()))
+            .unwrap();
+    }
     if fixture.creative_failure {
         let frames = vec![
             frame(
@@ -146,12 +180,16 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(root.is_absolute() && !root.exists(), "refusing an existing data directory");
     let mode = std::env::args().nth(2);
     let creative_failure = mode.as_deref() == Some("--creative-failure");
+    let creative_submit_failure = mode.as_deref() == Some("--creative-submit-failure");
+    let creative_retry_ack_loss = mode.as_deref() == Some("--creative-retry-ack-loss");
     let shutdown_wait = mode.as_deref() == Some("--shutdown-wait");
-    anyhow::ensure!(mode.is_none() || creative_failure || shutdown_wait, "unsupported fixture mode");
+    anyhow::ensure!(mode.is_none() || creative_failure || creative_submit_failure || creative_retry_ack_loss || shutdown_wait, "unsupported fixture mode");
     std::fs::create_dir(&root)?;
     let fixture = Arc::new(Fixture {
         calls: AtomicUsize::new(0),
         creative_failure,
+        creative_submit_failure,
+        creative_retry_ack_loss,
         shutdown_wait,
         waiting_streams: AtomicUsize::new(0),
         finish: Semaphore::new(0),
@@ -162,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
     let routes = Router::new().route("/v1/chat/completions", post(model))
         .route("/finish", post(|State(f): State<Arc<Fixture>>| async move { f.finish.add_permits(1); "released" }))
         .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst),
-            "creative_failure":f.creative_failure,"shutdown_wait":f.shutdown_wait,
+            "creative_failure":f.creative_failure,"creative_submit_failure":f.creative_submit_failure,"creative_retry_ack_loss":f.creative_retry_ack_loss,"shutdown_wait":f.shutdown_wait,
             "waiting_streams":f.waiting_streams.load(Ordering::SeqCst)})) }))
         .route("/shutdown", post(|State(f): State<Arc<Fixture>>| async move { f.stop.cancel(); "stopped" }))
         .with_state(fixture.clone());
@@ -178,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
     let prepared = async {
         let provider = api(&app,"/api/providers",json!({"platform":"custom","name":"会话回归测试模型","base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":["local-fixture-not-a-secret"]},"enabled":true,"initial_model":{"model":"journal-fixture","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(||anyhow::anyhow!("provider missing"))?;
-        if creative_failure {
+        if creative_failure || creative_submit_failure || creative_retry_ack_loss {
             let canvas = api(&app,"/api/creative-studio/canvases",json!({
                 "title":"MM 旧失败重试验收",
                 "agentKickoff":{
@@ -205,8 +243,28 @@ async fn main() -> anyhow::Result<()> {
     println!("CONVERSATION_GUI_FIXTURE_READY {}",json!({
         "data_dir":root,"control":format!("http://{address}"),
         "session_id":prepared.get("session_id"),"canvas_id":prepared.get("canvas_id"),
-        "creative_failure":creative_failure,"shutdown_wait":shutdown_wait
+        "creative_failure":creative_failure,"creative_submit_failure":creative_submit_failure,"creative_retry_ack_loss":creative_retry_ack_loss,"shutdown_wait":shutdown_wait
     }));
     fixture.stop.cancelled().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creative_submit_failure_is_one_http_rejection_not_a_success_stream() {
+        let fixture = Arc::new(Fixture {
+            calls: AtomicUsize::new(0), creative_failure: false, creative_submit_failure: true, creative_retry_ack_loss: false,
+            shutdown_wait: false, waiting_streams: AtomicUsize::new(0),
+            finish: Semaphore::new(0), stop: CancellationToken::new(),
+        });
+        let response = model(State(fixture.clone()), Json(json!({"messages":[]}))).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert!(!fixture.creative_failure);
+        assert_eq!(fixture.waiting_streams.load(Ordering::SeqCst), 0);
+    }
 }

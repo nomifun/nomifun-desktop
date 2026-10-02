@@ -6,24 +6,102 @@
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
 核心共同链路达标后单独通知，再补其中尚缺的Windows命令/native断言，不以全产品发布认证阻断收尾。
 
-2026-10-02用户再次要求尽快聚焦收尾：固定B→C→A完整场景/必要N3→Windows差异的队列，复用已验子链；
-暂停纯说明微调/旧矩阵扩展，同一未改根因不付费循环，只处理当前主线直接失败并集中结案。
+2026-10-02用户再次要求尽快聚焦收尾：最新实施计划已删除B→C→A整组/N3活动门槛，改为具体缺陷
+定位、直接修复、最小回归及必要的一次短UI。复用已验子链，暂停纯说明微调/旧矩阵扩展；
+同一未改根因不付费循环，阶段交付、生成精度残余与未认证项分开，不将旧FAIL改记PASS。
 
-## 当前活动问题簇
+2026-10-02用户要求整体复盘和提速方案：实施计划已固定最后四个工作包，机制结算、生成残余
+归类、Windows共用退出边界及一次最终交付，预计1～2小时有效工作。该估计不表示共享/Windows
+全部Case通过；旧缺证、复杂生成失败和平台阻断保持。单主agent、复用已验夹具和证据，无新根因
+不新增模型/整组测试，诊断时间盒不可通过新批次重置。本次只设计/更新计划，无模型调用或产品改动。
 
-| 簇 | 可复用基线 | 下一缺口 |
+用户随后将目标明确为上述四包的阶段收尾，允许Windows退出不可达时保留阻断并人工交接。
+四包已按W258证据完成结算，单份[阶段交付总结](DELIVERY-SUMMARY.zh.md)汇总已验机制、开放问题及
+退出人工步骤；本次目标按该交付范围完成，完整共享/Windows认证及所有原失败状态保持。
+
+### macOS 阶段性 P0 交付（2026-10-02，用户选择方案 1）
+
+用户选择先交付已修且已验证的产品机制，生成精度残余后续安排。macOS 本轮自动走查收尾：
+C06-15 历史命令结果策略 `ace29cdd0`（3 项回归/正式两命令 N1）、C05-09 退出失败码
+`6f1aaa270`（12 项回归/正常冷读）、C05-10 CEF 按需生命周期 `a3a0bf001`（4 项回归/
+正式未用及首次使用）已交付。B09 原始模型参数缺 LF/步骤错误仍开放，产品字节/恢复保障
+4/4 不代判生成通过；复杂 A 漏项、已用 CEF Keychain 等待/失败分支 live、旧 MM/N3/发布
+认证等保留为后续未解决或未验项。详见 [macOS 阶段交付记录](PROGRESS-MACOS.zh.md)。
+本项不关闭共享全范围验收、不改写 Windows 结果或改变其排程；本次仅文档，无新增模型调用。
+
+macOS 后续快速方案已设计，见 [四簇短队列及停止线](PROGRESS-MACOS.zh.md)：
+R1 字节/步骤、R2 多项结果交付（并入默认 GEN）、R3 旧 MM 实际 retry、R4 已用 CEF/失败退出。
+先复用证据定位，直接修复 + 最小回归，至多一次针对性正式验证；不重跑全 A/B/C/角色/N3。
+本次仅设计、未执行/未增加模型请求，不改共享全范围门禁及 Windows 结果或排程。
+
+macOS 已执行 R1/R2 短子链：R1 5请求/精确写改读N1；R2新增完整默认General fixture opt-in，
+不再删Computer/自动化模块，补正式必需资源选择，4项回归和正式Tauri/StepFun4请求的三结果
+交付N1。实际15模块/Skill与官方manifest全同；旧减权模式保持、无系统权限改变。此前422
+预检和A13/B09首败保留，不关闭原完整A/B/N3或Windows结果。详见macOS进度；共9个新请求。
+
+macOS R3发现并修复Creative链路丢弃canonical暂停：复用严格pause判据，非终态消息明确暂停，
+保留pending/停止确认、不自动重发或取消；41项直接回归及正式HTTP暂停→用户Stop通过。
+另外以debug指定UUID的一次回执丢失单独进入实际失败消息retry，真实Tauri点击后原key/
+Turn/operation仅一个、模型仅一次，冷读不重发；付费0，首个native/冷观察超时仍FAIL保留。
+仅隔离等价negative N1，不代判Windows旧数据/N3/全MM。详见macOS R3记录；Windows结果未改。
+
+macOS 四簇快速方案执行/交付记录已齐：R1/R2真实短链共9个StepFun请求，R3产品pause修复/
+实际retry及冷读negative N1，R4核对未漂移CEF/退出源码、复用正式已用Browser119ms ack并补
+当前退出/清理边界3项。Keychain系统等待及native失败分支live仍OPEN/未验，不改记PASS。
+此为限定方案的交付，不声明全部体验问题、原阶段二三、N3或共享全范围达标；残余见macOS
+最终状态表。R4无新模型/native运行或公共源码改动；Windows原生结果与排程保持。
+
+## 核心机制交付表（W258核账；子链证据）
+
+| 簇 | 已验机制与直接证据 | 保留边界 |
 | --- | --- | --- |
-| C01 命令选择与参数 | W73/W92；W184/185宿主/cwd/CMD；W198正式GEN目录/Hidden/读搜/Git/两测试一次 | 完整A报告首发/N3、其他入口与macOS首发待验 |
-| C02 读取与搜索 | 工作区读搜回归；W198正式中文空格文件43 bytes/4行/hash、匹配/零匹配 | 完整A报告首发/N3，当前状态未重验的清楚交付 |
-| C03 Git观察与小测试 | W86/W184；W198正式Git字节一致、两Bun各一次exit0/1 | 完整A报告首发/N3，不由已有操作证明代判 |
-| C04 文件与步骤结果 | 既有File/Artifact回归；W209 Windows正式COD/GEN/COD文件链各31/31；W210摘要单位冷读14/14 | 文件效果/交付N3及摘要单位已验；报告拒绝修正真实触发，macOS独立余项保持 |
-| C05 进程与停止 | W194输入/EOF；W196正确游标和Stop5秒N1；W227干净timeout直接收尾N1；W228/229早期READY引用修复及正式N1 | 进程/超时首发N3、公开语言和等待播报、完整B衔接；文件链N3见W209 |
-| C06 过程与交付真实性 | 业务非零/参数未执行/命令未启动已有分类；W230干净timeout摘要/阶段/回执冷读12/12 | A报告内容与引用范围、模型内部字段及信号说明、混合结果/新实时展示与N3；完整A/B/C待验 |
-| C07 连续会话与纠正 | W95/W98；W182取消冷读；W185完成历史读取及同步后一次实压缩；744ca440b保留已结算检查 | 最新用户纠正、较长连续任务及完整C场景 |
-| C08 模型协议接合 | W99/W100；W184 GEN；W185 GEN/COD真实StepFun→CMD/控制引用owner | 各入口定向小样本已有；完整连续命令与N3门槛未达 |
+| C01 命令选择与参数 | W245实际cwd/Hidden命令一次；W255当前cwd/完整九条目及真实Hidden、首次matching报告20项 | 特定合法命令及交付N1；原复杂A首败保留 |
+| C02 读取与搜索 | W245完整样本/两搜索各一次；W255中文空格文件一次全文、首尾/43 bytes/完整SHA | 只读事实与短交付已验，长任务漏项稳定性未认证 |
+| C03 Git观察与小测试 | W245 status/diff及指定两测试各一次、exit0/1、索引/文件不变、哨兵未执行 | 实际执行/非零交付可复用，原首report拒绝未消失 |
+| C04 文件与步骤结果 | W209三正式文件链各31/31；W250实际来源SHA/末LF/保护原件/最终回读；W210摘要单位 | 精确效果及保护成立；W240未带要求的来源guard仍开放，健康子链不代判全部模型遵循 |
+| C05 进程与停止 | W257六组原生参数/实物18/EOF18/exit0/推进游标；W248/249 Stop前父子存活、385/536ms消失 | 当前短链与Stop机制成立；旧漏stdin/重复cursor仍开放；后续W259正常空闲Quit已验，失败/活动Turn退出native未验 |
+| C06 过程与交付真实性 | W245业务非零；W230冷读/原回执分类12项；W254历史EOF0/当前读取13项；W255三结果交付 | 冷读和特定交付子链已验；新混合结果/长任务生成与全UI未认证 |
+| C07 连续会话与纠正 | W242纠正身份冷读；W248/249同Turn纠正/实际压缩/Stop、取消冷读；W253历史保留在W254正式采用 | 不复活/不重做的已验链复用；C原17-byte缺LF、引用反馈采用及完整长会话未全部达标 |
+| C08 模型协议接合 | W257真实7请求/SSE，六原生调用参数与canonical/owner结果相同，含一次压缩；GEN/COD已有正式样本 | 普通生产网络拓扑、旧拒绝帧及各类生成准确性不由这一个样本认证 |
 
 本表只列候选复用与缺口；是否受新代码影响需核对具体基线，不把源码测试存在当已跑通过。
-本轮结案按A/B/C正式任务、核心bad-case闭环及独立结果，不再按原Case×角色×OS计算完成率。
+W258已读取12份独立断言产物并核对当前差异：b1c21a0a5之后Windows核心Runtime/Session/Broker/
+File/Router/Terminal源码无变化；后续desktop变更为debug精确key的回执丢失夹具，Creative与macOS
+变更单列。W209以来文件执行实现保持，仅instruction_scope增加识别元数据/说明，后续W250文件链
+亦成立。因此复用上述指定断言，不把表格的8行计成8个完整Case通过。
+本轮按具体核心缺陷及独立证据交付；原A/B/C/N3保留历史/认证状态，不再作为整组复跑门槛，
+也不再按原Case×角色×OS计算完成率。W254/255关闭历史真实性和多项结果交付的短链，生成步骤/字节
+残余及Windows托盘退出另列，尚不宣称共享全阶段达标。
+
+### 剩余处理边界（W258归类）
+
+- W250漏stdin/重复cursor：真实调用和实物偏差已证；旧拒绝输出/实际工具表缺失，唯一原因待证。W259核对原seq564摘要及保留回执均含cursor25，seq576完成提议仍为0；该次压缩未完全丢失游标，实际HTTP/SSE仍缺。W257新短链PASS不覆盖旧FAIL，不再补相同正向样本。
+- W249末LF：原ToolCallCompleted已是17-byte无LF，owner/实物相同；Windows原SSE未保存，不把macOS供应商结论移植到本机，不自动补字节。
+- W240来源SHA及原复杂交付：产品schema允许无expected_source，但用户本次明确要求guard；提议未遵循继续开放。后续正确源保护/短报告不证明复杂任务稳定性。
+- Windows正式退出：W258原BLOCKED_UI_REACHABILITY保留。W259在用户明确提供人工托盘操作后，新隔离实例PID43056实际Quit自然exit0，8进程/5监听最终消失，原三表/文件及无活动Turn保持，正常空闲退出N1通过；失败码与活动Turn退出native未验，协调器组件规则复用。当前控制器仍无托盘目标，全角色/N3/100 seed/LONG/99%保持未认证。
+
+机制核账、残余归类、Windows退出边界和阶段交付已结算，原失败不改PASS；尚未满足的实际体验要求仍开放。
+外部2026-10-02/windows/w258-core-delivery保存所读产物hash/选定断言/源码差异和归类，
+没有新模型、测试或产品修改。首次读错W255断言集合字段已纠正并留档，原产物未变。
+正式零模型冷实例另核对三表/文件/无活动Turn共5项成立，既有记录无复活。原10分钟退出观察
+到期后复核同一PID仍活，延续同一进程至15分钟而未重启；没有实际Quit证据。自有夹具已清理，
+本轮核心机制交付可用，不宣称共享全阶段或Windows全部Case完成；后续恢复该断言须有可操作托盘的环境/人工。
+
+后续W259已按上述人工条件取得新实例正常Quit证据，详见Windows页对应记录及
+外部2026-10-02/windows/w259-open-items-closeout；本次无产品修复/模型调用，旧退出阻断不改写。
+
+用户后续已开启剩余共享/Windows全面走查的新目标，旧有限交付不代判该目标完成。W260使用
+当前正式Windows产物验证Creative HTTP暂停→实际Stop、精确提交回执丢失→实际retry→同数据
+冷读：34项直接回归/桌面边界通过；两个本地模型调用，分别28/30events、0effects，retry原key/
+Turn/operation一个，冷读四表整行hash及模型计数保持。三个GUI均由用户托盘Quit实际exit0、
+最终后代/监听清理；原夹具/观察器首错单列。无新产品源码，原旧MM及生成/平台/发布余项保持，
+不把隔离negative N1计为真实StepFun生成或全MM通过，详见Windows页W260。
+
+W261尝试W249精确引用反馈的真实StepFun采用，未达目标：初始控制工具按现有adaptive合同未
+暴露，错误的“先update_plan”载体两请求无进程后保留；修正前提后，原生模型仍在追加输入前
+自行cancel/收尾，未形成input1或目标拒绝。9个新真实请求/完整SSE、5组参数与canonical相同，
+实际请求明确保存等待/不取消notice、process ID/cursor，工作区保持、helper清理。无新产品修复，
+新生成首败及操作者未及时提交steering的边界保留，不覆盖W249采用或旧缺证；全面目标仍active。
 
 ### C04-01 / C05-04 精确末尾 LF 与模型参数（2026-10-01，macOS MAC-B-01；MAC-B-02 正式修后仍失败）
 
@@ -434,6 +512,20 @@
   整组FAIL：16请求/5压缩/一伪摘要拒绝，literal sed错误→deferred Bun/重复观察、cap暂停；
   观察者漏及时UI结束，native480秒TERM0仍expired，未假报取消或Cmd-Q通过。491rows/raw参数/
   原件/Git及WAL-aware只读库保持，证据2026-10-02/macos/mac-a-file-page-recheck；不覆盖A/B/C/N3。
+
+- **2026-10-02 MAC-B-09 完整B仍FAIL**：源7033e254e/正式Tauri/StepFun，提前24-call整链预算，
+  锁屏run零请求、人工解锁后新run；24请求/5压缩/546events/17参数全同。模型先patch后create，
+  缺guard/漏FILE末尾LF，后续实际patch/cp产物31非32；未到两helper/EOF/父子cancel/report。
+  四原件保持，首败/拒执行不吞；观察者超时TERM0仍失败、终态UI缺失，不伪造取消/完成。
+  WAL-aware完整只读库保持，证据2026-10-02/macos/mac-b-mainline-recheck；不加额/重跑或猜修，
+  转C主线，旧Mac/Windows操作子链及完整B/N3缺口原样保留。
+
+- **2026-10-02 MAC-C-02 核心链formalN1**：源e46e63a90/正式Tauri/StepFun，12请求/2压缩/
+  233events；原输入及正式steer保留，纠正后单写/回读20-byte新目标，旧目标未写，三原件保持。
+  UI Stop取消/父子清理、live Cmd-Q0；零模型冷读用户两输入/全部233events不变，旧Turn不复活。
+  整组仍FAIL：cold CEF shutdown未ack，90秒TERM/KILL；上游实际公开输出英文omission占位，
+  不删/译原文、早期poll被steer拒绝不计成功，完整交付/N3待验。证据2026-10-02/macos/mac-c-mainline，
+  原冷WAL错误副本另留，正确readonly WAL备份作核账，无付费重跑/源码猜修/Windows代判。
 
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
@@ -3148,3 +3240,190 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 修后正式GEN完整B：第二步以无摘要保护的write_file直接覆盖新建文件，违反明确来源SHA要求；首败原调用已保存。正式Stop后cancelled，保留最后read已执行及磁盘正确18-byte/echo输入、原件hash、父子cancel/reaped证据，工具结果错误0，未报告成功。
 - 原audit23/28保留，来源保护/重复write和停止后的未交付保持失败；无相同根因重跑。UI还出现私有推理省略占位文本，合并记录展示残余，按用户优先收尾要求转C链，不新增说明优化批次。
 - 本批仅真实主线走查，仓库外2026-10-02/windows/w240-mainline-b-closeout保存原参数/阶段首败/取消DB、字节/进程/原事件审计及UI；没有产品源码或新回归，共享未结案。
+
+### W241 连续纠正首败与冷读展示（2026-10-02，正式FAIL）
+
+- 正式COD完整C：27步/15压缩，同回合steer-accepted接受纠正；却启动helper三次/自行cancel两次、来源各读三次。写纠正结果被计划门禁阻止，四次来源引用拒绝后failed；引用多加原输入没有的“核对”，未产生结果或禁止初稿，未执行操作者Stop/Retry。
+- 原audit10/21不改；同回合纠正另以canonical事件证明。原件hash/宿主清理/当前PID消失成立，70条见证不证明三次启动全部拓扑；failed不改判cancelled，完整C未通过。
+- 正式零模型冷启动：events/turns/sessions全行数/hash及全部夹具文件不变、无复活，但实时纠正气泡在冷读UI不可见，canonical纠正仍在。记录恢复展示残余，不用数据库完整代判UI完整。
+- 外部2026-10-02/windows/w241-mainline-c保存所有首败和独立冷读证据。按收尾约束合并处理A重复/报告、B来源保护/交付、C重启重读/引用和恢复展示，不对未改根因付费循环，不展开旧矩阵。共享仍未结案。
+
+### W242 纠正消息在冷读中被错误过滤（2026-10-02，正式子断言PASS）
+
+- W241的steer message projection使用独立事件UUID，但correlation_id是拥有该输入的Turn operation；历史响应误拿operation当消息UUID而丢弃。accepted用户消息改用已有message projection ID，旧记录也恢复；不改canonical来源、Turn归属、执行或权限。
+- 双纠正独立身份回归修前红/修后绿，相关历史17项通过，fmt/diff与desktop边界通过；原失败会话正式Tauri零模型冷读7/7，纠正/failed提示可见，全表与磁盘hash不变、无复活或新动作。
+- 只关闭C冷读纠正展示；完整C执行/实际Stop、A重复/报告、B来源保护/交付及必要N3仍开放。外部2026-10-02/windows/w242-mainline-recovery保留首红/根因/回归/正式冷读，不启动未改根因的付费循环，下一项合并A复验。
+
+### W243 合并A复验仍受替换预算阻断（2026-10-02，正式FAIL）
+
+- 一次正式COD A、约2分57秒、11步/8压缩：cwd/list/专用全文及两搜索/Git各取得结果且Git未重复，第一指定测试exit0；自选PowerShell摘要脚本先exit1，修正提议未dispatch。十文件/Git/原事件不变，第二测试/报告未到达。
+- 压缩两次候选后83,681 bytes/27,894估算tokens超过27,854限制40而自行failed，UI确有Nomi内部失败；未Stop/Retry。原audit10/16与交付0/6保留，不代判W237报告反馈/语言采用或完整A。
+- 外部2026-10-02/windows/w243-mainline-a-closeout保存原始首败和终态。下一步直接核对正常压缩的触发阈值与冻结硬接纳上限，供应商margin/权限/原context保持；不继续删说明以追逐几十token，不重跑未改根因。A/B/C共享仍未结案。
+
+### W244 正常摘要误用触发阈值及立即再压缩（2026-10-02，正式预算N1）
+
+- 两首红：27,857-token合法摘要被27,294 soft trigger拒绝，原冻结硬接纳上限28,160未超；修接纳后下一小步又立即摘要。正常replacement现使用原硬上限扣实际usage margin，token floor给后续小步留余量；typed overflow严格cap、输出/字节/消息限、原上下文/回执/一纠正上限不改。
+- 一个最小回归覆盖两故障，compaction19项和7项严格预算/summary邻近，共26项不同定向通过，fmt/diff及正式构建通过。正式COD A约1分33秒、七步/五压缩、summary拒绝0，两个指定测试各一次exit0/1、报告首发接受、精确测试scope和1/1失败计数、UI正常非零成立，预算/测试链为N1。
+- 整体A仍FAIL：Git status/diff各两次，前四项实际值交付省略；原15/16及交付1/6不改，completed不是完整A PASS，N3/GEN不代判。B来源SHA/交付、C重启重读/来源纠正/Stop等仍开放；只处理这些主线直接阻断，不新增矩阵或未改根因的付费循环。
+- 外部2026-10-02/windows/w244-mainline-compaction-envelope保存两首红、26项/构建、正式原参数/DB/事件/独立scope与UI；Git仅预算接纳/余量、一个回归和短进度。共享门槛仍未达。
+
+### W245 已返回search/Git小结果未进入固定context（2026-10-02，正式交付改善N1）
+
+- W244只有请求参数、无匹配/status/diff数据，压缩摘要丢值后无法直接交付。既有四结果回归首红保留；现scoped ReadOnly、成功dispatch且同call的search/status/diff仅复制指定字段，每snapshot512 bytes，原scope/detail/台账预算不改，超限不剪裁，私密/错身份/query/动作/未执行/opaque等负例不入context。
+- 原epoch/资格/权限/Schema/计数保持，历史数据不升级current；45项completion及三项硬预算/余量/报告不重做，共48项不同定向通过，fmt/diff/正式构建通过。
+- 一次正式COD A约1分24秒，11步/四压缩、summary拒绝0，观察/两测试各一次exit0/1；交付由W244的1/6改善为4/6，实际原文/SHA/两搜索/Git修改进入答案。首report三项的五个旧ID被预检拒绝后仅纠正report，无重做，2/1计数及首败保存。
+- 整体A仍FAIL：实际cwd/完整九条目及三个英文rationale残余，原15/16、4/6保持，不计N3/GEN或共享达标。外部2026-10-02/windows/w245-mainline-read-result-retention存全证据；按固定收尾规则转C直接阻断，不继续未修根因的付费循环。
+
+### W246 running结果不合格不等于应丢失进程身份（2026-10-02，正式连续纠正N1）
+
+- 首红确认running缓存process_id/READY/next_cursor因只投给eligible条目而消失。现仍tracked的running缓存进入ineligible数据，并给last_observed_running_processes；不取得完成资格/新授权，清空tracker后不能显示旧running数据。原输出/详情/台账和冻结预算不变，46项completion及三项严格预算/报告邻近，共49项不同检查通过，fmt/diff/正式构建通过。
+- 一次正式COD C、13步/四压缩，同Turn纠正已应用；实际一helper、来源各一次、正确18-byte结果写/读各一次，无自取消/重启重读。两项新输入/replan阻止的提议未dispatch且原错保留；原17/21及按实际原参数/dispatch/steering另审都保留。
+- 正式cancelled/冷读无复活、全部DB三表与磁盘hash不变，原AX7/8及去浮层后实际取消截图分开保存。但helper在Stop前已达120秒deadline，CIM277样本证明约120.106秒父子消失；本次不证明运行中Stop，不代判完整C/N3或共享门槛。18字节误判、初始start无自适应观测及审计假定均另澄清，不覆盖原文件。
+- 外部2026-10-02/windows/w246-mainline-live-process-context存全部证据。下一步只补实测期限不足导致未覆盖的live Stop、以及A/B直接缺口；不增角色/旧矩阵，不用组件/timeout代判Stop。
+
+### W247 等待进度被要求清理并报告完成（2026-10-02，正式FAIL）
+
+- 一次正式COD C、helper期限按实测在运行前改为300秒，产品预算保持；19步/八压缩后模型自行cancel并completed，操作者Stop未执行。18-byte纠正及来源/原件保持，report旧ID拒绝及原计数保存，完整C不代判PASS。
+- 根因直接在宿主：无tool的等待响应触发完成复核，用户角色notice要求“Before ending, poll or explicitly cancel ... no process may survive this turn”；模型公开说明按系统要求取消，与原保持到Stop约束冲突。既有running进程回归强化后首红保留，转W248修执行/收尾状态区分。
+- 外部2026-10-02/windows/w247-mainline-live-stop存原参数/复核指令来源/DB/事件/353条CIM/未执行Stop及UI；不重复付费旧根因，普通完成/unknown/取消和宿主清理仍需严格保持，共享未结案。
+
+### W248 把活进程进度保留在执行阶段（2026-10-02，正式live Stop N1）
+
+- W247等待进度触发收尾并被要求cancel。现has_running_processes独立于can_report，活进程继续原执行/poll及用户保持约束，不索取报告或授权自取消；实际终态清理、无活进程报告/unknown patch/blocked/计数与预算不改。既有live回归首红保留，修后七项不同邻近检查、fmt/diff/正式构建通过。
+- 一次正式COD C、22步/八压缩，同Turn纠正、来源各一次、无自cancel/重启；Stop前真实父子存活，canonical cancelled后CIM约385ms均消失，419样本/心跳/host cleanup/后续零派发，取得live Stop N1。W247首败不覆盖，完整C仍不代判PASS。
+- 原20/24及三拒绝保持：write未派发、两引用拒绝，实际写/读各一次但参数漏末LF，真实17bytes不符合18byte要求；缺LF的provider/codec归因未验，不补写洗绿。冷读全部DB/磁盘不变无复活，原6/8及视觉停止提示分开保存，错误文件不被恢复或隐藏。
+- 外部2026-10-02/windows/w248-mainline-live-progress保存首红/中间红/七项/正式父子停止/原参数/DB/事件/审计/冷读；仅闭此直接等待/停止根因，C字节/引用、A/B与必要N3仍开放，共享未达。
+
+### W249 引用拒绝保留精确addition位置（2026-10-02，正式采用未触发）
+
+- W248三个新要求的第2个source多加“核对”，只提示input 1导致重复原错。首红保留；内部merge沿原验证给数字JSON路径/来源索引，update_plan反馈rejected_parameter_path与source_input_index，旧String错误API/验证集合/原计划/拒绝/计数保持，不回显原输入/quote或自动修复。9计划＋6要求＋两严格预算/防重做，共17项不同定向及fmt/diff/正式构建通过。
+- 一次正式COD原C，38步/15压缩、239.114秒内Stop，helper一次/源文件完整分页无重读，父子活体Stop后约536ms消失、cancelled无新派发；零模型冷读全部三表/磁盘不变无复活。原21/24、冷读6/8与末LF缺失保留，真实17bytes，不补写洗绿。
+- 本次update_plan省略requirements，未触发引用拒绝，不代判位置反馈采用/完整C/N3。录得ToolCallDelta空参数文本，不能归因provider或codec；工具已见参数缺LF只是边界事实。外部2026-10-02/windows/w249-mainline-citation-location存全首败/审计及澄清；不重跑未改LF根因，A/B及必要N3仍开放，共享未达。
+
+### macOS C03 主链补缺口与末LF归因（2026-10-02）
+
+- 正式Tauri/StepFun、源e2f7e47ca，原C任务/16-call预算：13请求/两压缩，READY→同Turn纠正→20-byte写/回读/中文说明→后续poll→实际live Stop，父子消失/cleanup证明及冷读四表/磁盘不变为本机N1。四次预检拒绝保留；准备公开报告和W248新review分支未覆盖，原C02冷KILL未修，不代判完整C/N3或Windows结果。
+- B09零调用复用定位：末LF要求在原接受输入及写前provider请求仍保留；三次原始响应SSE的content已缺末LF，canonical参数逐项相同。因此本样本不支持codec/文件owner裁剪归因，也不自动补LF洗绿；不外推为全部平台/供应商原因。证据外部2026-10-02/macos/mac-c-live-progress，首败及完整轨迹不入Git。
+
+### macOS A13 合并复验，实际执行与公开交付分开（2026-10-02）
+
+- 正式Tauri/StepFun原A任务、源e2f7e47ca/预算16：7请求/两压缩，全部观察/两测试各一次、实际exit0/1/reaped，无重复或改文件。首report旧三ID拒绝后只修报告，真实错误计数/UI2/1、completed及正常Cmd-Q为本机操作链N1；共享预算首败未再触发，不代判完整A/N3。
+- 整组仍缺cwd/隐藏项名称/原文头尾交付；末任务请求07中这些实际值及两搜索都存在。A12零模型三请求六组pwd/ls输出/游标也精确，现证据不支持再加缓存或owner裁剪归因。原首败、未展开详情和夹具首错保留；不放宽交付或重复未改根因，外部2026-10-02/macos/mac-a-shared-results，未改Windows结果。
+
+### C05-09 Tauri退出传递丢失失败码（macOS实测，2026-10-02）
+
+- 命令减权GEN原C任务12请求/一压缩，准备公开一次/纠正/真实回读/后续poll/live Stop/冷读为本机N1，一次replan拒绝保留。冷进程0/85.13秒，但清理四轮未验证；实样本主线程CEF shutdown、worker钥匙串解密RPC，native等待61.851秒。不改保护，不代判完整C/默认GEN/N3或Windows。
+- 锁定Wry2.11.2 RequestExit传code给回调后只设置ControlFlow::Exit，App::run在Tao直接exit0，既有协调器失败码没有到达进程。现run_return后显式采用协调器终态；未验证/未获允许保持非零，正常0/原非零/fatal和Tauri restart所有权保持。两最小回归＋原邻近共12项不同检查、正式Tauri通过；无CEF调用/清理判定/预算/权限改变。
+- 修后同数据零模型正式冷读正常0/32.51秒且清理无失败、原四表/六文件全同；本次未重触发失败分支，真实失败码路径和CEF卡顿仍须分开，未宣称全部根因关闭。原native首败及严格红保留于外部2026-10-02/macos/mac-gen-continuous；Windows native与真实restart未验、Windows结果未改。
+
+### W250 包装工具提议误入压缩摘要，集中主线收尾（2026-10-02）
+
+- 正式GEN原完整B复验最后交付缺口：真实SHA patch/复制移动/精确删除/18-byte末LF终版及最后read各一次，原件保持；没有stdin写入却close，真实EOF0 bytes，hold重复cursor0，未报告。20步/11压缩、原20/28及三模型拒绝/一截断/两摘要拒绝保持。观察组织越240秒限14.275秒后正式Stop为cancelled，父子原cancel159ms/69样本、host cleanup/后续零派发及真实取消UI成立；完整B仍FAIL。
+- 确定摘要缺口：三次接受仅含tool_call的JSON包装提议，原校验仅识别直接调用对象。只补该形态到已有CompactionInvalidSummary/一纠正路径；首红保留，普通历史/文档数据、原输入/context、无工具摘要及冻结预算不改。两个既有回归加强，8项不同定向及fmt/diff通过，不追加付费循环；未证明它是漏stdin原因或新修复已被真实模型采用。
+- 主线剩余集中为摘要修后正式验证、A结果/引用语言、B输入/游标/交付、C末LF及必要N3/入口，复用已验子链，不扩业务/旧矩阵。Windows完整场景0/3，共享未达；来源保护本次遵循不抹W240首败。外部2026-10-02/windows/w250-mainline-b-final存完整证据，Git只保留必要源码/已有回归/短进度。
+- 正常同步a3a0bf001；共享退出码修复的两项回归在Windows通过，合计10项不同定向检查，未跑全仓测试。正式Windows退出和摘要新修复的live效果保持待验；旧正式构建及macOS证据不移植为本机PASS。
+### 用户再次要求核心体验提速收敛（2026-10-02）
+
+- 实施计划追加缺陷驱动规则：复用未受影响的实际证据，停止为复杂整组全绿/N3/角色矩阵重复子链；安全、精确字节、结果真实性和首败不减。未通过/生成残余/发布认证分开，不改写Windows结果。
+- macOS新增C复跑在发送前关闭，实际请求0/无native启动/fixture200退出及无残留。当前只追结果交付完整性、精确字节/步骤提议两个体验缺口；已有操作/EOF/Stop/冷读/原生退出修复不再从头跑，仍不宣称整组A/B/C或全部模型行为达标。
+
+### W251 原生历史丢失真实回执，公开EOF被错误摘要替代（2026-10-02）
+
+- 正式GEN只读收尾W250，当前文件18-byte/完整SHA正确，却公开旧EOF18，原实物/回执为0。真实Runtime零模型重放仅两消息、无原ToolResult，保留错误摘要；首败及原audit/另审不改。
+- 修复闭合回合重放：原生process实际准入、原call/result及互动process_id匹配后，按原投影策略保留已丢出tool尾部的小回执。单记录2 KiB、整块含标签4 KiB，白名单字段/整条省略计数，不复制input/env/私有字段、不添加工具交换/当前证据或权限；恢复前缀及隔离归档保持。两最小回归先红后绿，历史5＋预算/隐私/不重做4＋恢复/核对/不覆盖3，共12项不同定向通过，fmt/diff通过。
+- 真实W250修后重放9回执/1省略、准确EOF0，原错误摘要和事件保持。但唯一修后正式样本没有新read、仍答EOF18（11/13），不代判live采用或共享达标；无同根因付费循环。新二进制/嵌入服务及无截断已核对，实际请求wire未取得，生成/接合责任仍有验证缺口。完整证据外部2026-10-02/windows/w251-report-closeout，不把组件结果拼为整组PASS。
+
+### C06-15 高优先级策略误把历史命令事实一律判旧（macOS实测，2026-10-02）
+
+- A13请求policy说后续process使旧命令证据失效/只引用最新，实际机制却保留reaped命令过去terminal/output。强化原缓存回归首红；仅改两句区分当前文件状态与过去命令结果、逐项matching advertised ID，不改资格/权限/Schema/预算/计数或刷新旧文件。
+- 三项直接回归、正式Tauri及一次针对性日常任务通过：3请求/两实际命令各一次0/reaped，真实cwd/完整五名称在中文report/UI、各matching ID、首次report/error0/无额外操作与文件改动。宿主政策进入真实wire，正常Cmd-Q、全快照/无残留独立核对。
+- 只关闭该产品矛盾的针对性链N1，不声称唯一因果、完整A/N3或所有模型交付达标；A13首败/B缺LF仍保留，不追加未改问题循环。外部2026-10-02/macos/delivery-policy存首红/修后/wire/DB/UI及首次格式oracle错误；Windows结果未改。
+
+### W252 删除旧排程冲突，限定核心收尾（2026-10-02）
+
+- 实施计划删除残留的B→C→A/N3活动门槛和旧整组结束条款，采用每缺陷30分钟零模型定位、最小修复/回归及必要的一次短UI；历史断言/首败/未认证状态不变，阶段交付和生成精度残余分列。
+- W250/W251真实记录经正式Runtime与OpenAI Chat编码器重建，源/编码消息各9条，真实EOF0保持，网络请求/真实凭据读取均0；证明构造与编码可保真，不能代判原历史HTTP或模型采用。外部2026-10-02/windows/w252-convergence-audit存证明及首次探针编译错误；无新产品源码、模型循环或全仓测试。
+
+### W253 后续闭合回合再次擦除较早原生回执（2026-10-02）
+
+- W251保留只附在该回合尾部，后续回合合法压缩仍能清掉它；零模型两回合反例首红保留。整组历史现单独暂存验证后的有界回执，原对话/未交付纠正重放完再加入，App接线采用；原单回合API、预算、身份/Schema、当前证据及执行权限不变，不按跨Turn重复call ID误排旧结果。
+- 历史6＋恢复/硬预算/报告不重做3，共9项不同定向、App check及fmt/diff通过；有效原件/错源/超限/非零/清理未决沿前批断言保持。真实记录新入口/正式编码仍9条且EOF0保持，数据排在错误旧回答后、当前用户输入前；网络/真凭据读取0，source/DB不改写。
+- 这只关闭可复现的数据再丢失，排序对模型准确性的作用未验，不代判W251因果、live或共享达标。两项夹具首错与真实行为首红分开，外部2026-10-02/windows/w253-closed-history-receipts保留完整记录；不付费循环或扩展角色/业务矩阵。
+
+### W254 历史真实回执与当前读取的正式交付N1（2026-10-02）
+
+- b1c21a0a5正式Tauri/StepFun/GEN原只读提示一次复验，两model步骤/一实际压缩、UI18秒completed；当前文件全文read一次、字节18/LF/三行/完整SHA正确，旧echo EOF0/exit0/reaped及hold cancelled/159ms准确交付，并明确历史/当前边界。
+- 独立13/13、真实UI及语义核对通过；所有原文件/旧事件hash/旧Turn整行不变，cancelled不复活、错误历史回答不删，无命令/进程/写入/补查或错误拒绝。原W251首败保持；仅关闭针对性保留/交付链N1，不代判原长场景、全部生成精度或共享全阶段。
+- 外部2026-10-02/windows/w254-native-history-final留原提示/源与产物/独立基线/DB/事件/正文/UI；无新源码或整组/N3重跑，真实过去HTTP及Windows退出仍未验，不继续同根因付费循环。
+
+### W255 Windows三项结果交付N1与机制阶段收尾（2026-10-02）
+
+- 正式Tauri/StepFun/COD新Session、复用b1c21a0a5构建及隔离profile/data/work；三步骤/UI13秒，cwd/含真实Hidden的九条目/中文空格文件全文各一次，三项具体值及首尾/43 bytes/完整SHA一次中文report首次接受，逐项matching call，exit0/reaped、错误0/0，无重复或附带动作。
+- 20项不同定向断言及真实UI通过；原文件集合（含.git）、旧事件/Turn全部不变，原W245完整A首败保留。Windows短链验证已同步的命令事实策略，不拼成原完整A或所有生成精度PASS；W254历史EOF0/当前读取子链直接复用。
+- 机制修复与相关正式采用作为阶段交付；生成漏stdin/重复cursor/末LF/来源前提仍开放，Windows托盘退出观察受限、全矩阵/N3/LONG/99%未认证。页首移除残留整组/N3活动口径，没有新根因不再付费复跑；不宣称共享全阶段完成。证据外部2026-10-02/windows/w255-multi-result-final，Git仅短进度。
+
+### W256 stdin遗漏的有限定位，唯一原因未证（2026-10-02）
+
+- 原W250记录中关闭前摘要仍明确18-byte输入未做、游标/handle保留，冻结Snapshot允许input；第8步拒绝无派发、第9步close真实EOF0与磁盘一致，7项直接核对。记录不支持待办已被压缩抹掉或冻结准入缺失。
+- 从ReasoningDelta提取的XML经现有正式守卫234个UTF-8分片均正确识别名称/拒绝文本，不是原拒绝输出或历史请求；当时tool_hint为何缺失和实际工具表仍缺证，不代判供应商/宿主责任或完整B已修。零模型/网络/产品改动，不追加付费循环或相邻Case；原FAIL和诊断首产物保留。证据外部2026-10-02/windows/w256-stdin-attribution。
+
+### W257 Windows真实stdin wire→owner→实物短链N1（2026-10-02）
+
+- 正式Tauri/GEN、新data/work/profile、原加密StepFun连接，仓库外loopback夹具保留实际7请求/SSE、认证头不记录；六步骤/一实际压缩/UI18秒。start/poll/input/close/poll/report各一次，同handle，实际18 bytes及末LF/EOF/hex、游标0→11→119、exit0/reaped和中文首次交付成立，无额外工具/协议错误。
+- 19项独立oracle加PID消失/68个制品无凭据，共21项不同断言；真实六组原生参数与canonical相同、helper/AGENTS保持、原source三张canonical表整行不变。两次错误DB克隆在模型前由身份门禁拒绝，首败保留；正式新库初始化后仅内存重加密导入所选连接，没有删除身份凭据或放宽保护。最终自有GUI/forwarder已核对清理。
+- 只关闭当前短链接合/精确stdin的N1证据缺口；未复现W250原拒绝或证明其唯一原因，不改旧完整B/长任务生成残余/Windows托盘退出/全阶段认证。没有新产品源码、构建或整组/N3循环；本次网络拓扑含录制夹具，普通生产直连不由此认证。证据外部2026-10-02/windows/w257-stdin-wire，Git仅短进度。
+
+### macOS 复杂交付与摘要协议根因修复（2026-10-02）
+
+- 私密reasoning-only被拒绝后不回放假调用；兼容Chat不将私密思考或内部省略标记编码为普通
+  助手正文，不解析私密名字缩窄工具面。原生参数、签名/加密续接、Frozen grants保持。
+- 多编号普通进度不提前关闭剩余授权工具；已结算报告参数修正仍report-only，不允许重做。
+  中文明确只读禁止句识别及重复完成说明去重，未削弱证据/错误计数/权限合同。
+- 单次自检不足，改显式编号交付与受限真实结果引用；宿主交付所选精确缓存数据，历史数据
+  不变新鲜证据，缺项blocked。原完整A13 run023正式N1通过：13请求/540events/18原生参数
+  全同，具体cwd/名称/头尾行数/搜索/Git/两测试0、1实际交付；七原件/Git不变，失败6/2保留。
+  不是N3或首发全部提议无错，Windows未代验、旧失败保持。
+- 裸动作参数JSON曾被接纳为压缩摘要；现只按原冻结schema匹配拒绝，禁止外部schema读取，
+  正常结构化状态笔记允许。run024只实际覆盖XML摘要拒绝，裸JSON live未验；无自动字节补齐。
+  B09仍跳过before→after且重复末LF，末mandatory投影增长硬失败；已去重交付目录正文投影，
+  最后轻量修复仅本机回归，原完整B/全包络界限/公开元数据简化继续开放。
+- Runtime270、Broker18及原35协议项、本机正式构建通过；无限付费次数是用户明确授权，不改
+  产品上下文、进程/清理保护。完整轨迹仅外部2026-10-02/macos/complex-delivery-repair，
+  不迁移Windows credential/结果；真实Keychain物理失败仍开放。
+
+### macOS B09 强制投影及交互合同（2026-10-03）
+
+- 完成引用目录仅ref/tool/path，不重复argv/结果/源全文；多编号简短summary与精确附件职责
+  分开，所有Schema断言和已保存字节保持。五槽/最后三read/13ref直接回归，不扩预算。
+- 编号首次file mutation/stdin前需独立plan；只证明先规划，不证明解释/字节正确。显式关闭
+  计划后的报告参数修正保持report-only。正式B09主动plan后顺序改善但仍缺LF/遗漏删除/
+  错误PTY同步exec而FAIL；Stop/正常退出/冷五表成立，不将已验子链代判整体。
+- 摘要root tool_calls数组无ID包装漏识别现拒绝；未知tool同样拒绝，普通状态/嵌套历史保持。
+  补真实exec等待结束与start先返回句柄、pipe stdin/EOF及tty字段说明，仅模型呈现，注册
+  Schema/owner字节/Frozen provenance不改。Runtime271及直接回归成立，最后补充未新live。
+- 证据仅外部2026-10-03/macos/b09-plan-envelope；原B生成精度/完整报告和真实Keychain物理
+  清理仍开放，Windows原生结果未代判，未新建动作框架或扩大权限/保护/断言。
+
+### macOS 源绑定参数契约与未知恢复（2026-10-03）
+
+- 复用plan的有限exact_actions，源quote仅定位、参数digest-only checkpoint；owner前比较
+  真实参数/最终stdin字节，拒绝不改写。编号写/patch/stdin须当前契约，独立只读仍原门。
+  reservation先持久化，typed正向owner回执推进；未知效果不复位，冷恢复区分未派发/
+  真实成功/已派发未知，新ID不能重复同源已完成动作。Runtime277及六个直接回归成立。
+- 原B正式采用已改善33→32B精确变更、copy/move/delete各一次；但遗漏内容回读、运行中
+  控制/五次压缩超过默认30秒helper寿命，stdin效果未知，原完整B仍FAIL。31请求/594events/
+  八effects原样；桌面锁定阻断Quit，480+5期限TERM/exit1/expired不冒充正常退出。
+- 后续聚焦声明时机和真实顺序/交付；不延长预算/寿命或以模型契约作语义证明。此版改变
+  共享控制schema，Windows未正式采用，旧平台结果保持。证据外部2026-10-03/macos/
+  b09-exact-actions；真实Keychain与公开元数据呈现风险仍开放。
+
+### macOS B09 receiver 预声明与声明反馈（2026-10-03）
+
+- receiver_ref引用前序start exact动作，在真实running owner回执后绑定目标digest；stdin
+  原参数/字节/TTL不变，未知/已结束/cold不能造live receiver，同ID重声明不复位host状态。
+  仅digest checkpoint、当前项投影，编号报告说明去重的结构断言严格相同。
+- 原B formal仍FAIL：9请求/116events/0effects，错误patch声明连续拒绝，未进入receiver实际
+  采用。正常UI/Cmd-Q0/102.47秒及冷五表成立，不以零效果关闭字节/步骤/交付缺口。
+- 补schema支持tool枚举和精确声明参数定位/脱敏反馈；同源成功stdin不可换ref新ID重入。
+  Runtime279及直接负例通过，最后反馈/别名保护未新live。外部2026-10-03/macos/
+  b09-receiver-ref保留首败；共享新控制字段Windows未代验，Keychain/公开表达仍开放。

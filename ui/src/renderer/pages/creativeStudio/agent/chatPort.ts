@@ -6,6 +6,7 @@
 
 import type { CreativeModelSelectionRef } from '../models';
 import type { CreativeStudioAgentMessage } from './types';
+import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
 
 export interface CreativeStudioAgentTurnRequest {
   canvasId: string;
@@ -26,6 +27,7 @@ export type CreativeStudioAgentTurnEvent =
   | { type: 'activity'; label: string }
   | { type: 'assistant-delta'; delta: string }
   | { type: 'history-reconciled'; history: readonly CreativeStudioAgentMessage[] }
+  | { type: 'paused'; pause: ConversationPauseNotice }
   | { type: 'completed'; assistantMessageId?: string }
   | { type: 'stopped' }
   | { type: 'failed'; message: string; code?: string; retryable?: boolean };

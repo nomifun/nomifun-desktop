@@ -11,6 +11,7 @@ import type {
   ISendMessageResult,
 } from '@/common/adapter/ipcBridge';
 import type { ConversationId, MessageId } from '@/common/types/ids';
+import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
 
 import type { CreativeModelSelectionRef } from '../../models';
 import type { CreativeStudioAgentMessage } from '../types';
@@ -55,6 +56,8 @@ export interface NomiCreativeStudioConversationSnapshot {
   model: CreativeModelSelectionRef;
   authority: NomiConversationRuntimeAuthority;
   activeTurnId?: MessageId;
+  /** Canonical pause remains nonterminal and never grants idle authority. */
+  pause?: ConversationPauseNotice;
 }
 
 export interface NomiCreativeStudioAgentTransport {

@@ -98,12 +98,33 @@ pub(crate) fn merge(
     additions: &[AgentTaskRequirement],
     inputs: &[ChatMessage],
 ) -> Result<Vec<AgentTaskRequirement>, String> {
+    merge_with_location(current,additions,inputs).map_err(|error|error.message)
+}
+
+pub(crate) struct RequirementMergeError {
+    pub message:String,
+    pub source_location:Option<(String,usize)>,
+}
+
+impl From<String> for RequirementMergeError {
+    fn from(message:String) -> Self { Self {message,source_location:None} }
+}
+
+impl From<&str> for RequirementMergeError {
+    fn from(message:&str) -> Self { message.to_owned().into() }
+}
+
+pub(crate) fn merge_with_location(
+    current: &[AgentTaskRequirement],
+    additions: &[AgentTaskRequirement],
+    inputs: &[ChatMessage],
+) -> Result<Vec<AgentTaskRequirement>, RequirementMergeError> {
     if additions.len() > 32 {
         return Err("Too many requirement additions".into());
     }
     let mut next = current.to_vec();
     let mut seen = BTreeSet::new();
-    for item in additions {
+    for (index,item) in additions.iter().enumerate() {
         if item.origin.is_some() {
             return Err("Requirement origin is engine-owned; omit origin when adding or repeating requirements".into());
         }
@@ -125,7 +146,9 @@ pub(crate) fn merge(
             // model cannot become trapped in an update/report retry loop.
             continue;
         } else {
-            validate_citation(&item.source, inputs, true)?;
+            validate_citation(&item.source, inputs, true).map_err(|message|RequirementMergeError {
+                message,source_location:Some((format!("/requirements/{index}/source"),item.source.input)),
+            })?;
             next.push(item.clone());
         }
     }
@@ -255,6 +278,12 @@ mod tests {
             "这是只读验收。不要修改任何文件。"
         )]));
         assert!(workspace_mutation_forbidden(&[input(
+            "整个任务不得新增、修改或删除文件。"
+        )]));
+        assert!(!workspace_mutation_forbidden(&[input(
+            "创建临时结果并修改第二行；不要修改或删除任何原件。"
+        )]));
+        assert!(workspace_mutation_forbidden(&[input(
             "Inspect the repository without modifying any files."
         )]));
         assert!(!workspace_mutation_forbidden(&[input(
@@ -381,6 +410,10 @@ pub(crate) fn workspace_mutation_forbidden(inputs: &[ChatMessage]) -> bool {
         "不修改任何文件",
         "不要创建、修改或删除任何文件",
         "不要创建、修改或删除文件",
+        "不得创建、修改或删除文件",
+        "不得新增、修改或删除文件",
+        "不要新增、修改或删除文件",
+        "不得新增、修改或删除任何文件",
         "不要写入任何文件",
     ];
     const ALLOWED: &[&str] = &[
