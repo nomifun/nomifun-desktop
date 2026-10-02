@@ -6,6 +6,7 @@
 
 import type { CreativeModelSelectionRef } from '../models';
 import type { ReactNode } from 'react';
+import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
 
 export type CreativeStudioAgentView = 'chat' | 'history';
 export type CreativeStudioAgentPanelLoadState = 'loading' | 'ready' | 'failed';
@@ -48,12 +49,20 @@ interface CreativeStudioAgentStoppedMessage extends CreativeStudioAgentMessageBa
   status: 'stopped';
 }
 
+interface CreativeStudioAgentPausedMessage extends CreativeStudioAgentMessageBase {
+  role: 'assistant';
+  status: 'paused';
+  pause: ConversationPauseNotice;
+}
+
 export type CreativeStudioAgentMessage =
   | CreativeStudioAgentUserMessage
   | CreativeStudioAgentCompleteMessage
   | CreativeStudioAgentRunningMessage
   | CreativeStudioAgentFailedMessage
+  | CreativeStudioAgentPausedMessage
   | CreativeStudioAgentStoppedMessage;
+// Paused rows are transient observations, not durable completed history.
 
 export interface CreativeStudioAgentSendInput {
   prompt: string;

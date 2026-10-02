@@ -5,6 +5,7 @@
  */
 
 import ThinkingProcessDisplay from '@renderer/components/chat/ThinkingProcessDisplay';
+import { ExecutionPauseNotice } from '@/renderer/pages/conversation/platforms/nomi/ExecutionPauseNotice';
 import { CheckOne, Error, MagicWand, Refresh, Robot } from '@icon-park/react';
 import { Button } from '@arco-design/web-react';
 import React from 'react';
@@ -85,6 +86,8 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
                 <span>{message.errorMessage}</span>
               </div>
             )}
+
+            {message.status === 'paused' && <ExecutionPauseNotice pause={message.pause} />}
 
             {message.status === 'stopped' && (
               <div className={styles.stoppedLabel} role='status'>

@@ -109,6 +109,28 @@
   未关闭，Computer/自动化实际动作未验。本轮共9个模型请求，不为同根因再补重复。
   证据`2026-10-02/macos/r2-multi-result-default-gen/`；下一簇R3实际旧MM retry，Windows结果不变。
 
+### 快速执行 R3：真实重试与暂停不冒充运行（2026-10-02）
+
+- 新本地HTTP拒绝现场揭示真实缺口：Runtime已记`EXECUTION_MODEL_INVALID_REQUEST`暂停，
+  Creative transport却丢弃pause信息、port当unknown处理。复用严格canonical pause helper，
+  增加非终态paused观察/消息行，显示正式暂停提示、不显示运行spinner；pending/发送屏障和
+  原Stop确认保留，不自动重发/取消/完成，匹配恢复才继续，迟到旧内容不抬回running。
+  最小pause反例首红保留；直接UI/port/共享pause回归41/41（含迟到内容）、类型/桌面边界/构建通过。
+- 单独复现实际失败消息retry：debug opt-in仅匹配指定提交UUID、同一loopback turn端点，
+  真实鉴权请求成功后只丢一次返回，不改参数/权限/receipt；release无此注入。Rust范围1/1、
+  六种JS行为断言通过。正式Tauri出现“提交结果尚未确认”及真实retry按钮，实际点击同一
+  消息再沿原key核对；仅1个Turn/operation、1次本地模型调用、0效果，30events/completed，
+  pending清除/两canonical消息、空画布不变。不是新Session首发成功或UI绘图代验。
+- 另一个HTTP暂停子样本：正式UI显示已暂停、无retry、pending保持；显式Stop才cancelled/
+  ready，28events/0效果。本地模型1次，native0/22.49秒；重试native0/18.37秒，修后冷读
+  同data0/15.83秒、原30events/同Turn/operation保持、本地调用仍1，无旧任务复活或再次发送。
+  两源/备份八表逐行全同/ok，App/Helper/listener无残留。真实StepFun/付费请求0。
+- 首次240秒native观察超时TERM0、首次90秒冷读超时TERM0均FAIL保留；控制段修正后另记，
+  不增加时限洗绿。外置首审误将暂停当turn.state=paused、把scope key当裸UUID亦保留，按
+  真实schema/owner/session构造完整key后另审，不改数据/断言目标/重跑模型。仅本机隔离等价
+  失败/实际retry及pause子断言N1，不冒充原Windows数据、N3/完整MM；下一簇R4。
+  证据`2026-10-02/macos/r3-mm-actual-retry/`，原旧MM首败/历史冷读记录未改。
+
 ## 上次活动问题簇（阶段性交付后不再自动排程）
 
 ### 2026-10-02 再收敛：当前只处理两项核心缺口
