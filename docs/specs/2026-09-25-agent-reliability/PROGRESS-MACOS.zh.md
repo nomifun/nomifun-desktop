@@ -365,6 +365,41 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   不宣称入口曝光就能跨build加载或B报告已恢复。日志仍外置complex-report-closure-fixed，
   公开语言及真实Keychain/物理native风险保持OPEN，Windows结果不代判。
 
+#### B09 历史 loader 正式使用与不透明游标（2026-10-03）
+
+- clean dc686a7dd正式同Session只补报告，精确标明最初原B operation而不重发操作。
+  第一请求已有LOAD，实际LOAD1及SEARCH1，但LOAD把完整operation截为末UUID，端口拒绝；
+  SEARCH又以operation作全文词，归档0/hits0，无READ。后3响应thinking-only length，
+  末completion各4096、reasoning12190/15365/14914B、public/tool0，5请求/5步骤/63新events。
+  **报告仍FAIL/0**；不能把调用LOAD或SEARCH成功当已加载原回执，binding import尚未进入。
+- 旧1020及本轮前1065events全值前缀保持，14effects全值保持，无重放/新effect。中途Mac
+  再锁、首次观察文件EEXIST保持；解锁后真实UI终态/正常Cmd-Q0/454.34秒、noexpiry/signals。
+  五表1128/1/1/3/14同源/ok，原failed不改，App/fixture/relay关闭。A13已通过N1不重跑。
+- LOAD参数现明确opaque/exclusive游标：从latest prior遍历，只复制完整next_before_turn，
+  不截UUID/不作为目标selector；错误返回history_not_loaded/0及omit-to-restart说明。
+  不自动补/归一化cursor、不回显私值/存储错、不扩大scope/binding/预算。Runtime289/289
+  含传给port的原身份及失败archive不变回归；最后未formal，B完整报告仍OPEN。
+- 外证据2026-10-03/macos/history-report-bootstrap保留全部首次失败/HTTP/UI/数据库，
+  不以exit0关闭原任务或Keychain物理风险，不改Windows结果。
+
+#### B09 新游标版本观察与公开载体 v2（2026-10-03）
+
+- clean `033677469` 正式同 Session 只补报告，3 请求/3 步骤/44 新 events；三条末
+  completion_tokens 均 4096，reasoning 16130/15325/15365B、public/tool 均 0，未调用
+  LOAD。因此报告仍 FAIL/0；本轮不证明也不否定游标修正的实际采用，不重复原文件/helper。
+- 正常 Cmd-Q0/166.761秒、无 expiry/TERM/KILL；闭库五表1172/1/1/4/14同源/ok，
+  原1128 events及14 effects保持，原 failed不改；App/fixture/relay关闭。观察器首次
+  sqlite输出 ENOBUFS 保留，仅提高外部读取buffer后续读同一实例，未重发任务或扩大产品预算。
+- 新交付持久化为 plain_zh_v2/plain_en_v2：已知 search/Git 包装字段及状态说明中文化，
+  实际路径/query/snippet/patch/hash、0/false/空集合保留，未知字段完整回落 JSON；旧 v1/None
+  不变，冷读回放和精确匹配仍按记录版本。修复 v2 原文大小写 Skill 标记被 renderer 提前
+  删除的问题；只转义标记开头而非 JSON 结构括号，逆解值不变，process/read/fallback 同覆盖。
+- Runtime291/291、现有 renderer parser 实际调用及独立只读复核通过；这是确定性修后结果，
+  v2 尚无正式 UI/模型采用证据，不以它关闭自由报告语言或原 B。A13原完整 N1继续复用，
+  N3、真实 Keychain/物理 native 清理失败仍 OPEN。下一 B 样本的隔离 Session 思考深度已
+  请求用户选择；未收到前不在未改 Auto 条件下继续付费循环，4096/上下文/权限上限不变。
+- 完整证据外置 `2026-10-03/macos/history-cursor-live/`，首败不覆盖，Windows结果未改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

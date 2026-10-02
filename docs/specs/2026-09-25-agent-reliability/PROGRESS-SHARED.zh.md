@@ -3517,3 +3517,24 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   首轮有port则LOAD，成功归档控制才激活ToolHistory，无TaskLedger/owner/证据提鲜/权限增开；
   考虑旧build兼容性仍保持原校验，不由此声称旧历史必可导入。纯思考截断用非代码分块提示，
   预算/续写数/私密思考不回放保持。Runtime288/288，新修复未formal，Windows未代验。
+
+### macOS 历史游标检索修正（2026-10-03）
+
+- dc686a7dd正式LOAD曝光并调用1次，但传末UUID被拒；后SEARCH操作ID得到空归档，未READ，
+  后3thinking-only length，5请求/63新events/报告0，B继续FAIL。前1065events及14effects
+  全值保持，无新effect；解锁后正常Cmd-Q0/noexpiry，闭五表1128/1/1/3/14同源/ok。
+- before_turn现在明确不透明排他游标及完整next_before_turn遍历，拒绝反馈给latest prior
+  重启路径，不自动修cursor或放宽scope/binding。Runtime289/289、archive/身份/私值保护
+  回归成立；最后未formal，证据外置history-report-bootstrap，Windows结果未代判。
+
+### macOS 公开交付 v2 与原 B 报告未完成（2026-10-03）
+
+- 033677469正式同Session纯报告3请求均thinking-only length/4096，public/tool0，没有LOAD；
+  报告0仍FAIL，游标修复未获实际采用证据。正常Cmd-Q0/noexpiry，闭五表1172/1/1/4/14，
+  旧1128events/14effects全值不变，无重放。外部观察buffer首次失败保留，不归因为产品故障。
+- 新持久化 public_format v2仅中文化已知search/Git包装元数据，未知字段完整JSON保留，
+  路径/查询/原文/差异/hash/计数/false/空值不猜改；v1/None精确历史输出保持。
+- renderer先于Markdown按gi删除Skill标记，旧精确大写转义漏小写/混合。仅新v2统一转义
+  marker开头，覆盖结构化、process/read、未知fallback，数组结构和JSON逆解实际值保持。
+  Runtime291/291、实际renderer parser及只读复核通过；新v2尚未formal，不代验Windows，
+  不将原B、自由语言或真实Keychain物理失败改PASS。证据外置history-cursor-live。
