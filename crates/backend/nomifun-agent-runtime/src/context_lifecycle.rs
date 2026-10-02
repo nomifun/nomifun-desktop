@@ -382,12 +382,14 @@ impl ContextLifecycle {
         let mut pending = VecDeque::from(chunks.unwrap_or_default());
         let compactions_before_prepare = self.compactions;
         let mut protocol_repair_used = false;
+        let mut context_fit_repair_used = false;
         'chunks: while let Some(chunk) = pending.pop_front() {
             let mut prompt_summary_limit = summary_limit.saturating_sub(
                 (summary_limit / SUMMARY_PROMPT_HEADROOM_DIVISOR)
                     .clamp(1, MAX_SUMMARY_PROMPT_HEADROOM_BYTES),
             );
             let mut retried_summary = false;
+            let mut context_fit_repair = false;
             loop {
                 if self.compactions.saturating_sub(self.segment_start_compactions) >= MAX_COMPACTIONS_PER_SEGMENT
                     || self.compactions >= MAX_TOTAL_COMPACTIONS
@@ -413,6 +415,9 @@ impl ContextLifecycle {
             )];
                 if protocol_repair_used {
                     compact.input.instructions.push("The previous summary draft was rejected as a tool invocation. Return only a continuation note about recorded work and remaining requirements. Do not propose a new action or emit bare XML/JSON tool-call payloads. Preserve the accepted task and its prohibitions.".into());
+                }
+                if context_fit_repair {
+                    compact.input.instructions.push("The previous draft cannot fit beside the required instructions and accepted inputs. Return a shorter continuation note from this exact same source; preserve recorded work and constraints, without tools or new actions.".into());
                 }
                 compact.input.messages = vec![text_message(
                 ChatRole::User,
@@ -454,6 +459,7 @@ impl ContextLifecycle {
                     input_bytes: compact_bytes,
                 })
                 .await?;
+                let compact_operation_id = compact.causality.operation_id.clone();
                 let result = crate::compaction::run_compaction_recorded(
                     binding,
                     model.clone(),
@@ -471,7 +477,37 @@ impl ContextLifecycle {
                 )
                 .await;
                 match result {
-                    Ok(result) => { previous = result.task_summary; break; }
+                    Ok(result) => {
+                        let mut candidate = request.input.clone();
+                        candidate.provider_round_parent = None;
+                        candidate.messages = vec![summary_message(&result.task_summary)];
+                        candidate.messages.extend_from_slice(&mandatory_messages);
+                        let candidate_bytes = encoded_size(&candidate)?;
+                        let candidate_tokens = crate::media_context::estimate_tokens(&candidate, candidate_bytes);
+                        if candidate_bytes < bytes && candidate_bytes <= self.resource.max_context_bytes
+                            && candidate.messages.len() <= self.resource.max_history_messages
+                            && candidate_tokens < input_limit
+                        {
+                            previous = result.task_summary;
+                            break;
+                        }
+                        // A valid note can still be too large beside the
+                        // immutable prefix. Reject that draft before replacing
+                        // context; one bounded correction keeps the same source.
+                        sink.emit(AgentEngineEvent::CompactionSummaryRejected {
+                            operation_id: compact_operation_id,
+                            reason: "REPLACEMENT_CONTEXT_BUDGET".into(),
+                        }).await?;
+                        if context_fit_repair_used {
+                            return Err(AgentEngineError::Compaction(format!(
+                                "summary still cannot fit the frozen replacement envelope after one correction; bytes={candidate_bytes}, tokens={candidate_tokens}, input limit={input_limit}; original context kept")));
+                        }
+                        context_fit_repair_used = true;
+                        context_fit_repair = true;
+                        retried_summary = true;
+                        prompt_summary_limit = (prompt_summary_limit / 2).max(128);
+                        continue;
+                    }
                     Err(error @ AgentEngineError::CompactionInvalidSummary) => {
                         if protocol_repair_used { return Err(error); }
                         // One correction per prepare, using the exact same
