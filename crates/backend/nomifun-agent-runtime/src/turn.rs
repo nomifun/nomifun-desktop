@@ -620,9 +620,10 @@ pub(crate) async fn run_turn(
             &discovered_tools,
             &mut adaptive_slots,
         )?;
+        let review_has_running_processes = long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty());
         let review_can_report = long_horizon.as_ref().is_some_and(|state| state.work_status.running_processes.is_empty())
             && !patch_recovery.pending() && !patch_recovery.unresolved();
-        synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used, review_can_report);
+        synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used, review_can_report, review_has_running_processes);
         protocol_recovery.constrain_tool_choice(
             &mut model_request.input.tool_choice, !model_request.input.tools.is_empty(),
         );
@@ -1811,8 +1812,17 @@ fn synchronize_completion_review(
     slots: &mut AdaptiveContextSlots,
     active: bool,
     can_report: bool,
+    has_running_processes: bool,
 ) {
     if active {
+        if has_running_processes {
+            // A provider's per-response stop can be a public progress update.
+            // Unsettled work is still execution, not authority to cancel a
+            // user-held process merely to obtain a completion report.
+            upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
+                "Execution remains unfinished for the same accepted task. A public progress reply does not complete it or authorize cancelling processes. Preserve the user's keep-alive/wait-for-input constraints, owned process IDs and output cursors; continue only the actions permitted by the accepted task. If the user requires keeping a helper until Stop, keep this turn active and poll that helper rather than cancel it to end a response. User cancellation and frozen execution budgets still apply. Unknown effects and pending recovery remain unresolved; this notice grants no verification, retry or wider scope. Claim completion only after the required work and owned processes have actually settled. Existing recovery policy may still permit a blocked partial account, which is never task success.".into());
+            return;
+        }
         // The transcript review can be summarized with an oversized tool
         // suffix. Keep this host-owned phase in mandatory instructions; the
         // original inputs, evidence and authority remain unchanged.
@@ -4620,7 +4630,7 @@ mod tests {
         let transcript_review = work.completion_review_message().unwrap();
         request.input.messages.push(transcript_review.clone());
         let mut slots = AdaptiveContextSlots::default();
-        synchronize_completion_review(&mut request, &mut slots, true, false);
+        synchronize_completion_review(&mut request, &mut slots, true, false, false);
         assert!(slots.completion_review.is_some(), "active review must have a host instruction independent of the transcript");
         assert!(request.input.instructions.iter().any(|instruction| instruction.contains("explicit prohibitions, including read-only probes")),
             "user restrictions must be explicit in the preserved model policy");
@@ -4638,9 +4648,9 @@ mod tests {
         assert_eq!(request.input.tools,tools, "review context grants no new tools");
         assert_eq!(request.input.messages.iter().filter(|message| **message==original).count(),1);
         assert!(serde_json::to_vec(&request.input).unwrap().len()<=resource.max_context_bytes);
-        synchronize_completion_review(&mut request,&mut slots,true,false);
+        synchronize_completion_review(&mut request,&mut slots,true,false,false);
         assert_eq!(request.input.instructions,instructions, "reconstruction must not append duplicate phase instructions");
-        synchronize_completion_review(&mut request,&mut slots,false,false);
+        synchronize_completion_review(&mut request,&mut slots,false,false,false);
         assert!(request.input.instructions[slots.completion_review.unwrap()].is_empty(), "new input/observations clear the old phase");
         assert_eq!(request.input.instructions[0],instructions[0]);
         request.validate().expect("clearing the turn-local review must leave a valid model request");
@@ -5218,6 +5228,12 @@ mod tests {
         assert_eq!(captured[3].input.tool_choice,ChatToolChoice::Auto,
             "the model must still be able to settle a live process before reporting");
         assert!(captured[3].input.tools.iter().any(|tool| tool.name=="poll_process"));
+        assert!(captured[3].input.instructions.iter().any(|text|text.starts_with("Execution remains unfinished")),
+            "a public progress response with a live process must stay in execution, not demand a closing report");
+        assert!(!captured[3].input.instructions.iter().any(|text|text.starts_with("Completion review is active")));
+        assert!(!captured[3].input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::Text {text} if text.contains("Before ending, poll or explicitly cancel"))),
+            "host continuation must not override an accepted keep-alive constraint with a new cancellation request");
     }
 
     #[tokio::test]
