@@ -3753,3 +3753,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：实际WorkStatus/CommandTracker经过后来非零命令仍保留完整中文cwd/list及原exit/失败计数；九类错配/未派发/未证明/非JSON反例拒绝，Unicode大输出及聚合限制/淘汰无剪裁。completion39/39（含新三项）及mandatory/fixed-prefix/observed-usage三项，共42项不同检查通过；首红/修后、fmt配置/diff分日志。
 - 未覆盖：正式Tauri/StepFun是否用原输出抵抗错摘要及交付cwd/列表、报告语义/引用范围、N3/完整A/B/C。本批无新模型/命令/正式构建，只记确定性子根因修复。
 - 证据：仓库外2026-10-02/windows/w231-retained-command-output，00原轨迹尺寸/摘要哈希、01首红、02/03修后和04/05及三项预算保护；Git仅源码、三项最小回归及短进度。
+
+### W232 综合A重复cwd/list及预算失败（2026-10-02；正式基线d76730452，FAIL）
+
+- Case/子断言：综合A、C01/C02/C03/C06/C07/C08与A05/A08/A09/A15/A17/A19；正式Tauri/StepFun/COD、原五项任务、新workspace/profile，复用W230 frontend，仅desktop所需构建45.77秒。
+- 首败：原正确cwd/九项目录后，第三次压缩后的第5步以完全相同参数各执行一次cwd/list，再做首次Git status/diff。读样本及两次单文件搜索此前正确且各一次，原件/十文件/Git未变；四native均exit0/reaped/errors=[]，未启动两个Bun，也没有report/假完成。独立操作原11/15、最终六项交付缺失及重复调用人工审计保留。
+- 随后回合自行failed，错误归NomiFun：compaction替换83,428 bytes、27,810估算tokens超过27,731实际输入余量79 tokens，未违反字节/消息限。正式UI“应用处理失败”；发现时已终止，没有执行取消或重试，没有外部kill或新付费循环。
+- 原三次成功压缩before82,174/81,123/81,702→after79,234/78,280/80,743，保留1/1/2调用。不能以W231组件PASS或缓存存在代判模型效果；报告具体值/引用仍缺。下一步按实际mandatory前缀余量核对summary上限，冻结token/byte/输出及accepted input不变。
+- 未覆盖：修后压缩预算、W231真实输出采用、禁止重做/完整A首发与N3、B/C及共享门槛。本批无新源码/重复测试；拟Stop前已failed，历史不记cancelled。
+- 证据：仓库外2026-10-02/windows/w232-comprehensive-a-output，01构建、02-first-replay原DB/事件/调用/11-15 audit/compaction尺寸/人工复核、03失败UI；无模型请求完整投影夹具，不声称已核对observed_output全部实际发送内容，Git仅短进度。
