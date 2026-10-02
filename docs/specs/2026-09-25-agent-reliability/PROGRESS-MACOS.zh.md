@@ -1810,3 +1810,11 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   删除来通过；成功后续poll/完整中文交付未验证，完整C仍FAIL。冷强退WAL存在，初错immutable
   副本不作验收，普通readonly WAL备233rows同/ok另存；首个审计误用event kind失败保留后按
   turn/steer-accepted修正。证据`2026-10-02/macos/mac-c-mainline/`；无付费重跑/猜修/Windows代判。
+
+- **MAC-C05-08 冷退出零模型定位**（2026-10-02）：同C02制品/数据，GUID直接Cmd-Q0/13.90秒、
+  进入cancelled会话后Cmd-Q0/21.85秒，两不同条件均无expiry/信号，未卡住故采样0。原C02
+  95秒/KILL首败不覆盖，233events/取消状态只读复核全同；未诊断为钥匙串或特定线程根因。
+- 仅加10行debug阶段记录：page close/context release/native entry/native return，数目/耗时不含
+  profile或凭据，无新锁/等待/CEF调用/完成判定，release不变；Mac lib13/13。路径替换造成的一次
+  launcher ENOENT先留、未启动进程后按精确原制品修正；不重跑同条件循环。证据
+  `2026-10-02/macos/cold-exit-stack/`；记录版正式native未重编/重验，完整C05/C/N3仍开放。
