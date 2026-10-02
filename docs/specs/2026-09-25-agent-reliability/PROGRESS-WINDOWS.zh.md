@@ -4126,3 +4126,9 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 新原生反例先红：实际短命令exit0/reaped、完整输出已冻结，测试使用公开policy的2秒lease加速退休，registry确实移除后原Engine owner清理报session_not_found。修复保留同一次admission绑定的只读终态数据见证，仅原cleanup.reaped=true才用于原owner结算；expired写入仍拒绝，观测不消费cursor、不恢复取消/续lease权限、不改生产期限/lease/预算、不按PID存在与否猜结果。
 - 首实现误持整个Session，扩大回归命中原evicted-session生命周期断言；首失败保留后改为仅共享SessionState中的终态/输出/cleanup数据，进程/Job/Session仍按原规则回收，原断言不改。新反例转绿、原Session回收通过，Process Runtime131/132；剩余real_start_pending_admission_cannot_cross_quiesce的物理marker超时在仓库外未修改HEAD基线同样失败，独立记录，不计绿或放宽等待。Engine Core39/39通过、1项原ignored保持。
 - 当前生产代码与必要回归三文件；正式desktop/helper构建成功，桌面SHA前缀3EC4C51952C6、前端身份仍e247ffd0，未改renderer。制品继续同W268根保存06首红、07首绿、08错误持有Session、12最终Runtime与14/15当前/原基线失败、16Core及17/18构建身份。没有新正式UI/模型或WIN-016重跑；W268修复后的实际退出采用、原历史唯一原因、强杀/冷重启与全部生成/平台认证仍未验，全面目标active。
+
+#### W268 修后lease退休窗口的正式退出采用（2026-10-03；限定N1）
+
+- 只补6c3fdb6e1对应正式采用，未重跑原强杀样本。夹具新增显式lease-retirement模式，原crash-tree默认30000ms不变；新用户输入/实际原生start参数均声明1000ms期限，生产lease仍按原规则=期限+60秒、sweep30秒，未扩生命周期/模型预算或修改退出入口。新data/work/profile正式初始化，完整同一回合留到100.544秒，超过61秒lease及一轮sweep且在120秒观察内；不是原30秒故障样本或WIN-016认证。
+- 当前源9250009b4正式桌面与helper构建成功，binary SHA前缀B9757B30E417、前端e247ffd0-e4df-4804-98ec-d4e5453b9fad。正式UI输入一次；原start回执有真实三层树READY/PID、唯一effect returned、本地请求2/第二SSE保持，原树按期限结束无重启。100.544秒时同Turn仍running、native_pause=null；自主调用已有Tauri process.exit(0)，PID70300实际exit0，同Turn仅一次cancelled、无cleanup_unproven暂停，原65events保持/最终71events、唯一effect/915bytes脚本保持，SSE释放、调用仍2，最终后代/监听0。
+- 独立14/14限定核对、退出后3表冷读保持；fixture正常shutdown/exit0，观察器全部结束。付费0、无新生产修复/全仓套件，上一批Core/Runtime/baseline失败证据复用；源码只新增明确短期测试模式。制品仍同W268根04-lease-fixed保存前/后实际UI/DB、原参数、100秒观察、actual exit及review。此N1关闭当前短期限lease退休退出采用；原两例的历史唯一原因、原30秒参数同场景复验、强杀/冷启动、实际托盘点击、原生成/复杂和完整平台/发布边界仍开放，全面目标active。
