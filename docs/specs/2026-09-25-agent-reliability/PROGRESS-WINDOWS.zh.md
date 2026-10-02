@@ -4050,3 +4050,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 正式Quit：当前window2仍无托盘目标，用户明确提供人工协助后才准备新profile；复用已正式初始化的W257隔离data/work，不克隆旧DB或改身份。二进制SHA及前端build ID与b1c21a0a5原产物相同，当前退出链源码未漂移。新PID43056、启动UTC13:38:56.1249366Z，正式窗口及8进程/5监听先记录；用户确认实际托盘“退出／Quit”。观察器保留同一Process handle，13:39:34.7459333Z自然退出、实际exit0、未kill，五端口消失。首快照两个WebView后代仍活，退出后33.4秒的复核8个PID全无，窗口消失；三表整行hash、全部工作区文件和无活动Turn五项成立。原stderr的WebView class unregister Error1412与首快照原样保留。
 - 验证与未覆盖：只关闭空闲隔离实例正常托盘Quit N1；W258原PID21636阻断/清理记录不改。失败退出码分支与活动Turn应用退出未做native验证，既有协调器组件证据复用；生成残余、原完整共享/Windows Case与N3/100 seed/LONG/99%仍未认证。自有GUI/后代/监听已自然清理，退出观察器已结束。
 - 证据：仓库外2026-10-02/windows/w259-open-items-closeout，open-items-review.json记录原seq/参数与源hash；01-native-quit含身份、UI、实际退出码、两次进程快照、原记录核对及quit-result.json。Git仅本次简短结算，文档变更无需产品构建或renderer检查。
+
+### W260 当前共享Creative在Windows正式采用（2026-10-02；全面走查进行中）
+
+- Case/子断言：C06/C07/C08、AMUL-001、OBS-008/014/020与A06/A09/A10/A12/A17/A19；补后续Creative pause/retry在Windows产物中的实际采用。新目标覆盖其余共享/Windows验证，本批不代判整体完成，原生成残余及旧MM失败保持。
+- 验证产物：源9118d3fab，34项Creative UI/port回归、desktop-ui-boundary、当前前端、正式`cargo build -p nomifun-desktop --features tauri/custom-protocol`及现有conversation_gui_fixture均通过。正式binary SHA前缀1CE1C5342933、frontend_build_id=4839fca4-409b-4553-a8bf-c89651730f21；新data/work由正式bootstrap初始化、新profile，不克隆用户DB或改身份。
+- 暂停正式N1：本地HTTP400仅一次，canonical native_pause=EXECUTION_MODEL_INVALID_REQUEST、cleanup_proven；UI显示“执行已暂停”、无运行spinner/retry、pending保留。正式Stop后同Turn cancelled、pending清除、UI“已停止”；28events、0effects、画布0节点/连接、本地调用仍1。用户托盘Quit，PID73680实际exit0，最终后代/监听消失，退出前后四表整行hash保持。
+- 实际retry正式N1：debug既有注入只匹配新夹具生成的精确key，真实鉴权提交成功后丢一次返回；UI出现“提交结果尚未确认”和实际retry按钮。正式点击后两次submit均200，仍仅原一个Turn/operation/key、本地模型仅1、0effects；释放原响应后30events/completed，pending清除、正式UI完整回复、空画布保持。PID70280用户Quit实际exit0；新PID46044同data/work、新profile冷读原画布，原30events/四表逐行hash及回复保持、无retry/重发/复活，本地调用仍1；用户Quit实际exit0，最终自有进程/监听全部消失，fixture正常shutdown/exit0。
+- 首错与边界：夹具构建未完成时误启动旧helper，unsupported mode/exit1，发生在模型/产品启动前，原样保留后增加外部runner产物hash门禁；一次输入几何失败/错误前景截图与用户输入检测另留档，错误截图排除。未修改产品源码；付费/真实StepFun请求0，本地模型共2。仅关闭上述隔离negative子断言N1，不关闭原Windows旧MM/N3/全MM、真实供应商生成、W250/W249/W240、复杂任务、引用反馈采用或其余平台/发布认证。
+- 证据外部2026-10-02/windows/w260-creative-adoption：构建/34回归/边界、原首错、三个GUI身份/UI/原生退出、真实点击的两submit日志、原DB/事件/完整表hash及review.json。当前无Cargo、测试GUI、fixture或其监听遗留。下一步真实模型统一使用用户指定StepFun Coding Plan / step-3.7-flash；跨盘/真实UNC缺隔离夹具保持未验，全面目标继续。

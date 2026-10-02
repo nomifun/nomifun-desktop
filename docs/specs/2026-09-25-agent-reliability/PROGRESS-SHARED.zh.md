@@ -90,6 +90,13 @@ File/Router/Terminal源码无变化；后续desktop变更为debug精确key的回
 后续W259已按上述人工条件取得新实例正常Quit证据，详见Windows页对应记录及
 外部2026-10-02/windows/w259-open-items-closeout；本次无产品修复/模型调用，旧退出阻断不改写。
 
+用户后续已开启剩余共享/Windows全面走查的新目标，旧有限交付不代判该目标完成。W260使用
+当前正式Windows产物验证Creative HTTP暂停→实际Stop、精确提交回执丢失→实际retry→同数据
+冷读：34项直接回归/桌面边界通过；两个本地模型调用，分别28/30events、0effects，retry原key/
+Turn/operation一个，冷读四表整行hash及模型计数保持。三个GUI均由用户托盘Quit实际exit0、
+最终后代/监听清理；原夹具/观察器首错单列。无新产品源码，原旧MM及生成/平台/发布余项保持，
+不把隔离negative N1计为真实StepFun生成或全MM通过，详见Windows页W260。
+
 ### C04-01 / C05-04 精确末尾 LF 与模型参数（2026-10-01，macOS MAC-B-01；MAC-B-02 正式修后仍失败）
 
 - 正式 COD/StepFun，16 requests / 531 events / 一轮压缩，文件创建/精确 patch/copy/move/read/
