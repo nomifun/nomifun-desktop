@@ -3181,3 +3181,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 原epoch/资格/权限/Schema/计数保持，历史数据不升级current；45项completion及三项硬预算/余量/报告不重做，共48项不同定向通过，fmt/diff/正式构建通过。
 - 一次正式COD A约1分24秒，11步/四压缩、summary拒绝0，观察/两测试各一次exit0/1；交付由W244的1/6改善为4/6，实际原文/SHA/两搜索/Git修改进入答案。首report三项的五个旧ID被预检拒绝后仅纠正report，无重做，2/1计数及首败保存。
 - 整体A仍FAIL：实际cwd/完整九条目及三个英文rationale残余，原15/16、4/6保持，不计N3/GEN或共享达标。外部2026-10-02/windows/w245-mainline-read-result-retention存全证据；按固定收尾规则转C直接阻断，不继续未修根因的付费循环。
+
+### W246 running结果不合格不等于应丢失进程身份（2026-10-02，正式连续纠正N1）
+
+- 首红确认running缓存process_id/READY/next_cursor因只投给eligible条目而消失。现仍tracked的running缓存进入ineligible数据，并给last_observed_running_processes；不取得完成资格/新授权，清空tracker后不能显示旧running数据。原输出/详情/台账和冻结预算不变，46项completion及三项严格预算/报告邻近，共49项不同检查通过，fmt/diff/正式构建通过。
+- 一次正式COD C、13步/四压缩，同Turn纠正已应用；实际一helper、来源各一次、正确18-byte结果写/读各一次，无自取消/重启重读。两项新输入/replan阻止的提议未dispatch且原错保留；原17/21及按实际原参数/dispatch/steering另审都保留。
+- 正式cancelled/冷读无复活、全部DB三表与磁盘hash不变，原AX7/8及去浮层后实际取消截图分开保存。但helper在Stop前已达120秒deadline，CIM277样本证明约120.106秒父子消失；本次不证明运行中Stop，不代判完整C/N3或共享门槛。18字节误判、初始start无自适应观测及审计假定均另澄清，不覆盖原文件。
+- 外部2026-10-02/windows/w246-mainline-live-process-context存全部证据。下一步只补实测期限不足导致未覆盖的live Stop、以及A/B直接缺口；不增角色/旧矩阵，不用组件/timeout代判Stop。
