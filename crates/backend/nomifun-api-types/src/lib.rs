@@ -96,7 +96,7 @@ pub use conversation::{
     ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary,
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse,
     MessageResponse, MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
-    SendMessageRequest, SendMessageResponse, UpdateConversationRequest,
+    PluginDeliveryRequirement, SendMessageRequest, SendMessageResponse, UpdateConversationRequest,
 };
 pub use cron::{
     CreateCronJobRequest, CronAgentConfigDto, CronJobExecutedEvent, CronJobMetadataDto,

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import type { PluginSummary } from '@/common/types/pluginPlatform';
-import { PLUGIN_LIBRARY_CHANGED } from './pluginLibraryState';
+import { subscribePluginLibraryChanges } from './pluginLibraryState';
 import styles from './PluginPlatform.module.css';
 
 export default function PluginPinnedEntries({ collapsed }: { collapsed: boolean }) {
@@ -32,10 +32,10 @@ export default function PluginPinnedEntries({ collapsed }: { collapsed: boolean 
       }
     };
     void refresh();
-    window.addEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
+    const off = subscribePluginLibraryChanges(refresh);
     return () => {
       active = false;
-      window.removeEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
+      off();
     };
   }, []);
 

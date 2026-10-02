@@ -4068,3 +4068,17 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 核对：合计9真实请求/SSE全部完成、5组原生调用参数与canonical逐项相同；工作区两文件完整bytes/hash/集合保持，helper实际PID76260消失，凭据审计70份文本制品0命中。无新明确产品根因/源码修复，不再同根因付费循环；精确引用反馈采用、原W250/W249/W240及复杂任务仍开放。
 - 夹具/观察首错：初始化已有无关local provider，导入旧整数PK导致冲突，三次模型前失败/rollback保留，外部import改为目标生成内部PK且保留provider UUID/model/role。一次SSE choices=[]观察器IndexError、错误前景截图、目录弹窗控件缓存缺失/人工目录选择单列；后续优先自行操作，真正不可达入口保留未验继续其他项。15分钟GUI观察超时后核对同PID39400/启动UTC并续观察，未重启；两Turn均终态/helper已清理后才核对身份清理空闲GUI和forwarder，未计正式Quit。全部自有PID/监听无遗留。
 - 证据外部2026-10-02/windows/w261-citation-adoption：正式初始化/连接导入与首错、两载体原提示/实际DB/UI、9份新真实wire、review.json/secret-audit/最终清理。Git仅简短失败与边界；全面目标保持active，下一步继续Windows生命周期及其他可执行平台/共享余项，未验证项不计PASS。
+
+### W262 复杂交付采用与摘要可用空间修复（2026-10-03；机制修复，整任务未通过）
+
+- Case/子断言：C01/C02/C03/C06/C07/C08、CTRL/OBS/REAL交付与A05/A09/A13/A17/A19；同步25c94acd8复杂交付/私有回放后，Windows Runtime270、私有回放1项通过，正式构建源a2c96fd70。原五项只读任务、中文空格/真实Hidden/Git/指定0、1测试及保护原件断言保留，已有加密StepFun Coding Plan / step-3.7-flash、新workspace/profile、正式Tauri入口。
+- 首败：15真实请求均HTTP200/完整SSE，15组完成参数与canonical相同；实际cwd/目录各一次、全文一次、搜索/Git各两项、两测试各一次exit0/1，后3提议被replan拒绝、没有重放。8model步骤/5压缩后冻结替换包络失败，bytes84595/tokens28199/limit28160，原上下文保持、host cleanup成立；无最终交付，原FAIL不改。
+- 有据产品原因与修复：首次摘要1462bytes符合产品1536byte提示，却无法与固定前缀同置；原提示仅按输出上限计算，未扣已选必需状态/输入/摘要wrapper。现根据完整冻结替换候选计算提示可用量，按JSON最大转义成本预留；token/byte/message上限、原始输入/回执/工具授权及一次纠正保持。短预算纠正不再被128byte下限反向抬高；实际超限摘要仍严格拒绝，无截字节或补输出。新反例修前红/修后绿，ASCII/转义及原状态保持断言；首次扩大到全部Runtime发现额外约束历史字节数造成3项旧回归失败，已改为冻结包络约束，未改原断言，最终271/271通过。正式修复构建通过，无renderer变更。
+- 修后正式一次仍未达：原任务/新workspace，同16窗口/产品硬限，夹具预设24请求/240秒观察。24实际上游全部HTTP200/完整SSE，12组完成参数与canonical相同；必要操作各一次、两测试exit0/1，文件/HEAD/status/diff保持；本夹具未单存index原始字节基线，不计独立index-byte断言。最终交付前触及本地录制器上限，后3请求未派发上游；出现EXECUTION_MODEL_RATE_LIMITED暂停来源是夹具429，不归因StepFun限流。操作者超过240秒才结束回合，组织首错保持、不计限内PASS；正式cancelled，无最终report/五项交付，整任务及稳定性继续开放，不新增未改根因付费循环。
+- 自主操作/退出：复用既有WebView2 CDP烟测接口，仅控制自有真实Tauri页面；测试profile书签作夹具初始化，再实际点击项目/官方Coding/输入/发送，冻结binding实际cwd与新workspace一致。其他bak/mobile实例保留；按名称阻断与静态配置推断的首错留档，实际内核互斥键未占用后才启动自有实例。两自有GUI在任务终态后调用已有Tauri process.exit API，分别PID13060/16448实际exit0、后代/监听最终清理；这是原生API退出，未冒称托盘操作。首次15分钟观察超时后核对同PID/启动UTC再续观察，无重启或kill GUI。
+- 证据外部2026-10-03/windows/w262-shared-delivery-adoption：原/修后真实wire、失败UI/DB、初次回归红与中间3红、最终271/构建身份、review-corrected.json/实际派发核对/保护与清理。首个review误将无JSON的replan拒绝计成派发，原样保存后按completion_observation.invocation_attempted纠正。尚未关闭原复杂交付、W249反馈、W250/W240/生成字节、活动Turn Quit/失败退出及其余Windows/共享/发布认证，全面目标active。
+
+### W263 真实Windows代码页管道与生产解码器（2026-10-03；native子断言通过）
+
+- Case/子断言：WIN-012、PROC-020，复用未变生产nomi-process-runtime库，仓库外单独编译探针、自有实际子进程双pipe；只读GetACP=936，不更改OS/控制台设置。stdout真实ACP中文5bytes、stderr UTF-8含emoji16bytes逐字节读取，按实际顺序进入生产OutputBuffer；两stream raw/text完全匹配、总游标21/mixed、8byte环精确丢13bytes，空当前游标/eviction仍保存lifetime metadata，child exit0并消失。
+- 无产品源码修复。decode_errors=1表示首次严格UTF-8失败后选择有效ACP的既有诊断，文本未丢失；探针初始误假设计数0的失败保留，按既有计数语义核对，未放宽任何字节/文本断言。首编译误调用supervisor-private finalize亦保留，后仅用导出API及完整字符/EOF。不是完整Supervisor/renderer验收或全部代码页；证据外部2026-10-03/windows/w263-native-encoding，Git仅本条短进度。

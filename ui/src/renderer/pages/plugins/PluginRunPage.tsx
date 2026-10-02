@@ -31,6 +31,7 @@ import { pluginNeedsAttention, pluginShape, requiresDataLossWarning } from './pl
 import PluginWorkspace, { PluginVisual } from './PluginWorkspace';
 import PluginSurfacePanel from './PluginSurfacePanel';
 import styles from './PluginPlatform.module.css';
+import { launchPluginConversation } from './pluginConversationLaunch';
 
 type Dialog = 'restore' | 'export_package' | 'export_backup' | 'trash' | 'delete' | 'command' | null;
 type DetailTab = 'overview' | 'access' | 'maintenance';
@@ -152,11 +153,10 @@ export default function PluginRunPage() {
     if (!desktopShell || !detail || busy) return;
     setBusy(true);
     try {
-      const draft = await pluginPlatform.drafts.create.invoke({
+      await launchPluginConversation(navigate, {
         plugin_id: detail.summary.plugin_id,
         expected_plugin_revision: detail.summary.revision,
       });
-      navigate(`/plugins/create/${encodeURIComponent(draft.summary.draft_id)}`);
     } catch {
       setError(t('pluginPlatform.detail.operationFailed'));
     } finally {

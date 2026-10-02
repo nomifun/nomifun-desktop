@@ -66,6 +66,7 @@ type AgentPresetEditorProps = {
   dirty: boolean;
   onDraftChange: (draft: AgentPresetDraft) => void;
   onSave: () => void;
+  saveLabel?: string;
   onDiscard?: () => void;
   onOpenModels?: () => void;
   onOpenAuthor?: (destination: string) => void | Promise<void>;
@@ -142,7 +143,7 @@ const AgentChatModelPicker: React.FC<{
 
 const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   editor, draft, catalog, sourceTemplate, busyAction, dirty, onDraftChange,
-  onSave, onDiscard, onOpenModels, onOpenAuthor, onStartConversation,
+  onSave, saveLabel, onDiscard, onOpenModels, onOpenAuthor, onStartConversation,
 }) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('capabilities');
@@ -394,7 +395,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       <div className={styles.saveStatus}><span className={dirty || unavailableCount || idmmPolicyBlocksSave ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : idmmPolicyBlocksSave ? 'agentSettings.workbench.runtimePolicyNeeded' : modelBlocksSave ? 'agentSettings.workbench.modelNeeded' : dirty ? 'agentSettings.workbench.previewCompileHint' : 'agentSettings.workbench.saveHint')}</span></div></div>
       <div className={styles.actionButtons}>
         {dirty && onDiscard && <Button type='text' disabled={busy} onClick={onDiscard}>{t('agentSettings.workbench.resetChanges')}</Button>}
-        {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || modelBlocksSave || idmmPolicyBlocksSave} onClick={onSave}>{t('common.save')}</AgentEditorActionButton> :
+        {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || modelBlocksSave || idmmPolicyBlocksSave} onClick={onSave}>{saveLabel ?? t('common.save')}</AgentEditorActionButton> :
           <AgentConversationAction hasStableRevision={Boolean(editor.preset.current_stable_revision)} dirty={dirty} busy={busy} onClick={() => onStartConversation(editor.preset)} />}
       </div>
     </AgentEditorActionBar>

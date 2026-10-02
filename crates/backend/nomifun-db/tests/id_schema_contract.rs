@@ -61,7 +61,7 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
     assert_eq!(files, ["001_canonical_baseline.sql", "002_model_compaction_threshold.sql",
         "003_agent_session_reasoning_effort.sql", "004_extended_agent_session_reasoning_effort.sql",
         "005_native_execution_checkpoints.sql", "006_native_execution_leases.sql",
-        "007_native_pause_resume.sql"]);
+        "007_native_pause_resume.sql", "008_plugin_draft_conversation_source.sql", "009_plugin_authoring_history.sql", "010_plugin_draft_install_commit.sql"]);
 }
 
 #[tokio::test]

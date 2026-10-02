@@ -25,12 +25,13 @@ const CANONICAL_FILES = [
   'ui/src/common/types/pluginPlatform.ts',
   'ui/src/common/adapter/pluginPlatformBridge.ts',
   'ui/src/renderer/pages/plugins/PluginLibraryPage.tsx',
-  'ui/src/renderer/pages/plugins/PluginCreatorPage.tsx',
+  'ui/src/renderer/pages/plugins/ConversationPluginArtifacts.tsx',
   'ui/src/renderer/pages/plugins/PluginRunPage.tsx',
   'ui/src/renderer/pages/plugins/PluginSurfacePanel.tsx',
 ];
 
 const RETIRED_FILES = [
+  'ui/src/renderer/pages/plugins/PluginCreatorPage.tsx',
   'crates/backend/nomifun-agent-contracts/src/plugin_n1.rs',
   'crates/backend/nomifun-agent-contracts/src/plugin_runtime.rs',
   'crates/backend/nomifun-agent-contracts/contracts/plugin-n1/plugin-n1-contract.v1.json',
@@ -269,7 +270,9 @@ export function auditUnifiedPluginBoundary(paths = workspacePaths()) {
     'ui/src/renderer/pages/agentSettings/AgentCapabilityWorkspace.tsx',
     'ui/src/renderer/pages/plugins/PluginRunPage.tsx',
   ].map((path) => readFileSync(resolve(ROOT, path), 'utf8')).join('\n');
-  if (/plugin\.development|plugin\.surface|source=plugin|setPluginsOnly|wanted\.has\(['"]plugin['"]\)|kind\s*===\s*['"]plugin['"]/.test(agentUiGraph)) {
+  // The optional authoring Module is a consumer of Unified Plugin Core.
+  // It must not restore the retired Plugin Resource/Provider graph.
+  if (/plugin\.surface|source=plugin|setPluginsOnly|wanted\.has\(['"]plugin['"]\)|kind\s*===\s*['"]plugin['"]/.test(agentUiGraph)) {
     failures.push('Agent authoring UI still routes Plugin through the retired resource/capability graph');
   }
 

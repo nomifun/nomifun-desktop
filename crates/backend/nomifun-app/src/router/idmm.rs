@@ -330,6 +330,7 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
                 session_id,
                 idempotency_key,
                 SendMessageRequest {
+                    plugin_delivery: None,
                     content: content.to_owned(),
                     files: Vec::new(),
                     inject_skills: Vec::new(),

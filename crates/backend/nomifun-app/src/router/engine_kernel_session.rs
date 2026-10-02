@@ -89,6 +89,7 @@ pub(crate) struct EngineKernelAssembly {
     pub hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
     pub robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     pub agent_plugins: nomifun_plugin_platform::AgentPluginBindings,
+    pub plugin_development: super::plugin::PluginRouterState,
 }
 
 fn constraints_allow_action(
@@ -152,6 +153,7 @@ pub struct EngineKernelSession {
     robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
     plugin_bindings: Arc<super::engine_plugin_bindings::FrozenAgentPluginBindings>,
+    plugin_development: Option<super::plugin::PluginRouterState>,
     state: Mutex<State>,
 }
 
@@ -400,6 +402,8 @@ impl EngineKernelSession {
             robot: assembly.robot.clone(),
             robot_tools: tokio::sync::OnceCell::new(),
             plugin_bindings,
+            plugin_development: selected().any(|item| item.capability.id.as_ref() == nomifun_plugin_development::MODULE_ID)
+                .then(|| assembly.plugin_development.clone()),
             state: Mutex::new(State::default()),
         })
     }
@@ -1222,9 +1226,20 @@ impl EngineKernelSession {
         })
         .await;
         let hosted = guard_effect_settlement(|| self.ensure_hosted_effects_settled()).await;
+        let authoring = guard_effect_settlement(|| async {
+            if let Some(state) = &self.plugin_development {
+                let root = self.state.lock().map_err(|_| failure("resource state poisoned"))?
+                    .turn.as_ref().map(|turn| turn.root.clone());
+                if let Some(root) = root {
+                    super::plugin_authoring::cleanup_authoring_turn(state, &self.principal.principal_id,
+                        self.session_id.as_ref(), &root).await.map_err(failure)?;
+                }
+            }
+            Ok(())
+        }).await;
         for (stage,failed) in [("admission",admission.is_err()),("process_owner",processes.is_err()),
             ("tool_tasks",tasks.is_err()),("resource_tasks",resource_tasks.is_err()),("git_owner",git.is_err()),
-            ("mcp_owner",mcp.is_err()),("hosted_receipts",hosted.is_err())] {
+            ("mcp_owner",mcp.is_err()),("hosted_receipts",hosted.is_err()),("plugin_authoring",authoring.is_err())] {
             if failed {tracing::warn!(stage,session_id=self.session_id.as_ref(),"owned resource cleanup remains unproven");}
         }
         admission?;
@@ -1241,6 +1256,7 @@ impl EngineKernelSession {
         git?;
         mcp?;
         hosted?;
+        authoring?;
         Ok(())
     }
 

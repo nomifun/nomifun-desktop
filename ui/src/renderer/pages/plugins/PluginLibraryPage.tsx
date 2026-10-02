@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Dropdown, Input, Menu, Select, Spin, Switch } from '@arco-design/web-react';
 import {
   AddOne,
@@ -21,7 +21,7 @@ import { isDesktopShell } from '@/renderer/utils/platform';
 import PluginImportDialog from './PluginImportDialog';
 import PluginWorkspace, { PluginVisual } from './PluginWorkspace';
 import {
-  PLUGIN_LIBRARY_CHANGED,
+  subscribePluginLibraryChanges,
   notifyPluginLibraryChanged,
   updatePluginLibraryState,
 } from './pluginLibraryState';
@@ -35,6 +35,7 @@ import {
   pluginShape,
 } from './pluginPlatformModel';
 import styles from './PluginPlatform.module.css';
+import { launchPluginConversation } from './pluginConversationLaunch';
 
 type LibrarySort = 'recent' | 'name';
 
@@ -55,33 +56,38 @@ export default function PluginLibraryPage() {
   const [busyId, setBusyId] = useState('');
   const [error, setError] = useState('');
   const [importVisible, setImportVisible] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const loadSequence = useRef(0);
   const desktopShell = isDesktopShell();
   const requestedView = searchParams.get('view');
   const view = isPluginLibraryView(requestedView) ? requestedView : 'all';
 
   const refresh = useCallback(async () => {
+    const request = ++loadSequence.current;
     try {
       const [library, draftList, state] = await Promise.all([
         pluginPlatform.plugins.list.invoke(),
         pluginPlatform.drafts.list.invoke(),
         pluginPlatform.libraryState.get.invoke(),
       ]);
+      if (request !== loadSequence.current) return;
       setPlugins(library.plugins);
       setDrafts(draftList.drafts);
       setOrganization(state);
       setError('');
     } catch (caught) {
+      if (request !== loadSequence.current) return;
       console.error('[pluginPlatform] library load failed', caught);
       setError(t('pluginPlatform.library.loadFailed'));
     } finally {
-      setLoading(false);
+      if (request === loadSequence.current) setLoading(false);
     }
   }, [t]);
 
   useEffect(() => {
     void refresh();
-    window.addEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
-    return () => window.removeEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
+    const off = subscribePluginLibraryChanges(refresh);
+    return () => { loadSequence.current += 1; off(); };
   }, [refresh]);
 
   useEffect(() => {
@@ -163,7 +169,14 @@ export default function PluginLibraryPage() {
             <p>{pageSubtitle}</p>
           </div>
           {desktopShell && (
-            <Button type='primary' icon={<AddOne />} onClick={() => navigate('/plugins/new')}>
+            <Button type='primary' icon={<AddOne />} loading={creating} onClick={() => {
+              if (creating) return;
+              setCreating(true);
+              void launchPluginConversation(navigate).catch(caught => {
+                console.error('[pluginPlatform] conversation launch failed', caught);
+                setError(t('pluginPlatform.creator.launchFailed'));
+              }).finally(() => setCreating(false));
+            }}>
               {t('pluginPlatform.actions.create')}
             </Button>
           )}
@@ -222,7 +235,13 @@ export default function PluginLibraryPage() {
                   draft={entry.draft}
                   locale={i18n.language}
                   onOpen={() => {
-                    if (desktopShell) navigate(`/plugins/create/${encodeURIComponent(entry.draft.draft_id)}`);
+                    if (!desktopShell) return;
+                    if (entry.draft.source_conversation_id) {
+                      navigate(`/conversation/${encodeURIComponent(entry.draft.source_conversation_id)}`);
+                    } else {
+                      void launchPluginConversation(navigate, { draft_id: entry.draft.draft_id })
+                        .catch(() => setError(t('pluginPlatform.creator.launchFailed')));
+                    }
                   }}
                   readOnly={!desktopShell}
                 />
@@ -249,10 +268,6 @@ export default function PluginLibraryPage() {
             <p>{query ? t('pluginPlatform.library.noResultsBody') : t('pluginPlatform.library.emptyBody')}</p>
             {query ? (
               <Button onClick={() => setQuery('')}>{t('pluginPlatform.library.clearSearch')}</Button>
-            ) : desktopShell ? (
-              <Button type='primary' icon={<AddOne />} onClick={() => navigate('/plugins/new')}>
-                {t('pluginPlatform.actions.create')}
-              </Button>
             ) : null}
           </div>
         )}

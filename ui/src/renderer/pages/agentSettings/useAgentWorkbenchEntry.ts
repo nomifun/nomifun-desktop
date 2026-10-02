@@ -2,6 +2,7 @@ import type {
   AgentPresetLibraryResponse,
   AgentPresetSummary,
   OfficialPresetTemplate,
+  ProductAgentSelection,
 } from '@/common/types/agentPlatform';
 import { useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
@@ -12,11 +13,13 @@ export function useAgentWorkbenchEntry({
   loading,
   openTemplate,
   openPreset,
+  rememberedSelection,
 }: {
   library: AgentPresetLibraryResponse | null;
   loading: boolean;
   openTemplate: (template: OfficialPresetTemplate) => void;
   openPreset: (preset: AgentPresetSummary) => Promise<void>;
+  rememberedSelection?: ProductAgentSelection | null;
 }) {
   const location = useLocation();
   const handledLocation = useRef<string | null>(null);
@@ -26,6 +29,10 @@ export function useAgentWorkbenchEntry({
 
     handledLocation.current = location.key;
     const params = new URLSearchParams(location.search);
+    if (!params.has('preset') && !params.has('template') && rememberedSelection) {
+      if (rememberedSelection.kind === 'preset') params.set('preset', rememberedSelection.preset_id);
+      else params.set('template', rememberedSelection.template_key);
+    }
     const preset = library.user_presets.find(
       (candidate) => candidate.preset_id === params.get('preset')
     );
@@ -37,5 +44,5 @@ export function useAgentWorkbenchEntry({
       (candidate) => candidate.template_key === params.get('template')
     );
     if (template) openTemplate(template);
-  }, [library, loading, location.key, location.search, openPreset, openTemplate]);
+  }, [library, loading, location.key, location.search, openPreset, openTemplate, rememberedSelection]);
 }

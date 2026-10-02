@@ -728,7 +728,7 @@ fn create_nomi_core_router_with_all_state(
     let nomi_core_agent_authenticated = protect_instance_owner(
         super::nomi_core_session::build_nomi_core_agent_router(
             states.nomi_core_agent_api.clone(),
-        ),
+        ).merge(super::plugin_development::preflight_routes(states.nomi_core_agent_api.clone())),
         &auth_mw_state,
         &instance_owner_state,
     );
