@@ -437,6 +437,40 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 真正系统 Keychain等待、Helper精确登记/guardian、Browser资源与物理FFI分段及修后live
   仍 OPEN；本次不能标整个风险PASS。完整日志外置history-cursor-live，Windows验收不改。
 
+#### Keychain 清理前置：Browser/存储分段与迟到消费者（2026-10-03）
+
+- R4/C05-09/10：Browser资源关闭与工厂物理关闭拆分；先批量封资源准入，全部页面/文件/
+  operation关闭成功才放行native。关闭调用者取消保留同一物理worker，成功不重入，失败
+  才允许同owner显式重试；runtime_changes关闭期间不得懒创建。21项workspace检查通过。
+- 存储独立承诺默认false，仅macOS CEF工厂true；生产host按真实消费者/Browser资源→
+  Companion+SQLite关闭确认→CEF tail，其他工厂仍native→storage。存储worker被保留，
+  调用者超时/取消不会丢失；DB关闭后native失败的重试不重新运行producer或读已关闭DB。
+  Gateway ingress独立先停，任何前置错误都拦native/DB；实际Native计数器保持失败分支0。
+- 两个首次红确认BackgroundTaskRegistry在外层取消时丢join句柄/已观察panic。RAII drain
+  现在在释放shutdown owner前归还句柄与未送达错误；7项回归通过，非吞错或删除失败。
+  Knowledge取源/启动恢复也曾detach且晚写SQLite；现封准入、publication fence与同任务
+  join，owned local I/O等真实worker结束，普通请求预算不变。6项定向及旧create/resume通过。
+- CEF真实FFI返回立即独立标记；ack-loss继续failed/不重入，但不再显示native仍运行。
+  native状态4/4、App带Browser22/22及默认21/21、独立复核通过。新增原生guardian尚未接入；
+  本段只认证机制，不认证系统等待/物理退出。首次后台失败与Gateway误当native的旧spy
+  失败分别保留，修后以独立native断言验证；原正常native/ack-loss live不移植为新源码PASS。
+- 本轮未发送模型或正式UI任务。A13原完整N1继续复用，B09报告仍OPEN/等待手动解锁；
+  日志外置history-cursor-live，无凭据/大索引入Git，Windows新共享路径未代验。
+  macOS桌面目标定向cargo check通过，未吞既有warning；不把编译当新正式native验收。
+
+#### Guardian 所需的精确 Helper 身份基础（2026-10-03）
+
+- 新macOS-only opaque注册子进程authority：只从实际Unix socket内核peer取audit token，
+  强制same UID、真实PPID、父启动代次和必需的精确可执行路径；不能填任意PID/token，
+  无组杀/名称扫描/PID fallback。缺native symbol拒绝，正数errno正确解码。
+- 原生8项实际子进程检查通过，另2项fixture入口在父测试运行中为no-op；unit2/2通过。
+  精确登记执行代终止并确认absent、无关sibling仍活、完成exec后的新程序仍活且旧token
+  不命中、parent/path/alias边界成立。不把执行代absent说成全部PID被回收，不声称exec前
+  已发信号不会随pending signal继承。全部目标来自本次自有Child，无权限/保护扩张。
+- 仅基础API，尚未由CEF Helper/独立guardian消费：launch nonce、初始化前guardian启动、
+  精确库存与后台失败退出仍待接入。不能由这组真实kernel测试关闭Keychain/system-wait
+  或正式Tauri Case。完整日志外置history-cursor-live；Windows路径未改变/未代验。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

@@ -58,6 +58,31 @@ enum BackgroundTaskRegistryPhase {
 struct BackgroundTaskRegistryState {
     phase: BackgroundTaskRegistryPhase,
     tasks: Vec<JoinHandle<()>>,
+    unreported_errors: Vec<String>,
+}
+
+/// The active shutdown caller borrows join authority from retained state.
+/// Cancellation returns every unjoined handle and any undelivered errors
+/// before that caller releases the shared shutdown-owner mutex.
+struct BackgroundTaskDrain<'a> {
+    state: &'a Mutex<BackgroundTaskRegistryState>,
+    tasks: std::collections::VecDeque<JoinHandle<()>>,
+    errors: Vec<String>,
+}
+
+impl Drop for BackgroundTaskDrain<'_> {
+    fn drop(&mut self) {
+        if self.tasks.is_empty() && self.errors.is_empty() {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.phase = BackgroundTaskRegistryPhase::Closing;
+        state.tasks.extend(self.tasks.drain(..));
+        state.unreported_errors.append(&mut self.errors);
+    }
 }
 
 pub(crate) struct BackgroundTaskRegistry {
@@ -78,6 +103,7 @@ impl BackgroundTaskRegistry {
             state: Mutex::new(BackgroundTaskRegistryState {
                 phase,
                 tasks: Vec::new(),
+                unreported_errors: Vec::new(),
             }),
             shutdown_owner: tokio::sync::Mutex::new(()),
         }
@@ -193,7 +219,19 @@ impl BackgroundTaskRegistry {
             }
         };
 
-        let mut errors = Vec::new();
+        // Declared after the owner guard so cancellation restores the batch
+        // before another caller can acquire join authority and seal Closed.
+        let mut drain = BackgroundTaskDrain {
+            state: &self.state,
+            tasks: Default::default(),
+            errors: {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::take(&mut state.unreported_errors)
+            },
+        };
 
         loop {
             let tasks = {
@@ -209,7 +247,7 @@ impl BackgroundTaskRegistry {
                     }
                     BackgroundTaskRegistryPhase::Closing => {}
                     BackgroundTaskRegistryPhase::Closed if state.tasks.is_empty() => {
-                        return errors;
+                        return std::mem::take(&mut drain.errors);
                     }
                     BackgroundTaskRegistryPhase::Closed => {
                         // A defensive late registration retained a task after
@@ -223,62 +261,45 @@ impl BackgroundTaskRegistry {
                     // mutex as register(). No registration can slip between
                     // them and become an untracked detached handle.
                     state.phase = BackgroundTaskRegistryPhase::Closed;
-                    return errors;
+                    return std::mem::take(&mut drain.errors);
                 }
                 std::mem::take(&mut state.tasks)
             };
 
-            let mut tasks = tasks.into_iter();
-            while let Some(mut task) = tasks.next() {
+            drain.tasks = tasks.into();
+            while !drain.tasks.is_empty() {
                 let remaining =
                     deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    task.abort();
-                    let mut retained = Vec::with_capacity(1 + tasks.len());
-                    retained.push(task);
-                    for task in tasks {
+                    for task in &drain.tasks {
                         task.abort();
-                        retained.push(task);
                     }
-                    let retained_count = retained.len();
-                    let mut state = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    state.phase = BackgroundTaskRegistryPhase::Closing;
-                    state.tasks.extend(retained);
-                    errors.push(format!(
+                    let retained_count = drain.tasks.len();
+                    drain.errors.push(format!(
                         "{retained_count} background task(s) did not quiesce before the shutdown deadline; aborted handles retained for retry"
                     ));
-                    return errors;
+                    return std::mem::take(&mut drain.errors);
                 }
 
-                match tokio::time::timeout(remaining, &mut task).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        if !error.is_cancelled() {
-                            errors.push(format!("background task join failed: {error}"));
+                let task = drain.tasks.front_mut().expect("drained batch is nonempty");
+                match tokio::time::timeout(remaining, task).await {
+                    Ok(result) => {
+                        drain.tasks.pop_front();
+                        if let Err(error) = result {
+                            if !error.is_cancelled() {
+                                drain.errors.push(format!("background task join failed: {error}"));
+                            }
                         }
                     }
                     Err(_) => {
-                        task.abort();
-                        let mut retained = Vec::with_capacity(1 + tasks.len());
-                        retained.push(task);
-                        for task in tasks {
+                        for task in &drain.tasks {
                             task.abort();
-                            retained.push(task);
                         }
-                        let retained_count = retained.len();
-                        let mut state = self
-                            .state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        state.phase = BackgroundTaskRegistryPhase::Closing;
-                        state.tasks.extend(retained);
-                        errors.push(format!(
+                        let retained_count = drain.tasks.len();
+                        drain.errors.push(format!(
                             "{retained_count} background task(s) exceeded the shutdown deadline; aborted handles retained for retry"
                         ));
-                        return errors;
+                        return std::mem::take(&mut drain.errors);
                     }
                 }
             }
@@ -638,10 +659,20 @@ async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Resul
     }
 }
 
+#[derive(Default)]
+struct HostShutdownStage {
+    storage_task: Option<JoinHandle<()>>,
+    storage_closed: bool,
+    storage_failure: Option<String>,
+    native_after_storage: bool,
+    complete: bool,
+}
+
 pub struct AppServices {
     /// Process-owned handle to the one immutable official Runtime provider.
     pub(crate) official_runtime: Arc<crate::router::official_runtime::OfficialRuntimeHost>,
     pub database: Database,
+    host_shutdown_stage: tokio::sync::Mutex<HostShutdownStage>,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
     pub(crate) background_shutdown: CancellationToken,
@@ -1185,6 +1216,11 @@ impl AppServices {
     /// closes the database or reports startup/shutdown success; relying on
     /// `Drop` is insufficient even when `browser-use` is disabled.
     pub async fn shutdown_browser_platform(&self) -> anyhow::Result<()> {
+        self.shutdown_browser_resources().await?;
+        self.shutdown_browser_native_runtime().await
+    }
+
+    async fn shutdown_browser_resources(&self) -> anyhow::Result<()> {
         #[cfg(feature = "browser-use")]
         let attached_chrome = match &self.attached_chrome {
             Some(service) => service.shutdown().await,
@@ -1195,7 +1231,7 @@ impl AppServices {
         let platform = self.browser_platform_shutdown.shutdown().await;
         #[cfg(feature = "browser-use")]
         if let Some(resources) = &self.browser_resources {
-            if let Err(error) = resources.shutdown().await {
+            if let Err(error) = resources.close_resources().await {
                 return Err(anyhow::anyhow!("managed Browser Resource shutdown failed: {error}; browser platform: {platform:?}"));
             }
         }
@@ -1204,6 +1240,39 @@ impl AppServices {
         #[cfg(feature = "browser-use")]
         attached_chrome.map_err(|error|anyhow::anyhow!("attached Chrome Provider disconnect failed: {error}"))?;
         platform
+    }
+
+    async fn shutdown_browser_native_runtime(&self) -> anyhow::Result<()> {
+        #[cfg(feature="browser-use")]
+        if let Some(resources)=&self.browser_resources {
+            resources.close_native_runtime().await.map_err(|error|anyhow::anyhow!("managed Browser native shutdown failed: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn browser_native_can_close_after_storage(&self) -> bool {
+        #[cfg(feature="browser-use")]
+        {self.browser_resources.as_ref().is_some_and(|resources|resources.supports_storage_independent_shutdown())}
+        #[cfg(not(feature="browser-use"))]
+        {false}
+    }
+
+    async fn finish_host_storage_shutdown(&self, stage: &mut HostShutdownStage) -> anyhow::Result<()> {
+        if let Some(error)=&stage.storage_failure {return Err(anyhow::anyhow!("Host storage cleanup remains unproven: {error}"));}
+        if !stage.storage_closed {
+            let task=stage.storage_task.as_mut().ok_or_else(||anyhow::anyhow!("Host storage closure has no retained worker"))?;
+            let result=tokio::time::timeout(Duration::from_secs(5),task).await
+                .map_err(|_|anyhow::anyhow!("Host storage cleanup timed out; same worker retained for retry"))?;
+            stage.storage_task=None;
+            if let Err(error)=result {
+                stage.storage_failure=Some(error.to_string());
+                return Err(anyhow::anyhow!("Host storage cleanup worker failed: {error}"));
+            }
+            stage.storage_closed=true;
+        }
+        if stage.native_after_storage {self.shutdown_browser_native_runtime().await?;}
+        stage.complete=true;
+        Ok(())
     }
 
     /// Stop process-lifetime background tasks before their repositories close.
@@ -1280,13 +1349,26 @@ impl AppServices {
     /// terminal, channel, Agent Execution, Browser/Gateway, robot, or SSH
     /// resources are still active.
     pub(crate) async fn shutdown_nomi_core_host(&self) -> anyhow::Result<()> {
+        let mut stage=self.host_shutdown_stage.lock().await;
+        if stage.complete {return Ok(());}
+        // A cancelled waiter or failed native close cannot re-run producers
+        // against SQLite that the retained storage worker has already closed.
+        if stage.storage_task.is_some() || stage.storage_closed || stage.storage_failure.is_some() {
+            return self.finish_host_storage_shutdown(&mut stage).await;
+        }
         let mut errors = Vec::new();
+        let native_after_storage=self.browser_native_can_close_after_storage();
 
         self.request_background_shutdown();
         self.shutdown_cron_timers();
         // Fence runtime admission immediately, before awaiting any producer or
         // resource owner. Its owned flight runs while these owners wind down.
         let engine_shutdown = self.agent_runtime_sessions.shutdown_and_wait();
+        // Gateway MCP is separate ingress. Fence it even if a later producer
+        // cleanup fails and native Browser authority must remain retained.
+        if let Err(error)=self.browser_platform_shutdown.shutdown().await {
+            errors.push(format!("Gateway ingress cleanup failed: {error:#}"));
+        }
         if let Some(runtime) = self.plugin_service_runtime.get()
             && let Err(error) = runtime.shutdown().await
         {
@@ -1353,10 +1435,18 @@ impl AppServices {
                 errors.push("SSH cleanup timed out after 5 seconds".to_owned());
             }
         }
+        // Gateway source jobs can outlive the HTTP request. Their own retained
+        // task authority, not an empty HTTP listener, proves no late DB publish.
+        if let Err(error)=self.knowledge_service.quiesce_background_tasks(Duration::from_secs(5)).await {
+            producers_stopped=false;
+            errors.push(format!("Knowledge source cleanup failed: {error}"));
+        }
         // Retain native cleanup authority when an Agent or producer may still
         // submit work. A later shutdown joins the same quarantined owners.
-        if runtimes_stopped && producers_stopped {
-            if let Err(error) = self.shutdown_browser_platform().await {
+        if runtimes_stopped && producers_stopped && errors.is_empty() {
+            let browser=if native_after_storage {self.shutdown_browser_resources().await}
+                else {self.shutdown_browser_platform().await};
+            if let Err(error) = browser {
                 errors.push(format!("browser/gateway cleanup failed: {error:#}"));
             }
         }
@@ -1377,11 +1467,13 @@ impl AppServices {
         }
 
         if errors.is_empty() {
-            tokio::time::timeout(Duration::from_secs(5), self.companion_service.close_storage())
-                .await
-                .map_err(|_| anyhow::anyhow!("Companion storage cleanup timed out"))?;
-            self.database.close().await;
-            Ok(())
+            let companion=self.companion_service.clone();let database=self.database.clone();
+            stage.native_after_storage=native_after_storage;
+            stage.storage_task=Some(tokio::spawn(async move {
+                companion.close_storage().await;
+                database.close().await;
+            }));
+            self.finish_host_storage_shutdown(&mut stage).await
         } else {
             Err(anyhow::anyhow!(
                 "Nomi-core cleanup failed: {}",
@@ -2129,6 +2221,7 @@ impl AppServices {
         let services = Self {
             official_runtime,
             database,
+            host_shutdown_stage: Default::default(),
             background_shutdown,
             background_tasks,
             channel_manager: Mutex::new(None),
@@ -2414,6 +2507,93 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_registry_cancelled_waiter_retains_blocking_task_for_retry() {
+        struct ReleaseBlockedTask(Arc<(StdMutex<bool>, Condvar)>);
+        impl ReleaseBlockedTask {
+            fn release(&self) {
+                let (released, signal) = &*self.0;
+                *released.lock().unwrap_or_else(|error| error.into_inner()) = true;
+                signal.notify_all();
+            }
+        }
+        impl Drop for ReleaseBlockedTask {
+            fn drop(&mut self) {
+                self.release();
+            }
+        }
+
+        let registry = Arc::new(BackgroundTaskRegistry::new(CancellationToken::new()));
+        let release = ReleaseBlockedTask(Arc::new((StdMutex::new(false), Condvar::new())));
+        let task_release = release.0.clone();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let task_completed = completed.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        registry.register(tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let (released, signal) = &*task_release;
+            let released = released.lock().unwrap_or_else(|error| error.into_inner());
+            let _released = signal
+                .wait_while(released, |released| !*released)
+                .unwrap_or_else(|error| error.into_inner());
+            task_completed.fetch_add(1, Ordering::AcqRel);
+        }));
+        started_rx.await.expect("blocking task did not start");
+
+        let owner = registry.clone();
+        let first = tokio::spawn(async move { owner.shutdown(Duration::from_secs(10)).await });
+        wait_for_background_registry_snapshot(&registry, BackgroundTaskRegistryPhase::Closing, 0).await;
+        let owner = registry.clone();
+        let concurrent = tokio::spawn(async move { owner.shutdown(Duration::from_secs(10)).await });
+        tokio::task::yield_now().await;
+        assert!(!concurrent.is_finished(), "another caller cannot seal an in-flight batch Closed");
+        concurrent.abort();
+        assert!(concurrent.await.unwrap_err().is_cancelled());
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert_eq!(registry.snapshot(), (BackgroundTaskRegistryPhase::Closing, 1));
+        assert_eq!(completed.load(Ordering::Acquire), 0);
+
+        let owner = registry.clone();
+        let retry = tokio::spawn(async move { owner.shutdown(Duration::from_secs(10)).await });
+        wait_for_background_registry_snapshot(&registry, BackgroundTaskRegistryPhase::Closing, 0).await;
+        assert!(!retry.is_finished(), "a retry must join the same withheld blocking task");
+        release.release();
+        assert!(retry.await.unwrap().is_empty());
+        assert_eq!(completed.load(Ordering::Acquire), 1);
+        assert_eq!(registry.snapshot(), (BackgroundTaskRegistryPhase::Closed, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_registry_cancelled_waiter_retains_observed_join_failure() {
+        let registry = Arc::new(BackgroundTaskRegistry::new(CancellationToken::new()));
+        let (panic_release_tx, panic_release_rx) = tokio::sync::oneshot::channel();
+        let panicking = tokio::spawn(async move {
+            let _ = panic_release_rx.await;
+            panic!("registry cancellation failure probe");
+        });
+        let panic_completion = panicking.abort_handle();
+        registry.register(panicking);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        registry.register(tokio::spawn(async move { let _ = release_rx.await; }));
+        panic_release_tx.send(()).unwrap();
+        while !panic_completion.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let owner = registry.clone();
+        let first = tokio::spawn(async move { owner.shutdown(Duration::from_secs(10)).await });
+        wait_for_background_registry_snapshot(&registry, BackgroundTaskRegistryPhase::Closing, 0).await;
+        // A completed first task is joined without another suspension, so a
+        // caller paused on this batch is waiting on the withheld second task.
+        tokio::task::yield_now().await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        let errors = registry.shutdown(Duration::from_secs(1)).await;
+        assert!(errors.iter().any(|error| error.contains("registry cancellation failure probe")), "{errors:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn background_registry_timeout_is_bounded_and_retains_join_authority() {
         let registry = BackgroundTaskRegistry::new(CancellationToken::new());
         let release = Arc::new((StdMutex::new(false), Condvar::new()));
@@ -2623,6 +2803,21 @@ mod tests {
         }
     }
 
+    #[cfg(feature="browser-use")]
+    struct NativeShutdownProbe(Arc<AtomicUsize>);
+
+    #[cfg(feature="browser-use")]
+    #[async_trait::async_trait]
+    impl nomifun_browser_platform::runtime::BrowserRuntimeFactory for NativeShutdownProbe {
+        async fn create(&self,_:nomifun_browser_platform::runtime::CreateBrowserRuntime)
+            ->Result<Arc<dyn nomifun_browser_platform::runtime::BrowserRuntime>,nomifun_browser_platform::runtime::WorkspaceError> {
+            panic!("shutdown probe must not create a runtime")
+        }
+        async fn shutdown(&self)->Result<(),nomifun_browser_platform::runtime::WorkspaceError> {
+            self.0.fetch_add(1,Ordering::AcqRel);Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn failed_agent_shutdown_retains_browser_and_database_until_retry() {
         let db=nomifun_db::init_database_memory().await.unwrap();
@@ -2631,6 +2826,10 @@ mod tests {
         let allow=Arc::new(std::sync::atomic::AtomicBool::new(false));
         services.agent_runtime_sessions=Arc::new(ShutdownRegistryProbe {inner:services.agent_runtime_sessions.clone(),allow:allow.clone()});
         let browser_shutdowns=Arc::new(AtomicUsize::new(0));
+        #[cfg(feature="browser-use")]
+        let native_calls=Arc::new(AtomicUsize::new(0));
+        #[cfg(feature="browser-use")]
+        {services.browser_resources=Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(NativeShutdownProbe(native_calls.clone())))));}
         let original=services.browser_platform_shutdown.clone();
         let calls=browser_shutdowns.clone();
         services.browser_platform_shutdown=BrowserPlatformShutdown::from_steps(Some(BrowserShutdownStep::new("browser shutdown order",move || {
@@ -2639,11 +2838,15 @@ mod tests {
         })));
         let failure=services.shutdown_nomi_core_host().await.unwrap_err();
         assert!(failure.to_string().contains("Agent runtime cleanup failed"));
-        assert_eq!(browser_shutdowns.load(Ordering::Acquire),0);
+        assert_eq!(browser_shutdowns.load(Ordering::Acquire),1,"Gateway ingress closes independently of native Browser");
+        #[cfg(feature="browser-use")]
+        assert_eq!(native_calls.load(Ordering::Acquire),0,"unproven Agent cleanup cannot enter native Browser");
         sqlx::query("SELECT 1").execute(services.database.pool()).await.unwrap();
         allow.store(true,Ordering::Release);
         services.shutdown_nomi_core_host().await.unwrap();
         assert_eq!(browser_shutdowns.load(Ordering::Acquire),1);
+        #[cfg(feature="browser-use")]
+        assert_eq!(native_calls.load(Ordering::Acquire),1);
         assert!(services.database.pool().is_closed());
     }
 
@@ -2656,6 +2859,10 @@ mod tests {
         robot.inject_bridge_panic_for_test().unwrap();
         assert!(robot.shutdown_and_wait().await.is_err());
         let calls=Arc::new(AtomicUsize::new(0));let counter=calls.clone();
+        #[cfg(feature="browser-use")]
+        let native_calls=Arc::new(AtomicUsize::new(0));
+        #[cfg(feature="browser-use")]
+        {services.browser_resources=Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(NativeShutdownProbe(native_calls.clone())))));}
         let original=services.browser_platform_shutdown.clone();
         services.browser_platform_shutdown=BrowserPlatformShutdown::from_steps(Some(BrowserShutdownStep::new("Robot cleanup order",move || {
             let original=original.clone();let counter=counter.clone();
@@ -2664,7 +2871,9 @@ mod tests {
         for _ in 0..2 {
             let failure=services.shutdown_nomi_core_host().await.unwrap_err();
             assert!(failure.to_string().contains("Robot task cleanup failed"));
-            assert_eq!(calls.load(Ordering::Acquire),0);
+            assert_eq!(calls.load(Ordering::Acquire),1,"Gateway remains stopped while failed Robot authority is retained");
+            #[cfg(feature="browser-use")]
+            assert_eq!(native_calls.load(Ordering::Acquire),0,"failed Robot cleanup must not enter native Browser");
             sqlx::query("SELECT 1").execute(services.database.pool()).await.unwrap();
         }
         // Explicit fixture teardown after all controlled workers have joined;
@@ -2672,6 +2881,106 @@ mod tests {
         services.shutdown_browser_platform().await.unwrap();
         services.companion_service.close_storage().await;
         services.database.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_background_shutdown_retains_native_and_database_until_retry() {
+        let db=nomifun_db::init_database_memory().await.unwrap();let root=tempfile::tempdir().unwrap();
+        let mut services=AppServices::from_config(db,&test_config(root.path())).await.unwrap();
+        services.register_background_task(tokio::spawn(async {panic!("controlled background cleanup failure")}));
+        let calls=Arc::new(AtomicUsize::new(0));let counter=calls.clone();
+        #[cfg(feature="browser-use")]
+        let native_calls=Arc::new(AtomicUsize::new(0));
+        #[cfg(feature="browser-use")]
+        {services.browser_resources=Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(NativeShutdownProbe(native_calls.clone())))));}
+        let original=services.browser_platform_shutdown.clone();
+        services.browser_platform_shutdown=BrowserPlatformShutdown::from_steps(Some(BrowserShutdownStep::new("retained Gateway",move || {
+            let original=original.clone();let counter=counter.clone();
+            async move {counter.fetch_add(1,Ordering::AcqRel);original.shutdown().await.map_err(|error|error.to_string())}
+        })));
+        let error=services.shutdown_nomi_core_host().await.unwrap_err();
+        assert!(error.to_string().contains("background task cleanup failed"));
+        assert_eq!(calls.load(Ordering::Acquire),1,"ingress must still close on a producer failure");
+        #[cfg(feature="browser-use")]
+        assert_eq!(native_calls.load(Ordering::Acquire),0);
+        sqlx::query("SELECT 1").execute(services.database.pool()).await.unwrap();
+        services.shutdown_nomi_core_host().await.unwrap();
+        assert!(services.database.pool().is_closed());
+        #[cfg(feature="browser-use")]
+        assert_eq!(native_calls.load(Ordering::Acquire),1);
+    }
+
+    #[cfg(feature="browser-use")]
+    struct StorageIndependentFactory {
+        database: Database,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+        calls: AtomicUsize,
+        fail_once: AtomicBool,
+    }
+
+    #[cfg(feature="browser-use")]
+    #[async_trait::async_trait]
+    impl nomifun_browser_platform::runtime::BrowserRuntimeFactory for StorageIndependentFactory {
+        fn supports_storage_independent_shutdown(&self)->bool {true}
+        async fn create(&self,_:nomifun_browser_platform::runtime::CreateBrowserRuntime)
+            -> Result<Arc<dyn nomifun_browser_platform::runtime::BrowserRuntime>,nomifun_browser_platform::runtime::WorkspaceError> {
+            panic!("shutdown test must not create a Browser runtime")
+        }
+        async fn shutdown(&self)->Result<(),nomifun_browser_platform::runtime::WorkspaceError> {
+            assert!(self.database.pool().is_closed(),"SQLite must close before storage-independent native entry");
+            self.calls.fetch_add(1,Ordering::AcqRel);self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            if self.fail_once.swap(false,Ordering::AcqRel) {
+                Err(nomifun_browser_platform::runtime::WorkspaceError::NativeCommandFailed)
+            } else {Ok(())}
+        }
+    }
+
+    #[cfg(feature="browser-use")]
+    #[tokio::test]
+    async fn storage_independent_native_retry_joins_after_db_close_without_restarting_producers() {
+        let db=nomifun_db::init_database_memory().await.unwrap();let root=tempfile::tempdir().unwrap();
+        let mut services=AppServices::from_config(db,&test_config(root.path())).await.unwrap();
+        let allow=Arc::new(AtomicBool::new(true));
+        services.agent_runtime_sessions=Arc::new(ShutdownRegistryProbe {inner:services.agent_runtime_sessions.clone(),allow:allow.clone()});
+        let factory=Arc::new(StorageIndependentFactory {database:services.database.clone(),entered:Arc::new(tokio::sync::Notify::new()),
+            release:Arc::new(tokio::sync::Semaphore::new(0)),calls:AtomicUsize::new(0),fail_once:AtomicBool::new(true)});
+        services.browser_resources=Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(factory.clone())));
+        let services=Arc::new(services);let owner=services.clone();
+        let first=tokio::spawn(async move {owner.shutdown_nomi_core_host().await});
+        factory.entered.notified().await;
+        assert!(services.database.pool().is_closed());assert!(!first.is_finished());
+        first.abort();assert!(first.await.unwrap_err().is_cancelled());
+        allow.store(false,Ordering::Release); // Re-running the Agent producer would now fail.
+        let owner=services.clone();let retry=tokio::spawn(async move {owner.shutdown_nomi_core_host().await});
+        tokio::task::yield_now().await;assert_eq!(factory.calls.load(Ordering::Acquire),1);
+        factory.release.add_permits(1);assert!(retry.await.unwrap().is_err());
+        let owner=services.clone();let retry=tokio::spawn(async move {owner.shutdown_nomi_core_host().await});
+        factory.entered.notified().await;factory.release.add_permits(1);retry.await.unwrap().unwrap();
+        assert_eq!(factory.calls.load(Ordering::Acquire),2);
+        services.shutdown_nomi_core_host().await.unwrap();
+        assert_eq!(factory.calls.load(Ordering::Acquire),2,"acknowledged native success is not re-entered");
+    }
+
+    #[tokio::test]
+    async fn cancelled_storage_waiter_keeps_owned_close_worker_for_retry() {
+        let db=nomifun_db::init_database_memory().await.unwrap();let root=tempfile::tempdir().unwrap();
+        let services=Arc::new(AppServices::from_config(db,&test_config(root.path())).await.unwrap());
+        let release=Arc::new(tokio::sync::Semaphore::new(0));let gate=release.clone();let database=services.database.clone();
+        services.host_shutdown_stage.lock().await.storage_task=Some(tokio::spawn(async move {
+            gate.acquire().await.unwrap().forget();database.close().await;
+        }));
+        let owner=services.clone();let waiter=tokio::spawn(async move {owner.shutdown_nomi_core_host().await});
+        tokio::task::yield_now().await;waiter.abort();assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(!services.database.pool().is_closed());
+        assert!(services.host_shutdown_stage.lock().await.storage_task.is_some());
+        release.add_permits(1);services.shutdown_nomi_core_host().await.unwrap();
+        assert!(services.database.pool().is_closed());
+        // This test injected only the storage stage; explicitly stop the other
+        // isolated fixture owners rather than treating injection as their proof.
+        services.request_background_shutdown();services.shutdown_background_tasks(Duration::from_secs(1)).await;
+        services.shutdown_browser_platform().await.unwrap();services.companion_service.close_storage().await;
     }
 
     #[tokio::test]
