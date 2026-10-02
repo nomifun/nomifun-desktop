@@ -3497,3 +3497,23 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   现只改criteria现状引用，保留仍合法历史delivery refs，不恢复current资格/不重跑；中文
   显示例句与公开label语言说明补齐，尾部参数指导无API/权限扩张。Runtime285/285及
   source/privacy/历史refs回归通过，最后未formal，不将缺项或blocked洗绿，Windows未代验。
+
+### macOS A13 原完整交付修后 N1（2026-10-03）
+
+- 最新688d251d4正式原A/StepFun8请求/7步骤，16native=canonical、11/11结果真实读取并
+  精确发布/UI呈现，含实际cwd和独立头/尾两页97B、搜索/Git/测试0/1；原件/Git/哨兵保护。
+  原完整功能N1 PASS，3report预检拒绝+预期exit1共4/1保持，不认证N3或首发无错。
+- Cmd-Q0/190.257s/noexpiry、五表437/1/1/1/5全同/ok。公开中文版本实际采用，但search/
+  VCS fallback机器字段/自由术语未全收敛。外部最小audit与全部日志在complex-report-closure-fixed。
+- 原B补报告未执行：Cua真实Mac锁定、任务未发送/模型0，原480秒native期限后TERM/expired
+  保持失败观察，旧1020events/14effects及failed全同，等价relay/fixture关闭；不代判B或Windows。
+
+### macOS 历史读取控制 bootstrap（2026-10-03）
+
+- 原B同Session正式仅补报告3次请求全部thinking-only length：末completion4096，public/
+  tool0；2次有界续写后TaskIncomplete，旧1020events/14effects完整无重放，新报告仍0。
+  Cmd-Q0/noexpiry与五表1065/1/1/2/14同源独立成立，完整证据外置complex-report-closure-fixed。
+- 已有owner-auth history_port但LOAD未曝光、又不在ToolSearch目录，造成历史任务入口循环。
+  首轮有port则LOAD，成功归档控制才激活ToolHistory，无TaskLedger/owner/证据提鲜/权限增开；
+  考虑旧build兼容性仍保持原校验，不由此声称旧历史必可导入。纯思考截断用非代码分块提示，
+  预算/续写数/私密思考不回放保持。Runtime288/288，新修复未formal，Windows未代验。
