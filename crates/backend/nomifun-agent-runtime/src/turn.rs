@@ -1312,7 +1312,7 @@ pub(crate) async fn run_turn(
                             let reportable_failure = state.execution_plan.revision == 0
                                 && (!state.execution_plan.needs_replan || state.completion.settled_failure_gate())
                                 && !request.unscoped_tool_hooks
-                                && crate::execution_policy::settled_nonzero_process(binding, &result);
+                                && crate::execution_policy::settled_reportable_process(binding, &result);
                             adaptive.activate(
                                 crate::adaptive::LONG_HORIZON_MODULES,
                                 crate::AgentRuntimeActivationReason::EffectfulToolCall,
@@ -1377,7 +1377,7 @@ pub(crate) async fn run_turn(
                         ) || (request.unscoped_tool_hooks && attempted && result.is_error) {
                             state.execution_plan.needs_replan = true;
                             if !failed_process || request.unscoped_tool_hooks
-                                || !crate::execution_policy::settled_nonzero_process(binding, &result)
+                                || !crate::execution_policy::settled_reportable_process(binding, &result)
                             {
                                 state.completion.set_settled_failure_gate(false);
                             }
@@ -4906,6 +4906,47 @@ mod tests {
             "a root source read must not be deferred by instructions that should already be loaded");
         assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
             "the first source read must reuse the pre-model root instruction observation");
+    }
+
+    #[tokio::test]
+    async fn reaped_timeout_can_report_without_reopening_an_optional_plan() {
+        #[derive(Default)]
+        struct TimeoutTool(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for TimeoutTool {
+            async fn invoke(&self, invocation:AgentToolInvocation, _:CancellationToken) -> Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation) {return Ok(result);}
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                let terminal=invocation.call.name=="poll_process";
+                Ok(AgentToolResult::text(invocation.call.call_id,
+                    if terminal {json!({"process_id":"owned-timeout","state":"timed_out","success":false,
+                        "output":{"text":"READY_PARENT\nREADY_CHILD\n","next_cursor":25},
+                        "cleanup":{"reaped":true,"errors":[]}}).to_string()}
+                    else {json!({"process_id":"owned-timeout","state":"running","success":null,
+                        "output":{"text":"","next_cursor":0}}).to_string()},terminal))
+            }
+        }
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("start-once","start_process",json!({"command":"bun","args":["helper.mjs","hold"],"timeout_ms":6000,"wait_ms":0})),
+            control_step("timeout-terminal","poll_process",json!({"process_id":"owned-timeout","cursor":0,"wait_ms":30000})),
+            control_step("report-terminal","report_completion",json!({"summary":"The controlled diagnostic timed out and was reaped; no exit code was observed, no success or user stop is claimed.",
+                "observed_tool_error_count":1,"observed_command_failure_count":1,
+                "criteria":[{"disposition":"supported","evidence_call_ids":["timeout-terminal"],"rationale":"The exact owned terminal records timeout and proven cleanup."}]})),
+            text_step("Report only the observed diagnostic; no new action is authorized."),
+        ]),requests:Default::default()});
+        let tools=Arc::new(TimeoutTool::default());
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ManagedEffect,false),
+            tool_binding("poll_process","workspace.process","workspace.process/poll",AgentEffectClass::ReadOnly,true),
+        ]).unwrap();
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan,principal(),0).with_max_model_steps(3)).await
+            .expect("a known reaped timeout is reportable without an extra plan round");
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert_eq!(model.requests.lock().unwrap().len(),3,"no unnecessary update_plan or repaired report round");
+        assert_eq!(*tools.0.lock().unwrap(),["start-once","timeout-terminal"]);
+        assert!(result.output_text.contains("timed out") && result.output_text.contains("reaped"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"),"the real timeout remains recorded");
     }
 
     #[tokio::test]

@@ -3695,3 +3695,14 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：04最小反例首红保留；修后定位[1,2,3]、不复制私有summary/rationale/原ID、不改原参数，更新后的精确计数下合法修正通过。参数预检模块8项与历史资格1项共9项不同定向通过，fmt配置/diff通过；06首次源码写入失败另记为工具错误，源码完整核对后一次重试。
 - 未覆盖：新反馈的真实采用/首发N3、summary信息丢失/压缩错误“未执行”状态、报告范围及完整A/B/C/共享门槛。修复晚于正式binary，不将恢复/N1计完整A，未再付费循环。
 - 证据：仓库外2026-10-02/windows/w225-report-shape-live，01构建、02拒绝后完成DB/事件/两报告/独立audit、03正式UI、04首红/05修后/06编辑失败/07～08合同；Git仅反馈代码、最小回归和短进度。
+
+### W226 受控timeout与不支持的清理阶段（2026-10-02；正式基线65f18d071，恢复完成/整组FAIL）
+
+- Case/子断言：C05/C06/C07/C08、PROC期限/清理、LIFE/OBS关键终态及A05/A08/A10/A11/A13/A17/A19；正式GEN/StepFun、独立工作区，原W194 helper，start一次timeout_ms=6000/wait_ms=0，poll0→25、wait30000。
+- 实跑8步/4压缩：READY父/子各一次，真实timed_out，无exit_code/信号，reaped=true；独立CIM20样本确认同一父子存活/亲缘及消失，心跳停止，3保护文件/旧事件保持，无原生PID操作/外部kill/重复进程。原独立12/13保留：清理errors含“CREATE_NO_WINDOW pipe无真实控制台interrupt”，不能因最后reaped抹去。
+- 首败：report先引用READY等当前不合格ID被拒，W225新反馈定位[1]生效；随后因缺少/失效plan又拒绝，update_plan后第三report完成。无新副作用，但2次拒绝和内部available_evidence/call_id警告仍为FAIL；不记首发/N3或完整B。
+- 产品修复一：已清理、无清理错误、无矛盾exit_code的明确timed_out与非零一样允许optional plan只报告；后续effect仍需原重规划，lost/unreaped/清理错误/未解决patch继续阻断。04测试桩用尽首错保留，05三步限最小反例确认失败；修后start/poll/report三步直接收尾且1/1超时计数保留。
+- 产品修复二：平台owner声明interrupt支持度，Windows pipe=false、ConPTY=true；清理选支持的阶段后再构造同一StopBudget，不先尝试必失败中断。不吞返回错误，显式pipe interrupt仍诚实失败，Job terminate/force权限与精确reap保持；Unix默认真实interrupt路径不改。
+- 验证：Agent超时/非零/反例/副作用gate/patch/终态资格8项通过；native期限首红15保留，修后16保留超时前文件效果且无伪interrupt错误；pipe Job父子5秒、显式不支持、ConPTY中断/父子reap及真实信号错误保护3项通过，共12项不同定向，fmt配置/diff通过。
+- 未覆盖：修后正式Tauri/N3、READY历史资格/计划后终态引用、内部警告语言、完整A/B/C及共享门槛；源码修晚于本次binary，原报告拒绝/清理errors不改PASS，不增加长期/发布矩阵。
+- 证据：仓库外2026-10-02/windows/w226-process-timeout-live，01构建、02原DB/事件/参数/独立audit、03UI、CIM witness、04/05/15首次失败及06～19修后；Git只留相关源码、最小回归和短进度。

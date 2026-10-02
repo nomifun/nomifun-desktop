@@ -2985,3 +2985,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - Windows正式COD原综合A 9步/4压缩completed，无操作重做，独立操作13/13；首报告旧ID被拒，第二报告用cwd ID支持读搜/Git而获Schema接受，独立语义FAIL；W224的unverified未采用。缺完整cwd/目录值及后续未复核披露，历史不重写。
 - 单独report的引用拒绝现在定位有限criterion索引，移除引用enum错误的其他ID替换列表并附原合法形态；不修改参数、接受集合、计数、批次/权限或自由文本语义判断。新反例首红、修后[1,2,3]及隐私/批次/漂移/历史保护共9项通过，fmt配置/diff通过。
 - 新反馈的实际采用/首发N3与A/B/C仍缺，源修晚于本次binary；证据在仓库外2026-10-02/windows/w225-report-shape-live，共享未结案。
+
+### W226 受控超时报告与平台清理支持度（2026-10-02）
+
+- Windows正式GEN 6秒deadline一次start、两poll正确游标0/25，父子READY、timed_out/reaped；独立CIM20样本/心跳/原件/旧事件核对，原12/13保持。报告两次拒绝后update_plan/第三report完成，内部警告仍在；不是首发/N3/完整B。
+- 确定性修复：干净明确timeout终态可直接报告optional plan，仍不授权后续effect；错误/丢失/未知与patch保护不变。真实pipe因无控制台interrupt却总尝试该阶段而产生日志错误；平台支持度用于清理阶段选择，Windows pipe跳过、ConPTY/Unix保留，显式请求及真正失败不吞错。
+- Agent8项、native期限/pipe Job/ConPTY/信号错误4项共12项通过，首败/测试桩耗尽另留，fmt配置/diff通过。修后正式/N3、READY/证据/警告语言及A/B/C仍缺，共享未结案；证据在仓库外2026-10-02/windows/w226-process-timeout-live。

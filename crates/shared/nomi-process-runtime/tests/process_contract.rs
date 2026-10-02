@@ -284,6 +284,11 @@ async fn running_deadline_preserves_partial_file_effect_and_reports_reaped_timeo
         panic!("running deadline must produce TimedOut, got {outcome:?}");
     };
     assert!(cleanup.reaped);
+    #[cfg(windows)]
+    {
+        assert!(!cleanup.interrupt_attempted,"a no-window pipe owner has no supported console interrupt");
+        assert!(cleanup.errors.is_empty(),"unsupported cleanup stages must be skipped, not attempted and hidden");
+    }
     assert_eq!(
         fs::read(&marker).expect("the pre-timeout effect should remain observable"),
         b"partial effect before timeout\n"
@@ -1059,6 +1064,10 @@ async fn windows_cancel_reaps_the_leader_and_grandchild_within_five_seconds() {
     let grandchild = ExactWindowsProcess::open(grandchild_pid)
         .expect("grandchild exact process handle should open");
 
+    let interrupt_error = supervisor.interrupt(&handle.owner,&handle.session_id).await
+        .expect_err("explicit pipe interrupt remains truthfully unsupported");
+    assert!(interrupt_error.to_string().contains("no truthful console interrupt contract"));
+
     let cancellation_started = Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
@@ -1072,7 +1081,8 @@ async fn windows_cancel_reaps_the_leader_and_grandchild_within_five_seconds() {
     let ProcessOutcome::Cancelled { cleanup, .. } = outcome else {
         panic!("Windows Job cancellation should be terminal Cancelled, got {outcome:?}");
     };
-    assert!(cleanup.interrupt_attempted);
+    assert!(!cleanup.interrupt_attempted,"cleanup selects only the pipe owner's supported stages");
+    assert!(cleanup.errors.is_empty(),"no unsupported signal was attempted or hidden");
     assert!(cleanup.terminate_attempted || cleanup.force_kill_attempted);
     assert!(cleanup.reaped);
     assert!(
