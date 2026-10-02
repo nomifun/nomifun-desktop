@@ -3453,6 +3453,13 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
   不清unknown/panic、不跑任务或重放参数。新缓存判定1项+cleanup_retry9项通过，
   最后修复未native，Agent failed cleanup与Keychain物理阻塞不混同，Windows未代验。
 
+W265在Windows源1d3712209的当前前端/正式Tauri采用固定root说明去重：实际StepFun请求仅一处
+instructions、tool重复0，原五项只读操作/两个指定测试0/1及原始index字节保持，16项限定核对
+成立。12真实HTTP200/10组完成参数与canonical相同；第11摘要耗尽4096输出tokens、length且
+正文0，单次纠正被120秒正式Stop中断，无最终五项报告，原复杂交付仍FAIL。摘要推理配置的
+产品唯一原因未证，不改冻结配置/硬限或循环付费；W250/W249/W240和其他认证边界保持，
+详见Windows页W265，全面目标继续active。
+
 ### macOS 晚控制真实终态与公开交付格式（2026-10-03）
 
 - 后台deadline可能先在原owner完成，scope尚无terminal便盲目stdin并报unknown。新增冻结
