@@ -415,6 +415,17 @@
   证据2026-10-02/macos/mac-a-completion-copy-recheck；本批无源码猜修/第二付费任务，旧失败/
   A/B/C/语言/N3及Windows独立结果保持，下一缺口聚焦漏项与公开交付，不再扩底层矩阵。
 
+### C06-14 已读短页保留为历史数据（2026-10-02，macOS 确定性修复）
+
+- A11读过的四行在第二压缩后最终请求缺失；完整要求仍在、history已展示但未调用，未认定
+  压缩全丢要求或唯一漏项根因。仅成功scoped/匹配call与路径/ReadOnly文本页进入原owner
+  metadata，含页最多512 bytes；完整byte cursor/行列/版本标记保留，超限整体省略，不裁剪。
+- 原scope2KiB/detail4KiB/观测32KiB/64条及淘汰保持；无新缓存、读取、权限或额度。历史epoch/
+  eligibility不动，旧read不能变current，write/instruction-scope/失败/未派发/错ID或路径等不留正文。
+- 真语义首红、新三回归、13拒留形式与淘汰通过，completion43/43、Runtime254/254；测试enum
+  编译错误另存后按已有ManagedEffect修正。Schema/提示/报告接受/prune源字节不变，零模型/UI。
+  证据2026-10-02/macos/historical-file-page；A11原FAIL、漏搜索/英文/完整A/B/C/N3及Windows不覆盖。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
