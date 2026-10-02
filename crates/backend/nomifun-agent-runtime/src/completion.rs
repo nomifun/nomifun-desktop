@@ -1565,6 +1565,13 @@ mod tests {
         assert_eq!(later["command_exit_code"], 1);
         assert_eq!(work.failed_commands, 1);
         assert_eq!(work.failed_tools, 1);
+        let policy = crate::workflow::LONG_HORIZON_EXECUTION_INSTRUCTIONS;
+        assert!(!policy.contains("a later process launch invalidates earlier command evidence"),
+            "high-priority policy cannot erase the exact past terminal/output retained above");
+        assert!(policy.contains("matching advertised call IDs"));
+        assert!(policy.contains("not current file state"));
+        assert!(!policy.contains("citing the latest usable observation"),
+            "separate requested command results must not be reduced to the newest call");
     }
 
     #[test]
