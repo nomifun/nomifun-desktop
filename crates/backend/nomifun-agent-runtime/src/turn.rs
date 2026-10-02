@@ -4150,6 +4150,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn valid_summary_that_cannot_fit_the_fixed_prefix_gets_one_source_preserving_repair() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step("Earlier checks recorded; finish the accepted task without replay.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(400),
+        ));
+        let before = request.input.clone();
+        let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), resource,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < serde_json::to_vec(&before).unwrap().len() && after <= resource.max_context_bytes);
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, Some(4096));
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        let attempts = model.requests.lock().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].input.messages, attempts[1].input.messages, "the correction must see the same full source");
+        assert!(attempts.iter().all(|attempt| attempt.input.tools.is_empty()
+            && attempt.input.tool_choice == ChatToolChoice::None));
+        assert!(attempts[1].input.instructions.iter().any(|text| text.contains("cannot fit") && text.contains("shorter")));
+    }
+
+    #[tokio::test]
+    async fn summary_fit_repair_honors_the_observed_token_margin() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step("Keep recorded checks and finish the remaining requirements.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(79_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(600)));
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), AgentContextBudget::default(),
+        ).unwrap();
+        lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage { input_tokens:500, ..Default::default() });
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let bytes = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&request.input, bytes) < 32768 - 4096 - 512 - 500);
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, before.max_output_tokens);
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        let attempts = model.requests.lock().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].input.messages, attempts[1].input.messages);
+    }
+
+    #[tokio::test]
+    async fn a_second_unfitting_summary_fails_without_replacing_the_original_context() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step(&"t".repeat(4000))]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(400)));
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 },
+        ).unwrap();
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &sink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(ref text) if text.contains("after one correction")));
+        assert_eq!(request.input, before);
+        let attempts = model.requests.lock().unwrap();
+        assert_eq!(attempts.len(), 2, "no third paid correction");
+        assert_eq!(attempts[0].input.messages, attempts[1].input.messages);
+        assert!(attempts.iter().all(|attempt| attempt.input.tools.is_empty()
+            && attempt.input.tool_choice == ChatToolChoice::None));
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| matches!(event,
+            AgentEngineEvent::CompactionSummaryRejected {reason, ..} if reason == "REPLACEMENT_CONTEXT_BUDGET")).count(), 2);
+        assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ContextCompacted { .. })),
+            "neither rejected draft becomes an accepted replacement");
+    }
+
+    #[tokio::test]
     async fn compaction_preserves_a_latest_receipt_that_fits_beyond_the_soft_margin() {
         #[derive(Default)]
         struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
