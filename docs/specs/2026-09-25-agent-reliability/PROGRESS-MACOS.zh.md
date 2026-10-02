@@ -89,6 +89,26 @@
   查实际 schema 后另记全表核对，不重跑模型。下一项 R2 默认GEN/多结果；本批构建可复用。
   证据 `2026-10-02/macos/r1-exact-file-short/`，Windows结果未改。
 
+### 快速执行 R2：默认 GEN 三项实际结果（2026-10-02）
+
+- 修复验证入口缺口：现有 General fixture 会减去 Computer/自动化，新增明确 opt-in
+  `--live-default-general-commands`，原减权模式不变；默认模式保持完整模板文档，只选择正式
+  `local-desktop`/`installation-scheduler` 两个必需资源，不授予系统权限或执行其动作。
+  模式断言首红保留，模式/全文保持/资源选择/原预算四个定向回归均1/1。
+- 第一次完整配置预检422 `RESOURCE_SELECTION_REQUIRED`（缺computer/scheduler）保留；
+  未运行模型/Turn/events均0。按产品实际资源ID补齐后在独立run建立正式会话，不重置付费
+  任务预算；复用R1正式签名App，fixture源码/patch单独冻结，6/4096/180、native300+5。
+- 完整默认General配置选择经正式Tauri入口验证：15个capability selections及Skill与官方
+  `assistant.general` manifest逐项全同，完整revision/Session绑定前后不变，5个正式资源
+  精确绑定。真实StepFun4请求/150events/4原生参数全同；`/bin/pwd -P`、`/bin/ls -a`各一次
+  exit0/reaped，指定原文一次读取、report首发接受/错误0。cwd、五名称（含`.`/`..`/hidden）、
+  文件首尾原文均在报告/真实UI完整交付，三原件全同、无额外文件、两命令证据分别引用正确。
+- 终态截图/正常Cmd-Q同段，native0/163.86秒（含准备）、无expiry/信号/CEF初始化；fixture
+  shutdown200/exit0、自有App/Helper/listener消失。闭库七表逐行全同/ok，核心四表150/1/1/2；
+  凭据0/149。仅记默认GEN命令入口和三项结果N1，原A13复杂漏项/全A/N3/默认GEN其他业务
+  未关闭，Computer/自动化实际动作未验。本轮共9个模型请求，不为同根因再补重复。
+  证据`2026-10-02/macos/r2-multi-result-default-gen/`；下一簇R3实际旧MM retry，Windows结果不变。
+
 ## 上次活动问题簇（阶段性交付后不再自动排程）
 
 ### 2026-10-02 再收敛：当前只处理两项核心缺口
