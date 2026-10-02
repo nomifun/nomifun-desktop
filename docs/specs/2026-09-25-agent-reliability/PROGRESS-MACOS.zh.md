@@ -1736,3 +1736,11 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   397-row只读快照/ok；final仅从该快照导出，不误用空库。证据`2026-10-02/macos/empty-stop-live-recheck/`。
   本批无新可证实产品根因，只短进度/不追加模型；公开语言/重复根因/完整A/B/C/N3及旧问题
   仍开放，Windows记录未改写。
+
+- **MAC-C06-12 完成工具静态说明减重**（2026-10-02，零模型）：MAC-A-10真实请求15的
+  27 tools共50,892 wire JSON bytes，system共23,911；四次压缩仍保留5/5/1/1原call IDs，
+  未证明回执全部丢失。仅压缩重复静态说明3,247→2,385 bytes；参数Schema、动态提示、
+  Completion context/计数/资格/接受规则源字节不变，不扩预算/权限/删结果或放宽断言。
+- 首红保留，修后completion **40/40**；旧wire仅替换该字符串的模拟tools50,892→50,030
+  （约1.7%），非新的provider/UI结果，不宣称重复根因全解。原A10整组FAIL及完整A/B/C/N3、
+  公开语言/旧MM仍开放。证据`2026-10-02/macos/completion-prompt-footprint/`；Windows不代判。
