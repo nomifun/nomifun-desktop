@@ -127,7 +127,7 @@ fn observation_scope(
         "workspace.artifacts" => &["artifact_id","source_path","path"],
         _ => &[],
     };
-    // Do not copy env, stdin, file/patch contents, hook data or owner output.
+    // Do not copy env, stdin, write/patch contents, hooks or arbitrary output.
     // Budget before cloning: oversized scripts/argv are omitted as a whole.
     let selected = fields.iter().filter_map(|key| call.arguments.0.get(*key).map(|value| (*key,value)))
         .collect::<BTreeMap<_,_>>();
@@ -144,12 +144,50 @@ fn observation_scope(
     let owner_observation = absence.or_else(|| owner_result.filter(|_| has_owner_path && effects_are_scoped
         && binding.action_id.as_ref()=="workspace.files/read")
         .filter(|value| value.get("sha256").and_then(serde_json::Value::as_str).is_some_and(valid_sha256))
-        .map(|value| serde_json::json!({"sha256":value["sha256"],"total_bytes":value.get("total_bytes").and_then(serde_json::Value::as_u64),
-            "offset":value.get("offset").and_then(serde_json::Value::as_u64),"eof":value.get("eof").and_then(serde_json::Value::as_bool)})));
+        .map(|value| {
+            let mut metadata=serde_json::json!({"sha256":value["sha256"],"total_bytes":value.get("total_bytes").and_then(serde_json::Value::as_u64),
+                "offset":value.get("offset").and_then(serde_json::Value::as_u64),"eof":value.get("eof").and_then(serde_json::Value::as_bool)});
+            retain_short_read_text(&mut metadata,binding,call,value);
+            metadata
+        }));
     serde_json::json!({"capability":binding.capability_id,"action":binding.action_id,
         "requested_arguments":if retained { serde_json::to_value(selected).ok() } else { None },
         "requested_arguments_omitted":!retained,"effects_are_scoped":effects_are_scoped,
         "owner_observation":owner_observation})
+}
+
+/// An exact already-returned page is historical data, not file freshness or
+/// authority. Keep it inside the existing scope/detail/observation budgets;
+/// omit oversized pages as a whole rather than clipping UTF-8 or cursor facts.
+fn retain_short_read_text(
+    metadata:&mut serde_json::Value,
+    binding:&AgentToolBinding,
+    call:&ChatToolCall,
+    value:&serde_json::Value,
+) {
+    if binding.capability_id.as_ref()!="workspace.files"
+        || binding.effect_class!=crate::AgentEffectClass::ReadOnly
+        || !matches!(call.arguments.0.get("format").and_then(serde_json::Value::as_str),None|Some("text"))
+    { return; }
+    let requested=call.arguments.0["path"].as_str().and_then(|path| crate::agents_md::normalize_workspace_directory(path).ok());
+    let returned=value["path"].as_str().and_then(|path| crate::agents_md::normalize_workspace_directory(path).ok());
+    if requested.is_none() || requested!=returned { return; }
+    let (Some(content),Some(offset),Some(total),Some(eof))=(value["content"].as_str(),value["offset"].as_u64(),
+        value["total_bytes"].as_u64(),value["eof"].as_bool()) else { return; };
+    let Some(end)=offset.checked_add(content.len() as u64).filter(|end| *end<=total) else { return; };
+    if (eof && (end!=total || value.get("next_offset")!=Some(&serde_json::Value::Null)))
+        || (!eof && value["next_offset"].as_u64()!=Some(end))
+        || !value["start_line"].as_u64().is_some_and(|line| line>0)
+        || value["start_column_bytes"].as_u64().is_none()
+        || value["source_version_pinned"].as_bool().is_none()
+    { return; }
+    let selected=["content","next_offset","start_line","start_column_bytes","source_version_pinned"]
+        .into_iter().filter_map(|key| value.get(key).map(|value| (key,value))).collect::<BTreeMap<_,_>>();
+    if crate::stream_limits::serialized_size(&selected,512).is_err() { return; }
+    metadata["observed_text"]=serde_json::to_value(selected).expect("JSON values serialize");
+    if crate::stream_limits::serialized_size(metadata,512).is_err() {
+        metadata.as_object_mut().unwrap().remove("observed_text");
+    }
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -406,7 +444,7 @@ impl CompletionTracker {
         // invalidate() and clear that cause explicitly.
         self.invalidate_report();
         let owner_result = (matches!(binding.capability_id.as_ref(), "workspace.files" | "workspace.artifacts")
-            && invocation_attempted && !result.is_error)
+            && invocation_attempted && !result.is_error && result.call_id==call.call_id)
             .then(|| serde_json::from_str::<serde_json::Value>(&result.output_text()).ok()).flatten();
         let owner_path = owner_result.as_ref().filter(|_| binding.capability_id.as_ref() == "workspace.files"
             && matches!(binding.action_id.as_ref(), "workspace.files/read" | "workspace.files/write" | "workspace.files/delete")
@@ -1207,6 +1245,110 @@ mod tests {
         binding.definition.name = "cancel_process".into();
         binding.capability_id = "workspace.process".into();
         binding
+    }
+
+    fn text_page_result(path: &str, content: &str) -> serde_json::Value {
+        serde_json::json!({"path":path,"workspace_path":{
+            "root_sha256":"a".repeat(64),"path":path,"case_resolved":true},
+            "content":content,"sha256":"b".repeat(64),"total_bytes":content.len(),"offset":0,
+            "next_offset":null,"eof":true,"start_line":1,"start_column_bytes":0,"source_version_pinned":false})
+    }
+
+    #[test]
+    fn short_file_page_survives_as_past_output_without_reviving_current_evidence() {
+        let content = "第一行\nNEEDLE-present 第二行\n第三行\n末行\n";
+        let mut tracker = CompletionTracker::default();
+        let mut binding = file_binding("workspace.files/read");
+        binding.effect_class = crate::AgentEffectClass::ReadOnly;
+        let call = ChatToolCall {call_id:"read-original".into(),name:"read_file".into(),
+            arguments:StrictJsonValue(serde_json::json!({"path":"中文 空格.txt"})),provider_metadata:None};
+        let work = AgentWorkStatus {workspace_observation_epoch:1,..Default::default()};
+        tracker.observe(&work,&binding,&call,
+            &AgentToolResult::text(call.call_id.clone(),text_page_result("中文 空格.txt",content).to_string(),false),true);
+        let later = AgentWorkStatus {workspace_observation_epoch:2,..Default::default()};
+        let context = context_value(&tracker,&later);
+        let historical = &context["ineligible_observations"][0];
+        assert_eq!(historical["scope"]["owner_observation"]["observed_text"]["content"],content);
+        assert_eq!(historical["scope"]["owner_observation"]["observed_text"]["next_offset"],serde_json::Value::Null);
+        assert_eq!(historical["eligible_current_evidence"],false);
+        assert_eq!(tracker.observations[0].workspace_epoch,1);
+        assert!(!tracker.is_usable(&tracker.observations[0],2));
+        assert!(context["available_evidence"].as_array().unwrap().is_empty());
+        let schema=tracker.definition_with_evidence(&AgentPlan::default(),&later,false).input_schema.0;
+        let validator=jsonschema::options().build(&schema).unwrap();
+        assert!(!validator.is_valid(&serde_json::json!({"summary":"Files are unchanged","criteria":[
+            {"disposition":"supported","rationale":"Old read","evidence_call_ids":["read-original"]}]})));
+        assert!(validator.is_valid(&serde_json::json!({"summary":"Earlier observed lines are reported; later state was not checked","criteria":[
+            {"disposition":"unverified","rationale":"Only the earlier read is known"}]})));
+    }
+
+    #[test]
+    fn historical_file_page_retains_byte_cursor_without_copying_extra_owner_fields() {
+        let mut tracker=CompletionTracker::default();
+        let mut binding=file_binding("workspace.files/read"); binding.effect_class=crate::AgentEffectClass::ReadOnly;
+        let call=ChatToolCall {call_id:"page".into(),name:"read_file".into(),
+            arguments:StrictJsonValue(serde_json::json!({"path":"page.txt","offset":9})),provider_metadata:None};
+        let mut page=text_page_result("page.txt","尾部\n");
+        page["offset"]=serde_json::json!(9);page["total_bytes"]=serde_json::json!(32);
+        page["next_offset"]=serde_json::json!(16);page["eof"]=serde_json::json!(false);
+        page["start_line"]=serde_json::json!(3);page["source_version_pinned"]=serde_json::json!(true);
+        page["env"]=serde_json::json!({"PRIVATE":"not-file-output"});
+        page["stdin"]=serde_json::json!("not-file-output");
+        tracker.observe(&AgentWorkStatus::default(),&binding,&call,
+            &AgentToolResult::text(call.call_id.clone(),page.to_string(),false),true);
+        let owner=&tracker.scopes["page"]["owner_observation"];
+        assert_eq!(owner["offset"],9);assert_eq!(owner["observed_text"]["next_offset"],16);
+        assert_eq!(owner["observed_text"]["start_line"],3);
+        assert_eq!(owner["observed_text"]["source_version_pinned"],true);
+        assert_eq!(owner["observed_text"]["content"],"尾部\n");
+        assert!(!tracker.context(&AgentPlan::default(),&AgentWorkStatus::default(),1).unwrap().contains("not-file-output"));
+    }
+
+    #[test]
+    fn historical_file_page_omits_unbound_unsafe_and_oversized_text_without_clipping() {
+        for defect in ["not-dispatched","failed","unscoped","wrong-result-call","wrong-path",
+            "missing-owner-path","instruction-scope","wrong-action","wrong-effect","invalid-hash",
+            "missing-cursor","wrong-cursor","oversized"] {
+            let mut tracker=CompletionTracker::default();
+            let mut binding=file_binding("workspace.files/read"); binding.effect_class=crate::AgentEffectClass::ReadOnly;
+            let mut call=ChatToolCall {call_id:"guarded".into(),name:"read_file".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":"page.txt"})),provider_metadata:None};
+            let mut page=text_page_result("page.txt","EXACT_EARLIER_FILE_TEXT\n");
+            match defect {
+                "wrong-path"=>page["path"]=serde_json::json!("different.txt"),
+                "missing-owner-path"=>{page.as_object_mut().unwrap().remove("workspace_path");},
+                "instruction-scope"=>call.arguments.0["format"]=serde_json::json!("instruction_scope"),
+                "wrong-action"=>binding.action_id="workspace.files/write".into(),
+                "wrong-effect"=>binding.effect_class=crate::AgentEffectClass::ManagedEffect,
+                "invalid-hash"=>page["sha256"]=serde_json::json!("not-a-digest"),
+                "missing-cursor"=>{page.as_object_mut().unwrap().remove("next_offset");},
+                "wrong-cursor"=>page["next_offset"]=serde_json::json!(17),
+                "oversized"=>page=text_page_result("page.txt",&"EXACT_EARLIER_FILE_TEXT\n".repeat(100)),
+                _=>{},
+            }
+            let mut result=AgentToolResult::text(call.call_id.clone(),page.to_string(),defect=="failed");
+            if defect=="wrong-result-call" {result.call_id="unrelated".into();}
+            tracker.observe_with_effect_scope(&AgentWorkStatus::default(),&binding,&call,&result,
+                defect!="not-dispatched",defect!="unscoped");
+            assert!(tracker.scopes["guarded"]["owner_observation"].get("observed_text").is_none(),"{defect}");
+            assert!(!tracker.context(&AgentPlan::default(),&AgentWorkStatus::default(),1).unwrap()
+                .contains("EXACT_EARLIER_FILE_TEXT"),"{defect} must not leak a partial or unbound page");
+        }
+        let mut tracker=CompletionTracker::default();
+        let mut binding=file_binding("workspace.files/read"); binding.effect_class=crate::AgentEffectClass::ReadOnly;
+        for index in 0..65 {
+            let call=ChatToolCall {call_id:format!("page-{index}").into(),name:"read_file".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":"page.txt"})),provider_metadata:None};
+            tracker.observe(&AgentWorkStatus::default(),&binding,&call,
+                &AgentToolResult::text(call.call_id.clone(),text_page_result("page.txt","早先返回的文本\n").to_string(),false),true);
+        }
+        assert!(tracker.omitted>0);
+        assert!(!tracker.scopes.contains_key("page-0"),"text leaves with the original observation");
+        assert!(tracker.observations.len()<=64);
+        for scope in tracker.scopes.values() {assert!(crate::stream_limits::serialized_size(scope,2048).is_ok());}
+        let later=AgentWorkStatus {workspace_observation_epoch:1,..Default::default()};
+        let context=context_value(&tracker,&later);
+        assert!(crate::stream_limits::serialized_size(&context["ineligible_observations"],4096).is_ok());
     }
 
     fn settled_command(
