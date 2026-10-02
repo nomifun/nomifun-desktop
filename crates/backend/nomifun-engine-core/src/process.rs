@@ -437,6 +437,21 @@ impl ManagedEngineProcessOwner {
         }
     }
 
+    /// Inspect only a frozen owner terminal, without consuming running output,
+    /// renewing a lease, cancelling a process or synthesizing a reap witness.
+    pub fn terminal_if_ready(
+        &self,
+        session: &mut EngineProcessSession,
+    ) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
+        let outcome = self.supervisor.terminal_outcome_if_ready(
+            &session.owner, &session.session_id, session.cursor,
+        ).map_err(process_error)?;
+        let cursor = session.cursor;
+        let result = outcome.map(|outcome| self.convert_outcome(session, outcome));
+        session.cursor = cursor;
+        Ok(result)
+    }
+
     pub async fn close_stdin(
         &self,
         session: &EngineProcessSession,

@@ -63,6 +63,10 @@ pub struct AgentCompletionReport {
     /// Explicitly selected, bounded owner data; never fresh proof or actions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery_items: Vec<AgentDeliveryItem>,
+    /// Host-selected presentation, never model authority. Absent on historical
+    /// reports so their exact immutable delivery remains reproducible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_format: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1143,6 +1147,11 @@ impl CompletionTracker {
                 serde_json::to_string(&missing).unwrap_or_default()));
         }
         self.resolve_delivery(&mut submission.delivery_items, inputs, &submission.criteria)?;
+        // Presentation fallback only: this does not interpret user intent or
+        // translate arbitrary owner text. Persist it before moving the summary.
+        let public_format = if submission.summary.chars().any(|c| matches!(c as u32, 0x3400..=0x9fff)) {
+            "plain_zh_v1"
+        } else { "plain_en_v1" };
         Ok(AgentCompletionReport {
             plan_revision: plan.revision,
             observation_revision: self.revision,
@@ -1154,6 +1163,7 @@ impl CompletionTracker {
             observed_command_failure_count: work.failed_commands,
             requirements: plan.requirements.clone(),
             delivery_items: submission.delivery_items,
+            public_format: Some(public_format.into()),
         })
     }
 
@@ -1283,6 +1293,37 @@ fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn versioned_public_delivery_retains_values_and_legacy_exact_replay() {
+        assert_eq!(public_owner_text("*x*\n~~~\n"),"\n```text\n*x*\n~~~\n```\n");
+        let mut report: AgentCompletionReport = serde_json::from_value(serde_json::json!({
+            "plan_revision":1,"observation_revision":1,"input_revision":1,"workspace_epoch":0,
+            "summary":"已保留实际结果。","criteria":[],"observed_tool_error_count":2,"observed_command_failure_count":1,
+            "requirements":[],"delivery_items":[{"item_id":"item","status":"delivered","results":[
+                {"result_ref":"file","label":"文件内容","data":{"observed_text":{"content":"第一行\n第二行\n"},"sha256":"a".repeat(64),"total_bytes":20,"line_count":2,"offset":0,"eof":false}},
+                {"result_ref":"process","label":"实际输出","data":{"exit_code":1,"observed_output":{"process_id":"private-owner-handle","state":"exited","output":{"text":"READY\n","next_cursor":6,"dropped_bytes":0,"decode_errors":0}}}}
+            ]}]
+        })).unwrap();
+        let legacy = report.delivery_text();
+        assert!(legacy.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert!(report.matches_delivery(&legacy));
+        report.public_format=Some("plain_zh_v1".into());
+        let text = report.delivery_text();
+        assert!(text.contains("第一行\n第二行\n") && text.contains("READY\n"));
+        assert!(text.contains(&"a".repeat(64)) && text.contains("文件字节数：20") && text.contains("行数：2"));
+        assert!(text.contains("读至文件末尾：否") && text.contains("退出码：1") && text.contains("丢失输出字节：0"));
+        assert!(text.contains("未成功的操作尝试：2") && text.contains("未成功的命令尝试：1"));
+        for internal in ["observed_output","process_id","private-owner-handle","next_cursor","null","Unsuccessful"] { assert!(!text.contains(internal),"{internal}"); }
+        assert!(report.matches_delivery(&text));
+        assert!(!report.matches_delivery(&legacy) && !report.matches_delivery(&report.summary));
+        let cold:AgentCompletionReport=serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+        assert_eq!(cold.delivery_text(),text);
+        let escaped=plain_public_result(&serde_json::json!({"observed_text":{"content":"<think>`[SKILL_SUGGEST]"},"sha256":"b".repeat(64)}),true);
+        assert!(!escaped.contains("<think>") && !escaped.contains("[SKILL_SUGGEST]"));
+        assert!(escaped.contains("\\u003c") && escaped.contains("\\u0060") && escaped.contains(&"b".repeat(64)));
+        let unknown=plain_public_result(&serde_json::json!({"exit_code":null,"observed_output":{"state":"lost","output":{"text":"","dropped_bytes":null,"decode_errors":null}}}),true);
+        assert!(unknown.contains("结果未知") && unknown.contains("退出码：未记录") && unknown.contains("丢失输出字节：未记录"));
+    }
 
     #[test]
     fn final_file_reads_extend_references_without_duplicating_mandatory_output() {
@@ -1360,7 +1401,7 @@ mod tests {
         tracker.resolve_delivery(&mut valid,&inputs,&[criterion]).unwrap();
         let report=AgentCompletionReport {plan_revision:1,observation_revision:0,input_revision:1,workspace_epoch:0,
             summary:"只读检查完成。".into(),criteria:vec![],observed_tool_error_count:0,observed_command_failure_count:0,
-            requirements:vec![],delivery_items:valid};
+            requirements:vec![],delivery_items:valid,public_format:None};
         let text=report.delivery_text();
         assert!(text.contains("/实际 工作目录\n")&&text.contains(exact));
         assert!(!report.matches_delivery(&report.summary),"new reports cannot replay the old summary-only format");
@@ -3400,6 +3441,42 @@ mod tests {
     }
 }
 
+fn public_owner_text(text: &str) -> String {
+    if text.contains('<') || text.contains('`') || text.contains("[SKILL_SUGGEST]") {
+        let encoded=serde_json::to_string(text).unwrap_or_default().replace('<',"\\u003c").replace('`',"\\u0060").replace("[SKILL_SUGGEST]","\\u005bSKILL_SUGGEST]");
+        format!("\n```json\n{encoded}\n```\n")
+    } else { format!("\n```text\n{text}{}```\n",if text.ends_with('\n') {""} else {"\n"}) }
+}
+
+fn plain_public_result(data: &serde_json::Value, chinese: bool) -> String {
+    let unknown=if chinese {"未记录"} else {"not recorded"};
+    let value=|value:&serde_json::Value| if value.is_null() {unknown.to_owned()} else {value.as_str().map(str::to_owned).unwrap_or_else(||value.to_string())};
+    if let Some(text)=data["observed_output"]["output"]["text"].as_str() {
+        let state=data["observed_output"]["state"].as_str().unwrap_or(unknown);
+        let state=if chinese {match state {"running"=>"运行中（观察时）","exited"=>"已退出","cancelled"=>"已停止","timed_out"=>"已超时","lost"=>"结果未知",other=>other}} else {state};
+        return format!("{}\n{}：{}；{}：{}；{}：{}；{}：{}。",public_owner_text(text),
+            if chinese {"状态"} else {"Observed state"},state,
+            if chinese {"退出码"} else {"Exit code"},value(&data["exit_code"]),
+            if chinese {"丢失输出字节"} else {"Dropped output bytes"},value(&data["observed_output"]["output"]["dropped_bytes"]),
+            if chinese {"解码错误"} else {"Decode errors"},value(&data["observed_output"]["output"]["decode_errors"]));
+    }
+    if let Some(text)=data["observed_text"]["content"].as_str() {
+        let mut result=public_owner_text(text);
+        for (key,zh,en) in [("sha256","SHA-256","SHA-256"),("total_bytes","文件字节数","File bytes"),("line_count","行数","Lines"),("offset","读取起点（字节）","Read offset (bytes)"),("eof","读至文件末尾","Reached end of file")] {
+            if !data[key].is_null() {
+                let rendered=if chinese && key=="eof" { match data[key].as_bool() {Some(true)=>"是".into(),Some(false)=>"否".into(),None=>value(&data[key])} } else {value(&data[key])};
+                result.push_str(&format!("\n{}：{}",if chinese {zh} else {en},rendered));
+            }
+        }
+        return result;
+    }
+    if data["file_exists"]==false { return if chinese {"文件不存在（观察时）。"} else {"File was absent at observation."}.into(); }
+    // Unknown result types retain a reversible representation, not guessed
+    // interpretation. Escape legacy payload markers just as historical reports.
+    let encoded=serde_json::to_string(data).unwrap_or_default().replace('<',"\\u003c").replace('`',"\\u0060").replace("[SKILL_SUGGEST]","\\u005bSKILL_SUGGEST]");
+    format!("\n```json\n{encoded}\n```\n")
+}
+
 impl AgentCompletionReport {
     pub(crate) fn delivery_text(&self) -> String {
         let mut delivery = self.summary.clone();
@@ -3408,6 +3485,10 @@ impl AgentCompletionReport {
             for result in &item.results {
                 if let Some(data) = &result.data {
                     delivery.push_str(&format!("\n\n{}\n", result.label));
+                    if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_en_v1")) {
+                        delivery.push_str(&plain_public_result(data, self.public_format.as_deref()==Some("plain_zh_v1")));
+                        continue;
+                    }
                     let encoded = serde_json::to_string(data).unwrap_or_default();
                     if encoded.contains('<') || encoded.contains('`') || encoded.contains("[SKILL_SUGGEST]") {
                         // A reversible JSON data representation avoids the
@@ -3443,7 +3524,7 @@ impl AgentCompletionReport {
     pub(crate) fn matches_delivery(&self, text: &str) -> bool {
         let current = self.delivery_text();
         if text == current || text == format!("\n\n{current}") { return true; }
-        if !self.delivery_items.is_empty() { return false; }
+        if !self.delivery_items.is_empty() || self.public_format.is_some() { return false; }
         // Preserve immutable deliveries from the earlier formatter. Both known
         // formats contain the exact accepted report and cumulative counts.
         let mut legacy = format!("{}{}", self.summary, self.unverified_disclosure().unwrap_or_default());
@@ -3499,6 +3580,9 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn tool_error_disclosure(&self) -> Option<String> {
+        if self.public_format.as_deref()==Some("plain_zh_v1") {
+            return (self.observed_tool_error_count>0).then(||format!("\n\n本轮未成功的操作尝试：{} 次（包括参数检查和命令结果）。具体原因保留在过程记录中。",self.observed_tool_error_count));
+        }
         (self.observed_tool_error_count > 0).then(|| format!(
             "\n\nUnsuccessful tool attempts in this turn: {} (including argument checks and command outcomes). Details remain available in the execution steps.",
             self.observed_tool_error_count
@@ -3506,6 +3590,9 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn command_failure_disclosure(&self) -> Option<String> {
+        if self.public_format.as_deref()==Some("plain_zh_v1") {
+            return (self.observed_command_failure_count>0).then(||format!("\n\n本轮未成功的命令尝试：{} 次。各次退出状态和输出已保留，后续成功不抵消这些记录。",self.observed_command_failure_count));
+        }
         (self.observed_command_failure_count > 0).then(|| format!(
             "\n\nUnsuccessful command attempts in this turn: {}. Each command's exit status and output explain the result.",
             self.observed_command_failure_count
