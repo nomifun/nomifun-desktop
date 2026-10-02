@@ -36,6 +36,12 @@ macOS R3发现并修复Creative链路丢弃canonical暂停：复用严格pause�
 Turn/operation仅一个、模型仅一次，冷读不重发；付费0，首个native/冷观察超时仍FAIL保留。
 仅隔离等价negative N1，不代判Windows旧数据/N3/全MM。详见macOS R3记录；Windows结果未改。
 
+macOS 四簇快速方案执行/交付记录已齐：R1/R2真实短链共9个StepFun请求，R3产品pause修复/
+实际retry及冷读negative N1，R4核对未漂移CEF/退出源码、复用正式已用Browser119ms ack并补
+当前退出/清理边界3项。Keychain系统等待及native失败分支live仍OPEN/未验，不改记PASS。
+此为限定方案的交付，不声明全部体验问题、原阶段二三、N3或共享全范围达标；残余见macOS
+最终状态表。R4无新模型/native运行或公共源码改动；Windows原生结果与排程保持。
+
 ## 当前活动问题簇
 
 | 簇 | 可复用基线 | 下一缺口 |
