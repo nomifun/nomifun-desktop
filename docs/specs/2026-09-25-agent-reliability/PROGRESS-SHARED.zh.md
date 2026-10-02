@@ -3071,3 +3071,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 沿W234仍超122 tokens，缩减每轮重复的completion说明：3,856→2,400 UTF-8 bytes，减少1,456 bytes。保留旧/当前区分、精确scope、历史恢复、unknown/blocked、证据/需求及禁止重做规则；JSON状态/输出、Schema和资格谓词未改。
 - completion39项及mandatory/实际usage/报告修正防重做三项，共42项既有定向通过，fmt配置/diff通过；无需新镜像测试。只证明固定说明变短及合同未回归，正式实际余量/模型交付/N3/完整A/B/C仍待验，W234失败继续保留。
 - 仓库外2026-10-02/windows/w235-completion-context-copy保存原/新说明与尺寸审计、42项定向日志；无新付费模型、命令或正式构建，Git仅一行说明和短进度。
+
+### W236 五项具体交付与报告位置误修（2026-10-02，recovered/整体FAIL）
+
+- W235正式Windows COD原A，12步/七压缩completed；一命令合并cwd/list且9项真实Hidden/System全对，完整读/两搜索及两Bun各一次，三个native进程全部reaped，exit0/1正确、原件/Git/旧事件不变。末次一条REPLACEMENT_CONTEXT_BUDGET拒绝后继续并交付，W233一次恢复分支正式N1；不覆盖W234二次拒绝失败。
+- 最终完整cwd/九项列表/文件元数据/搜索/Git修改/两测试结果六项存在检查全通过，accepted四项unverified/最后测试supported与两精确poll对应，无借用scope。仍重复git_status一次；首report[1,2,3]零起始拒绝后先改了第1/2/3项，留下第4项，两次继续拒绝后才改准，四次report的三首败保留。
+- 原audit12/15保留：一个false来自合法合并输出的整串JSON解析限制，另存第二行解析及9项属性复核；重复status/首report不通过是真的行为失败。中文最终又重复四条英文rationale警告，整组仍FAIL，不关闭A/N3/共享；下一步让反馈提供明确的一起始序号及JSON路径，避免零/一起始误修。
+- 仓库外2026-10-02/windows/w236-compact-guidance-live保存构建、DB/事件/四报告/原audit/人工复核与澄清、正式UI；无新源码或重复测试，未Stop/Retry/追加模型。
