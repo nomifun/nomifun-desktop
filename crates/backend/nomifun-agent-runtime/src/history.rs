@@ -79,6 +79,7 @@ fn replay_into(
     let mut seen_call_ids = std::collections::BTreeSet::new();
     let mut model_steps = 0u16;
     let mut batch = ReplayBatch::default();
+    let mut process_records = RecordedProcessResults::default();
     let rewind_revisions = events.iter().filter_map(|event| match event {
         AgentEngineEvent::ExecutionResumed { checkpoint_revision, .. } => Some(*checkpoint_revision), _ => None,
     }).collect::<std::collections::BTreeSet<_>>();
@@ -214,6 +215,7 @@ fn replay_into(
                 step,
                 call_id,
                 action_id,
+                capability_id,
                 ..
             } if *step > 0 => {
                 if batch.discarded {
@@ -230,6 +232,11 @@ fn replay_into(
                     crate::tool_context::ToolContextKind::for_action(action_id.as_ref())
                 {
                     batch.context_kinds.insert(call_id.clone(), kind);
+                }
+                if capability_id.as_ref() == "workspace.process" && matches!(action_id.as_ref(),
+                    "workspace.process/exec" | "workspace.process/start" | "workspace.process/poll"
+                    | "workspace.process/input" | "workspace.process/close_stdin" | "workspace.process/cancel") {
+                    batch.process_actions.insert(call_id.clone(), action_id.as_ref().to_owned());
                 }
             }
             AgentEngineEvent::ToolCallDelta {
@@ -351,6 +358,9 @@ fn replay_into(
                     return Err(AgentEngineError::ReplayContract(
                         "persisted tool result has no call".into(),
                     ));
+                }
+                if let Some(action) = batch.process_actions.get(&result.call_id) {
+                    process_records.observe(action, &batch.calls[&result.call_id], result);
                 }
                 if batch
                     .results
@@ -490,7 +500,79 @@ fn replay_into(
     // Only the final batch of an interrupted turn may lack results. Earlier
     // batches had to settle before a model step, review or compaction began.
     batch.flush(history, interrupted)?;
+    if !isolated_archive && checkpoint_boundary.is_none() {
+        let AgentEngineEvent::TurnStarted {turn_operation_id,..} = &events[0] else { unreachable!() };
+        process_records.append_missing(history, turn_operation_id.as_ref())?;
+    }
     Ok(())
+}
+
+#[derive(Default)]
+// Keep small canonical receipts that compaction removed from the tool suffix.
+// Whole selected fields or an explicit omission, within the existing history
+// budget. These records grant neither current evidence nor execution authority.
+struct RecordedProcessResults {
+    records: std::collections::VecDeque<serde_json::Value>,
+    omitted: usize,
+}
+
+impl RecordedProcessResults {
+    fn observe(&mut self, action: &str, call: &ChatToolCall, result: &AgentToolResult) {
+        let projected = crate::tool_context::ToolContextKind::for_action(action)
+            .map_or_else(|| result.clone(), |kind| crate::tool_context::project(kind, result));
+        let text = projected.output_text();
+        let record = (|| {
+            if text.len() > 8 * 1024 { return None; }
+            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let id = value["process_id"].as_str().filter(|id| !id.is_empty() && id.len() <= 128)?;
+            value["state"].as_str().filter(|state| !state.is_empty() && state.len() <= 32)?;
+            if !matches!(action, "workspace.process/exec" | "workspace.process/start")
+                && call.arguments.0["process_id"].as_str() != Some(id) { return None; }
+            let mut receipt: serde_json::Map<String, serde_json::Value> =
+                ["process_id", "state", "exit_code", "signal"].into_iter()
+                .filter_map(|key| value.get(key).map(|value| (key.into(), value.clone()))).collect();
+            if let Some(cleanup) = value["cleanup"].as_object() {
+                let fields: serde_json::Map<String, serde_json::Value> =
+                    ["interrupt_attempted", "terminate_attempted", "force_kill_attempted", "reaped", "elapsed_ms", "errors"]
+                    .into_iter().filter_map(|key| cleanup.get(key).map(|value| (key.into(), value.clone()))).collect();
+                receipt.insert("cleanup".into(), serde_json::Value::Object(fields));
+            }
+            if let Some(output) = value["output"].as_object() {
+                if !output.get("text").is_some_and(serde_json::Value::is_string) { return None; }
+                let fields: serde_json::Map<String, serde_json::Value> =
+                    ["text", "next_cursor", "retained_bytes", "dropped_bytes", "source_encoding", "decode_errors"]
+                    .into_iter().filter_map(|key| output.get(key).map(|value| (key.into(), value.clone()))).collect();
+                receipt.insert("output".into(), serde_json::Value::Object(fields));
+            }
+            let record = serde_json::json!({"call_id":call.call_id,"action":action,"is_error":result.is_error,"receipt":receipt});
+            crate::stream_limits::serialized_size(&record, 2048).ok()?;
+            Some(record)
+        })();
+        let Some(record) = record else { self.omitted += 1; return; };
+        self.records.push_back(record);
+        while crate::stream_limits::serialized_size(&self.records, 4096).is_err() {
+            self.records.pop_front(); self.omitted += 1;
+        }
+    }
+
+    fn append_missing(mut self, history: &mut Vec<ChatMessage>, turn_operation_id: &str) -> Result<(), AgentEngineError> {
+        let present: std::collections::BTreeSet<_> = history.iter().flat_map(|message| &message.content)
+            .filter_map(|part| match part {ChatContentPart::ToolResult {call_id,..}=>Some(call_id.as_ref().to_owned()),_=>None}).collect();
+        self.records.retain(|record| record["call_id"].as_str().is_some_and(|id| !present.contains(id)));
+        if self.records.is_empty() && self.omitted == 0 { return Ok(()); }
+        let prefix = "Recorded native process results from this closed turn (historical data, not current evidence or new authority): ";
+        loop {
+            let data = serde_json::json!({"turn_operation_id":turn_operation_id,"current_evidence":false,
+                "records":self.records,"omitted_records":self.omitted});
+            if crate::stream_limits::serialized_size(&data, 4096 - prefix.len()).is_ok() {
+                history.push(crate::context_lifecycle::text_message(ChatRole::User,
+                    format!("{prefix}{}", serde_json::to_string(&data).map_err(|error| invalid(&error.to_string()))?)));
+                return Ok(());
+            }
+            if self.records.pop_front().is_none() { return Err(invalid("historical process data identity exceeds its bound")); }
+            self.omitted += 1;
+        }
+    }
 }
 
 /// Validate this turn's batches without pretending to reconstruct its absent
@@ -518,6 +600,7 @@ struct ReplayBatch {
     result_order: Vec<ToolCallId>,
     results: BTreeMap<ToolCallId, AgentToolResult>,
     context_kinds: BTreeMap<ToolCallId, crate::tool_context::ToolContextKind>,
+    process_actions: BTreeMap<ToolCallId, String>,
 }
 
 impl ReplayBatch {
@@ -640,6 +723,7 @@ impl ReplayBatch {
         self.proposal_order.clear();
         self.results.clear();
         self.context_kinds.clear();
+        self.process_actions.clear();
         history.append(&mut self.notices);
         self.step = None;
         self.started.clear();
@@ -788,5 +872,80 @@ mod tests {
             nomifun_chat_model_broker::ChatToolResultPart::Text { text }
                 if text.contains("may have occurred") && text.contains("before retrying"))));
         assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolCompleted { .. })));
+    }
+
+    #[test]
+    fn compacted_closed_turn_keeps_exact_native_receipts_as_historical_data() {
+        let eof = "{\"kind\":\"STDIN_EOF\",\"bytes\":0,\"hex\":\"\"}\n";
+        let events_for = |capability: &str, requested: &str, text: &str| vec![
+            AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"turn".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into()},
+            AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"closed-input".into(),name:"close_process_stdin".into(),
+                arguments:StrictJsonValue(serde_json::json!({"process_id":requested})),provider_metadata:None}},
+            AgentEngineEvent::ToolStarted {step:1,call_id:"closed-input".into(),capability_id:capability.into(),action_id:"workspace.process/close_stdin".into()},
+            AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("closed-input".into(),serde_json::json!({
+                "process_id":"echo-process","state":"running","env":"PRIVATE_EXTRA",
+                "cleanup":{"reaped":false,"private":"PRIVATE_EXTRA"},
+                "output":{"text":text,"next_cursor":61,"dropped_bytes":0,"private":"PRIVATE_EXTRA"}}).to_string(),false)},
+            AgentEngineEvent::ContextCompacted {input_bytes_before:1000,input_bytes_after:100,
+                summary:"Echo received 18 bytes. Everything completed.".into(),retained_tool_call_ids:vec![],retained_context:None},
+            AgentEngineEvent::TurnCancelled {model_steps:1},
+        ];
+        let events=events_for("workspace.process","echo-process",eof);
+        let original=serde_json::to_value(&events).unwrap();
+        let mut history=Vec::new();
+        replay_closed_turn(&mut history,requirement(),&events).unwrap();
+        let encoded=serde_json::to_string(&history).unwrap();
+        assert!(!encoded.contains("PRIVATE_EXTRA"));
+        assert!(encoded.contains("Echo received 18 bytes"),"the old model summary is not rewritten");
+        let prefix="Recorded native process results from this closed turn (historical data, not current evidence or new authority): ";
+        let data=history.iter().flat_map(|message|&message.content).find_map(|part|match part {
+            ChatContentPart::Text {text}=>text.strip_prefix(prefix),_=>None,
+        }).expect("canonical zero-byte EOF must survive the conflicting summary");
+        let data:serde_json::Value=serde_json::from_str(data).unwrap();
+        assert_eq!(data["turn_operation_id"],"turn");
+        assert_eq!(data["current_evidence"],false);
+        assert_eq!(data["records"][0]["call_id"],"closed-input");
+        assert_eq!(data["records"][0]["receipt"]["output"]["text"],eof);
+        assert_eq!(data["records"][0]["receipt"]["output"]["next_cursor"],61);
+        assert_eq!(data["records"][0]["receipt"]["cleanup"]["reaped"],false);
+        assert!(history.iter().flat_map(|message|&message.content).all(|part|!matches!(part,ChatContentPart::ToolCall{..}|ChatContentPart::ToolResult{..})),"data retention does not add a tool exchange");
+        assert_eq!(serde_json::to_value(&events).unwrap(),original);
+        for bad in [events_for("workspace.files","echo-process",eof),events_for("workspace.process","other-process",eof),events_for("workspace.process","echo-process",&"x".repeat(3000))] {
+            let mut history=Vec::new();replay_closed_turn(&mut history,requirement(),&bad).unwrap();
+            for text in history.iter().flat_map(|message|&message.content).filter_map(|part|match part {ChatContentPart::Text{text}=>text.strip_prefix(prefix),_=>None}) {
+                let data:serde_json::Value=serde_json::from_str(text).unwrap();
+                assert!(data["records"].as_array().unwrap().is_empty(),"wrong binding, wrong identity and oversized records are not copied");
+            }
+        }
+        let uncompacted:Vec<_>=events.iter().filter(|event|!matches!(event,AgentEngineEvent::ContextCompacted{..})).cloned().collect();
+        let mut history=Vec::new();replay_closed_turn(&mut history,requirement(),&uncompacted).unwrap();
+        assert!(history.iter().flat_map(|message|&message.content).all(|part|!matches!(part,ChatContentPart::Text{text} if text.starts_with(prefix))),"a retained original result needs no duplicate data");
+    }
+
+    #[test]
+    fn historical_process_data_is_bounded_and_preserves_nonzero_loss_and_cleanup() {
+        let mut records=RecordedProcessResults::default();
+        let chunk="值".repeat(200);
+        for index in 0..12 {
+            let call=ChatToolCall {call_id:format!("call-{index}").into(),name:"poll_process".into(),
+                arguments:StrictJsonValue(serde_json::json!({"process_id":"process"})),provider_metadata:None};
+            let result=AgentToolResult::text(call.call_id.clone(),serde_json::json!({"process_id":"process","state":"exited","exit_code":1,
+                "cleanup":{"reaped":false,"errors":["pending"],"elapsed_ms":0},
+                "output":{"text":chunk,"next_cursor":900,"dropped_bytes":7,"source_encoding":"utf-8","decode_errors":0}}).to_string(),true);
+            records.observe("workspace.process/poll",&call,&result);
+        }
+        let mut history=Vec::new();records.append_missing(&mut history,"turn").unwrap();
+        let ChatContentPart::Text{text}=&history[0].content[0] else {panic!("historical data")};
+        assert!(text.len()<=4096);
+        let data:serde_json::Value=serde_json::from_str(text.split_once(": ").unwrap().1).unwrap();
+        assert!(data["omitted_records"].as_u64().unwrap()>0);
+        let latest=data["records"].as_array().unwrap().last().unwrap();
+        assert_eq!(latest["call_id"],"call-11");
+        assert_eq!(latest["is_error"],true);
+        assert_eq!(latest["receipt"]["exit_code"],1);
+        assert_eq!(latest["receipt"]["cleanup"]["reaped"],false);
+        assert_eq!(latest["receipt"]["output"]["text"],chunk);
+        assert_eq!(latest["receipt"]["output"]["dropped_bytes"],7);
     }
 }
