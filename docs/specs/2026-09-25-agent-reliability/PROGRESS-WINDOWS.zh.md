@@ -3788,3 +3788,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：复用completion39项（含旧引用/借用范围提示/历史/失败计数/文件/进程与输出边界）及mandatory预算、实际usage余量、健康报告修正不重做三项，共42项不同检查通过；fmt配置/diff通过。只改说明，无新增同构测试或语义NLP校验。
 - 未覆盖：正式Tauri/StepFun实际余量、是否减少压缩/完成交付、W234成功恢复及N3、A引用语义/完整B/C/共享门槛。尺寸减少不是正式任务PASS，未放宽assert或预算、未改原首败。
 - 证据：仓库外2026-10-02/windows/w235-completion-context-copy，01/02原新说明、copy-size-audit及03组件/三项邻近与04/05配置/diff；Git只保留一行模型说明和短进度。
+
+### W236 具体结果交付及零起始索引误修（2026-10-02；基线d5fdbd765，recovered/整体FAIL）
+
+- Case/子断言：综合A、C01/C02/C03/C05/C06/C07/C08与A05/A08/A09/A15/A17/A19；正式Tauri/StepFun/COD、原五项任务、新workspace/profile，所需desktop构建1m06，复用同frontend。
+- 12步/七压缩completed：合法一命令打印cwd再JSON列9项，真实Hidden/System全对；instruction_scope与完整文件读分开，实际读/两单文件搜索/两Bun各一次，tests依序start→poll exit0/1，三native精确process均reaped。文件/Git/原事件保持，实际业务非零1/1。
+- W233正式恢复N1：末次一条REPLACEMENT_CONTEXT_BUDGET拒绝后成功继续，after77,977/77,290/79,607/79,643/81,132/82,788/83,619，保留1/1/2/2/1/3/1调用；无应用预算失败。最后六项具体交付存在检查全绿，包括完整cwd/9名字和元数据；早期事实/后续未核验披露保留。
+- 首败仍在：git_status以{}调用两次且结果相同；首report的旧文件/搜索/Git引用拒绝提示零起始[1,2,3]，模型误改第1/2/3项、漏第4项，后续两拒绝才修准。第四report四项unverified、测试项supported，精确两poll范围正确，未借cwd ID。三参数错误/四累计工具失败与原1命令非零保持。
+- 原audit12/15不改：目录一个false来自合法cwd+JSON两行输出的整串JSON解析限制；另存第二行原9项与Win32基线严格复核，重复status及首report不通过是真失败。最终四条英文“后续未复验”rationale在中文回答中重复，公开体验仍FAIL，账本completed不是完整A/N3或共享达标。
+- 未覆盖：反馈位置/用户语言修后首发与N3、重复Git恢复根因、完整A首发/GEN及B/C。下一批只修有证据的零/一起始歧义与语言提示，不重跑模型或吞掉历史失败。
+- 证据：仓库外2026-10-02/windows/w236-compact-guidance-live，01构建、02-first-duplicate完成事件/DB/四报告/原audit/属性及scope复核与澄清、03正式UI；本批无新源码/重复测试，未执行Stop/Retry。
