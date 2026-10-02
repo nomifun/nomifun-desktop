@@ -89,7 +89,8 @@
 
 用户明确要求完成复杂结果交付、字节/步骤、真实Keychain清理和公开报告质量，不能以短链或
 残余归类替代完成。付费调用次数上限已被用户明确取消；旧16次本地cap耗尽现场仍保留，
-产品上下文/执行窗口、进程期限及清理保护不改。本目标仍活动，未记A13/B09或Keychain PASS。
+产品上下文/执行窗口、进程期限及清理保护不改。本目标仍活动；A13原完整任务本次N1见下，
+B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证。
 
 - B09原实际HTTP确认：被拒绝的reasoning-only假写入被回放为普通assistant content；最小
   反例首红后修，不再回放该载体，不解析/执行私密参数。私密名字收窄提示在真实混批后导致
@@ -143,6 +144,83 @@
   oracle漏`./`首错全部在外另存，未发送任务的实例模型0；各结果不覆盖历史。证据
   `2026-10-02/macos/complex-delivery-repair/`。公开结果含内部元数据的呈现仍待简化；
   A13 N3/稳定性、B09生成步骤/字节及真实Keychain物理失败仍OPEN，Windows结果未改。
+
+#### B09 计划前置与强制投影去重（2026-10-03）
+
+- 去掉交付catalog重复argv，只留ref/tool/path；多编号summary说明改为简短结论+宿主精确
+  附件，所有Schema断言/真实缓存/资格/错误计数不变。最后三read的五槽/13ref回归覆盖
+  absence/32B/hash解析、不复制源正文及输出；没有靠扩大32768/4096默认包络洗绿。
+- 明确编号任务首次write/patch/stdin前单独plan；无plan整批未派发，单任务/读观察/cleanup
+  保持。已显式关闭计划的报告参数修正同样report-only，最小反例保持首次变更不派发及
+  已结算效果不重做。plan仍是模型解释，不是用户意图/顺序或字节已正确的证明。
+- 原B09正式Tauri新隔离run002：源`18d68c558`+外source.patch，本机arm64/macOS26.6.2/25G83、
+  APFS非大小写敏感Data；11 StepFun请求/376events/五effects，任务/四原件保持。
+  主动plan后before→guarded patch→cp→mv各一次；未触发plan门拒绝，不能冒充live拦错。
+  首write仍无末LF32B，patch保持无LF而成31B，temp尚未删除就进入helper；实际exec bun
+  字面argv一项、tty=true/timeout600000同步等待，只有READY\r\n，无stdin/EOF/长helper/report。
+  明确合同失败后正式UI Stop+Cmd-Q0/249.47秒，非expiry/TERM/KILL；五表全同、ok、所有
+  自有PID/listener已消失。**原B仍FAIL**，本次未到完成边界，不能代判包络live已解除。
+- 真实摘要`tool_calls:[{name,arguments}]`（未知copy_file、无call_id）被接纳为状态；补既有
+  root-only工具型摘要守卫，保留普通JSON状态、嵌套历史与空数组。未把假摘要当真实效果，
+  也不归因它是后续PTY选择的唯一原因。此新守卫仅回归，尚未新live触发。
+- 实际同步exec等不到后续模型输入，而工具说明未明确这一点；补exec同步等待、start先
+  返回handle及READY/input/close/poll pipe链、tty=false为pipe/true为PTY。仅模型说明与
+  既有字段白名单，不改owner/注册Schema/Session provenance或自动替换工具。最后这处
+  合同补充仅定向回归，未再付费复跑；首LF/遗漏delete/完整报告仍需下一步处理。
+- Runtime271/271及说明/摘要直接回归通过，正式构建/签名通过；日志仍在外
+  `2026-10-03/macos/b09-plan-envelope/`。外置setup语法及跨根seal首拒保留，修夹具后
+  冷五表376/1/1/1/5完整一致。未重复已验EOF/父子Stop正链，Windows结果未改。
+- Keychain只读核对：Browser关闭之前未证明所有SSH/robot/storage已quiesce，CEF Helper也
+  无精确退出库存；后台硬退不是可靠清理，原系统/物理风险仍OPEN，不改保护或记PASS。
+
+#### B09 源绑定精确动作契约（2026-10-03，run002）
+
+- 计划增加有限exact_actions：来源quote仅定位，不证明自然语言解释；保存参数digest/状态，
+  不复制file/stdin正文/env或live handle到checkpoint。编号写/patch/stdin须先声明当前精确
+  参数；整批owner前匹配，错中间状态/漏LF/双LF不归一化、不派发。stdin绑定新鲜process_id
+  摘要，两种13B表达等价、另一owned目标拒绝；合法双LF声明仍合法，不改原工具字节语义。
+- 先持久化reservation再admission，正向typed owner回执才推进；空/partial/lost对象不成功，
+  未派发reservation与已派发未知在恢复中分开，真实回执断点恢复不重放。成功后新ID同源
+  同payload不能绕once；后续用户新input可授权新动作。未完成契约不能非blocked收尾。
+  最后将未知结果settled标志保持false，仅回归；正式样本旧字段仍保留，不改写历史。
+- Runtime277/277与六个直接字节/零派发/once/恢复/正向回执回归通过；正式Tauri/签名及
+  fixture构建通过。源`e2df86c08`+外tracked patch+exact_actions.rs（另存hash），arm64/
+  macOS26.6.2/25G83、APFS非大小写敏感Data。原B task/seed不变，真实31请求/594events/
+  八effects；首次两个缺LF提议0dispatch，假SHA占位与不支持cleanup契约声明拒绝保留。
+- 实际创建before33B SHA f6a612…→guarded patch after32B SHA6ab0c427…，cp/mv/shasum/rm
+  各一次、四原件不变。**原完整B仍FAIL**：步骤2没有内容回读便删临时；首helper虽已正确
+  start pipe/wait0并观察READY，但未给timeout_ms，用原默认30秒。运行中stdin契约声明/
+  五次付费压缩耗时约76.85秒，实际input距start90.69秒，回执EFFECT_OUTCOME_UNKNOWN、
+  effect仍pending，实物仅ready。原13B参数正确不证明13B已送达，无EOF/长helper/最终报告。
+- 暂停EXECUTION_CLEANUP_UNPROVEN/cleanup_proven=false，未知动作未复位/未重发。桌面途中
+  锁定，正式UI收尾阻断；用户解锁到达时同实例已按原480+5期限TERM退出1、expired=true、
+  forceKill=false（483.09秒）。失败专用冷封存五表594/1/1/1/8全同/ok，自有PID/listener
+  消失；不是正常Quit，不以进程消失证明原任务/清理通过。完整失败在仓库外，不重启旧任务。
+- 下一直接缺口是活动helper期间新增声明/压缩的成本与真实读/顺序覆盖；不自动延长寿命，
+  不拿契约匹配当语义proof。A13旧N1不移植为新schema全认证，Keychain/公开元数据仍OPEN。
+  证据`2026-10-03/macos/b09-exact-actions/`；测试夹具路径/未暴露计划首错均在外，
+  Windows结果未代判、无权限/加密/保护/断言放宽。
+
+#### B09 receiver_ref 预声明与定位反馈（2026-10-03）
+
+- stdin可在启动前receiver_ref引用同计划前序start_process ID；仅真实匹配running回执
+  绑定receiver digest，不改原生process_id/input/LF/TTL。未知/已结束start不绑定，晚引用
+  拒绝，同ID重声明保留host绑定，cold关闭执行资格但历史结算可匹配；不复活句柄或重启once。
+- 编号completion三处重复字段说明缩短，原types/required/enum/长度/计数/资格完全保持，
+  结构等价回归通过；未改变frozen平台工具Schema。receiver及冷/错目标/重声明回归成立。
+- 正式原B新隔离样本：源`29911b473`+外patch+exact_actions.rs，Tauri/签名/fixture通过，
+  本机arm64/macOS26.6.2/25G83、APFS非大小写敏感Data；原task/四seed不变。9真实StepFun
+  请求/6步骤/116events/0effects，连续update_plan声明拒绝→bounded no-progress失败。
+  **整组仍FAIL**：虽原声明已有正确末LF和receiver_ref，但缺source、错误patch顶层path/
+  hunks、cleanup/poll与PLACEHOLDER混入；反馈没有指出具体动作，后续修错处。没有file/
+  helper/report效果，不能记receiver live采用、字节/完整交付已验或以零副作用作PASS。
+- 正常正式UI终态+Cmd-Q0/102.47秒，无expiry/TERM/KILL；冷五表116/1/1/1/0全同/ok，
+  自有App/fixture/listener消失，未遇锁屏。首声明与全部失败保存于外部
+  `2026-10-03/macos/b09-receiver-ref/`，不重发同一任务或放宽4次控制停滞守卫。
+- 该真实缺口修后：exact声明tool枚举明确支持范围；复用脱敏schema issue反馈，给动作
+  索引/参数路径与schema自有expected字段，不回显文件/stdin/私密属性值。成功同源stdin
+  换receiver别名不能新ID重入。Runtime279/279及定位/脱敏/别名负例通过，最后两处仅回归，
+  尚未新formal采用；原Task语义/回读/EOF/长helper与报告保持OPEN。Windows结果未代判。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 

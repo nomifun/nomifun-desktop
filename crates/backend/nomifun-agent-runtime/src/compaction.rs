@@ -141,10 +141,11 @@ fn tool_shaped_summary(text: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value| {
         let is_call = |candidate: &serde_json::Value| candidate.is_object()
             && candidate.get("name").is_some_and(serde_json::Value::is_string)
-            && candidate.get("arguments").is_some_and(serde_json::Value::is_object)
-            && candidate.get("call_id").is_some_and(serde_json::Value::is_string);
+            && candidate.get("arguments").is_some_and(serde_json::Value::is_object);
         is_call(&value) || value.as_object().is_some_and(|object|
-            object.len() == 1 && object.get("tool_call").is_some_and(is_call))
+            (object.len() == 1 && object.get("tool_call").is_some_and(is_call))
+            || object.get("tool_calls").and_then(serde_json::Value::as_array)
+                .is_some_and(|calls| !calls.is_empty() && calls.iter().all(is_call)))
     })
 }
 
@@ -487,6 +488,8 @@ mod tests {
             r#"{"call_id":"made-up","name":"exec_command","arguments":{"cmd":"unexpected"}}"#,
             r#"{"tool_call":{"call_id":"chatcmpl-tool-xxxx-step2","name":"write_file","arguments":{"path":"临时 空格/新建.txt","content":"alpha\n值=2\nomega\n","source_sha256":"fab9c24aa5c6d8b8601695086b35cc6e1d6baad5b569d11d21cd5f660b10a404"}}}"#,
             r#"{"tool_call":{"call_id":"made-up","name":"cancel_process","arguments":{"process_id":"unverified"}}}"#,
+            r#"{"tool_calls":[{"name":"copy_file","arguments":{"source":"a.txt","destination":"b.txt"}}]}"#,
+            r#"{"name":"not-advertised","arguments":{"path":"unexecuted"}}"#,
         ] {
             assert!(summary(text).is_err(),"a bare invocation is not a continuation summary");
         }
