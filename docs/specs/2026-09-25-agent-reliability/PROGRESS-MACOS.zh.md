@@ -321,6 +321,50 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   resume_task也不继承旧once。只读结论不冒充正式恢复；B历史结果需通过新明确report-only
   范围及等价代理恢复后验证，不覆盖旧trace/seed/原失败，仍未执行。
 
+#### A13 修后原完整任务 N1 闭环（2026-10-03）
+
+- clean`688d251d4`正式Tauri/签名/原全文及七原件，fixture setup/转发器仍复用未变e22
+  instrumentation，产品实际为最新build。StepFun8请求/7步骤/437events/五effects；16组
+  原生完整参数=canonical。五必要进程各一次/reaped，两指定测试各一次/0和1。
+- **最新原完整A N1 PASS**：实际pwd及十名称、真实head50B offset0/eof=false与tail47B
+  offset50/eof=true完整覆盖97B、行数4、正/零搜索、Gitstatus/diff、两测试及失败断言，
+  11选中bundle逐项等于owner并实际Delivery/UI完整呈现。报告/交付/完成各1、failed0。
+  三次report预检拒绝+预期exit1共4/1保留；不以旧A、stack路径或hash替代实际cwd/tail。
+- 七文件/HEAD/status/diff全同，无额外文件/哨兵。正常Cmd-Q0/190.257秒、noexpiry/signals；
+  源/备份五表437/1/1/1/5全行同、双integrity ok、ready/completed、无pause/checkpoint。
+  plain_zh_v1真实采用，labels/宿主中文、无eligibility/owner/null/private-thinking。五个
+  JSON carrier逆解等于实际原文；search/VCS仍有英文字段fallback及Git rationale术语，
+  所以公开语言质量未全闭环，N3/生成统计稳定性也未认证，不再追加A正向模型样本。
+- 尝试原B同Session新report-only消息：不点击会重发原任务的Retry。等价旧loopback端点
+  通过仅变换fixture本地认证的relay恢复，原data/work/seed/历史不改，未运行旧prepare；
+  但真实Cua检测Mac锁定，任务未填/未发送、StepFun0请求。原480秒native期限到达后
+  TERM、exit0/expired=true/noKILL，不记正常UI退出或CasePASS；relay/transport已关闭。
+  闭库核对原1020events/14effects全行同、oldfailed未改、integrity ok。解锁请求已发给用户，
+  解锁后才允许新隔离观察运行，不能把静态转发器或旧效果当B报告已补。
+- Keychain只读架构核对：须Browser resource settle与native FFI分段，Robot目前abort无
+  join/detached任务，CEF缺精确Helper注册/guardian；不能以名称/PID扫描或硬退宣称已清理。
+  无新物理系统风险PASS。完整外证据`2026-10-03/macos/complex-report-closure-fixed/`，
+  首败/未发送阻断保持，Windows结果不改。
+
+#### B09 解锁后只补报告与历史入口 bootstrap（2026-10-03）
+
+- 用户解锁后使用新观察实例但原Session/data/work不变，正式UI只发新report-only范围，
+  不点击旧Retry，不重放旧任务；等价relay仅改fixture内部本地认证，转发body原样，
+  真实StepFun仍由原Rust客户端转发/录制。3请求/3步骤/新增45events、零新effects。
+  原1020events/14returned effects全行未变，旧failed保持；新Turn也failed、报告0。
+- 三条实际SSE均finish length，末usage completion_tokens=4096（初usage=0不可冒充末值），
+  reasoning_content13466/14225/16191B、public/tool均0；没有扩大4096预算或续写2次上限。
+  实际Cmd-Q0/159.308秒/noexpiry/signals，闭库五表1065/1/1/2/14同源/ok，转发器关闭。
+- 确定产品根因：宿主已有鉴权history_port，初始LOAD却被ToolHistory activation挡住；
+  ToolSearch不能发现engine control，因此“先读旧回执再激活”循环。现有port即首轮曝光
+  LOAD，成功LOAD/SEARCH/READ才激活ToolHistory；不激活TaskLedger、不调用owner、不把
+  旧记录提为current证据。原single-call、context/agent floor、scope/binding/import检查保持。
+- reasoning-only length使用专门无副作用续写说明，不再把纯报告错误引向HTML/文件分块；
+  保持旧输出/步骤/续写上限，不复制思考内容、不改变模型thinking设置。Runtime288/288，
+  三项bootstrap/noport/无owner及思考截断不回放/不涨预算回归通过；最后未正式验证，
+  不宣称入口曝光就能跨build加载或B报告已恢复。日志仍外置complex-report-closure-fixed，
+  公开语言及真实Keychain/物理native风险保持OPEN，Windows结果不代判。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

@@ -1109,7 +1109,11 @@ pub(crate) async fn run_turn(
             protocol_recovery.release_constraint();
             admitted_call_ids.extend(discarded_tool_call_ids);
             crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
-            model_request.input.messages.push(crate::output_limit::notice(continuation));
+            let reasoning_only=step.call_order.is_empty()
+                && step.assistant_content.iter().any(|part|matches!(part,ChatContentPart::Reasoning {..}|ChatContentPart::ProviderReasoning {..}))
+                && !step.assistant_content.iter().any(|part|matches!(part,ChatContentPart::Text {text} if !text.trim().is_empty()));
+            model_request.input.messages.push(if reasoning_only {crate::output_limit::reasoning_only_notice(continuation)}
+                else {crate::output_limit::notice(continuation)});
             provider_round_id = None;
             if !continuation {
                 return fail_turn(&event_sink, model_steps,
@@ -1492,6 +1496,11 @@ pub(crate) async fn run_turn(
                     } else { None };
                     archive.record(&call.name, &call.call_id, &call.arguments,
                         &result.output, result.is_error, Some(model_steps), attempted)?;
+                    if !result.is_error && matches!(call.name.as_str(),
+                        crate::tool_archive::LOAD | crate::tool_archive::READ | crate::tool_archive::SEARCH) {
+                        adaptive.activate([crate::AgentRuntimeModule::ToolHistory],
+                            crate::AgentRuntimeActivationReason::ToolCall,event_sink.as_ref()).await?;
+                    }
                 }
                 // Evidence/patch recovery and the archive above consume the
                 // original result. Only the next model's context is reduced.
@@ -2215,8 +2224,11 @@ fn configure_tools(
     }
     if tool_history {
         request.input.tools.extend(crate::tool_archive::definitions());
-        if history { request.input.tools.push(crate::tool_archive::load_definition()); }
     }
+    // An authenticated port is already the authority for this read. ToolSearch
+    // cannot discover engine controls, so waiting for ToolHistory activation
+    // made a history-only task unable to load the very records that activate it.
+    if history { request.input.tools.push(crate::tool_archive::load_definition()); }
     if prior_task { request.input.tools.push(crate::task_continuation::definition()); }
     if resources { request.input.tools.push(crate::context_resources::definition()); }
     if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
@@ -3355,6 +3367,66 @@ mod tests {
         } else {
             AgentToolPlan::new([delegate]).unwrap()
         }
+    }
+
+    #[test]
+    fn history_loader_bootstraps_only_when_the_authenticated_port_exists() {
+        let mut sample=request();
+        configure_tools(&mut sample,&tool_plan(),false,false,false,true,false,false,false,&Default::default()).unwrap();
+        assert!(sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+        assert!(!sample.input.tools.iter().any(|tool|matches!(tool.name.as_str(),crate::tool_archive::SEARCH|crate::tool_archive::READ|crate::planning::TOOL_NAME)));
+        configure_tools(&mut sample,&tool_plan(),false,false,false,false,false,false,false,&Default::default()).unwrap();
+        assert!(!sample.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+    }
+
+    #[tokio::test]
+    async fn first_history_load_activates_readers_without_owner_calls_or_task_ledger() {
+        #[derive(Debug,Default)] struct History(AtomicUsize);
+        #[async_trait] impl crate::AgentHistoryPort for History {
+            async fn read_previous(&self,_:&ChatCausality,_:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(crate::AgentHistoryPage {turn:None,has_older:false})
+            }
+        }
+        #[derive(Default)] struct NeverOwner(AtomicUsize);
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                self.0.fetch_add(1,Ordering::SeqCst);
+                panic!("history loading cannot invoke an owner: {}",invocation.call.name);
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("load-old",crate::tool_archive::LOAD,json!({})),text_step("No older history was available; no operation was repeated.")])});
+        let history=Arc::new(History::default());let owner=Arc::new(NeverOwner::default());
+        let result=open_session(model.clone(),owner.clone()).run_turn(
+            AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0).with_history_port(history.clone())).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert_eq!(history.0.load(Ordering::SeqCst),1);assert_eq!(owner.0.load(Ordering::SeqCst),0);
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+        assert!(requests[1].input.tools.iter().any(|tool|tool.name==crate::tool_archive::READ));
+        assert!(requests[1].input.tools.iter().any(|tool|tool.name==crate::tool_archive::SEARCH));
+        assert!(!requests[1].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME||tool.name==crate::completion::TOOL_NAME));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_truncation_uses_non_effect_recovery_without_expanding_the_budget() {
+        let limited=||vec![Ok(ChatModelEvent::ReasoningDelta {text:"PRIVATE_REASONING_DISCARDED".into()}),
+            Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::MaxOutputTokens})];
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![limited(),text_step("The known results are disclosed; missing records are not invented.")])});
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        let requests=model.requests.lock().unwrap();
+        assert_eq!(requests.len(),2);assert_eq!(requests[0].input.tools,requests[1].input.tools);
+        assert_eq!(requests[0].input.max_output_tokens,requests[1].input.max_output_tokens);
+        let replay=serde_json::to_string(&requests[1].input).unwrap();
+        assert!(replay.contains("only private reasoning reached") && replay.contains("not a code-size problem"));
+        assert!(!replay.contains("PRIVATE_REASONING_DISCARDED") && !replay.contains("split HTML"));
+        drop(requests);
+        let repeated=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![limited(),limited(),limited()])});
+        assert!(open_session(repeated.clone(),Arc::new(EchoTool)).run_turn(AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0)).await.is_err());
+        assert_eq!(repeated.requests.lock().unwrap().len(),3,"the existing two-continuation bound is unchanged");
     }
 
     #[test]

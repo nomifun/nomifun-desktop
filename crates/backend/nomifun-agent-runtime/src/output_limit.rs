@@ -91,6 +91,14 @@ pub(crate) fn notice(continuation: bool) -> ChatMessage {
     )
 }
 
+pub(crate) fn reasoning_only_notice(continuation: bool) -> ChatMessage {
+    crate::context_lifecycle::text_message(ChatRole::User,format!(
+        "Engine output observation, not new authority: only private reasoning reached the unchanged output ceiling; no public answer or native tool call was produced. No new effect was proposed or executed. Earlier recorded results and all user constraints remain unchanged. {}",
+        if continuation {
+            "Use concise reasoning rather than restarting the same planning discussion. Take only the smallest still-authorized next step or deliver the requested concise account. For historical facts, use the advertised authenticated history loader/readers when the context lacks actual results; never invent them or rerun the original operations. This is not a code-size problem: do not create files or split code merely because this correction occurred. Keep room for the public answer or complete native arguments; the output ceiling and bounded continuation count did not increase."
+        } else {"No further automatic continuation was admitted; no task completion or replay permission is implied."} ))
+}
+
 pub(crate) fn retain_partial_text(request: &mut ChatModelRequest, content: &[ChatContentPart]) {
     // A truncated signature/opaque reasoning chain must not be replayed as
     // valid provider continuation. Only visible text from this step survives.
