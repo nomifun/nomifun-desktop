@@ -10,9 +10,9 @@
 | --- | --- | --- |
 | A 观察、只读、小测试 | W245正式COD十一阶段/四压缩完成，全部观察/两测试各一次，原文/SHA/搜索/Git修改已交付，具体交付4/6 | 整体FAIL：实际cwd/完整九条目仍缺，报告旧引用一拒后纠正，三个英文提示；完整首发/N3/GEN待验 |
 | B 文件、进程、停止 | W209文件链N3；W238/240正式GEN文件/18-byte输入EOF/父子取消与原件保持；W244预算根因正式N1 | W240未使用来源SHA保护，已取消且无报告；完整B交付/N3/COD仍缺，不重跑未修根因 |
-| C 连续、纠正、恢复 | W241同Turn纠正/15压缩，W242正式冷读纠正恢复且DB/磁盘不变 | 整体FAIL：helper三启动/来源三读、来源引用循环；纠正结果/实际Stop/N3待验，failed不计cancelled |
+| C 连续、纠正、恢复 | W246同Turn纠正/四压缩，helper一次/来源各一次/18-byte正确结果一次，cancelled冷读无复活 | 原17/21及限制保留；helper在Stop前达到120秒deadline，运行中Stop仍缺；必要N3/入口待验 |
 
-截至W245，Windows完整场景仍为0/3，剩余就是上述三组主线及缺失的关键N3/入口。预算修复和冷读
+截至W246，Windows完整场景仍为0/3，剩余就是上述三组主线及缺失的关键N3/入口。预算修复和冷读
 子断言不抵扣完整场景。共享门槛未达，尚未转Windows命令差异收尾；停止旧82条全业务排程。
 
 关键bad-case/正向任务取N3，GEN/COD各有正式执行；不同角色不机械重复所有底层断言。
@@ -3888,3 +3888,15 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 整体A仍FAIL：实际cwd及完整九条目未交付，三个rationale复制英文示例；不把操作无重复或canonical completed代判完整A/N3。UI分清正常exit1与一项参数未执行，没有Nomi应用失败。未Stop/Retry/外部kill；旧W244失败保持。
 - 未覆盖：完整A首发/全部结果/语言/N3/GEN，B来源SHA/最终报告、C重启重读/逐字引用/实际Stop。按收尾约束转C直接阻断，不启动未修A的付费循环；本批只关闭丢失search/Git小结果的确定性根因。
 - 证据：仓库外2026-10-02/windows/w245-mainline-read-result-retention，01首红/02修后、03/04定向回归及真实原结果大小、05构建、06隔离正式夹具、07原DB/事件/参数/audit/两report与独立复核、08正式UI。Git仅数据保留/最小回归与短进度。
+
+### W246 运行进程身份/游标被完成资格过滤（2026-10-02；基线3302b055e，连续纠正N1）
+
+- Case/子断言：C05/C06/C07/C08与A03/A05/A06/A09/A10/A12/A13/A15/A17/A19；沿W241重启/重读查实际固定context，无新角色或旁支矩阵。
+- 首红：running结果不能作完成证据，原缓存process_id/READY/next_cursor却只给eligible条目，压缩后活进程信息丢失。现原缓存里running且仍在work tracker的结果进入ineligible数据，另给last_observed_running_processes；资格仍false、无授权/刷新，旧running记录不能在tracker清空后冒充活进程。原单输出2048/aggregate4096/detail4096/台账32KiB及冻结预算保持。
+- 验证：新回归修前红/修后绿，包含失去tracked状态后不展示；completion46项及三项硬预算/余量/报告不重做，共49项不同检查通过，fmt/diff与正式构建27.08秒。测试READY两个LF的正确游标25另校准；仅测试夹具修改，没有再次编译产品或额外模型循环。
+- 正式一次COD C：13步/四压缩，同Turn的steer-accepted与steering_inputs均保存，一个实际helper、两来源各完整读一次、无cancel/restart；新输入使一poll/一write提议未dispatch，replan后仅一次实际写入及一次回读，18-byte UTF-8/LF内容/hash完全匹配，禁止初稿不存在、原件全保持。
+- 正式Stop为cancelled，但独立277条CIM及毫秒时间核对证明父子已在helper原120秒deadline后约120.106秒消失，cleanup170ms/reaped/errors=[]，不能代判运行中Stop。下一覆盖样本应在冻结前按实测model/steering耗时给helper留足观察余量；不扩大产品硬预算，不改本次首败为PASS。
+- 原audit17/21不改：计入未执行write提议、把wire turn_input_scope当纠正内容、对全部后续poll强制初始READY阶段的1000ms，均保留并以原参数/实际dispatch/steering_inputs另审；真实timeout及live Stop缺口仍在。运行审阅误把18bytes当字节首败已独立更正，原说明保留；自适应观测未记录初始start，真实owner receipt+CIM证明一次，不把缺观测当未启动。
+- 零模型正式冷读，events/turns/sessions全部行数/hash及全部磁盘字节保持、纠正和正确结果/取消显示、无旧Turn复活。原AX文字审计7/8保留；移去浮层后截图明确“已取消执行”且AX有“停止前尚未完成”提示，独立视觉复核补足显示语义，没有声称原自动审计全绿。
+- 未覆盖：C运行中Stop/必要N3/另一关键入口，A实际cwd/完整条目/报告首发与语言，B来源SHA/最终报告，Windows差异；共享未达。复用本批不重启/不重读/纠正和冷读证据，只补实际缺口，不重复未改根因。
+- 证据：仓库外2026-10-02/windows/w246-mainline-live-process-context，01首红、02/03定向、04构建、05纠正时、06正式Stop、07/08原DB/事件/audit/实际dispatch与澄清、09暖UI/误判更正、10/11冷启动、12/13原冷读与补充截图、14物理deadline核对、15测试游标；Git仅数据保留、一个最小回归和短进度。
