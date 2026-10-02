@@ -371,6 +371,18 @@
   零模型/无用户数据变动，证据`2026-10-02/macos/historical-guidance-consistency/`；正式live与
   公开语言未验证，不能据此覆盖Mac/Windows已有失败或关闭完整A/B/C/N3。
 
+### C06-11 空公开答复不等于收尾（2026-10-02，macOS MAC-A-09）
+
+- 真实原A任务/最新同步基线：8requests/202events/一压缩，仅pwd/ls/read已执行；后续未做却
+  partial report/completed，整组FAIL。raw/canonical11组相同，零公开text/零call的stop后
+  工具表变report-only，合法后续read/exec拒绝；六字符串argv另属生成问题，不靠默拆放过。
+- active-ledger空答复/只有private thinking不作closing answer，复用现有协议纠正/事件/恢复及
+  2-consecutive/8-total/Turn预算，要求原已展示工具继续未完工作或合法report，不重放/加权。
+  正常公开收尾及实际report参数纠正仍关闭effect，patch/计数/权限/Schema集合保持。
+- 真语义首红保留，剩余read/无重放与重复empty有界失败通过，Runtime244/244；测试桩错误
+  单独保留、按接口修正，不代判修后live。原UI/202-row快照/文件/清理独立核对在
+  `2026-10-02/macos/current-command-sync/`；公开语言/完整A/B/C/N3未关闭，Windows记录未改。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/

@@ -1058,7 +1058,13 @@ pub(crate) async fn run_turn(
         }
         output_limit_recovery.observe_complete_step();
         step.finalize()?;
-        protocol_recovery.observe_valid_step();
+        let empty_task_response = matches!(finish_reason, ChatFinishReason::Completed)
+            && adaptive.task_ledger() && !step.has_tool_calls()
+            && !step.assistant_content.iter().any(|part|
+                matches!(part, ChatContentPart::Text { text } if !text.trim().is_empty()));
+        if !empty_task_response {
+            protocol_recovery.observe_valid_step();
+        }
         if !step.has_tool_calls() && matches!(finish_reason, ChatFinishReason::ToolCalls) {
             return fail_turn(
                 &event_sink,
@@ -1537,6 +1543,23 @@ pub(crate) async fn run_turn(
             && (patch_recovery.pending() || patch_recovery.unresolved())
         {
             return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
+        }
+        if empty_task_response {
+            // Private reasoning (or no content) is not a public closing answer.
+            // Keep the already-advertised action surface for unfinished work;
+            // correction is bounded by the existing protocol and turn budgets.
+            let continuation = protocol_recovery.admit(model_steps < total_model_limit);
+            protocol_recovery.set_tool_hint(None);
+            event_sink.emit(AgentEngineEvent::ModelResponseRejected {
+                step: model_steps, discarded_tool_call_ids: vec![], continuation, tool_hint: None,
+            }).await?;
+            model_request.input.messages.push(crate::protocol_recovery::empty_task_notice(continuation));
+            model_request.input.provider_round_parent = None;
+            if !continuation {
+                return fail_turn(&event_sink, model_steps,
+                    "model produced no public answer or native tool calls after bounded correction; task completion was not accepted").await;
+            }
+            continue 'model_steps;
         }
         // At most one evidence review, never an unbounded self-retry. The
         // model may report a blocker/unverified result instead of invoking a
@@ -5076,6 +5099,63 @@ mod tests {
             [crate::completion::TOOL_NAME], "a rejected proposal must not reopen the completion review's action surface");
         assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"));
         assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_stop_keeps_unfinished_authorized_tools_available() {
+        #[derive(Default)]
+        struct Tools { calls: std::sync::Mutex<Vec<String>> }
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref()=="workspace.files/read" {return Ok(workspace_result(invocation));}
+                Ok(AgentToolResult::text(invocation.call.call_id.clone(),json!({
+                    "process_id":format!("process:{}",invocation.call.call_id.as_ref()),"state":"exited",
+                    "exit_code":0,"cleanup":{"reaped":true},"success":true}).to_string(),false))
+            }
+        }
+        let observations=|| {
+            let mut observed=control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]}));
+            observed.pop();
+            observed.extend(control_step("entries","exec_command",json!({"command":"/bin/ls","args":["-a"]})));
+            observed
+        };
+        let empty=||vec![Ok(ChatModelEvent::ReasoningDelta {text:"SYNTHETIC_PRIVATE_PENDING_WORK".into()}),
+            Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed})];
+        let report=|count|json!({"summary":"The original commands and remaining read were accounted for.",
+            "observed_tool_error_count":count,"observed_command_failure_count":0,
+            "criteria":[{"disposition":"unverified","rationale":"No broader current state is claimed."}]});
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            observations(), empty(),
+            control_step("remaining","read_file",json!({"path":"b"})),
+            control_step("account","report_completion",report(0)),
+            control_step("old-bug-account","report_completion",report(2)),
+        ])});
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let tools=Arc::new(Tools::default());
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan.clone(),principal(),0)).await.unwrap();
+        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="read_file"),
+            "a reasoning-only stop is not a public closing answer or terminal account");
+        assert_eq!(*tools.calls.lock().unwrap(),["cwd","entries","remaining"],"continue only the remaining read; never repeat settled commands");
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(!result.output_text.contains("SYNTHETIC_PRIVATE_PENDING_WORK"));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+
+        let bounded=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            observations(),empty(),empty(),empty(),
+        ])});
+        let bounded_tools=Arc::new(Tools::default());
+        let error=open_session(bounded.clone(),bounded_tools.clone())
+            .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap_err();
+        assert!(matches!(error,AgentEngineError::TurnFailed(ref message) if message.contains("after bounded correction")),
+            "repeated empty stops cannot loop or become completion");
+        assert_eq!(bounded.requests.lock().unwrap().len(),4,"reuse the existing two-consecutive correction limit");
+        assert_eq!(*bounded_tools.calls.lock().unwrap(),["cwd","entries"],"empty output cannot replay effects");
     }
 
     #[tokio::test]

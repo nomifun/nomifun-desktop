@@ -101,6 +101,17 @@ pub(crate) fn notice(continuation: bool) -> ChatMessage {
     ))
 }
 
+pub(crate) fn empty_task_notice(continuation: bool) -> ChatMessage {
+    crate::context_lifecycle::text_message(ChatRole::User, format!(
+        "Engine protocol observation, not a new user instruction: the previous terminal response contained no public answer or native tool calls. Private thinking is not task completion. No new effect was proposed or executed by that response. Earlier recorded observations, effects, original user constraints and plan remain unchanged. {}",
+        if continuation {
+            "Continue only the still-unfinished authorized parts of the same accepted task through exact advertised native tools, or submit the required completion report when the actual work is settled. Do not restart the task, repeat settled commands or observations, or infer new permission. Send arrays/objects/booleans as JSON values, not encoded strings. Use fresh call IDs."
+        } else {
+            "The existing bounded protocol-correction budget is exhausted. This is not task completion or authorization to replay effects."
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -27,7 +27,7 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-07 历史头尾/搜索已交付、九次请求正常完成/退出；实际 cwd 路径与公开语言仍缺，不记整组 PASS/N3 |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-09 cwd/目录/97-byte文件已观察交付，空公开stop错误进入report-only，搜索/Git/两测试未执行；已修确定性分支，正式修后/完整A/N3仍待验 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-08 原文件任务报告形态N1，公开交付/整体超时仍FAIL；B07联合未close/EOF/交付，03 EOF/04 Stop各N1，完整链/N3仍开放 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
@@ -1702,3 +1702,21 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   连续三goal turns阻断正式UI；已有相关确定性检查和远端修复已核对，无新安全工作需重复。
   停止自动续跑，目标标记blocked而非complete/paused；待人工持续解锁并继续后恢复，未验/首败
   保留，0新模型/用户数据变更。依据`run-008-blocked-audit/`，不追加构建/UI启动/重复测试填进度。
+
+- **MAC-A-09 恢复后当前命令链**（2026-10-02）：当前UI可访问的零模型探针与90秒退出失败
+  各自保留；同步W215～229后Runtime243/243、Mac process6/6、原生deadline1/1及Store fence1/1。
+  新正式Tauri源`8bb9226b3`/App`64015995097a…`/新隔离Session，原任务/7原件/约束与
+  1task/16requests含摘要/4096/360秒/独立App480秒不变；旧前置均0请求，无预算重置扩大。
+- 实际 **8 requests/一压缩/202 events**，partial report接受/completed/ready，**整组FAIL**。
+  pwd/ls各一次0/reaped、一次97-byte/4行回读正确、真实cwd已交付，原件/Git/sentinel不变；
+  搜索/Git/两指定测试未执行，工具错误7。11组raw/canonical全同，六提议argv为JSON字符串
+  是另外的真实参数问题，未默拆/放宽。模型公开summary/rationales及原错误保留。
+- 特定产品根因：private reasoning-only stop/零公开text/零call被当闭合答复，原动作表下一请求
+  收窄report-only，继续原任务的read/exec因此未执行。最小语义首红保留；仅该active-ledger
+  空答复走既有协议有界纠正，不执行文本/复制思考、不加authority、不重放已结算命令。
+  原2-consecutive/8-total/Turn预算、patch及report参数纠正护栏不改；重复空答复失败。
+  测试桩编译/计数/路径/返回约定错误分别另存并按真实接口修正，非产品断言放宽。
+- 修后剩余read/不重放及boundedempty正反通过，Runtime **244/244**；真实修后尚未重跑。
+  正式终态截图/AX先保存，Cmd-Q0/312.44秒/无expiry/TERM/KILL/cleanup错误，fixture shutdown200/0，
+  App/listener无。writer/WAL/shm无后完整202-row只读快照同/ok，keyaudit0/299；证据
+  `2026-10-02/macos/current-command-sync/`。公开语言/完整A/B/C/N3及旧CEF/MM仍开放，Windows不代判。
