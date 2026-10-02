@@ -3475,3 +3475,13 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
   仍原说明，不移除adaptive索引。冻结边界及Runtime284/284通过，最后未formal复验。
 - 正式Cmd-Q0/332.15s/noexpiry/noTERM、父子witness和五表封存独立成立；非CEF/Keychain
   样本，不代判系统物理风险或Windows结果。外证据2026-10-03/macos/b09-postfix-live。
+
+### macOS A13 修正反馈与历史交付分离（2026-10-03）
+
+- 最新97bbbd8dc正式原A仍FAIL：尾读未做，原实值只交付4bundle；public_format plain_zh_v1
+  已实际采用，但模型仍复制公开英文证据术语。原件/Git保护、实际测试0/1、Cmd-Q0成立；
+  6请求/5步骤/386events/五effects，全证据外置complex-report-closure，旧A N1不代判新样本。
+- 定位旧argument repair通知要求将旧值转summary，与独立delivery发布合同冲突。编号报告
+  现只改criteria现状引用，保留仍合法历史delivery refs，不恢复current资格/不重跑；中文
+  显示例句与公开label语言说明补齐，尾部参数指导无API/权限扩张。Runtime285/285及
+  source/privacy/历史refs回归通过，最后未formal，不将缺项或blocked洗绿，Windows未代验。
