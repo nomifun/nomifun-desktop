@@ -3116,3 +3116,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 实际工具错误0，但最后回读/报告前两次REPLACEMENT_CONTEXT_BUDGET拒绝后failed：84,385 bytes/28,129估算tokens超过27,885余量。原context与首败保留，未Stop/Retry/外部kill。文件/进程跨步骤已有实际证据，完整B仍未交付，不计N3或共享达标。
 - 原audit20/28保留；四个false为夹具只识别PowerShell复制/删除、只累计poll游标且只在terminal查EOF的形状限制。另存精确cmd参数、跨stdin/close游标/EOF、磁盘18 bytes/hash复核；真正未达的最后read/report/完成/顺序继续失败。生成夹具脚本的首次语法错误发生在模型前，另记工具错误。
 - 下一步减少完成context中重复的空metadata字段，保留实际值、原参数与所有证据/预算门禁；仓库外2026-10-02/windows/w238-combined-b保存全证据，本批Git仅短进度。
+
+### W239 模型context的空metadata投影（2026-10-02，正式待验）
+
+- W238长链在报告前仍超244 tokens；当前每个available/ineligible条目及scope重复序列化无值path/command/artifact/owner metadata。最小首红保留；现只在派生模型metadata对象一层省略null，不递归到原参数、command、output或数组。
+- 实际值/零/false/原参数显式null、非零终态/清理、精确call与已结算早期poll关系全部保留，原观测/Scope台账/资格/Schema/权限/计数/预算不改。completion41项及mandatory/实际usage/报告不重做三项，共44项不同检查通过，fmt配置/diff通过。
+- 只关闭空字段重复的确定性开销，正式B完成/模型效果/N3/COD与完整A/C仍待验，不用单元PASS覆盖W238失败。仓库外2026-10-02/windows/w239-absent-context-metadata保存首红/修后/41项和三项预算及配置检查；无新模型/命令/构建样本。
