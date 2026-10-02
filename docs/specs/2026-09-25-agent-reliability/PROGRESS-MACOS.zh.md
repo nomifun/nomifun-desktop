@@ -1860,3 +1860,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 发送前只读SQL14/观察器动态代码拒绝/暂白屏、冷尚活时snapshot ENOENT、打包替换路径及签名
   字节比较首错均在外另存；不重启任务/扩预算，改静态观察器及正确包复制前hash/签名校验。
   证据`2026-10-02/macos/mac-gen-continuous/`，凭据0/421；Windows原生/真实重启未验、结果未改。
+
+- **MAC-C05-10 CEF按需生命周期**（2026-10-02）：沿GEN冷样本未用Browser却在CEF/Keychain
+  卡住，启动阶段现只检查原包路径/二进制；首次已授权Browser资源创建才在主线程初始化。
+  宿主持有单次结果，调用者取消不丢Engine；关闭阻止迟到初始化并等已启动结果，真实初始化
+  错误仍失败，已用Engine仍原真实shutdown。无加密/Sandbox/权限/清理时限改动，Windows不变。
+- 本机生命周期4/4、正式Tauri/签名通过；同旧cancelled数据正式零模型冷读23.05秒/exit0，无
+  CEF初始化/加载后shutdown，只有unused_closed；原302events/四表/六文件全同，无复活。
+- 独立Browser会话正式UI：首次使用前vmmap无CEF，实际POST Browser后仅一次初始化；本地真实
+  页面点击计数1与独立witness trusted=true一致，模型0/Turn0。URL只在精确principal/session/
+  binding hash profile，Default无该URL；真实shutdown119ms、native0/114.85秒，全部自有PID/
+  listener消失。证明没有通过禁用Browser洗绿，不宣称已用CEF的系统钥匙串等待/N3/完整C关闭。
+- 原GEN首败/线程样本/失败码红保持；本批是mac专属根因，不另改共享/Windows结果。证据
+  `2026-10-02/macos/cef-on-demand/`；未跑无关媒体/生态矩阵，无新增付费调用或范围收缩。

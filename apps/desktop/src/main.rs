@@ -2897,7 +2897,7 @@ fn main() -> std::process::ExitCode {
 
     #[cfg(target_os = "macos")]
     let cef_engine = Arc::new(std::sync::OnceLock::<
-        Result<Arc<nomifun_browser_macos::engine::Engine>, String>,
+        Result<Arc<browser_surface::macos::lifecycle::DeferredEngine>, String>,
     >::new());
     #[cfg(target_os = "macos")]
     let setup_cef_engine = cef_engine.clone();
@@ -2949,11 +2949,11 @@ fn main() -> std::process::ExitCode {
             #[cfg(target_os = "macos")]
             let browser_resources = match setup_cef_engine
                 .get()
-                .expect("macOS CEF availability is resolved before app setup")
+                .expect("macOS CEF bundle availability is resolved before app setup")
             {
                 Ok(engine) => Some(Arc::new(
                     nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
-                        browser_surface::macos::host::DesktopBrowserHost::new(
+                        browser_surface::macos::host::DesktopBrowserHost::new_deferred(
                             app_handle.clone(),
                             engine.clone(),
                         ),
@@ -3356,7 +3356,7 @@ fn main() -> std::process::ExitCode {
 
     #[cfg(target_os = "macos")]
     {
-        let initialized = browser_surface::macos::lifecycle::initialize(&cef_data_dir);
+        let initialized = browser_surface::macos::lifecycle::prepare(&cef_data_dir);
         if let Err(error) = &initialized {
             eprintln!("managed macOS Browser Provider unavailable: {error}");
         }
