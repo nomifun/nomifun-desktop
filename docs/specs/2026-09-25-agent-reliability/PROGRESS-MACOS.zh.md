@@ -416,6 +416,23 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   未发送；已请求解锁。完整外证据 history-cursor-live，下一隔离目录 history-upgrade-report
   仅预备，无新模型调用；Windows验收未改，A13原完整N1继续复用。
 
+#### Keychain 清理前置：Robot 的真实本地 join（2026-10-03）
+
+- 原 RobotServices 只 abort accept-loop，source/session、旧turn及 run_device_turn bridge
+  另行 detach，不能证明 SQLite 消费者已停止。本批仅补这个必要前置，不声称物理 CEF 已修。
+- Gateway/source/session/writer/pacer/turn/discovery 与桥接 worker 现在由 retained completion
+  清单持有；停止封准入、请求同一任务取消并 join，替换 owner保留。5秒等待超时/调用者取消
+  不丢完成凭据；panic/异常取消/锁中毒不能转成功。ASR停止不发布晚文本，dispatch 已接受
+  后停止保留结果并取消同一request，不开启语音投影；业务失败与本地任务清理分别记录。
+- 生产 host 先确认 Robot/SSH再进入Browser，仍独立等待 canonical Agent runtime；Robot/
+  SSH未确认则保留Browser，任何清理错误不关DB。兼容 dormant fallback仅换真实join，
+  不冒充全部资源/远端provider/物理Robot已停止，更不以abort或exit1宣称CEF物理完成。
+- 最终Robot lib153/153，App bridge2/2、Robot失败保持Browser/DB隔离1/1、既有Agent失败
+  重试保持Browser/DB1/1及独立复核通过。初版151及首次App测试清理代码编译失败保留，
+  修后另记；四个现有非本簇warning未吞/未改。无新模型、正式UI、native物理故障样本。
+- 真正系统 Keychain等待、Helper精确登记/guardian、Browser资源与物理FFI分段及修后live
+  仍 OPEN；本次不能标整个风险PASS。完整日志外置history-cursor-live，Windows验收不改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

@@ -3548,3 +3548,14 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - Runtime294通过/1默认ignored；另显式对原B只读634事件/33完整结果正文、失败标记、来源
   与READ回放验证通过，owner/model0。App history5/5及独立复核通过，首次失败另存外证据。
   正式B模型采用未验，不改Windows，证据外置history-cursor-live；Mac锁定不阻断确定性修复。
+
+### macOS 清理前置的 Robot 任务归属（2026-10-03）
+
+- abort accept-loop不能证明detached source/session/嵌套语音任务或Agent bridge结束。现保留
+  current/retired Gateway及全部本地worker completion，封准入、取消后join；5秒超时/丢waiter
+  留原凭据，panic/poison不转成功，业务失败不等同清理失败。ASR及已接受dispatch停止fence补齐。
+- 生产host把Robot/SSH join放在Browser之前，未知则保留Browser/DB；仍需独立Agent runtime
+  关闭证明，不把本地Robot完成当canonical进程、远端模型或物理设备已清理。
+- Robot153、App bridge2、Robot失败隔离1、既有Agent失败隔离/重试1及独立复核通过；首次
+  App测试编译错误与修后各自外置history-cursor-live。未有真实Keychain/CEF物理live，风险OPEN，
+  Windows新共享关闭顺序/Robot改动未代验，未改已有Windows记录。
