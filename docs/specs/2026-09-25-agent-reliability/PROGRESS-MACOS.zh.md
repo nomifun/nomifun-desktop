@@ -1757,3 +1757,13 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   Git/sentinel保持；具体tool row展开未截图，dev updater warning保留、不当命令故障。
   证据`2026-10-02/macos/mac-a-completion-copy-recheck/`；只新增完整任务反例和命令N1事实，
   完整A/B/C/N3及公开交付仍未结案，Windows原结果不改。本批仅短进度、无猜测性源码修改。
+
+- **MAC-C06-14 已读短文本的历史页保留**（2026-10-02，零模型）：沿A11四行在最终请求缺失，
+  不改压缩硬限/强制输入；成功、scoped、call-ID匹配的ReadOnly文本页在原owner scope中保留，
+  连metadata最多512 bytes，字节游标/行列/版本标记原样，超限整体不留、不裁剪或自动重读。
+  原scope2KiB/历史detail4KiB/观测32KiB与64条上限不变，原观测淘汰即删；未扩权限/额度。
+- 旧epoch/资格保持，历史文本不是当前文件证明，stale supported仍拒绝。语义首红保留，
+  新三回归含分页/私有extra排除、13种拒留与淘汰；completion **43/43**、Runtime **254/254**。
+  一次测试enum编译错误另留、按真实ManagedEffect修正，未放宽断言。Schema/提示/报告接受/
+  prune源字节复核不变。证据`2026-10-02/macos/historical-file-page/`；修后正式UI/live未跑，
+  A11漏搜索/交付/英文及完整A/B/C/N3仍开放，Windows独立结果不改写。
