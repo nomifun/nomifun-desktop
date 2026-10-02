@@ -84,8 +84,9 @@ pub enum AgentEngineEvent {
         discarded_tool_call_ids: Vec<ToolCallId>,
         continuation: bool,
     },
-    /// Non-native tool markup was rejected before any tool admission. This
-    /// closes the proposed batch for replay; it is not a transport retry,
+    /// Non-native tool markup, or an active-task terminal without public
+    /// text/calls, was rejected before any tool admission. This closes any
+    /// proposed batch for replay; it is not a transport retry,
     /// an executed call/result, an output-limit claim or a success event.
     ModelResponseRejected {
         step: u16,
