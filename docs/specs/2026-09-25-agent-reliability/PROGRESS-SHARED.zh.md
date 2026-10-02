@@ -3155,3 +3155,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 原audit10/21不改；同回合纠正另以canonical事件证明。原件hash/宿主清理/当前PID消失成立，70条见证不证明三次启动全部拓扑；failed不改判cancelled，完整C未通过。
 - 正式零模型冷启动：events/turns/sessions全行数/hash及全部夹具文件不变、无复活，但实时纠正气泡在冷读UI不可见，canonical纠正仍在。记录恢复展示残余，不用数据库完整代判UI完整。
 - 外部2026-10-02/windows/w241-mainline-c保存所有首败和独立冷读证据。按收尾约束合并处理A重复/报告、B来源保护/交付、C重启重读/引用和恢复展示，不对未改根因付费循环，不展开旧矩阵。共享仍未结案。
+
+### W242 纠正消息在冷读中被错误过滤（2026-10-02，正式子断言PASS）
+
+- W241的steer message projection使用独立事件UUID，但correlation_id是拥有该输入的Turn operation；历史响应误拿operation当消息UUID而丢弃。accepted用户消息改用已有message projection ID，旧记录也恢复；不改canonical来源、Turn归属、执行或权限。
+- 双纠正独立身份回归修前红/修后绿，相关历史17项通过，fmt/diff与desktop边界通过；原失败会话正式Tauri零模型冷读7/7，纠正/failed提示可见，全表与磁盘hash不变、无复活或新动作。
+- 只关闭C冷读纠正展示；完整C执行/实际Stop、A重复/报告、B来源保护/交付及必要N3仍开放。外部2026-10-02/windows/w242-mainline-recovery保留首红/根因/回归/正式冷读，不启动未改根因的付费循环，下一项合并A复验。
