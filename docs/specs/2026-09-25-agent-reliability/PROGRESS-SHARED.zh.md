@@ -3120,3 +3120,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 反馈保留原参数/Schema/计数/整批不派发和不借用其他ID规则，明确保留已合格项、rationale使用summary语言并适配实际不确定性；不复制私密summary/rationale/ID，不自动重写report或翻译模型文本。
 - tool_validation8项、同步后completion40项及防重做/重复拒绝界限两项，共50项不同定向通过；首红/修后与fmt配置/diff分日志，无新增同构测试。正式模型采用/首发与N3、重复Git及完整A/B/C仍待验，共享未结案。
 - 仓库外2026-10-02/windows/w237-explicit-criterion-locations保存全证据；本批无新付费模型、命令或构建，Git仅两字段/说明与既有回归加强及短进度。
+
+### W238 文件→EOF→父子取消的完整B首败（2026-10-02，正式FAIL）
+
+- 正式Windows GEN/StepFun一次完整B，16步/九压缩：写18-byte LF文件、摘要保护patch、cmd copy/move与限定del各一次；echo管道一次输入18 bytes/close/exit0，STDIN_EOF在close结果返回，后续119游标正确；hold父子READY后精确cancel一次，182ms/reaped/errors=[]，独立CIM50样本确认亲缘/消失，全部原件保持。
+- 实际工具错误0，但最后回读/报告前两次REPLACEMENT_CONTEXT_BUDGET拒绝后failed：84,385 bytes/28,129估算tokens超过27,885余量。原context与首败保留，未Stop/Retry/外部kill。文件/进程跨步骤已有实际证据，完整B仍未交付，不计N3或共享达标。
+- 原audit20/28保留；四个false为夹具只识别PowerShell复制/删除、只累计poll游标且只在terminal查EOF的形状限制。另存精确cmd参数、跨stdin/close游标/EOF、磁盘18 bytes/hash复核；真正未达的最后read/report/完成/顺序继续失败。生成夹具脚本的首次语法错误发生在模型前，另记工具错误。
+- 下一步减少完成context中重复的空metadata字段，保留实际值、原参数与所有证据/预算门禁；仓库外2026-10-02/windows/w238-combined-b保存全证据，本批Git仅短进度。
