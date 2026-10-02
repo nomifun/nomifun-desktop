@@ -32,6 +32,8 @@ pub struct AgentPlan {
     pub needs_replan: bool,
     #[serde(default)]
     pub requirements: Vec<crate::AgentTaskRequirement>,
+    #[serde(default, skip_serializing_if="Vec::is_empty")]
+    pub exact_actions: Vec<crate::AgentExactAction>,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +44,8 @@ struct UpdatePlan {
     plan: Vec<AgentPlanStep>,
     #[serde(default)]
     requirements: Vec<crate::AgentTaskRequirement>,
+    #[serde(default)]
+    exact_actions: Vec<crate::exact_actions::ExactActionInput>,
 }
 
 pub(crate) fn definition() -> ChatToolDefinition {
@@ -56,6 +60,7 @@ pub(crate) fn definition() -> ChatToolDefinition {
                 "explanation":{"type":"string","minLength":1,"maxLength":2048,
                     "description":"Optional short explanation of the plan or its revision. The engine preserves accepted requirements independently of this text."},
                 "requirements":crate::requirements::schema(),
+                "exact_actions":crate::exact_actions::schema(),
                 "plan":{"type":"array","minItems":1,"maxItems":16,"items":{
                     "type":"object","additionalProperties":false,"required":["step","status"],
                     "properties":{"step":{"type":"string","minLength":1,"maxLength":512},
@@ -119,7 +124,25 @@ impl AgentPlan {
             self.requirements.iter().any(|existing| existing.id == item.id
                 && (existing.description != item.description || existing.source != item.source))
         }).map(|item| item.id.as_str()).collect::<Vec<_>>();
-        if !self.needs_replan && update.plan == self.steps && requirements == self.requirements {
+        let mut exact_actions=self.exact_actions.clone();
+        for proposal in update.exact_actions {
+            let action=match proposal.compile(inputs) {Ok(action)=>action,Err(reason)=>return Ok(self.feedback(call,"rejected",&reason))};
+            if let Some(prior)=exact_actions.iter().find(|prior|prior.id==action.id) {
+                if prior.source!=action.source||prior.tool!=action.tool||prior.fields!=action.fields||prior.stdin_sha256!=action.stdin_sha256 {
+                    return Ok(self.feedback(call,"rejected","Exact action IDs cannot rewrite bytes, tools or sources, reset once state or erase receipts; add a new source-bound action only for genuinely new authorized work."));
+                }
+            } else {
+                if exact_actions.iter().any(|prior|prior.succeeded&&prior.source==action.source&&prior.tool==action.tool
+                    &&prior.fields==action.fields&&prior.stdin_sha256==action.stdin_sha256) {
+                    return Ok(self.feedback(call,"rejected","A new exact action ID cannot repeat a satisfied commitment under the same user-source citation. Later user authorization needs its distinct later input source."));
+                }
+                exact_actions.push(action);
+            }
+        }
+        if exact_actions.len()>24 || crate::stream_limits::serialized_size(&exact_actions,8192).is_err() {
+            return Ok(self.feedback(call,"rejected","Exact action ledger exceeds 24 items / 8 KiB digest metadata"));
+        }
+        if !self.needs_replan && update.plan == self.steps && requirements == self.requirements && exact_actions==self.exact_actions {
             return Ok(self.feedback(call, "unchanged",
                 "Plan already has these step statuses and immutable requirements; this idempotent update succeeded without recording a new revision or invalidating completion evidence. Perform the next authorized action, or report_completion if the work is finished. Repeating this update is not task progress."));
         }
@@ -131,6 +154,7 @@ impl AgentPlan {
             steps: update.plan,
             needs_replan: false,
             requirements,
+            exact_actions,
         };
         // Persist before publishing/using the new control state.
         sink.emit(AgentEngineEvent::PlanUpdated { plan: next.clone() })
@@ -199,8 +223,52 @@ impl AgentPlan {
     }
 
     pub(crate) fn context(&self) -> Result<String, AgentEngineError> {
-        serde_json::to_string(self).map(|value| format!("Current engine plan (derived control state, not user authority or completion evidence): {value}"))
+        let mut projected=serde_json::to_value(self).map_err(|error|AgentEngineError::ContextAssembly(error.to_string()))?;
+        if !self.exact_actions.is_empty() {
+            projected["exact_actions"]=serde_json::json!(self.exact_actions.iter().map(|action|serde_json::json!([action.id,
+                if action.succeeded {"succeeded"} else if action.attempted_call_id.is_some() {"attempted_not_satisfied"} else {"pending"}])).collect::<Vec<_>>());
+            projected["next_exact_action"]=serde_json::json!(crate::exact_actions::pending(&self.exact_actions));
+        }
+        serde_json::to_string(&projected).map(|value| format!("Current engine plan (derived control state, not user authority or completion evidence): {value}"))
             .map_err(|error| AgentEngineError::ContextAssembly(error.to_string()))
+    }
+
+    pub(crate) fn exact_action_gate(&self,call:&ChatToolCall,protected:bool)->Option<String> {
+        if self.exact_actions.is_empty() {return None;}
+        let current=crate::exact_actions::pending(&self.exact_actions);
+        if !current.is_some_and(|action|action.matches(call)) && let Some(action)=self.exact_actions.iter().find(|action|action.succeeded&&action.matches(call)) {
+            return Some(format!("Not executed: exact action {} already has a successful owner receipt; do not repeat it for plan/report repair.",action.id));
+        }
+        let Some(current)=current else {return None;};
+        if !protected && !current.matches(call) {return None;}
+        if current.attempted_call_id.is_some() {
+            return Some(format!("Not executed: exact action {} has an attempted, failed or unsettled owner outcome. A fresh read/plan status cannot reset once state; report blocked or obtain real reconciliation, never replay it blindly.",current.id));
+        }
+        if !current.matches(call) {return Some(format!("Not executed: proposed tool/parameters do not match the next exact action {}. Preserve every committed byte and operation order; parameters were not corrected or normalized.",current.id));}
+        None
+    }
+
+    pub(crate) async fn arm_exact_action(&mut self,call:&ChatToolCall,sink:&dyn AgentEventSink)->Result<bool,AgentEngineError> {
+        let Some(action)=self.exact_actions.iter_mut().find(|action|!action.succeeded) else {return Ok(false);};
+        if !action.matches(call)||action.attempted_call_id.is_some() {return Ok(false);}
+        action.attempted_call_id=Some(call.call_id.as_ref().to_owned());
+        sink.emit(AgentEngineEvent::PlanUpdated {plan:self.clone()}).await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn settle_exact_action(&mut self,call:&ChatToolCall,result:&AgentToolResult,not_applied:bool,sink:&dyn AgentEventSink)->Result<(),AgentEngineError> {
+        if !self.apply_exact_outcome(call,result,not_applied) {return Ok(());}
+        sink.emit(AgentEngineEvent::PlanUpdated {plan:self.clone()}).await?;
+        Ok(())
+    }
+
+    pub(crate) fn apply_exact_outcome(&mut self,call:&ChatToolCall,result:&AgentToolResult,not_applied:bool)->bool {
+        let Some(action)=self.exact_actions.iter_mut().find(|action|action.attempted_call_id.as_deref()==Some(call.call_id.as_ref())&&action.matches(call)) else {return false;};
+        if not_applied {action.attempted_call_id=None;action.settled=false;action.succeeded=false;} else {
+            action.succeeded=crate::exact_actions::owner_succeeded(call,result);
+            action.settled=action.succeeded;
+        }
+        true
     }
 }
 
@@ -209,6 +277,29 @@ mod tests {
     use super::*;
     use crate::{AgentInputCitation, AgentTaskRequirement, NoopAgentEventSink};
     use nomifun_chat_model_broker::{ChatContentPart, ChatRole, ChatToolResultPart};
+
+    #[tokio::test]
+    async fn satisfied_exact_action_cannot_be_renamed_or_its_once_state_rewritten() {
+        let inputs=vec![crate::context_lifecycle::text_message(ChatRole::User,"Save this exact file once.".into())];
+        let spec=|id:&str|serde_json::json!({"id":id,"source":{"input":0,"quote":"Save this exact file once."},
+            "tool":"write_file","expected_arguments":{"path":"a","content":"exact\n"}});
+        let update=|id:&str|ChatToolCall {call_id:"plan".into(),name:TOOL_NAME.into(),provider_metadata:None,
+            arguments:StrictJsonValue(serde_json::json!({"plan":[{"step":"Save","status":"in_progress"}],"exact_actions":[spec(id)]}))};
+        let mut plan=AgentPlan::default();
+        assert!(!plan.update(&update("original"),&inputs,&NoopAgentEventSink).await.unwrap().is_error);
+        let call=ChatToolCall {call_id:"saved".into(),name:"write_file".into(),arguments:StrictJsonValue(serde_json::json!({"path":"a","content":"exact\n"})),provider_metadata:None};
+        plan.arm_exact_action(&call,&NoopAgentEventSink).await.unwrap();
+        plan.settle_exact_action(&call,&AgentToolResult::text(call.call_id.clone(),serde_json::json!({"written":true,"path":"a","bytes":6,
+            "sha256":nomifun_agent_contracts::digest_bytes(b"exact\n")}).to_string(),false),false,&NoopAgentEventSink).await.unwrap();
+        assert!(plan.update(&update("renamed"),&inputs,&NoopAgentEventSink).await.unwrap().is_error);
+        assert_eq!(plan.exact_actions.len(),1);assert!(plan.exact_actions[0].succeeded);
+        let mut wrong=update("original");wrong.arguments.0["exact_actions"][0]["expected_arguments"]["content"]=serde_json::json!("changed");
+        assert!(plan.update(&wrong,&inputs,&NoopAgentEventSink).await.unwrap().is_error);
+        let mut later=inputs;later.push(crate::context_lifecycle::text_message(ChatRole::User,"Repeat that save now.".into()));
+        let mut repeat=update("new-user-authorized");repeat.arguments.0["exact_actions"][0]["source"]=serde_json::json!({"input":1,"quote":"Repeat that save now."});
+        assert!(!plan.update(&repeat,&later,&NoopAgentEventSink).await.unwrap().is_error);
+        assert_eq!(plan.exact_actions.len(),2);
+    }
 
     #[derive(Default)]
     struct RecordingSink(std::sync::Mutex<Vec<AgentEngineEvent>>);
@@ -380,7 +471,7 @@ mod tests {
         let mut plan = AgentPlan {
             revision: 1, explanation: "Start".into(),
             steps: vec![AgentPlanStep { step: "Fix tests".into(), status: AgentPlanStatus::InProgress }],
-            needs_replan: false, requirements: vec![original.clone()],
+            needs_replan: false, requirements: vec![original.clone()],exact_actions:Vec::new(),
         };
         let call = ChatToolCall {
             call_id: "update-2".into(), name: TOOL_NAME.into(), provider_metadata: None,

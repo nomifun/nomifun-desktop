@@ -1025,6 +1025,10 @@ impl CompletionTracker {
         crate::requirements::require_input_coverage(&plan.requirements, inputs.len())?;
         let mut submission: Submission = serde_json::from_value(self.resolve_submission(call, plan, work)?)
             .map_err(|error| format!("Invalid completion report: {error}"))?;
+        if crate::exact_actions::pending(&plan.exact_actions).is_some()
+            && !submission.criteria.iter().any(|criterion|criterion.disposition==AgentCriterionDisposition::Blocked) {
+            return Err("Exact action commitments remain pending, failed or unsettled. Report blocked; completed plan labels and fresh reads cannot satisfy them or authorize replay.".into());
+        }
         if submission.observed_tool_error_count.unwrap_or(0) != work.failed_tools
             || (work.failed_tools > 0 && submission.observed_tool_error_count.is_none())
         {
@@ -3217,7 +3221,7 @@ mod tests {
             nomifun_chat_model_broker::ChatRole::User,"Update the game".into())];
         let mut plan = AgentPlan { revision:1, explanation:"Implement requested work".into(),
             steps:vec![crate::AgentPlanStep { step:"Work in progress".into(),status:AgentPlanStatus::InProgress }],
-            requirements:crate::requirements::merge(&[],&[],&inputs).unwrap(), needs_replan:false };
+            requirements:crate::requirements::merge(&[],&[],&inputs).unwrap(), needs_replan:false,exact_actions:Vec::new() };
         let original = plan.clone();
         let mut tracker = CompletionTracker { observations:vec![file_observation("old-game","game.js",1),
             file_observation("fresh-readme","README.md",2)], ..Default::default() };
@@ -3265,7 +3269,7 @@ mod tests {
         ];
         let mut plan=AgentPlan {revision:1,explanation:"Updated scope".into(),steps:vec![
             crate::AgentPlanStep {step:"Honor revised scope".into(),status:AgentPlanStatus::Completed}],
-            requirements:crate::requirements::merge(&[],&[],&inputs).unwrap(),needs_replan:false};
+            requirements:crate::requirements::merge(&[],&[],&inputs).unwrap(),needs_replan:false,exact_actions:Vec::new()};
         let mut tracker=CompletionTracker {observations:vec![file_observation("fresh-a","a",0)],..Default::default()};
         let work=AgentWorkStatus::default();
         let call=ChatToolCall {call_id:"scope".into(),name:TOOL_NAME.into(),provider_metadata:None,

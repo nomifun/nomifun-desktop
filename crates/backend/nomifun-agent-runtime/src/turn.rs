@@ -2315,6 +2315,16 @@ async fn invoke_tool_calls(
         }
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
+    let protected=|call:&ChatToolCall|plan.binding(&call.name).is_some_and(|binding|
+        crate::execution_policy::affects_workspace(binding)&&!matches!(binding.effect_class,AgentEffectClass::ReadOnly)
+            && !matches!(binding.action_id.as_ref(),"workspace.process/poll"|"workspace.process/cancel"|"workspace.process/close_stdin"));
+    let exact_gate=completed.iter().find_map(|call|execution_plan.exact_action_gate(call,protected(call)));
+    let has_exact_call=crate::exact_actions::pending(&execution_plan.exact_actions).is_some_and(|action|completed.iter().any(|call|action.matches(call)));
+    if exact_gate.is_some() || (has_exact_call&&completed.len()!=1) {
+        let reason=exact_gate.unwrap_or_else(||"Not executed: submit one exact action alone; later actions cannot assume an earlier call succeeded before its owner receipt.".into());
+        let results=completed.iter().map(|call|(call.call_id.clone(),Ok(AgentToolResult::text(call.call_id.clone(),reason.clone(),true)))).collect();
+        return finish_tool_results(results,event_sink,model_step,cancellation).await;
+    }
     if completed
         .iter()
         .any(|call| call.name == crate::tool_discovery::TOOL_NAME)
@@ -2417,6 +2427,10 @@ async fn invoke_tool_calls(
     // is invented and no model-selected name can shadow the engine planner.
     if completed.len() == 2 && completed[0].name == crate::planning::TOOL_NAME
         && completed[1].name == crate::completion::TOOL_NAME {
+        if let Some(reason)=validate_exact_declarations(&completed[0],plan,&model_request.input.tools) {
+            let results=completed.iter().map(|call|(call.call_id.clone(),Ok(AgentToolResult::text(call.call_id.clone(),reason.clone(),true)))).collect();
+            return finish_tool_results(results,event_sink,model_step,cancellation).await;
+        }
         let planned = execution_plan.update(&completed[0], accepted_inputs, event_sink).await?;
         let report = if planned.is_error {
             AgentToolResult::text(completed[1].call_id.clone(), "Completion was not applied because the preceding plan update failed. The prior plan and effects remain unchanged.", true)
@@ -2462,7 +2476,9 @@ async fn invoke_tool_calls(
         let mut results = Vec::new();
         for call in &completed {
             let result = if completed.len() == 1 {
-                execution_plan.update(call, accepted_inputs, event_sink).await?
+                if let Some(reason)=validate_exact_declarations(call,plan,&model_request.input.tools) {
+                    AgentToolResult::text(call.call_id.clone(),reason,true)
+                } else {execution_plan.update(call, accepted_inputs, event_sink).await?}
             } else {
                 AgentToolResult::text(call.call_id.clone(), "No tools executed: submit update_plan alone, then submit execution calls in a subsequent batch.", true)
             };
@@ -2492,6 +2508,11 @@ async fn invoke_tool_calls(
             let cleanup = matches!(binding.action_id.as_ref(),
                 "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin");
             if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
+            else if task_ledger_active && crate::delivery_review::multi_item_task(accepted_inputs)
+                && matches!(binding.action_id.as_ref(),"workspace.files/write"|"workspace.files/patch"|"workspace.process/input")
+                && crate::exact_actions::pending(&execution_plan.exact_actions).is_none_or(|action|!action.matches(call)) {
+                Some("Not executed: declare the NEXT source-bound exact_actions commitment in update_plan ALONE before this numbered task's file mutation/stdin phase. Preserve intermediate states, complete content with final LF and effective stdin bytes. stdin must bind the fresh owned process_id from the actual start/poll receipt; it is retained only as a digest, not recovery authority. Never supply success flags, fabricated/cold handles or credentials. The commitment is model interpretation, not semantic proof or extra authority; actual effects remain independently checked.")
+            }
             else if task_ledger_active && execution_plan.revision == 0
                 && crate::delivery_review::multi_item_task(accepted_inputs)
                 && matches!(binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch" | "workspace.process/input") {
@@ -2514,7 +2535,7 @@ async fn invoke_tool_calls(
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
     let mut calls = Vec::with_capacity(step.call_order.len());
-    let mut can_parallelize = !step.call_order.is_empty();
+    let mut can_parallelize = !has_exact_call && !step.call_order.is_empty();
     for call_id in &step.call_order {
         if cancellation.is_cancelled() {
             return Err(AgentEngineError::Cancelled);
@@ -2643,8 +2664,10 @@ async fn invoke_tool_calls(
             results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
             continue;
         }
+        let exact_armed=execution_plan.arm_exact_action(&invocation.call,event_sink).await?;
         if !record_tool_admission(event_sink, model_step, &invocation).await? {
             let result = steering_deferred(call_id.clone());
+            if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
             defer_remaining = Some(result.output_text());
             results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
             continue;
@@ -2657,6 +2680,7 @@ async fn invoke_tool_calls(
                 let reason = format!("Not executed: {error}");
                 defer_remaining = Some(reason.clone());
                 let result = AgentToolResult::text(call_id.clone(), reason, true);
+                if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
                 results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
                 continue;
             }
@@ -2694,6 +2718,10 @@ async fn invoke_tool_calls(
         // cancellation/failure cannot erase the already recorded prefix. This
         // is a tool observation, not owner cleanup or task-success proof.
         let recorded = record_tool_result(call_id, result, event_sink, model_step).await?;
+        if exact_armed {
+            execution_plan.settle_exact_action(&observed_call,&recorded.1,
+                crate::execution_policy::process_operation_not_applied(&observed_binding,&recorded.1),event_sink).await?;
+        }
         if recorded.1.is_error || plan.binding(&observed_call.name).is_some_and(|binding|
             crate::execution_policy::failed_process_observation(binding, &recorded.1)
         ) {
@@ -2717,6 +2745,20 @@ async fn invoke_tool_calls(
 
 fn steering_deferred(call_id: ToolCallId) -> AgentToolResult {
     AgentToolResult::text(call_id, "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.", true)
+}
+
+fn validate_exact_declarations(call:&ChatToolCall,plan:&AgentToolPlan,tools:&[nomifun_chat_model_broker::ChatToolDefinition])->Option<String> {
+    for action in call.arguments.0.get("exact_actions").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        let tool=action["tool"].as_str()?;
+        if plan.binding(tool).is_none() {return Some("Exact action names a tool outside the frozen Session surface; no plan or action was applied".into());}
+        let Some(definition)=tools.iter().find(|definition|definition.name==tool) else {return Some("Discover the already-authorized tool schema before declaring its exact action; this adds no authority".into());};
+        let mut arguments=action["expected_arguments"].clone();
+        if tool=="write_process_stdin" && arguments.get("process_id").is_none() {arguments["process_id"]=serde_json::json!("validation-only-not-a-live-handle");}
+        let valid=jsonschema::options().with_retriever(crate::tool_validation::NoExternalSchemaReads)
+            .build(&definition.input_schema.0).is_ok_and(|validator|validator.is_valid(&arguments));
+        if !valid {return Some("Exact action declaration does not satisfy the frozen tool parameter schema. Correct the declaration before effects; no bytes or tool arguments were normalized".into());}
+    }
+    None
 }
 
 async fn record_tool_admission(sink: &dyn AgentEventSink, step: u16, invocation: &crate::AgentToolInvocation) -> Result<bool, AgentEngineError> {
@@ -3325,6 +3367,7 @@ mod tests {
         let historical_plan = crate::AgentPlan {
             revision: 1,
             explanation: "历史任务".into(),
+            exact_actions:Vec::new(),
             steps: vec![],
             needs_replan: false,
             requirements: vec![crate::AgentTaskRequirement {
@@ -3357,6 +3400,7 @@ mod tests {
             execution_plan: crate::AgentPlan {
                 revision: 1,
                 explanation: "继续历史任务".into(),
+                exact_actions:Vec::new(),
                 steps: vec![],
                 needs_replan: true,
                 requirements: vec![crate::AgentTaskRequirement {
@@ -5569,6 +5613,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_action_preflight_rejects_wrong_bytes_and_replay_before_dispatch() {
+        #[derive(Default)] struct Files(std::sync::Mutex<Vec<String>>);
+        #[async_trait] impl AgentToolInvoker for Files {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                if invocation.binding.action_id.as_ref()=="workspace.files/read" {return Ok(workspace_result(invocation));}
+                let content=invocation.call.arguments.0["content"].as_str().unwrap().to_owned();
+                self.0.lock().unwrap().push(content.clone());
+                Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":"a","written":true,
+                    "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes()),"bytes":content.len()}).to_string(),false))
+            }
+        }
+        let before="第一行 MAC-B\n第二行 before\n";let after="第一行 MAC-B\n第二行 after\n";
+        let source="Create the before contents with LF. Then change before to after, preserving LF.";
+        let exact=|id:&str,content:&str|json!({"id":id,"source":{"input":0,"quote":source},"tool":"write_file",
+            "expected_arguments":{"path":"a","content":content}});
+        let write=|id:&str,content:&str|control_step(id,"write_file",json!({"path":"a","content":content}));
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("observe-one","read_file",json!({"path":"a"})),
+            control_step("observe-two","read_file",json!({"path":"a"})),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Create before, then modify after","status":"in_progress"}],
+                "exact_actions":[exact("before",before),exact("after",after)]})),
+            write("skip-before",after),write("omit-lf",before.trim_end()),write("create-before",before),
+            write("repeat-before",before),write("modify-after",after),
+            control_step("report","report_completion",json!({"summary":"Exact before33 and after32 completed; three proposals did not execute.",
+                "observed_tool_error_count":3,"observed_command_failure_count":0,
+                "criteria":[{"disposition":"unverified","rationale":"Only actual earlier effects are reported."}]})),
+        ])});
+        let tools=Arc::new(Files::default());let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {text:source.into()}];
+        let plan=AgentToolPlan::new([tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true)]).unwrap();
+        let outcome=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
+        let result=outcome.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(*tools.0.lock().unwrap(),[before,after]);
+        assert_eq!(before.len(),33);assert_eq!(after.len(),32);
+        for id in ["skip-before","omit-lf","repeat-before"] {
+            assert!(model.requests.lock().unwrap().iter().flat_map(|request|&request.input.messages).flat_map(|message|&message.content)
+                .any(|part|matches!(part,ChatContentPart::ToolResult{call_id,is_error:true,..} if call_id.as_ref()==id)));
+        }
+    }
+
+    #[tokio::test]
     async fn healthy_settled_command_report_argument_repair_cannot_replay_effects() {
         #[derive(Default)]
         struct HealthyTools { calls: std::sync::Mutex<Vec<String>> }
@@ -5577,7 +5664,11 @@ mod tests {
             async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
                 if let Some(result)=instruction_result(&invocation){return Ok(result);}
                 self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
-                if invocation.binding.action_id.as_ref()=="workspace.files/write" {return Ok(workspace_result(invocation));}
+                if invocation.binding.action_id.as_ref()=="workspace.files/write" {
+                    let content=invocation.call.arguments.0["content"].as_str().unwrap();
+                    return Ok(AgentToolResult::text(invocation.call.call_id.clone(),json!({"path":invocation.call.arguments.0["path"],
+                        "written":true,"bytes":content.len(),"sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())}).to_string(),false));
+                }
                 Ok(AgentToolResult::text(invocation.call.call_id,json!({"process_id":"healthy-process","state":"exited",
                     "exit_code":0,"cleanup":{"reaped":true},"success":true,
                     "output":{"text":"exit 0\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
@@ -5590,7 +5681,9 @@ mod tests {
                 {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]}]});
         let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
             control_step("premature-write","write_file",json!({"path":"a","content":"premature-final"})),
-            control_step("ordered-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"in_progress"}]})),
+            control_step("ordered-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"in_progress"}],
+                "exact_actions":[{"id":"create","source":{"input":0,"quote":"Create a once."},"tool":"write_file","expected_arguments":{"path":"a","content":"original"}},
+                    {"id":"command","source":{"input":0,"quote":"Run the original command"},"tool":"exec_command","expected_arguments":{"command":"bun","args":["test"]}}]})),
             control_step("created","write_file",json!({"path":"a","content":"original"})),
             control_step("original","exec_command",json!({"command":"bun","args":["test"]})),
             control_step("settled-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"completed"}]})),
@@ -5619,7 +5712,7 @@ mod tests {
         assert!(requests[1].input.tools.iter().any(|tool|tool.name=="update_plan"));
         assert!(requests[1].input.messages.iter().flat_map(|message|&message.content).any(|part|
             matches!(part,ChatContentPart::ToolResult {call_id,output,is_error:true} if call_id.as_ref()=="premature-write"
-                && output.iter().any(|part|matches!(part,nomifun_chat_model_broker::ChatToolResultPart::Text {text} if text.contains("intermediate state"))))));
+                && output.iter().any(|part|matches!(part,nomifun_chat_model_broker::ChatToolResultPart::Text {text} if text.contains("exact_actions"))))));
         assert!(!result.output_text.contains("Unsuccessful command attempts"));
     }
 

@@ -173,6 +173,34 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - Keychain只读核对：Browser关闭之前未证明所有SSH/robot/storage已quiesce，CEF Helper也
   无精确退出库存；后台硬退不是可靠清理，原系统/物理风险仍OPEN，不改保护或记PASS。
 
+#### B09 源绑定精确动作契约（2026-10-03，run002）
+
+- 计划增加有限exact_actions：来源quote仅定位，不证明自然语言解释；保存参数digest/状态，
+  不复制file/stdin正文/env或live handle到checkpoint。编号写/patch/stdin须先声明当前精确
+  参数；整批owner前匹配，错中间状态/漏LF/双LF不归一化、不派发。stdin绑定新鲜process_id
+  摘要，两种13B表达等价、另一owned目标拒绝；合法双LF声明仍合法，不改原工具字节语义。
+- 先持久化reservation再admission，正向typed owner回执才推进；空/partial/lost对象不成功，
+  未派发reservation与已派发未知在恢复中分开，真实回执断点恢复不重放。成功后新ID同源
+  同payload不能绕once；后续用户新input可授权新动作。未完成契约不能非blocked收尾。
+  最后将未知结果settled标志保持false，仅回归；正式样本旧字段仍保留，不改写历史。
+- Runtime277/277与六个直接字节/零派发/once/恢复/正向回执回归通过；正式Tauri/签名及
+  fixture构建通过。源`e2df86c08`+外tracked patch+exact_actions.rs（另存hash），arm64/
+  macOS26.6.2/25G83、APFS非大小写敏感Data。原B task/seed不变，真实31请求/594events/
+  八effects；首次两个缺LF提议0dispatch，假SHA占位与不支持cleanup契约声明拒绝保留。
+- 实际创建before33B SHA f6a612…→guarded patch after32B SHA6ab0c427…，cp/mv/shasum/rm
+  各一次、四原件不变。**原完整B仍FAIL**：步骤2没有内容回读便删临时；首helper虽已正确
+  start pipe/wait0并观察READY，但未给timeout_ms，用原默认30秒。运行中stdin契约声明/
+  五次付费压缩耗时约76.85秒，实际input距start90.69秒，回执EFFECT_OUTCOME_UNKNOWN、
+  effect仍pending，实物仅ready。原13B参数正确不证明13B已送达，无EOF/长helper/最终报告。
+- 暂停EXECUTION_CLEANUP_UNPROVEN/cleanup_proven=false，未知动作未复位/未重发。桌面途中
+  锁定，正式UI收尾阻断；用户解锁到达时同实例已按原480+5期限TERM退出1、expired=true、
+  forceKill=false（483.09秒）。失败专用冷封存五表594/1/1/1/8全同/ok，自有PID/listener
+  消失；不是正常Quit，不以进程消失证明原任务/清理通过。完整失败在仓库外，不重启旧任务。
+- 下一直接缺口是活动helper期间新增声明/压缩的成本与真实读/顺序覆盖；不自动延长寿命，
+  不拿契约匹配当语义proof。A13旧N1不移植为新schema全认证，Keychain/公开元数据仍OPEN。
+  证据`2026-10-03/macos/b09-exact-actions/`；测试夹具路径/未暴露计划首错均在外，
+  Windows结果未代判、无权限/加密/保护/断言放宽。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

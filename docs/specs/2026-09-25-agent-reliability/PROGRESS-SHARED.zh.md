@@ -3403,3 +3403,16 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
   Schema/owner字节/Frozen provenance不改。Runtime271及直接回归成立，最后补充未新live。
 - 证据仅外部2026-10-03/macos/b09-plan-envelope；原B生成精度/完整报告和真实Keychain物理
   清理仍开放，Windows原生结果未代判，未新建动作框架或扩大权限/保护/断言。
+
+### macOS 源绑定参数契约与未知恢复（2026-10-03）
+
+- 复用plan的有限exact_actions，源quote仅定位、参数digest-only checkpoint；owner前比较
+  真实参数/最终stdin字节，拒绝不改写。编号写/patch/stdin须当前契约，独立只读仍原门。
+  reservation先持久化，typed正向owner回执推进；未知效果不复位，冷恢复区分未派发/
+  真实成功/已派发未知，新ID不能重复同源已完成动作。Runtime277及六个直接回归成立。
+- 原B正式采用已改善33→32B精确变更、copy/move/delete各一次；但遗漏内容回读、运行中
+  控制/五次压缩超过默认30秒helper寿命，stdin效果未知，原完整B仍FAIL。31请求/594events/
+  八effects原样；桌面锁定阻断Quit，480+5期限TERM/exit1/expired不冒充正常退出。
+- 后续聚焦声明时机和真实顺序/交付；不延长预算/寿命或以模型契约作语义证明。此版改变
+  共享控制schema，Windows未正式采用，旧平台结果保持。证据外部2026-10-03/macos/
+  b09-exact-actions；真实Keychain与公开元数据呈现风险仍开放。
