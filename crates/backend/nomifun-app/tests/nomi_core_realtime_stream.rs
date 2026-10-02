@@ -428,7 +428,7 @@ async fn create_chat_provider(router: &axum::Router) -> Value {
     value["data"].clone()
 }
 
-async fn create_settlement_session(app: &RealtimeApp) -> String {
+async fn create_settlement_preset(app: &RealtimeApp) -> (Value, String) {
     let provider = create_chat_provider(&app.router).await;
     let model = json!({"provider_id": provider["provider_id"], "model": "step-3.7-flash"});
     let (status, preset) = call(
@@ -445,7 +445,15 @@ async fn create_settlement_session(app: &RealtimeApp) -> String {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{preset}");
-    let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    let preset_id = preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (model, preset_id)
+}
+
+async fn create_settlement_session(app: &RealtimeApp) -> String {
+    let (model, preset_id) = create_settlement_preset(app).await;
     let (status, session) = call(
         app.router.clone(),
         "POST",
@@ -599,6 +607,115 @@ async fn read_stream_until(
     .await
     .expect("timed out waiting for the expected realtime frame");
     (others, frame)
+}
+
+#[tokio::test]
+async fn canonical_session_list_mutations_notify_only_the_owner() {
+    let app = start_realtime_app().await;
+    let (model, preset_id) = create_settlement_preset(&app).await;
+    let intruder_token = app
+        .services
+        .jwt_service
+        .sign(INTRUDER_USER_ID, "intruder")
+        .unwrap();
+    let mut owner_rx = connect_owner(app.addr).await;
+    let mut intruder_rx = connect_intruder(app.addr, &intruder_token).await;
+    wait_for_clients(&app, 2).await;
+
+    let (status, created) = call(
+        app.router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({"preset_id": preset_id, "model": model, "title": "LAN session"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let session_id = created["data"]["agent_session_id"].as_str().unwrap();
+    let session_path = format!("/api/agent-sessions/{session_id}");
+    assert_eq!(
+        read_text(&mut owner_rx).await,
+        json!({
+            "name": "conversation.listChanged",
+            "data": {"conversation_id": session_id, "action": "created"},
+        }),
+    );
+    let (status, listed) = call(
+        app.router.clone(), "GET", "/api/agent-sessions", Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed["data"]["items"].as_array().unwrap().iter().any(|row| {
+        row["conversation_id"] == session_id && row["name"] == "LAN session"
+    }));
+
+    let (status, updated) = call(
+        app.router.clone(),
+        "PATCH",
+        &session_path,
+        json!({"name": "LAN renamed", "pinned": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["data"]["name"], "LAN renamed");
+    assert_eq!(updated["data"]["pinned"], true);
+    assert_eq!(
+        read_text(&mut owner_rx).await,
+        json!({
+            "name": "conversation.listChanged",
+            "data": {"conversation_id": session_id, "action": "updated"},
+        }),
+    );
+    let (status, projection) = call(
+        app.router.clone(), "GET", &format!("{session_path}/projection"), Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projection}");
+    assert_eq!(projection["data"]["name"], "LAN renamed");
+    assert_eq!(projection["data"]["pinned"], true);
+
+    // Rejected writes must not invalidate another session's list/detail view.
+    let (status, rejected) = call(
+        app.router.clone(),
+        "PATCH",
+        &format!("/api/agent-sessions/{}", uuid::Uuid::now_v7()),
+        json!({"name": "missing session"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{rejected}");
+    expect_silent(
+        &mut owner_rx,
+        Duration::from_millis(300),
+        "failed metadata update must not emit listChanged",
+    )
+    .await;
+
+    let (status, deleted) = call(
+        app.router.clone(), "DELETE", &session_path, Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["data"]["state"], "deleted");
+    assert_eq!(
+        read_text(&mut owner_rx).await,
+        json!({
+            "name": "conversation.listChanged",
+            "data": {"conversation_id": session_id, "action": "deleted"},
+        }),
+    );
+    let (status, listed) = call(
+        app.router.clone(), "GET", "/api/agent-sessions", Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed["data"]["items"].as_array().unwrap().iter().all(|row| {
+        row["conversation_id"] != session_id
+    }));
+    expect_silent(
+        &mut intruder_rx,
+        Duration::from_millis(300),
+        "another user must not receive session list mutations",
+    )
+    .await;
 }
 
 #[tokio::test]
