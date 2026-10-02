@@ -12,7 +12,7 @@ use crate::{AgentEngineError, AgentToolPlan, AgentToolResult, input_schema_diges
 const MAX_CACHED_SCHEMAS: usize = 256;
 const MAX_ISSUES_PER_CALL: usize = 8;
 
-struct NoExternalSchemaReads;
+pub(crate) struct NoExternalSchemaReads;
 
 impl Retrieve for NoExternalSchemaReads {
     fn retrieve(&self, _: &Uri<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

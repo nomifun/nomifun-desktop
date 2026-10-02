@@ -24,6 +24,7 @@ pub struct AgentCompactionRequest {
     pub outstanding_work: String,
     pub retained_facts: Vec<String>,
     pub max_summary_bytes: usize,
+    pub(crate) action_schemas: Vec<nomifun_chat_model_broker::ChatToolDefinition>,
 }
 
 impl AgentCompactionRequest {
@@ -43,12 +44,17 @@ impl AgentCompactionRequest {
             outstanding_work: outstanding_work.into(),
             retained_facts,
             max_summary_bytes: DEFAULT_MAX_COMPACTION_BYTES,
+            action_schemas: Vec::new(),
         }
     }
 
     pub fn with_max_summary_bytes(mut self, max_summary_bytes: usize) -> Self {
         self.max_summary_bytes = max_summary_bytes;
         self
+    }
+
+    pub(crate) fn with_action_schemas(mut self, schemas: Vec<nomifun_chat_model_broker::ChatToolDefinition>) -> Self {
+        self.action_schemas=schemas;self
     }
 }
 
@@ -142,6 +148,16 @@ fn tool_shaped_summary(text: &str) -> bool {
     })
 }
 
+fn bare_action_arguments(text: &str, tools: &[nomifun_chat_model_broker::ChatToolDefinition]) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).ok()
+        .filter(serde_json::Value::is_object)
+        .is_some_and(|value| tools.iter().any(|tool|
+            tool.input_schema.0.get("required").and_then(serde_json::Value::as_array)
+                .is_some_and(|required| !required.is_empty())
+            && jsonschema::options().with_retriever(crate::tool_validation::NoExternalSchemaReads).build(&tool.input_schema.0)
+                .is_ok_and(|validator| validator.is_valid(&value))))
+}
+
 pub async fn run_compaction(
     binding: &EngineBinding,
     model: Arc<dyn AgentModelPort>,
@@ -174,6 +190,9 @@ pub(crate) async fn run_compaction_recorded(
             field: "compaction_identity",
         });
     }
+    let summary_action_schemas = if request.action_schemas.is_empty() {
+        request.model_request.input.tools.clone()
+    } else { std::mem::take(&mut request.action_schemas) };
     request.model_request.input.tools.clear();
     request.model_request.input.tool_choice = ChatToolChoice::None;
     request.model_request.input.reasoning = None;
@@ -283,7 +302,10 @@ pub(crate) async fn run_compaction_recorded(
         }
     }
 
-    let result = AgentCompactionSummary::new(
+    let bare_arguments = bare_action_arguments(&summary, &summary_action_schemas);
+    let result = if bare_arguments {
+        Err(AgentEngineError::CompactionInvalidSummary)
+    } else { AgentCompactionSummary::new(
         binding,
         request.source_event_cursor,
         summary,
@@ -291,7 +313,7 @@ pub(crate) async fn run_compaction_recorded(
         request.completed_tools,
         request.outstanding_work,
         request.retained_facts,
-    );
+    ) };
     if matches!(&result, Err(AgentEngineError::CompactionInvalidSummary)) {
         if let Some(sink) = sink {
             sink.emit(crate::AgentEngineEvent::CompactionSummaryRejected {
@@ -381,6 +403,18 @@ mod tests {
     }
 
     struct CompactionModel;
+
+    #[test]
+    fn bare_write_arguments_cannot_replace_continuation_state() {
+        let tools=crate::standard_tools::standard_agent_tool_exposures().into_iter()
+            .filter(|exposure| exposure.definition.name == "write_file")
+            .map(|exposure| exposure.definition).collect::<Vec<_>>();
+        assert!(bare_action_arguments(r#"{"path":"临时 结果.txt","content":"第一行 MAC-B\n第二行 after"}"#,&tools));
+        for text in [r#"{"completed":["created file"],"pending":["modify then copy"]}"#,
+            r#"{"goal":"explain JSON","path":"a historical path"}"#] {
+            assert!(!bare_action_arguments(text,&tools));
+        }
+    }
 
     #[async_trait]
     impl AgentModelPort for CompactionModel {

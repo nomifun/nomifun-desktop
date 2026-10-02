@@ -46,7 +46,7 @@ struct LiveFrontend {
 
 #[derive(Clone, Copy)]
 struct LiveBudget {
-    calls: usize,
+    calls: Option<usize>,
     output_tokens: u64,
     seconds: u64,
 }
@@ -58,12 +58,12 @@ impl LiveBudget {
         seconds: Option<&str>,
     ) -> anyhow::Result<Self> {
         let budget = Self {
-            calls: calls.unwrap_or("32").parse()?,
+            calls: match calls { Some("unlimited") => None, _ => Some(calls.unwrap_or("32").parse()?) },
             output_tokens: tokens.unwrap_or("4096").parse()?,
             seconds: seconds.unwrap_or("1800").parse()?,
         };
         anyhow::ensure!(
-            (1..=32).contains(&budget.calls)
+            budget.calls.is_none_or(|calls| (1..=32).contains(&calls))
                 && (128..=4096).contains(&budget.output_tokens)
                 && (1..=1800).contains(&budget.seconds),
             "live GUI budget outside bounded acceptance range"
@@ -85,7 +85,7 @@ impl LiveBudget {
         }
         let elapsed = now.saturating_duration_since(*started.get_or_insert(now));
         if elapsed >= Duration::from_secs(self.seconds)
-            || calls.load(Ordering::SeqCst) >= self.calls
+            || self.calls.is_some_and(|limit| calls.load(Ordering::SeqCst) >= limit)
         {
             return Err(stop_live_once(
                 stopped,
@@ -193,7 +193,7 @@ mod live_budget_tests {
         let budget = LiveBudget::parse(Some("6"), Some("1024"), Some("180")).unwrap();
         assert_eq!(
             (budget.calls, budget.output_tokens, budget.seconds),
-            (6, 1024, 180)
+            (Some(6), 1024, 180)
         );
         for values in [
             ("0", "1024", "180"),
@@ -230,6 +230,18 @@ mod live_budget_tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 6);
         assert_eq!(*started.lock().unwrap(), Some(now));
+    }
+
+    #[test]
+    fn explicitly_unlimited_calls_keep_the_time_and_output_safety_limits() {
+        let budget=LiveBudget::parse(Some("unlimited"),Some("4096"),Some("360")).unwrap();
+        assert_eq!(budget.calls,None);
+        let started=Mutex::new(None);let calls=AtomicUsize::new(0);let stopped=AtomicUsize::new(0);let now=Instant::now();
+        for _ in 0..64 {assert!(budget.reserve(&started,&calls,&stopped,now).is_ok());}
+        assert_eq!(calls.load(Ordering::SeqCst),64);
+        assert!(budget.reserve(&started,&calls,&stopped,now+Duration::from_secs(360)).is_err());
+        assert!(LiveBudget::parse(Some("unlimited"),Some("4097"),Some("360")).is_err());
+        assert!(LiveBudget::parse(Some("unlimited"),Some("4096"),Some("1801")).is_err());
     }
 
     #[test]
