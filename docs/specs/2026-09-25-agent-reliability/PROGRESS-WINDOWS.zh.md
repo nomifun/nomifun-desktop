@@ -3848,3 +3848,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 零模型冷启动后agent_events/turns/sessions全行数/hash及全部夹具文件保持，全部Turn仍终态，无复活/新执行。但实时UI曾展示的纠正气泡在冷读会话不可见，canonical仍有纠正；记录为恢复展示缺陷，冷读完整性不计PASS。
 - 未覆盖：C正确执行/实际Stop/完整冷读展示/N3，A报告纠正与重复观察，B摘要保护与最终交付，共享门槛仍未达。不付费重复未修根因；下一步合并定位这些主线阻断，不开说明微调批次。
 - 证据：仓库外2026-10-02/windows/w241-mainline-c，02纠正前、04/05失败原事件/参数/DB/audit、06实时UI/冷读前全表基线、07正式冷启动、08冷读UI、09全表/磁盘/当前PID复核；本批Git仅短进度。
+
+### W242 已接受纠正的冷读消息身份（2026-10-02；基线c2cae2177，子断言PASS）
+
+- Case/子断言：C07/C06、LIFE冷读与A03/A09/A12/A17；直接修W241正式首败，不重启模型或重放操作。
+- 根因：steer的projection_id是独立message:event UUID，correlation_id保留所属Turn operation。历史响应误把operation当消息UUID并过滤，导致原始纠正仍在DB、重启UI却消失。现accepted用户消息从已有message projection身份读取，兼容旧记录，不迁移/改写canonical事件或Turn归属。
+- 验证：新增双纠正身份回归修前红/修后绿；相关历史17/17、fmt/diff及desktop边界通过。正式Tauri构建40.84秒，原W241失败会话零模型冷读7/7：纠正气泡与failed提示可见，events/turns/sessions全部行数/hash、全部磁盘字节保持，无旧Turn复活。未调用Stop/Retry。
+- 未覆盖：只关闭既有纠正消息的冷读展示缺陷；W241重启/重读/逐字来源循环、C执行及实际Stop/N3仍FAIL或待验。B来源保护/交付、A重复Git/报告及共享仍未结案，下一项按固定顺序合并A复验。
+- 证据：仓库外2026-10-02/windows/w242-mainline-recovery，01首红、02真实projection根因、03历史回归、04正式构建及原会话冷读UI/DB/7项审计；初始化元数据文件路径首错另存，已启动GUI直接核对恢复，未重复启动模型。Git仅消息身份修复、最小回归及短进度。
