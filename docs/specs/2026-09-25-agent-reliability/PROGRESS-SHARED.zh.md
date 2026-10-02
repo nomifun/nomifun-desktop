@@ -3208,3 +3208,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 一次正式COD C、helper期限按实测在运行前改为300秒，产品预算保持；19步/八压缩后模型自行cancel并completed，操作者Stop未执行。18-byte纠正及来源/原件保持，report旧ID拒绝及原计数保存，完整C不代判PASS。
 - 根因直接在宿主：无tool的等待响应触发完成复核，用户角色notice要求“Before ending, poll or explicitly cancel ... no process may survive this turn”；模型公开说明按系统要求取消，与原保持到Stop约束冲突。既有running进程回归强化后首红保留，转W248修执行/收尾状态区分。
 - 外部2026-10-02/windows/w247-mainline-live-stop存原参数/复核指令来源/DB/事件/353条CIM/未执行Stop及UI；不重复付费旧根因，普通完成/unknown/取消和宿主清理仍需严格保持，共享未结案。
+
+### W248 把活进程进度保留在执行阶段（2026-10-02，正式live Stop N1）
+
+- W247等待进度触发收尾并被要求cancel。现has_running_processes独立于can_report，活进程继续原执行/poll及用户保持约束，不索取报告或授权自取消；实际终态清理、无活进程报告/unknown patch/blocked/计数与预算不改。既有live回归首红保留，修后七项不同邻近检查、fmt/diff/正式构建通过。
+- 一次正式COD C、22步/八压缩，同Turn纠正、来源各一次、无自cancel/重启；Stop前真实父子存活，canonical cancelled后CIM约385ms均消失，419样本/心跳/host cleanup/后续零派发，取得live Stop N1。W247首败不覆盖，完整C仍不代判PASS。
+- 原20/24及三拒绝保持：write未派发、两引用拒绝，实际写/读各一次但参数漏末LF，真实17bytes不符合18byte要求；缺LF的provider/codec归因未验，不补写洗绿。冷读全部DB/磁盘不变无复活，原6/8及视觉停止提示分开保存，错误文件不被恢复或隐藏。
+- 外部2026-10-02/windows/w248-mainline-live-progress保存首红/中间红/七项/正式父子停止/原参数/DB/事件/审计/冷读；仅闭此直接等待/停止根因，C字节/引用、A/B与必要N3仍开放，共享未达。
