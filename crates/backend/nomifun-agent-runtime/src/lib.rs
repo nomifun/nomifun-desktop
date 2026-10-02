@@ -40,7 +40,7 @@ mod kernel;
 mod history;
 mod history_port;
 pub use history_port::{AgentHistoryPage, AgentHistoryPort, AgentRecordedTurn};
-pub use history::replay_closed_turn;
+pub use history::{replay_closed_history, replay_closed_turn};
 mod model;
 mod output_limit;
 mod public_output;
