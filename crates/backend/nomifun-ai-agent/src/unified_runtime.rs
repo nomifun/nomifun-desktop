@@ -31,6 +31,11 @@ use crate::{
 /// Session owner. They must not infer authority from user/model JSON.
 #[async_trait]
 pub trait UnifiedRuntimeHost: Send + Sync {
+    /// Validate a completed proposal against Host-owned delivery facts before
+    /// the lifecycle SDK records success. It can only narrow completion.
+    async fn completion_gate(
+        &self, _message: &SendMessageData,
+    ) -> Result<Option<EngineTurnTerminal>, AppError> { Ok(None) }
     async fn recoverable_preparation_step(&self, _message:&SendMessageData) -> Result<Option<u16>,AppError> { Ok(None) }
     async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
     fn supports_execution_checkpoints(&self) -> bool { false }
@@ -317,7 +322,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         let pending = projection.terminal.lock().unwrap_or_else(|e| e.into_inner()).take();
         match execution {
             Ok(result) => {
-                let outcome = EngineTurnOutcome {
+                let mut outcome = EngineTurnOutcome {
                     model_steps: result.model_steps,
                     terminal: match result.terminal {
                         AgentTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
@@ -328,6 +333,11 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 };
                 if pending.as_ref() != Some(&runtime_terminal(&outcome)) {
                     return Err(AppError::Conflict("Nomi result and terminal event disagree or terminal is absent".into()));
+                }
+                if matches!(outcome.terminal, EngineTurnTerminal::Completed { .. }) {
+                    if let Some(terminal) = self.host.completion_gate(message).await? {
+                        outcome.terminal = terminal;
+                    }
                 }
                 Ok(outcome)
             }
@@ -547,6 +557,7 @@ mod tests {
     }
 
     struct Host {
+        block_completion: AtomicBool,
         events: Mutex<Vec<AgentEngineEvent>>,
         cleanup_turns: AtomicUsize,
         cleanup_sessions: AtomicUsize,
@@ -562,6 +573,7 @@ mod tests {
     impl Host {
         fn new() -> Arc<Self> {
             Arc::new(Self {
+                block_completion: AtomicBool::new(false),
                 events: Mutex::new(Vec::new()),
                 cleanup_turns: AtomicUsize::new(0),
                 cleanup_sessions: AtomicUsize::new(0),
@@ -578,6 +590,11 @@ mod tests {
 
     #[async_trait]
     impl UnifiedRuntimeHost for Host {
+        async fn completion_gate(&self, _message: &SendMessageData) -> Result<Option<EngineTurnTerminal>,AppError> {
+            Ok(self.block_completion.load(Ordering::Acquire).then(|| EngineTurnTerminal::Paused {
+                reason:"PLUGIN_DELIVERY_REQUIRED".into(),
+            }))
+        }
         fn capability_activation_snapshot(
             &self,
         ) -> Result<Option<crate::AgentCapabilityActivationSnapshot>, AppError> {
@@ -875,6 +892,25 @@ mod tests {
 
         assert!(events.try_recv().is_err());
         assert_eq!(host.events.lock().unwrap().len(), 3);
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_delivery_obligation_cannot_be_satisfied_by_final_model_text() {
+        let host=Host::new();
+        host.block_completion.store(true,Ordering::Release);
+        let runtime=runtime(host.clone(),model(false,false));
+        let mut events=runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        assert!(matches!(terminal(&mut events).await,AgentStreamEvent::Finish(data)
+            if data.stop_reason==Some(TurnStopReason::Paused)));
+        runtime.cancel().await.unwrap();
+        let recorded=host.events.lock().unwrap();
+        assert!(!recorded.iter().any(|event|matches!(event,AgentEngineEvent::TurnCompleted {..})));
+        assert!(recorded.iter().any(|event|matches!(event,
+            AgentEngineEvent::TurnPaused {reason,..} if reason=="PLUGIN_DELIVERY_REQUIRED")));
+        assert_eq!(host.cleanup_turns.load(Ordering::Acquire),1);
+        drop(recorded);
         runtime.kill_and_wait(None).await.unwrap();
     }
 

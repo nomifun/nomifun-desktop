@@ -98,9 +98,10 @@ describe('Guid workbench Agent launch behavior', () => {
     ).toBe(true);
     expect(selectionUtils.includes("kind: 'template',")).toBe(true);
     expect(selection.includes('presets[0]')).toBe(false);
+    // The workbench restores the last edited Agent before this catalog fallback.
     expect(
       workbenchController.includes(
-        'const firstTemplate = nextLibrary.official_templates[0];'
+        'nextLibrary.official_templates[0]'
       )
     ).toBe(true);
   });

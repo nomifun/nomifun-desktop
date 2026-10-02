@@ -27,6 +27,26 @@ pub struct ConversationMcpStatus {
 
 // ── Request types ──────────────────────────────────────────────────
 
+/// A user-selected deliverable obligation, not a capability grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginDeliveryRequirement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
+    #[serde(default = "one_plugin", deserialize_with = "plugin_count", skip_serializing_if = "is_one_plugin")]
+    pub expected_count: u8,
+}
+
+fn one_plugin() -> u8 { 1 }
+fn is_one_plugin(count: &u8) -> bool { *count == 1 }
+fn plugin_count<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    let count = u8::deserialize(deserializer)?;
+    if !(1..=32).contains(&count) {
+        return Err(serde::de::Error::custom("plugin delivery requires 1 to 32 outputs"));
+    }
+    Ok(count)
+}
+
 /// Body for `POST /api/conversations`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +109,8 @@ pub struct CloneConversationRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_delivery: Option<PluginDeliveryRequirement>,
     pub content: String,
     #[serde(default)]
     pub files: Vec<String>,

@@ -720,6 +720,11 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("plugin_drafts", "owner_user_id" => "users", "user_id", false, Cascade),
     text_ref!("plugin_drafts", "plugin_id" => "plugins", "plugin_id", true, SetNull)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("plugin_drafts", "source_conversation_id" => "agent_sessions", "agent_session_id", true, KeepHistory)
+        .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_user_id"),
+    // The message is an event/projection identity validated at Turn admission.
+    // It is not the private composite agent_messages projection row key.
+    external_ref!("plugin_drafts", "source_message_id", Text, true, CanonicalUuidV7, KeepHistory),
     text_ref!("plugin_credential_bindings", "owner_user_id" => "users", "user_id", false, Cascade),
     text_ref!("plugin_credential_bindings", "plugin_id" => "plugins", "plugin_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
@@ -948,6 +953,15 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
 /// each entry yields one column named `value`, including one row per array
 /// element where necessary.
 pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
+    json_external_ref!(
+        "plugin_drafts", "verification_json", "$.task_message_id",
+        "SELECT json_extract(verification_json, '$.task_message_id') AS value FROM plugin_drafts WHERE json_extract(verification_json, '$.task_message_id') IS NOT NULL", KeepHistory
+    ),
+    json_text_ref!(
+        "plugin_mutations", "draft_association_json", "$.draft_id",
+        "SELECT json_extract(draft_association_json, '$.draft_id') AS value FROM plugin_mutations WHERE draft_association_json IS NOT NULL" =>
+        "plugin_drafts", "draft_id", KeepHistory, AllowMissingHistoricalParent
+    ),
     json_text_ref!(
         "terminal_sessions", "idmm", "$.fault_watch.bypass_model.provider_id",
         "SELECT json_extract(idmm, '$.fault_watch.bypass_model.provider_id') AS value FROM terminal_sessions WHERE idmm IS NOT NULL" =>
@@ -1627,7 +1641,16 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE ON PLUGIN_DRAFTS",
                 "NEW.DRAFT_ID IS NOT OLD.DRAFT_ID",
-                "RAISE(ABORT, 'PLUGIN DRAFT IDENTITY IS IMMUTABLE AND TIME IS MONOTONIC')",
+                "NEW.IMPORTED_CONTEXT_JSON IS NOT OLD.IMPORTED_CONTEXT_JSON",
+                "RAISE(ABORT, 'PLUGIN DRAFT IDENTITY, IMPORTED HISTORY AND TIME ARE IMMUTABLE')",
+            ],
+        ),
+        (
+            "trg_plugin_drafts_clear_base_before_plugin_delete",
+            &[
+                "BEFORE DELETE ON PLUGINS",
+                "UPDATE PLUGIN_DRAFTS SET BASE_REVISION = NULL, REVISION = REVISION + 1",
+                "WHERE PLUGIN_ID = OLD.PLUGIN_ID",
             ],
         ),
         (

@@ -1,4 +1,5 @@
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
+import { conversation } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { PluginLibraryState } from '@/common/types/pluginPlatform';
 import { isDesktopShell } from '@/renderer/utils/platform';
@@ -7,6 +8,18 @@ export const PLUGIN_LIBRARY_CHANGED = 'nomifun:plugin-library-changed';
 
 export function notifyPluginLibraryChanged(): void {
   window.dispatchEvent(new Event(PLUGIN_LIBRARY_CHANGED));
+}
+
+/** GUI mutations, conversation tools and reconnects share the same library refresh. */
+export function subscribePluginLibraryChanges(refresh: () => void): () => void {
+  window.addEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
+  const offChanges = pluginPlatform.plugins.changed.on(refresh);
+  const offReconnect = conversation.reconnected.on(refresh);
+  return () => {
+    window.removeEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
+    offChanges();
+    offReconnect();
+  };
 }
 
 let mutationQueue: Promise<unknown> = Promise.resolve();

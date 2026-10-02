@@ -540,6 +540,8 @@ export interface RuntimeBuildBinding {
 }
 
 export interface CreateAgentSessionRequest {
+  /** Required launch features; the server verifies actual saved authority. */
+  required_modules?: string[];
   model?: { provider_id: string; model: string };
   preset_id: AgentPresetId;
   title?: string;
@@ -676,6 +678,36 @@ export interface CreateAgentSessionTurnResponse {
   result_error?: string;
   result_error_code?: string;
   result_error_retryable?: boolean;
+}
+
+/** Fields needed to continue the exact canonical execution after owner input. */
+export interface NativeAgentExecution {
+  operation_id: string;
+  state: string;
+  checkpoint_revision: number;
+  checkpoint_digest: DigestHex | null;
+  checkpoint_retained: boolean;
+  pause: {
+    revision: number;
+    reason: string;
+    cleanup_proven: boolean;
+  } | null;
+}
+
+export interface ResumeNativeAgentExecutionRequest {
+  operation_id: string;
+  idempotency_key: string;
+  expected_pause_revision: number;
+  expected_checkpoint_revision: number;
+  expected_checkpoint_digest: DigestHex;
+  budget: Record<string, never>;
+}
+
+export interface ResumeNativeAgentExecutionResponse {
+  operation_id: string;
+  authorization_event_id: string;
+  seq: number;
+  duplicate: boolean;
 }
 
 export interface AgentSessionEventsResponse {

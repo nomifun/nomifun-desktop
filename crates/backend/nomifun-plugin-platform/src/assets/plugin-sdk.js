@@ -299,6 +299,56 @@
     operation.reject(sdkError(failure.code, failure.message));
   }
 
+  // Only the Host's transferred channel can request these typed observations.
+  // This performs actual DOM interactions; no supplied JavaScript is evaluated.
+  async function observeUi(command) {
+    const operation = command.operation;
+    if (operation === 'ready') {
+      if (document.readyState === 'loading') {
+        await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once: true }));
+      }
+      await call('config.get', {});
+      return Boolean(document.body);
+    }
+    if (!['click', 'fill', 'text', 'count'].includes(operation)) throw new Error('Unsupported UI operation');
+    if (!preview && (operation === 'click' || operation === 'fill')) throw new Error('Mutation tests require preview');
+    if (typeof command.selector !== 'string' || command.selector.length > 4096) throw new Error('Invalid UI selector');
+    let element = document.querySelector(command.selector);
+    const elementDeadline = Date.now() + 4000;
+    while (!element && operation !== 'count' && Date.now() < elementDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      element = document.querySelector(command.selector);
+    }
+    if (operation !== 'count' && !element) throw new Error('UI element not found: ' + command.selector);
+    if (operation === 'click') {
+      element.click();
+      await new Promise(resolve => setTimeout(resolve, 150));
+      return null;
+    }
+    if (operation === 'fill') {
+      const prototype = element instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype : element instanceof HTMLSelectElement
+          ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      if (!setter) throw new Error('UI element cannot accept input');
+      setter.call(element, String(command.value ?? ''));
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 150));
+      return null;
+    }
+    const read = () => operation === 'count'
+      ? document.querySelectorAll(command.selector).length
+      : (document.querySelector(command.selector)?.textContent ?? '').trim();
+    const until = Date.now() + 4000;
+    let observed = read();
+    while (observed !== command.value && Date.now() < until) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      observed = read();
+    }
+    return observed;
+  }
+
   function receiveWindow(event) {
     if (closed || port || event.source !== window.parent) return;
     const message = event.data;
@@ -321,6 +371,17 @@
     }
     preview = message.preview;
     port = transferred;
+    port.addEventListener('message', (event) => {
+      const command = event.data;
+      if (!isPlainRecord(command) || command.type !== 'nomifun-plugin-ui-probe-v1'
+        || typeof command.probe_token !== 'string' || command.probe_token.length > 128) return;
+      void observeUi(command).then(value => {
+        port?.postMessage({ type: 'nomifun-plugin-ui-observation-v1', probe_token: command.probe_token, value });
+      }).catch(error => {
+        port?.postMessage({ type: 'nomifun-plugin-ui-observation-v1', probe_token: command.probe_token,
+          error: error instanceof Error ? error.message : String(error) });
+      });
+    });
     port.addEventListener('message', receive);
     port.addEventListener('messageerror', () => {
       clearPending(sdkError('PLUGIN_BRIDGE_MESSAGE_ERROR', 'Plugin bridge message could not be decoded'));

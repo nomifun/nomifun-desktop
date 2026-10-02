@@ -1,4 +1,53 @@
 {
+  "authoring": {
+    "createPrompt": "Help me create a plugin",
+    "templatePrompt": "Create a before-tool guard using the agent.before_tool template. Ask for my guard rules first, then implement, verify and install it.",
+    "resumePrompt": "The actual permissions for draft {{id}} have been approved. Continue this existing draft through preview, business verification, installation and delivery checks; do not create another draft.",
+    "title": "Create a plugin or small app",
+    "conversationHint": "Describe the requirement here using your default Agent. It will implement, verify, repair and install a usable plugin.",
+    "moduleNeeded": "Enable plugins and small apps in the Agent workbench first.",
+    "editPrompt": "Continue editing plugin {{id}} from revision {{revision}}. Read the implementation first and wait for my requested changes.",
+    "draftPrompt": "Continue draft {{id}}. Read its files first and wait for my requirement.",
+    "saved": "Saved",
+    "historicalDeleted": "Delivered; plugin deleted",
+    "inProgress": "In progress",
+    "deliveryPending": "Generation, required verification or installation is incomplete. Continue the paused task in this conversation.",
+    "resumeTask": "Continue task",
+    "currentConversationPending": "The plugin is installed; actual tool use in this conversation still needs verification. Continue the original task at its safe pause. This requirement remains incomplete until the tool is available and used.",
+    "replyLabel": "Add requirements or configuration",
+    "replyPlaceholder": "Add the missing information. Use a configured credential reference rather than entering a secret in chat.",
+    "replyContinue": "Send and continue this task",
+    "continueTaskPrompt": "Continue the original plugin task, complete its unmet required behavior, verification, installation and delivery checks, and retain the existing work.",
+    "approvalHint": "This plugin needs additional execution privileges. Review the actual code capabilities and permissions, then continue in this conversation.",
+    "accept": "Allow this plugin to use the capabilities above",
+    "approve": "Approve and continue",
+    "details": "Files and verification",
+    "importedHistoryHint": "Read-only history imported from the old creator. It does not prove current execution, authorization or successful verification.",
+    "saveContinue": "Save as default and continue authoring",
+    "workbenchHint": "Enable the whole plugin-development feature and its creation actions for the default Agent. Your requirement is retained.",
+    "continue": "Continue authoring",
+    "operations": {
+      "list": "List plugins and drafts",
+      "open": "Create or open draft",
+      "read": "Read files and verification",
+      "plan": "Record requirements and acceptance plan",
+      "apply": "Edit draft files",
+      "check": "Check package structure",
+      "preview": "Run plugin preview",
+      "test_action": "Verify business actions",
+      "test_ui": "Verify UI interactions",
+      "install": "Install or update plugin",
+      "inspect": "Inspect installed plugin",
+      "configure": "Configure plugin",
+      "enable": "Enable or disable plugin",
+      "export": "Export plugin",
+      "trash": "Move to trash",
+      "restore": "Restore plugin",
+      "delete": "Permanently delete plugin",
+      "discard": "Discard draft",
+      "close_preview": "Close preview"
+    }
+  },
   "actions": {
     "back": "Back to plugins",
     "cancel": "Cancel",
@@ -95,18 +144,46 @@
       "actions": "Actions"
     },
     "views": {
-      "all": { "title": "All plugins", "subtitle": "See {{count}} plugins and drafts in one place." },
-      "enabled": { "title": "Enabled", "subtitle": "{{count}} plugins are working for you." },
-      "disabled": { "title": "Disabled", "subtitle": "{{count}} plugins keep their data but do not run." },
-      "drafts": { "title": "In progress", "subtitle": "{{count}} drafts are waiting to be finished." },
-      "attention": { "title": "Needs attention", "subtitle": "{{count}} items need confirmation or a fix." },
-      "trash": { "title": "Trash", "subtitle": "{{count}} plugins are disabled and waiting to be restored or removed." },
-      "ui_only": { "title": "Interface apps", "subtitle": "{{count}} plugins can be opened and used directly." },
-      "headless": { "title": "Background capabilities", "subtitle": "{{count}} plugins provide capabilities in the background." },
-      "mixed": { "title": "App + service", "subtitle": "{{count}} plugins provide both an interface and a background service." }
+      "all": {
+        "title": "All plugins",
+        "subtitle": "See {{count}} plugins and drafts in one place."
+      },
+      "enabled": {
+        "title": "Enabled",
+        "subtitle": "{{count}} plugins are working for you."
+      },
+      "disabled": {
+        "title": "Disabled",
+        "subtitle": "{{count}} plugins keep their data but do not run."
+      },
+      "drafts": {
+        "title": "In progress",
+        "subtitle": "{{count}} drafts are waiting to be finished."
+      },
+      "attention": {
+        "title": "Needs attention",
+        "subtitle": "{{count}} items need confirmation or a fix."
+      },
+      "trash": {
+        "title": "Trash",
+        "subtitle": "{{count}} plugins are disabled and waiting to be restored or removed."
+      },
+      "ui_only": {
+        "title": "Interface apps",
+        "subtitle": "{{count}} plugins can be opened and used directly."
+      },
+      "headless": {
+        "title": "Background capabilities",
+        "subtitle": "{{count}} plugins provide capabilities in the background."
+      },
+      "mixed": {
+        "title": "App + service",
+        "subtitle": "{{count}} plugins provide both an interface and a background service."
+      }
     }
   },
   "creator": {
+    "launchFailed": "Unable to start plugin authoring. Check the default Agent or connection and retry.",
     "title": "Create plugin",
     "subtitle": "Chat edits the standard package files directly. Preview and save use the same SDK and storage adapters.",
     "modelRequired": "Connect a Chat model before generating or changing a plugin.",

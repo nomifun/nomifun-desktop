@@ -291,7 +291,9 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   const needsAttention = (entry: ModuleEntry): boolean =>
     moduleNeedsAttention(entry) || permissionNeedsAttention(entry);
   const localizedActionName = (actionId: string): string => t(
-    `agentSettings.actionLabels.${actionTranslationKey(actionId)}`,
+    actionId.startsWith('plugin.development/')
+      ? `pluginPlatform.authoring.operations.${actionId.slice('plugin.development/'.length)}`
+      : `agentSettings.actionLabels.${actionTranslationKey(actionId)}`,
     { defaultValue: actionFallbackName(actionId) }
   );
   const resourceName = (value: string): string => {

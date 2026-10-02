@@ -156,6 +156,9 @@ import type {
   CreateAgentSessionResponse,
   CreateAgentSessionTurnRequest,
   CreateAgentSessionTurnResponse,
+  NativeAgentExecution,
+  ResumeNativeAgentExecutionRequest,
+  ResumeNativeAgentExecutionResponse,
   CreateRemoteBindingRequest,
   ForkAgentSessionRequest,
   ForkAgentSessionResponse,
@@ -775,6 +778,16 @@ export const agentPlatform = {
         `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/turns`,
       (params) => params.request
     ),
+    getExecution: httpGet<NativeAgentExecution | null, { agent_session_id: string }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/execution`
+    ),
+    resumeExecution: httpPost<
+      ResumeNativeAgentExecutionResponse,
+      { agent_session_id: string; request: ResumeNativeAgentExecutionRequest }
+    >(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/execution/resume`,
+      (params) => params.request
+    ),
     events: withResponseMap(
       httpGet<IAgentSessionEventPage, { agent_session_id: string; after_seq: number; limit: number }>(
         (params) =>
@@ -1047,6 +1060,7 @@ export const conversation = {
             content: p.input,
             files: p.files,
             inject_skills: p.inject_skills,
+            plugin_delivery: p.plugin_delivery,
           },
         },
         { idempotencyKey, initialOnly: p.initial_only === true }
@@ -1079,6 +1093,7 @@ export const conversation = {
             content: p.input,
             files: p.files,
             inject_skills: p.inject_skills,
+            plugin_delivery: p.plugin_delivery,
           },
         },
         { idempotencyKey }
@@ -3112,6 +3127,8 @@ export const terminal = {
 // ---------------------------------------------------------------------------
 
 interface ISendMessageParams {
+  /** Deliverable obligation only; it never grants Plugin tools. */
+  plugin_delivery?: import('@/common/types/pluginDevelopment').PluginDeliveryRequirement;
   input: string;
   conversation_id: ConversationId;
   files?: string[];
