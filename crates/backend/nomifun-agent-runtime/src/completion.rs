@@ -1150,8 +1150,8 @@ impl CompletionTracker {
         // Presentation fallback only: this does not interpret user intent or
         // translate arbitrary owner text. Persist it before moving the summary.
         let public_format = if submission.summary.chars().any(|c| matches!(c as u32, 0x3400..=0x9fff)) {
-            "plain_zh_v1"
-        } else { "plain_en_v1" };
+            "plain_zh_v2"
+        } else { "plain_en_v2" };
         Ok(AgentCompletionReport {
             plan_revision: plan.revision,
             observation_revision: self.revision,
@@ -1293,6 +1293,66 @@ fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_v2_translates_only_known_wrapper_fields_and_keeps_owner_values() {
+        let source=serde_json::json!({"query":"files_scanned", "matches":[{"path":"worktree_modified","line":2,"column_bytes":0,
+            "text":"<think>`files_scanned`","sha256":"a".repeat(64),"truncated":false}],"truncated":false,
+            "incomplete_reasons":[],"files_scanned":1,"files_skipped":0,"source_bytes_read":97});
+        let rendered=public_structured_result(&source,true).unwrap();
+        assert!(!rendered.contains("<think>")&&rendered.contains("已扫描文件数"));
+        let json=rendered.trim().strip_prefix("```json\n").unwrap().strip_suffix("\n```").unwrap();
+        let value:serde_json::Value=serde_json::from_str(json).unwrap();
+        assert_eq!(value["查找文本"],source["query"]);assert_eq!(value["实际匹配"][0]["文件"],source["matches"][0]["path"]);
+        assert_eq!(value["实际匹配"][0]["实际匹配原文"],source["matches"][0]["text"]);
+        assert_eq!(value["实际匹配"][0]["匹配起点（字节列）"],0);assert_eq!(value["实际匹配"][0]["片段已截断"],false);
+        assert_eq!(value["跳过文件数"],0);assert_eq!(value["扫描未完成原因"],serde_json::json!([]));
+        let git=serde_json::json!({"is_repository":true,"entries":[{"path":"worktree_modified","status":["worktree_modified","unknown_future"]}]});
+        let text=public_structured_result(&git,true).unwrap();assert!(text.contains("工作区修改，未暂存")&&text.contains("unknown_future"));
+        let mut report:AgentCompletionReport=serde_json::from_value(serde_json::json!({
+            "plan_revision":1,"observation_revision":1,"input_revision":1,"workspace_epoch":0,"summary":"观察结果。","criteria":[],
+            "public_format":"plain_zh_v1","delivery_items":[{"item_id":"item","status":"delivered","results":[{"result_ref":"git","label":"Git 状态","data":git}]}]})).unwrap();
+        let legacy=report.delivery_text();
+        assert_eq!(legacy,format!("观察结果。\n\nGit 状态\n{}",plain_public_result(&git,true)));
+        assert!(report.matches_delivery(&legacy));
+        report.public_format=Some("plain_zh_v2".into());
+        assert_ne!(report.delivery_text(),legacy);assert!(!report.matches_delivery(&legacy));
+        let restored:AgentCompletionReport=serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+        assert_eq!(restored.delivery_text(),report.delivery_text());
+        let diff=serde_json::json!({"path":"a","patch":"+ files_scanned\n","truncated":false});
+        let text=public_structured_result(&diff,true).unwrap();assert!(text.contains("实际差异原文")&&text.contains("+ files_scanned"));
+        let mut future=source.clone();future["future_metadata"]=serde_json::json!(false);assert!(public_structured_result(&future,true).is_none());
+        assert!(public_structured_result(&source,false).is_none());
+    }
+
+    #[test]
+    fn public_v2_preserves_case_insensitive_skill_markers_in_every_result_carrier() {
+        let text="中文 [skill_suggest]原文[/skill_suggest] [SkIlL_SuGgEsT]混合[/SKILL_SUGGEST] [普通数组]";
+        let search=serde_json::json!({"query":text,"matches":[{"path":text,"text":text}],"truncated":false});
+        let diff=serde_json::json!({"path":text,"patch":text,"truncated":false});
+        let fallback=serde_json::json!({"future_metadata":[text, false, 0]});
+        for (data,key) in [(&search,"查找文本"),(&diff,"实际差异原文"),(&fallback,"future_metadata")] {
+            let rendered=public_structured_result(data,true)
+                .unwrap_or_else(||plain_public_result_versioned(data,true,true));
+            assert!(!public_skill_marker(&rendered));
+            let json=rendered.trim().strip_prefix("```json\n").unwrap().strip_suffix("\n```").unwrap();
+            let parsed:serde_json::Value=serde_json::from_str(json).unwrap();
+            if key=="future_metadata" {assert_eq!(parsed[key],data[key]);}
+            else {assert_eq!(parsed[key],text);}
+        }
+        for data in [serde_json::json!({"observed_text":{"content":text},"total_bytes":text.len()}),
+            serde_json::json!({"exit_code":0,"observed_output":{"state":"exited","output":{"text":text,"dropped_bytes":0,"decode_errors":0}}})] {
+            for chinese in [true,false] {
+                let rendered=plain_public_result_versioned(&data,chinese,true);
+                assert!(!public_skill_marker(&rendered));
+                let json=rendered.split_once("```json\n").unwrap().1.split_once("\n```").unwrap().0;
+                assert_eq!(serde_json::from_str::<String>(json).unwrap(),text);
+                assert!(public_skill_marker(&plain_public_result(&data,chinese)),"v1 replay remains unchanged");
+            }
+        }
+        assert_eq!(escape_public_json(serde_json::json!([text,[],{}]).to_string(),true)
+            .parse::<serde_json::Value>().unwrap(),serde_json::json!([text,[],{}]));
+    }
+
     #[test]
     fn versioned_public_delivery_retains_values_and_legacy_exact_replay() {
         assert_eq!(public_owner_text("*x*\n~~~\n"),"\n```text\n*x*\n~~~\n```\n");
@@ -3442,26 +3502,55 @@ mod tests {
 }
 
 fn public_owner_text(text: &str) -> String {
-    if text.contains('<') || text.contains('`') || text.contains("[SKILL_SUGGEST]") {
-        let encoded=serde_json::to_string(text).unwrap_or_default().replace('<',"\\u003c").replace('`',"\\u0060").replace("[SKILL_SUGGEST]","\\u005bSKILL_SUGGEST]");
+    public_owner_text_versioned(text, false)
+}
+
+fn public_skill_marker(text: &str) -> bool {
+    text.char_indices().any(|(index, ch)| ch == '[' && text[index..].get(.."[SKILL_SUGGEST]".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[SKILL_SUGGEST]")))
+}
+
+fn escape_public_json(encoded: String, version2: bool) -> String {
+    let encoded=encoded.replace('<',"\\u003c").replace('`',"\\u0060");
+    if !version2 { return encoded.replace("[SKILL_SUGGEST]","\\u005bSKILL_SUGGEST]"); }
+    // The renderer strips Skill markers case-insensitively before Markdown.
+    // Escape only the marker opener, never structural JSON array brackets.
+    let mut safe=String::with_capacity(encoded.len());
+    for (index,ch) in encoded.char_indices() {
+        if ch=='[' && encoded[index..].get(.."[SKILL_SUGGEST]".len())
+            .is_some_and(|prefix|prefix.eq_ignore_ascii_case("[SKILL_SUGGEST]")) {
+            safe.push_str("\\u005b");
+        } else {safe.push(ch);}
+    }
+    safe
+}
+
+fn public_owner_text_versioned(text: &str, version2: bool) -> String {
+    if text.contains('<') || text.contains('`') || if version2 {public_skill_marker(text)} else {text.contains("[SKILL_SUGGEST]")} {
+        let encoded=escape_public_json(serde_json::to_string(text).unwrap_or_default(),version2);
         format!("\n```json\n{encoded}\n```\n")
     } else { format!("\n```text\n{text}{}```\n",if text.ends_with('\n') {""} else {"\n"}) }
 }
 
 fn plain_public_result(data: &serde_json::Value, chinese: bool) -> String {
+    plain_public_result_versioned(data,chinese,false)
+}
+
+fn plain_public_result_versioned(data: &serde_json::Value, chinese: bool, version2: bool) -> String {
     let unknown=if chinese {"未记录"} else {"not recorded"};
     let value=|value:&serde_json::Value| if value.is_null() {unknown.to_owned()} else {value.as_str().map(str::to_owned).unwrap_or_else(||value.to_string())};
+    let owner_text=|text:&str|if version2 {public_owner_text_versioned(text,true)} else {public_owner_text(text)};
     if let Some(text)=data["observed_output"]["output"]["text"].as_str() {
         let state=data["observed_output"]["state"].as_str().unwrap_or(unknown);
         let state=if chinese {match state {"running"=>"运行中（观察时）","exited"=>"已退出","cancelled"=>"已停止","timed_out"=>"已超时","lost"=>"结果未知",other=>other}} else {state};
-        return format!("{}\n{}：{}；{}：{}；{}：{}；{}：{}。",public_owner_text(text),
+        return format!("{}\n{}：{}；{}：{}；{}：{}；{}：{}。",owner_text(text),
             if chinese {"状态"} else {"Observed state"},state,
             if chinese {"退出码"} else {"Exit code"},value(&data["exit_code"]),
             if chinese {"丢失输出字节"} else {"Dropped output bytes"},value(&data["observed_output"]["output"]["dropped_bytes"]),
             if chinese {"解码错误"} else {"Decode errors"},value(&data["observed_output"]["output"]["decode_errors"]));
     }
     if let Some(text)=data["observed_text"]["content"].as_str() {
-        let mut result=public_owner_text(text);
+        let mut result=owner_text(text);
         for (key,zh,en) in [("sha256","SHA-256","SHA-256"),("total_bytes","文件字节数","File bytes"),("line_count","行数","Lines"),("offset","读取起点（字节）","Read offset (bytes)"),("eof","读至文件末尾","Reached end of file")] {
             if !data[key].is_null() {
                 let rendered=if chinese && key=="eof" { match data[key].as_bool() {Some(true)=>"是".into(),Some(false)=>"否".into(),None=>value(&data[key])} } else {value(&data[key])};
@@ -3473,8 +3562,47 @@ fn plain_public_result(data: &serde_json::Value, chinese: bool) -> String {
     if data["file_exists"]==false { return if chinese {"文件不存在（观察时）。"} else {"File was absent at observation."}.into(); }
     // Unknown result types retain a reversible representation, not guessed
     // interpretation. Escape legacy payload markers just as historical reports.
-    let encoded=serde_json::to_string(data).unwrap_or_default().replace('<',"\\u003c").replace('`',"\\u0060").replace("[SKILL_SUGGEST]","\\u005bSKILL_SUGGEST]");
+    let encoded=escape_public_json(serde_json::to_string(data).unwrap_or_default(),version2);
     format!("\n```json\n{encoded}\n```\n")
+}
+
+fn public_structured_result(data:&serde_json::Value,chinese:bool)->Option<String> {
+    if !chinese {return None;}
+    let only=|value:&serde_json::Value,keys:&[&str]|value.as_object().is_some_and(|object|object.keys().all(|key|keys.contains(&key.as_str())));
+    let mut display=data.clone();
+    let fields:&[(&str,&str)]=if data["query"].is_string()&&data["matches"].is_array() {
+        if !only(data,&["query","matches","truncated","incomplete_reasons","files_scanned","files_skipped","source_bytes_read"])
+            || data["matches"].as_array()?.iter().any(|row|!only(row,&["path","line","column_bytes","byte_offset","sha256","text","text_start_column_bytes","truncated"])) {return None;}
+        if let Some(rows)=display["matches"].as_array_mut() {for row in rows {
+            if let Some(object)=row.as_object_mut() {for (key,label) in [("path","文件"),("line","行"),("column_bytes","匹配起点（字节列）"),("byte_offset","匹配起点（字节偏移）"),("sha256","SHA-256"),("text","实际匹配原文"),("text_start_column_bytes","原文片段起点（字节列）"),("truncated","片段已截断")] {
+                if let Some(value)=object.remove(key) {object.insert(label.into(),value);}
+            }}
+        }}
+        &[("query","查找文本"),("matches","实际匹配"),("truncated","结果已截断"),("incomplete_reasons","扫描未完成原因"),("files_scanned","已扫描文件数"),("files_skipped","跳过文件数"),("source_bytes_read","已读取源字节数")]
+    } else if data["is_repository"].is_boolean()&&data["entries"].is_array() {
+        if !only(data,&["is_repository","entries"])||data["entries"].as_array()?.iter().any(|row|!only(row,&["path","status"])) {return None;}
+        if let Some(rows)=display["entries"].as_array_mut() {for row in rows {
+            if let Some(statuses)=row["status"].as_array_mut() {for status in statuses {
+                if let Some(label)=status.as_str().and_then(|status|match status {
+                    "index_new"=>Some("暂存区新增"),"index_modified"=>Some("暂存区修改"),"index_deleted"=>Some("暂存区删除"),"index_renamed"=>Some("暂存区重命名"),"index_typechange"=>Some("暂存区类型变化"),
+                    "worktree_new"=>Some("未跟踪新增"),"worktree_modified"=>Some("工作区修改，未暂存"),"worktree_deleted"=>Some("工作区删除"),"worktree_renamed"=>Some("工作区重命名"),"worktree_typechange"=>Some("工作区类型变化"),"conflicted"=>Some("冲突"),"ignored"=>Some("已忽略"),_=>None}) { *status=serde_json::json!(label); }
+            }}
+            if let Some(object)=row.as_object_mut() {for (key,label) in [("path","文件"),("status","观察时改动状态")] {
+                if let Some(value)=object.remove(key) {object.insert(label.into(),value);}
+            }}
+        }}
+        &[("is_repository","是 Git 仓库"),("entries","观察时改动")]
+    } else if data["patch"].is_string()&&data["truncated"].is_boolean() {
+        if !only(data,&["path","patch","truncated"]) {return None;}
+        &[("path","文件"),("patch","实际差异原文"),("truncated","差异已截断")]
+    } else {return None;};
+    if let Some(object)=display.as_object_mut() {for (key,label) in fields {
+        if let Some(value)=object.remove(*key) {object.insert((*label).into(),value);}
+    }}
+    // Translate wrapper metadata only; paths, queries, snippets, diffs, hashes,
+    // counters, false/empty and unknown statuses retain their actual values.
+    let encoded=escape_public_json(serde_json::to_string_pretty(&display).unwrap_or_default(),true);
+    Some(format!("\n```json\n{encoded}\n```\n"))
 }
 
 impl AgentCompletionReport {
@@ -3485,8 +3613,11 @@ impl AgentCompletionReport {
             for result in &item.results {
                 if let Some(data) = &result.data {
                     delivery.push_str(&format!("\n\n{}\n", result.label));
-                    if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_en_v1")) {
-                        delivery.push_str(&plain_public_result(data, self.public_format.as_deref()==Some("plain_zh_v1")));
+                    if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_en_v1"|"plain_zh_v2"|"plain_en_v2")) {
+                        let chinese=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2"));
+                        let version2=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v2"|"plain_en_v2"));
+                        delivery.push_str(&if version2 {public_structured_result(data,chinese).unwrap_or_else(||plain_public_result_versioned(data,chinese,true))}
+                            else {plain_public_result(data,chinese)});
                         continue;
                     }
                     let encoded = serde_json::to_string(data).unwrap_or_default();
@@ -3580,7 +3711,7 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn tool_error_disclosure(&self) -> Option<String> {
-        if self.public_format.as_deref()==Some("plain_zh_v1") {
+        if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2")) {
             return (self.observed_tool_error_count>0).then(||format!("\n\n本轮未成功的操作尝试：{} 次（包括参数检查和命令结果）。具体原因保留在过程记录中。",self.observed_tool_error_count));
         }
         (self.observed_tool_error_count > 0).then(|| format!(
@@ -3590,7 +3721,7 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn command_failure_disclosure(&self) -> Option<String> {
-        if self.public_format.as_deref()==Some("plain_zh_v1") {
+        if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2")) {
             return (self.observed_command_failure_count>0).then(||format!("\n\n本轮未成功的命令尝试：{} 次。各次退出状态和输出已保留，后续成功不抵消这些记录。",self.observed_command_failure_count));
         }
         (self.observed_command_failure_count > 0).then(|| format!(
