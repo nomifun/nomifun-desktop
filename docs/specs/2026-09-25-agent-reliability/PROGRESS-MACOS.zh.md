@@ -28,7 +28,7 @@
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-12 历史97-byte文本保留正式N1；literal脚本错误→重复观察/预期非零未执行/无report、本地cap与观察者480秒超时仍FAIL，完整A/N3未达 |
-| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-08 原文件任务报告形态N1，公开交付/整体超时仍FAIL；B07联合未close/EOF/交付，03 EOF/04 Stop各N1，完整链/N3仍开放 |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-09 完整链24-call样本仍FAIL：先patch后create、写入漏LF、只到cp；未到helper/report且观察者超时；转C，不循环B，旧03/04子链保持 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；按最新B→C→A主线推进，不等待A/B全部稳定，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
@@ -1784,3 +1784,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 同步远端`67617e1cf`的主线收尾约束：按B→C→A推进；同一未改根因不付费循环，暂停纯说明
   微调/相邻边界/历史矩阵扩展。A12为已完成的新修复正式样本，不继续加跑A；原失败保持。
   同步的null元数据省略只复核完成合同，未递归删原参数/输出的null、0或false，不代判live。
+
+- **MAC-B-09 完整文件/EOF/父子取消/末尾回读**（2026-10-02）：源`7033e254e`/正式Tauri，
+  一Task提前冻结24总请求含摘要/4096/360秒/native480秒；在原B07文件与EOF要求上合并长helper，
+  不改32-byte/13-byte或清理断言。run002锁屏前置0请求/0Turn，人工明确解锁后新隔离run003，
+  同冻结额度未重置；旧绑定闭包误读旧control被guard拒绝、另以新绑定继续，未重开默认数据。
+- 实际 **24请求/5压缩/546events/17组参数全同**，整组 **FAIL**：先对不存在target读/patch，
+  缺expected_source；missing_ok/replan后才实际write，全部write提议漏末尾LF，patch/cp后临时/
+  副本31 bytes而非32，未move/delete/helper/EOF/父子取消/report；五失败结果保持，四原件不变。
+- 观察者再未及时结束UI，native480秒expired/TERM0非Cmd-Q通过，终态UI缺失、headpaused/
+  Turnrunning不伪装cancel。App/helper/listener无，fixture200/0，WAL-aware readonly备546rows同/ok；
+  阻断run首次错误immutable源副本不作验收，正确WAL备份3rows另存；Task文件尾NL验证器错误
+  保留，按composer外围trim核对五原文，FILE末尾LF仍严格失败。证据`2026-10-02/macos/mac-b-mainline-recheck/`；
+  无猜修/第二付费任务，B/N3开放，按主线转C，Windows不代判。
