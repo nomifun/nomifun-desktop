@@ -3202,3 +3202,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 一次正式COD C、13步/四压缩，同Turn纠正已应用；实际一helper、来源各一次、正确18-byte结果写/读各一次，无自取消/重启重读。两项新输入/replan阻止的提议未dispatch且原错保留；原17/21及按实际原参数/dispatch/steering另审都保留。
 - 正式cancelled/冷读无复活、全部DB三表与磁盘hash不变，原AX7/8及去浮层后实际取消截图分开保存。但helper在Stop前已达120秒deadline，CIM277样本证明约120.106秒父子消失；本次不证明运行中Stop，不代判完整C/N3或共享门槛。18字节误判、初始start无自适应观测及审计假定均另澄清，不覆盖原文件。
 - 外部2026-10-02/windows/w246-mainline-live-process-context存全部证据。下一步只补实测期限不足导致未覆盖的live Stop、以及A/B直接缺口；不增角色/旧矩阵，不用组件/timeout代判Stop。
+
+### W247 等待进度被要求清理并报告完成（2026-10-02，正式FAIL）
+
+- 一次正式COD C、helper期限按实测在运行前改为300秒，产品预算保持；19步/八压缩后模型自行cancel并completed，操作者Stop未执行。18-byte纠正及来源/原件保持，report旧ID拒绝及原计数保存，完整C不代判PASS。
+- 根因直接在宿主：无tool的等待响应触发完成复核，用户角色notice要求“Before ending, poll or explicitly cancel ... no process may survive this turn”；模型公开说明按系统要求取消，与原保持到Stop约束冲突。既有running进程回归强化后首红保留，转W248修执行/收尾状态区分。
+- 外部2026-10-02/windows/w247-mainline-live-stop存原参数/复核指令来源/DB/事件/353条CIM/未执行Stop及UI；不重复付费旧根因，普通完成/unknown/取消和宿主清理仍需严格保持，共享未结案。
