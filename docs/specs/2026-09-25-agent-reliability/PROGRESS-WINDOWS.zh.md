@@ -4111,3 +4111,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 文件deny-write/deny-delete、共享锁原件/暂存保护、DACL/ADS和部分失败fence已有W03/W34/W35及W36正式预览证据，相关文件执行层未变，本次直接复用；不重复文件链/锁矩阵。新增缺口是标准Windows token运行管理员查询的owner结果，仅补一个显式opt-in环境回归；不修改生产执行层，不触发UAC/自动提权、不启动或改系统服务。
 - 先只读确认当前token非管理员、LanmanServer已运行；新回归再次确认同样前提，否则明确失败，默认ignored防止管理员CI假通过。实际App EngineProcessScope只运行一次net.exe/args=[session]，返回exited、exit2、success=false、OS错误5/拒绝访问，cleanup.reaped=true/errors空；不是PROCESS_NOT_STARTED或平台不可用，没有第二session/权限回退，scope quiescent/cleanup成立。
 - 当前源4e951dc82加测试的`nomifun-app --lib --no-default-features`精确ignored回归1/1通过。完整34bytes未丢失，真实Windows-936/严格UTF8失败后fallback诊断1保留；不改代码页或错误断言。模型/正式UI0、无全仓套件；本批只新增环境受限测试。外部2026-10-03/windows/w267-windows-permission-boundary保存前提/实际日志/native receipt/review，全部自有进程结束。实际UI呈现、其他管理员操作与完整权限/角色/Windows认证仍未验，原生成与复杂交付残余不改PASS，全面目标active。
+
+### W268 正式进程树故障样本与观察首败（2026-10-03；WIN-016未验）
+
+- 目标为实际Tauri父/子/孙在运行时强杀GUI并同数据冷启动，未取得此断言：两个故障观察器均在强杀前失败，不计强杀/冷恢复PASS。源da8bd70a0正式custom-protocol构建成功，binary SHA前缀D98DD201566C、前端e247ffd0-e4df-4804-98ec-d4e5453b9fad。只新增既有conversation_gui_fixture的crash-tree模式，生产执行/退出入口不改；真实新库、新work/profile、正式UI输入均自主操作，本地模型4次/付费0。
+- 初始化两次首败分别RESOURCE_SELECTION_UNUSED和RESOURCE_SELECTION_REQUIRED/process_session，均模型/GUI前exit1；原库/日志保持，按现有合同声明files/read、process/start及managed-process-session，未伪造authority/移除校验。新helper实际创建一次Bun三层树、原30000ms期限不变；准备脚本只作夹具，模型不创建文件。冷推理受控400分支用于防止夹具重复提议，未实际进入冷启动。
+- 第一正式样本取得canonical READY；观察器比较正斜杠/Windows路径误拒同一PID71964，启动UTC ticks/实际完整路径复核相同，未执行kill，原树随后按期限结束。观察器路径比较改为GetFullPath后一次新隔离样本PID40436，当前canonical仍有READY，但重用的find_tree.py固定指向首个Session，15秒观测失败；再次未kill/未重启/未延长寿命。两次观察组织失败原样保留，本问题定位时间盒已停止，不能靠下一批重置继续重复。
+- 正式异常另存：两例出现EXECUTION_CLEANUP_UNPROVEN/cleanup_proven=false，而现场原树已无活动PID；没有据此把清理改成功。实际UI“结束本回合”后同Turn cancelled、唯一start effect仍returned；已有原生API请求code0最终各exit1，日志保留process_owner/prior_turn_settlement未证及有界重试耗尽。缺精确原owner为何不能给出cleanup witness的唯一根因，后续须从这些原记录定位，不宣称已修或把组件PASS覆盖。
+- 两个GUI/fixture/watchers/原Bun树及监听均已结束。完整证据外部2026-10-03/windows/w268-formal-crash-restart含两个初始化失败、两个正式原DB/UI/参数/真实退出和review；无强杀意图文件、无冷重启制品。最终helper修正崩溃等待文案并编译通过，未再次正式运行；原运行文案“文件已写入”是夹具复用失实，未计文件效果。WIN-016、真实UI进程清理原因及其余原生成/复杂/平台认证仍开放，全面目标active。
