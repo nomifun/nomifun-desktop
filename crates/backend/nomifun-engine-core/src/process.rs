@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nomi_process_runtime::{
     CapabilityPolicy, CleanupReport, CommandSpec, EncodingMetadata, NormalizedProcessRequest,
     MAX_PTY_DIMENSION, OutputCursor, OutputSnapshot, PollResult, ProcessError, ProcessOutcome,
-    ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, SandboxPolicy, SessionId,
+    ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, ProcessTerminalWitness, SandboxPolicy, SessionId,
     SupervisorConfig, Transport, ShellKind, normalize_request,
 };
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,7 @@ impl EngineProcessRequest {
 
 #[derive(Debug)]
 pub struct EngineProcessSession {
+    terminal: ProcessTerminalWitness,
     owner: ProcessOwner,
     session_id: SessionId,
     pid: u32,
@@ -327,6 +328,7 @@ impl ManagedEngineProcessOwner {
             })?;
         self.pending_starts.lock().expect("process startup tracking is poisoned").remove(&native_owner);
         let session = EngineProcessSession {
+            terminal: handle.terminal_witness(),
             owner: handle.owner,
             session_id: handle.session_id,
             pid: handle.pid,
@@ -443,9 +445,7 @@ impl ManagedEngineProcessOwner {
         &self,
         session: &mut EngineProcessSession,
     ) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
-        let outcome = self.supervisor.terminal_outcome_if_ready(
-            &session.owner, &session.session_id, session.cursor,
-        ).map_err(process_error)?;
+        let outcome = session.terminal.terminal(session.cursor);
         let cursor = session.cursor;
         let result = outcome.map(|outcome| self.convert_outcome(session, outcome));
         session.cursor = cursor;
@@ -478,6 +478,13 @@ impl ManagedEngineProcessOwner {
         &self,
         session: &mut EngineProcessSession,
     ) -> Result<EngineProcessPoll, EngineProcessError> {
+        if let Some(outcome) = session.terminal.terminal(session.cursor)
+            && matches!(&outcome, ProcessOutcome::Exited { cleanup, .. }
+                | ProcessOutcome::Cancelled { cleanup, .. } | ProcessOutcome::TimedOut { cleanup, .. }
+                | ProcessOutcome::Lost { cleanup, .. } if cleanup.reaped)
+        {
+            return Ok(self.convert_outcome(session, outcome));
+        }
         let outcome = self
             .supervisor
             .cancel(&session.owner, &session.session_id)
@@ -694,6 +701,53 @@ const fn default_output_limit_bytes() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn owned_terminal_witness_survives_idle_lease_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = ManagedEngineProcessOwner::new(root.path(), SupervisorConfig {
+            max_sessions: 1, reaper_interval: Duration::from_millis(10),
+        }).unwrap();
+        let mut request = if cfg!(windows) {
+            let mut request = EngineProcessRequest::pipe("cmd.exe");
+            request.args = vec!["/d".into(), "/c".into(), "echo LEASE_TERMINAL".into()];
+            request
+        } else {
+            let mut request = EngineProcessRequest::pipe("/bin/sh");
+            request.args = vec!["-c".into(), "printf LEASE_TERMINAL".into()];
+            request
+        };
+        request.timeout_ms = 5000;
+        let mut native = owner.normalized_request(request).unwrap();
+        native.policy.lease = Duration::from_secs(2);
+        let handle = owner.supervisor.start(native).await.unwrap();
+        let mut session = EngineProcessSession { terminal:handle.terminal_witness(), owner:handle.owner, session_id:handle.session_id, pid:handle.pid, cursor:OutputCursor::START };
+        let original = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(terminal) = owner.terminal_if_ready(&mut session).unwrap() { break terminal; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert!(matches!(&original, EngineProcessPoll::Exited { exit_code:Some(0), cleanup, output, .. }
+            if cleanup.reaped && output.text.contains("LEASE_TERMINAL")));
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                match owner.supervisor.terminal_outcome_if_ready(&session.owner, &session.session_id, OutputCursor::START) {
+                    Err(ProcessError::SessionNotFound { .. }) => break,
+                    Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(error) => panic!("unexpected registry observation: {error}"),
+                }
+            }
+        }).await.unwrap();
+        let cursor = session.cursor();
+        assert_eq!(owner.terminal_if_ready(&mut session).unwrap().unwrap(), original);
+        assert_eq!(session.cursor(), cursor, "retained observation does not consume output");
+        assert!(owner.write_stdin(&session, b"must-not-run", CancellationToken::new()).await.is_err(),
+            "the witness cannot restore expired input authority");
+        let recovered = owner.cancel(&mut session).await.expect("retain exact original terminal proof after registry retirement");
+        assert_eq!(recovered, original, "retirement cannot fabricate cancellation or alter frozen output");
+        owner.supervisor.shutdown().await;
+    }
 
     fn startup_fence_report(owner: ProcessOwner, reaped: bool) -> nomi_process_runtime::QuiesceReport {
         nomi_process_runtime::QuiesceReport {

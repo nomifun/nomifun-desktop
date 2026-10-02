@@ -4119,3 +4119,16 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 第一正式样本取得canonical READY；观察器比较正斜杠/Windows路径误拒同一PID71964，启动UTC ticks/实际完整路径复核相同，未执行kill，原树随后按期限结束。观察器路径比较改为GetFullPath后一次新隔离样本PID40436，当前canonical仍有READY，但重用的find_tree.py固定指向首个Session，15秒观测失败；再次未kill/未重启/未延长寿命。两次观察组织失败原样保留，本问题定位时间盒已停止，不能靠下一批重置继续重复。
 - 正式异常另存：两例出现EXECUTION_CLEANUP_UNPROVEN/cleanup_proven=false，而现场原树已无活动PID；没有据此把清理改成功。实际UI“结束本回合”后同Turn cancelled、唯一start effect仍returned；已有原生API请求code0最终各exit1，日志保留process_owner/prior_turn_settlement未证及有界重试耗尽。缺精确原owner为何不能给出cleanup witness的唯一根因，后续须从这些原记录定位，不宣称已修或把组件PASS覆盖。
 - 两个GUI/fixture/watchers/原Bun树及监听均已结束。完整证据外部2026-10-03/windows/w268-formal-crash-restart含两个初始化失败、两个正式原DB/UI/参数/真实退出和review；无强杀意图文件、无冷重启制品。最终helper修正崩溃等待文案并编译通过，未再次正式运行；原运行文案“文件已写入”是夹具复用失实，未计文件效果。WIN-016、真实UI进程清理原因及其余原生成/复杂/平台认证仍开放，全面目标active。
+
+#### W268 原owner终态见证在lease退休后丢失（2026-10-03；有据机制修复）
+
+- 复用原数据定位：原日志只保留process_owner阶段，底层错误全文缺失，不能重建为历史真值。代码显示EngineProcessSession只持ID/PID/cursor，原30秒进程的idle lease为90秒，registry退休会移除已reaped记录；未缓存terminal的scope再cancel便无法取回原证明。原两例暂停发生在此时间窗之后；这是机制对应线索，不冒充原历史唯一原因。
+- 新原生反例先红：实际短命令exit0/reaped、完整输出已冻结，测试使用公开policy的2秒lease加速退休，registry确实移除后原Engine owner清理报session_not_found。修复保留同一次admission绑定的只读终态数据见证，仅原cleanup.reaped=true才用于原owner结算；expired写入仍拒绝，观测不消费cursor、不恢复取消/续lease权限、不改生产期限/lease/预算、不按PID存在与否猜结果。
+- 首实现误持整个Session，扩大回归命中原evicted-session生命周期断言；首失败保留后改为仅共享SessionState中的终态/输出/cleanup数据，进程/Job/Session仍按原规则回收，原断言不改。新反例转绿、原Session回收通过，Process Runtime131/132；剩余real_start_pending_admission_cannot_cross_quiesce的物理marker超时在仓库外未修改HEAD基线同样失败，独立记录，不计绿或放宽等待。Engine Core39/39通过、1项原ignored保持。
+- 当前生产代码与必要回归三文件；正式desktop/helper构建成功，桌面SHA前缀3EC4C51952C6、前端身份仍e247ffd0，未改renderer。制品继续同W268根保存06首红、07首绿、08错误持有Session、12最终Runtime与14/15当前/原基线失败、16Core及17/18构建身份。没有新正式UI/模型或WIN-016重跑；W268修复后的实际退出采用、原历史唯一原因、强杀/冷重启与全部生成/平台认证仍未验，全面目标active。
+
+#### W268 修后lease退休窗口的正式退出采用（2026-10-03；限定N1）
+
+- 只补6c3fdb6e1对应正式采用，未重跑原强杀样本。夹具新增显式lease-retirement模式，原crash-tree默认30000ms不变；新用户输入/实际原生start参数均声明1000ms期限，生产lease仍按原规则=期限+60秒、sweep30秒，未扩生命周期/模型预算或修改退出入口。新data/work/profile正式初始化，完整同一回合留到100.544秒，超过61秒lease及一轮sweep且在120秒观察内；不是原30秒故障样本或WIN-016认证。
+- 当前源9250009b4正式桌面与helper构建成功，binary SHA前缀B9757B30E417、前端e247ffd0-e4df-4804-98ec-d4e5453b9fad。正式UI输入一次；原start回执有真实三层树READY/PID、唯一effect returned、本地请求2/第二SSE保持，原树按期限结束无重启。100.544秒时同Turn仍running、native_pause=null；自主调用已有Tauri process.exit(0)，PID70300实际exit0，同Turn仅一次cancelled、无cleanup_unproven暂停，原65events保持/最终71events、唯一effect/915bytes脚本保持，SSE释放、调用仍2，最终后代/监听0。
+- 独立14/14限定核对、退出后3表冷读保持；fixture正常shutdown/exit0，观察器全部结束。付费0、无新生产修复/全仓套件，上一批Core/Runtime/baseline失败证据复用；源码只新增明确短期测试模式。制品仍同W268根04-lease-fixed保存前/后实际UI/DB、原参数、100秒观察、actual exit及review。此N1关闭当前短期限lease退休退出采用；原两例的历史唯一原因、原30秒参数同场景复验、强杀/冷启动、实际托盘点击、原生成/复杂和完整平台/发布边界仍开放，全面目标active。

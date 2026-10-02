@@ -30,6 +30,33 @@ pub struct ProcessHandle {
     pub session_id: SessionId,
     pub pid: u32,
     pub started_at: Instant,
+    terminal: ProcessTerminalWitness,
+}
+
+/// Exact read-only final-output/cleanup witness retained by an admitted owner.
+/// It cannot renew a lease or authorize I/O after registry retirement.
+#[derive(Clone)]
+pub struct ProcessTerminalWitness {
+    state: Arc<Mutex<SessionState>>,
+}
+
+impl std::fmt::Debug for ProcessTerminalWitness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ProcessTerminalWitness").finish_non_exhaustive()
+    }
+}
+
+impl ProcessTerminalWitness {
+    pub fn terminal(&self, cursor: OutputCursor) -> Option<ProcessOutcome> {
+        self.state.lock().expect("process terminal witness state lock is poisoned")
+            .terminal.as_ref().map(|record| Session::outcome_from(record, cursor))
+    }
+}
+
+impl ProcessHandle {
+    pub fn terminal_witness(&self) -> ProcessTerminalWitness {
+        self.terminal.clone()
+    }
 }
 
 pub struct SupervisorConfig {
@@ -91,7 +118,7 @@ pub(crate) struct Session {
     policy: ProcessPolicy,
     started_at: Instant,
     last_activity_at: Mutex<Instant>,
-    state: Mutex<SessionState>,
+    state: Arc<Mutex<SessionState>>,
     exit: tokio::sync::watch::Sender<Option<ExitObservation>>,
     lifecycle: tokio::sync::watch::Sender<u64>,
     #[cfg(test)]
@@ -440,11 +467,11 @@ impl ProcessSupervisor {
             policy,
             started_at,
             last_activity_at: Mutex::new(started_at),
-            state: Mutex::new(SessionState {
+            state: Arc::new(Mutex::new(SessionState {
                 process_state: ProcessState::Running,
                 exit_observation: None,
                 terminal: None,
-            }),
+            })),
             exit,
             lifecycle,
             #[cfg(test)]
@@ -468,6 +495,7 @@ impl ProcessSupervisor {
                     session_id,
                     pid,
                     started_at,
+                    terminal: ProcessTerminalWitness { state: Arc::clone(&session.state) },
                 }, session))
             }
             CommitResult::Retiring(retirement) => {
@@ -1251,6 +1279,10 @@ impl Session {
     }
 
     fn outcome(&self, terminal: &TerminalRecord, cursor: OutputCursor) -> ProcessOutcome {
+        Self::outcome_from(terminal, cursor)
+    }
+
+    fn outcome_from(terminal: &TerminalRecord, cursor: OutputCursor) -> ProcessOutcome {
         match &terminal.kind {
             TerminalKind::Exited { fact, output } => ProcessOutcome::Exited {
                 code: fact.code,
@@ -2716,11 +2748,11 @@ mod tests {
             policy: policy.clone(),
             started_at,
             last_activity_at: Mutex::new(started_at),
-            state: Mutex::new(SessionState {
+            state: Arc::new(Mutex::new(SessionState {
                 process_state: ProcessState::Running,
                 exit_observation: None,
                 terminal: None,
-            }),
+            })),
             exit,
             lifecycle,
             before_lost_commit: Mutex::new(None),
@@ -2796,11 +2828,11 @@ mod tests {
             policy: policy.clone(),
             started_at,
             last_activity_at: Mutex::new(started_at),
-            state: Mutex::new(SessionState {
+            state: Arc::new(Mutex::new(SessionState {
                 process_state: ProcessState::Running,
                 exit_observation: None,
                 terminal: None,
-            }),
+            })),
             exit,
             lifecycle,
             before_lost_commit: Mutex::new(None),

@@ -35,7 +35,7 @@ pub use request::{
     MAX_PTY_DIMENSION, NormalizedProcessRequest, ShellKind, Transport, normalize_request,
 };
 pub use supervisor::{
-    ProcessHandle, PollResult, ProcessSupervisor, QuiesceReport, QuiesceSessionReport,
+    ProcessHandle, ProcessTerminalWitness, PollResult, ProcessSupervisor, QuiesceReport, QuiesceSessionReport,
     ShutdownReport, ShutdownSessionReport, StartupCleanupReport, SupervisorConfig,
 };
 
