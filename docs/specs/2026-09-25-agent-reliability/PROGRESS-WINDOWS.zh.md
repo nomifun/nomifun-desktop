@@ -3900,3 +3900,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 零模型正式冷读，events/turns/sessions全部行数/hash及全部磁盘字节保持、纠正和正确结果/取消显示、无旧Turn复活。原AX文字审计7/8保留；移去浮层后截图明确“已取消执行”且AX有“停止前尚未完成”提示，独立视觉复核补足显示语义，没有声称原自动审计全绿。
 - 未覆盖：C运行中Stop/必要N3/另一关键入口，A实际cwd/完整条目/报告首发与语言，B来源SHA/最终报告，Windows差异；共享未达。复用本批不重启/不重读/纠正和冷读证据，只补实际缺口，不重复未改根因。
 - 证据：仓库外2026-10-02/windows/w246-mainline-live-process-context，01首红、02/03定向、04构建、05纠正时、06正式Stop、07/08原DB/事件/audit/实际dispatch与澄清、09暖UI/误判更正、10/11冷启动、12/13原冷读与补充截图、14物理deadline核对、15测试游标；Git仅数据保留、一个最小回归和短进度。
+
+### W247 宿主收尾指令导致用户保持进程被取消（2026-10-02；基线4e07701ed，FAIL）
+
+- Case/子断言：C05/C06/C07/C08与A05/A06/A09/A10/A13/A17/A18/A19；补live Stop覆盖，按W246实测冻结helper300秒/观察240秒，原任务约束和产品预算不变，复用正式构建。
+- 正式COD一次、19步/八压缩，helper实际300000ms启动；来源各一次、纠正结果18-byte写入/回读且原件保持。但在操作者Stop前模型自行cancel一次，171ms/reaped/errors=[]，之后report一拒后接受、canonical completed；公开称“按系统要求cancel”。新输入造成的未执行write和旧report引用拒绝均保留，未重试模型或外部kill。
+- 首败及根因：provider无tool的等待进度被当作完成复核，workflow completion_review_message明确要求“Before ending, poll or explicitly cancel running_processes; no process may survive this turn”，与用户保持到Stop矛盾。W248既有running-process回归强化后修前红；不是helper deadline、权限缺失或无法原生停止。
+- 操作者停止前CIM已见父子均消失，点击先前Stop索引时回合已完成、按钮不可用，未实际停止，不生成伪Stop记录或运行依赖Stop成功的audit。原目标、旧审计与新运行前的审计语义修正均外置保留，原安全拒绝不删除；完整C仍FAIL。
+- 未覆盖：修后停止保持语义/完整C/N3，A实际cwd/完整条目/报告与语言、B来源SHA/交付，Windows差异及共享门槛。下一批只修活进程等待被错误归入收尾的直接根因，普通完成/未知效果/取消/宿主清理底线保持。
+- 证据：仓库外2026-10-02/windows/w247-mainline-live-stop，冻结期限/原与修正oracle、02纠正时、03/04原事件/DB/自cancel与completion_review、05原UI、CIM353样本和stop-not-executed；本批Git仅短进度。
