@@ -135,6 +135,19 @@ pub(crate) fn process_operation_not_applied(binding: &AgentToolBinding, result: 
             && value["success"] == false && value.get("process_id").is_none())
 }
 
+/// Input was held before I/O, but its real owner's terminal still must be
+/// observed. Invalid references have no such terminal and use the path above.
+pub(crate) fn process_control_rejected_terminal(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
+    if binding.capability_id.as_ref() != "workspace.process" { return false; }
+    let operation=match binding.action_id.as_ref() {"workspace.process/input"=>"stdin","workspace.process/close_stdin"=>"close_stdin","workspace.process/resize"=>"resize",_=>return false};
+    serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+        value["schema"]=="nomifun.process-control-observation.v1" && value["code"]=="PROCESS_ALREADY_TERMINATED"
+            && value["operation"]==operation && value["control_applied"]==false && value["success"]==false
+            && matches!(value["state"].as_str(),Some("exited"|"cancelled"|"timed_out"|"lost"))
+            && value["process_id"].as_str().is_some_and(|id|!id.is_empty()&&id.len()<=128)
+            && value["cleanup"]["reaped"]==true)
+}
+
 /// A read failure or a proposal held before dispatch is not a change of task
 /// scope. Let the model correct the call within its existing plan. An
 /// attempted effect may have partially happened and still requires recovery.
@@ -167,6 +180,31 @@ pub(crate) fn completes_turn_on_success(binding: &AgentToolBinding) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejected_terminal_control_keeps_epoch_but_observes_actual_timeout() {
+        let input=binding("workspace.process","workspace.process/input");
+        let mut work=crate::AgentWorkStatus {workspace_observation_epoch:7,..Default::default()};
+        work.running_processes.insert("original".into());
+        let call=nomifun_chat_model_broker::ChatToolCall {call_id:"late".into(),name:"write_process_stdin".into(),provider_metadata:None,
+            arguments:StrictJsonValue(serde_json::json!({"process_id":"original","input":"not-sent"}))};
+        let mut receipt=serde_json::json!({"schema":"nomifun.process-control-observation.v1","code":"PROCESS_ALREADY_TERMINATED",
+            "operation":"stdin","process_id":"original","state":"timed_out","success":false,"control_applied":false,"cleanup":{"reaped":true,"errors":[]}});
+        let result=crate::AgentToolResult::text(call.call_id.clone(),receipt.to_string(),true);
+        assert!(process_control_rejected_terminal(&input,&result));
+        let mut commands=crate::workflow::CommandTracker::default();
+        work.observe(&input,&call,&result,&mut commands);
+        assert_eq!(work.workspace_observation_epoch,7);
+        assert!(work.running_processes.is_empty());
+        assert_eq!(work.failed_tools,1);
+        assert_eq!(work.failed_commands,1);
+        receipt["cleanup"]["reaped"]=serde_json::json!(false);
+        let uncertain=crate::AgentToolResult::text(call.call_id.clone(),receipt.to_string(),true);
+        assert!(!process_control_rejected_terminal(&input,&uncertain));
+        receipt["cleanup"]["reaped"]=serde_json::json!(true);
+        receipt["control_applied"]=serde_json::json!(true);
+        let applied=crate::AgentToolResult::text(call.call_id,receipt.to_string(),true);
+        assert!(!process_control_rejected_terminal(&input,&applied));
+    }
     use nomifun_agent_contracts::{
         ActionId, CanonicalSchemaRef, CapabilityId, DigestHex, StrictJsonValue,
     };
