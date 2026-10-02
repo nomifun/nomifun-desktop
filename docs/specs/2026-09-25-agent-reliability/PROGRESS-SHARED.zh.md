@@ -3483,6 +3483,11 @@ instructions、tool重复0，原五项只读操作/两个指定测试0/1及原�
 - 正式Cmd-Q0/332.15s/noexpiry/noTERM、父子witness和五表封存独立成立；非CEF/Keychain
   样本，不代判系统物理风险或Windows结果。外证据2026-10-03/macos/b09-postfix-live。
 
+W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY两项，当前App owner
+11/11定向通过，1秒期限后未缓存scope先取得真实timed_out/reaped，stdin/close/resize均未执行；
+原片段/冻结output/cursor0回放一致，无重启/输入重放。只新增Windows回归，生产代码不改，
+正式UI/真实模型采用与原B/W250仍未验，不能把这两条拼成完整进程或Windows认证。
+
 ### macOS A13 修正反馈与历史交付分离（2026-10-03）
 
 - 最新97bbbd8dc正式原A仍FAIL：尾读未做，原实值只交付4bundle；public_format plain_zh_v1
