@@ -29,7 +29,7 @@
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-12 历史97-byte文本保留正式N1；literal脚本错误→重复观察/预期非零未执行/无report、本地cap与观察者480秒超时仍FAIL，完整A/N3未达 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-09 完整链24-call样本仍FAIL：先patch后create、写入漏LF、只到cp；未到helper/report且观察者超时；转C，不循环B，旧03/04子链保持 |
-| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；按最新B→C→A主线推进，不等待A/B全部稳定，不扩成长稳全矩阵 |
+| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | MAC-C-02纠正→两压缩→UI取消→冷读主链N1，旧Turn/效果不重放；冷Cmd-Q真实CEF未确认/KILL、公开占位及poll/交付缺口仍FAIL，N3未达 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
 MAC-GEN-01 已有通用模板仅减去 Computer/自动化资源模块的正式目录观察 N1；不代表完整默认
@@ -1798,3 +1798,15 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   保留，按实际接纳输入的外围trim核对五原文，规范化来源层未定位，FILE末尾LF仍严格失败。
   证据`2026-10-02/macos/mac-b-mainline-recheck/`；
   无猜修/第二付费任务，B/N3开放，按主线转C，Windows不代判。
+
+- **MAC-C-02 纠正/压缩/取消冷读主链**（2026-10-02）：源`e46e63a90`/正式Tauri/StepFun新隔离
+  COD，一Task/一steer提前16总请求/4096/360秒/native480秒、cold0模型/90秒。实际12请求/
+  2压缩/233events/9组参数全同，正式按钮接受seq92纠正后仅写/读正确20-byte目标一次，旧目标
+  不存在、三原件保持；旧poll因steer优先拒绝，不能计成功READY观察。主链 **N1**，非N3。
+- 真实UI Stop→cancelled/headready，父子消失/心跳停，先存UI再Cmd-Q0/88.41秒/无expiry或信号。
+  同制品/同数据零模型冷读看见两用户输入，233events逐字同、文件/旧Turn不复活；但cold
+  Cmd-Q实际CEF completion未确认、90秒TERM→KILL，95.03秒 **FAIL**，非观察者拖延或正常退出。
+- 上游response08公开delta.content确发39-byte英文private-omission占位，UI原样保留，不翻译/
+  删除来通过；成功后续poll/完整中文交付未验证，完整C仍FAIL。冷强退WAL存在，初错immutable
+  副本不作验收，普通readonly WAL备233rows同/ok另存；首个审计误用event kind失败保留后按
+  turn/steer-accepted修正。证据`2026-10-02/macos/mac-c-mainline/`；无付费重跑/猜修/Windows代判。
