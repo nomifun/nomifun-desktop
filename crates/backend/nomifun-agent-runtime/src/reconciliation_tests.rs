@@ -32,7 +32,7 @@ fn outcome(id: &str) -> AgentReconciledOutcome {
 fn exact_action_reservation_and_owner_success_reconcile_without_replay() {
     let mut cp=checkpoint();
     let action=crate::exact_actions::ExactActionInput {id:"save".into(),source:crate::AgentInputCitation {input:0,quote:"save".into()},
-        tool:"write_file".into(),expected_arguments:json!({"path":"answer.txt","content":"saved"})}
+        tool:"write_file".into(),expected_arguments:json!({"path":"answer.txt","content":"saved"}),receiver_ref:None}
         .compile(&[crate::context_lifecycle::text_message(ChatRole::User,"save".into())]).unwrap();
     cp.plan.revision=1;cp.plan.exact_actions=vec![action];
     let mut reserved=cp.plan.clone();reserved.exact_actions[0].attempted_call_id=Some("written".into());

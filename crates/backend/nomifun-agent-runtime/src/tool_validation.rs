@@ -136,6 +136,27 @@ fn bounded_schema_value(value: &Value) -> Option<Value> {
     serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= 1024).then(|| value.clone())
 }
 
+pub(crate) fn declaration_issues(schema:&Value,arguments:&Value)->Result<Vec<Value>,String> {
+    let validator=jsonschema::options().with_retriever(NoExternalSchemaReads).build(schema)
+        .map_err(|_|"Exact action tool schema is invalid or needs external references".to_owned())?;
+    let mut issues=Vec::new();
+    for error in validator.iter_errors(arguments).take(MAX_ISSUES_PER_CALL) {collect_issues(&error,schema,0,&mut issues);}
+    Ok(issues)
+}
+
+#[cfg(test)]
+mod exact_declaration_tests {
+    use super::*;
+    #[test]
+    fn native_shape_feedback_locates_files_without_echoing_private_input() {
+        let schema=crate::standard_tools::standard_agent_tool_exposures().into_iter()
+            .find(|tool|tool.definition.name=="apply_patch").unwrap().definition.input_schema.0;
+        let issues=declaration_issues(&schema,&json!({"path":"PRIVATE_PATH","hunks":[{"text":"PRIVATE_CONTENT"}]})).unwrap();
+        assert!(!issues.is_empty());let text=serde_json::to_string(&issues).unwrap();
+        assert!(text.contains("files"));assert!(!text.contains("PRIVATE_PATH")&&!text.contains("PRIVATE_CONTENT"));
+    }
+}
+
 fn collect_issues(error: &ValidationError<'_>, schema: &Value, depth: usize, issues: &mut Vec<Value>) {
     if issues.len() >= MAX_ISSUES_PER_CALL { return; }
     if depth < 8 {

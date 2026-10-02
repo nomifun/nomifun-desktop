@@ -390,6 +390,7 @@ pub(crate) async fn run_turn(
         work.recent_commands.clear(); work.observed_processes.clear();
         work.command_observed_after_latest_mutation = false;
         let mut plan = recovery.checkpoint.plan.clone();
+        crate::exact_actions::close_receivers(&mut plan.exact_actions);
         // A pending delivery review can only publish a truthful account of
         // earlier observations, never resume actions. Recovery still drops
         // old evidence freshness; it need not reopen a completed plan merely
@@ -2511,7 +2512,7 @@ async fn invoke_tool_calls(
             else if task_ledger_active && crate::delivery_review::multi_item_task(accepted_inputs)
                 && matches!(binding.action_id.as_ref(),"workspace.files/write"|"workspace.files/patch"|"workspace.process/input")
                 && crate::exact_actions::pending(&execution_plan.exact_actions).is_none_or(|action|!action.matches(call)) {
-                Some("Not executed: declare the NEXT source-bound exact_actions commitment in update_plan ALONE before this numbered task's file mutation/stdin phase. Preserve intermediate states, complete content with final LF and effective stdin bytes. stdin must bind the fresh owned process_id from the actual start/poll receipt; it is retained only as a digest, not recovery authority. Never supply success flags, fabricated/cold handles or credentials. The commitment is model interpretation, not semantic proof or extra authority; actual effects remain independently checked.")
+                Some("Not executed: declare the NEXT source-bound exact_actions commitment in update_plan ALONE before this numbered task's mutation/stdin phase. Keep intermediate states and final LF. For stdin, declare receiver_ref to an earlier start_process action before launching, or use its fresh owned process_id; only a digest is retained. No success flags, credentials, fabricated/cold handles or authority. Actual byte/order requirements still need independent verification.")
             }
             else if task_ledger_active && execution_plan.revision == 0
                 && crate::delivery_review::multi_item_task(accepted_inputs)
@@ -2748,15 +2749,18 @@ fn steering_deferred(call_id: ToolCallId) -> AgentToolResult {
 }
 
 fn validate_exact_declarations(call:&ChatToolCall,plan:&AgentToolPlan,tools:&[nomifun_chat_model_broker::ChatToolDefinition])->Option<String> {
-    for action in call.arguments.0.get("exact_actions").and_then(serde_json::Value::as_array).into_iter().flatten() {
+    for (index,action) in call.arguments.0.get("exact_actions").and_then(serde_json::Value::as_array).into_iter().flatten().enumerate() {
         let tool=action["tool"].as_str()?;
         if plan.binding(tool).is_none() {return Some("Exact action names a tool outside the frozen Session surface; no plan or action was applied".into());}
         let Some(definition)=tools.iter().find(|definition|definition.name==tool) else {return Some("Discover the already-authorized tool schema before declaring its exact action; this adds no authority".into());};
         let mut arguments=action["expected_arguments"].clone();
         if tool=="write_process_stdin" && arguments.get("process_id").is_none() {arguments["process_id"]=serde_json::json!("validation-only-not-a-live-handle");}
-        let valid=jsonschema::options().with_retriever(crate::tool_validation::NoExternalSchemaReads)
-            .build(&definition.input_schema.0).is_ok_and(|validator|validator.is_valid(&arguments));
-        if !valid {return Some("Exact action declaration does not satisfy the frozen tool parameter schema. Correct the declaration before effects; no bytes or tool arguments were normalized".into());}
+        let issues=match crate::tool_validation::declaration_issues(&definition.input_schema.0,&arguments) {
+            Ok(issues)=>issues,Err(reason)=>return Some(reason),
+        };
+        if !issues.is_empty() {return Some(serde_json::json!({"status":"not_executed","code":"INVALID_EXACT_ACTION_PARAMETERS",
+            "action_index":index,"parameter_path":format!("/exact_actions/{index}/expected_arguments"),"tool":tool,"issues":issues,
+            "message":"No plan or action applied. Correct this action's native parameter shape using the advertised frozen tool schema; do not weaken bytes/order or rerun settled work. Schema-owned expected values only; parameters were not normalized."}).to_string());}
     }
     None
 }
