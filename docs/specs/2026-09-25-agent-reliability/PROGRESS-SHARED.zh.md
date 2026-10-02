@@ -3517,3 +3517,12 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   首轮有port则LOAD，成功归档控制才激活ToolHistory，无TaskLedger/owner/证据提鲜/权限增开；
   考虑旧build兼容性仍保持原校验，不由此声称旧历史必可导入。纯思考截断用非代码分块提示，
   预算/续写数/私密思考不回放保持。Runtime288/288，新修复未formal，Windows未代验。
+
+### macOS 历史游标检索修正（2026-10-03）
+
+- dc686a7dd正式LOAD曝光并调用1次，但传末UUID被拒；后SEARCH操作ID得到空归档，未READ，
+  后3thinking-only length，5请求/63新events/报告0，B继续FAIL。前1065events及14effects
+  全值保持，无新effect；解锁后正常Cmd-Q0/noexpiry，闭五表1128/1/1/3/14同源/ok。
+- before_turn现在明确不透明排他游标及完整next_before_turn遍历，拒绝反馈给latest prior
+  重启路径，不自动修cursor或放宽scope/binding。Runtime289/289、archive/身份/私值保护
+  回归成立；最后未formal，证据外置history-report-bootstrap，Windows结果未代判。
