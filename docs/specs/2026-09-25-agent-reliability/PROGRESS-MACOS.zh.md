@@ -1795,5 +1795,6 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 观察者再未及时结束UI，native480秒expired/TERM0非Cmd-Q通过，终态UI缺失、headpaused/
   Turnrunning不伪装cancel。App/helper/listener无，fixture200/0，WAL-aware readonly备546rows同/ok；
   阻断run首次错误immutable源副本不作验收，正确WAL备份3rows另存；Task文件尾NL验证器错误
-  保留，按composer外围trim核对五原文，FILE末尾LF仍严格失败。证据`2026-10-02/macos/mac-b-mainline-recheck/`；
+  保留，按实际接纳输入的外围trim核对五原文，规范化来源层未定位，FILE末尾LF仍严格失败。
+  证据`2026-10-02/macos/mac-b-mainline-recheck/`；
   无猜修/第二付费任务，B/N3开放，按主线转C，Windows不代判。
