@@ -1565,6 +1565,27 @@ impl ExitCoordinator {
         }
     }
 
+    fn process_exit_code(&self, runtime_code: i32) -> i32 {
+        // Tauri owns restart/relaunch and run_return normally never returns
+        // for that sentinel. Do not reinterpret its handoff as a normal quit.
+        if self.is_restart_requested() {
+            return runtime_code;
+        }
+        if self.is_exit_allowed() {
+            let owned = self.final_exit_code();
+            return if owned != 0 {
+                owned
+            } else if runtime_code == 0 && self.phase.load(Ordering::Acquire) == EXIT_PHASE_FATAL {
+                1
+            } else {
+                runtime_code
+            };
+        }
+        // An event-loop return without the coordinator's terminal permission
+        // proves neither backend cleanup nor a successful desktop close.
+        if runtime_code == 0 { 1 } else { runtime_code }
+    }
+
     fn mark_no_cleanup_needed(&self) {
         self.mark_cleanup_verified();
     }
@@ -3346,9 +3367,14 @@ fn main() -> std::process::ExitCode {
 
     // `Builder::run(context)` installs an empty app-level event callback. Build
     // manually so a Dock click after close-to-tray can surface the hidden main window.
-    app.run(handle_run_event);
-
-    std::process::ExitCode::SUCCESS
+    let exit_coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
+    // The pinned Wry RequestExit path forwards the requested code to the
+    // callback but sets ControlFlow::Exit (zero). App::run then exits the
+    // process inside Tao, so the coordinator's nonzero handoff is lost. Return
+    // from the event loop and explicitly preserve the proven owner outcome;
+    // process::exit also retains the existing no-destructor exit semantics.
+    let runtime_code = app.run_return(handle_run_event);
+    std::process::exit(exit_coordinator.process_exit_code(runtime_code));
 }
 
 #[cfg(test)]
@@ -3890,6 +3916,42 @@ mod tests {
         verified.mark_cleanup_verified();
         assert_eq!(verified.final_exit_code(), 0, "real cleanup still permits success");
         assert!(verified.is_exit_allowed());
+    }
+
+    #[test]
+    fn process_exit_preserves_the_owned_cleanup_outcome_after_a_zero_runtime_return() {
+        for (requested, expected) in [(None, 1), (Some(0), 1), (Some(9), 9)] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(requested));
+            allow_handoff_without_verified_cleanup(&coordinator);
+            assert_eq!(coordinator.process_exit_code(0), expected);
+            assert!(!coordinator.cleanup_verified.load(Ordering::Acquire));
+        }
+        for (requested, runtime, expected) in [(0, 0, 0), (0, 17, 17), (23, 0, 23)] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(Some(requested)));
+            coordinator.mark_cleanup_verified();
+            assert_eq!(coordinator.process_exit_code(runtime), expected);
+        }
+    }
+
+    #[test]
+    fn process_exit_keeps_restart_ownership_and_rejects_unowned_success() {
+        let unowned = ExitCoordinator::default();
+        assert_eq!(unowned.process_exit_code(0), 1);
+        assert_eq!(unowned.process_exit_code(17), 17);
+        let fatal = ExitCoordinator::default();
+        fatal.mark_cleanup_verified();
+        assert!(fatal.claim_fatal_exit());
+        assert_eq!(fatal.process_exit_code(0), 1);
+        assert_eq!(fatal.process_exit_code(17), 17);
+        let restarting = ExitCoordinator::default();
+        assert!(restarting.request_restart());
+        restarting.allow_unverified_handoff();
+        for runtime in [0, 23, tauri::RESTART_EXIT_CODE] {
+            assert_eq!(restarting.process_exit_code(runtime), runtime);
+        }
+        assert!(!restarting.cleanup_verified.load(Ordering::Acquire));
     }
 
     #[test]
