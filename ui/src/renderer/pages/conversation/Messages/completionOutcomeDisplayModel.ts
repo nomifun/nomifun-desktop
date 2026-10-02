@@ -6,7 +6,7 @@ export interface CompletionOutcomeDisplay {
   toolCount: number;
   commandCount: number;
   /** Only exact same-turn native outcomes can establish this presentation. */
-  kind: 'native_nonzero' | 'native_nonzero_and_arguments' | 'native_nonzero_and_unclassified' | 'arguments_not_executed' | 'counts';
+  kind: 'native_nonzero' | 'native_nonzero_and_arguments' | 'native_nonzero_and_unclassified' | 'native_timeout' | 'arguments_not_executed' | 'counts';
   exitCodes: number[];
   argumentCount?: number;
   otherCount?: number;
@@ -54,11 +54,18 @@ export function projectCompletionOutcomes(
   const ordinaryKeys = new Set(ordinaryExits.map((tool) => tool.key));
   const rejectedArguments = tools.filter((tool) => tool.notExecutedReason === 'invalid_arguments');
   const argumentKeys = new Set(rejectedArguments.map((tool) => tool.key));
-  const otherFailures = tools.some((tool) => !ordinaryKeys.has(tool.key) && !argumentKeys.has(tool.key)
+  const timeouts = tools.filter((tool) => tool.commandTimedOut === true);
+  const timeoutKeys = new Set(timeouts.map((tool) => tool.key));
+  const otherFailures = tools.some((tool) => !ordinaryKeys.has(tool.key) && !argumentKeys.has(tool.key) && !timeoutKeys.has(tool.key)
     && (tool.status === 'error' || tool.notExecutedReason !== undefined
       || tool.boundedResult !== undefined || tool.nonFatalFailure === true));
   // Classify only a fully reconciled breakdown from the same turn. A missing
   // receipt or another failure must keep the generic counts and full details.
+  if (timeouts.length > 0) {
+    const timeoutOnly = commandCount === timeouts.length && (toolCount === 0 || toolCount === timeouts.length)
+      && ordinaryExits.length === 0 && rejectedArguments.length === 0 && !otherFailures;
+    return { body, toolCount, commandCount, kind: timeoutOnly ? 'native_timeout' : 'counts', exitCodes: [] };
+  }
   const breakdownMatches = commandCount === ordinaryExits.length
     && toolCount === ordinaryExits.length + rejectedArguments.length && !otherFailures;
   if (rejectedArguments.length > 0 && breakdownMatches) {

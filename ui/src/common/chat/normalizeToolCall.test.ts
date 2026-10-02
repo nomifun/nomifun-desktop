@@ -24,6 +24,27 @@ describe('normalizeToolCall', () => {
     expect(result?.nonFatalFailure).toBe(true);
     expect(result?.output).toBe(output);
   });
+  it('recognizes only a clean native timeout while retaining its error status and raw output', () => {
+    const timeout = { state: 'timed_out', success: false, process_id: 'owned-process', output: { text: '' },
+      cleanup: { reaped: true, errors: [], interrupt_attempted: false, terminate_attempted: true, force_kill_attempted: false } };
+    const normalize = (value: unknown, name = 'poll_process') => normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'timeout', name, status: 'error', output: JSON.stringify(value),
+    } } as any);
+    const result = normalize(timeout)!;
+    expect(result.commandTimedOut).toBe(true);
+    expect(result.status).toBe('error');
+    expect(result.nonFatalFailure).toBeUndefined();
+    expect(result.commandExitCode).toBeUndefined();
+    expect(result.output).toBe(JSON.stringify(timeout));
+    for (const value of [
+      { ...timeout, state: 'lost' }, { ...timeout, success: true }, { ...timeout, process_id: '' },
+      { ...timeout, exit_code: 0 }, { ...timeout, signal: 9 }, { ...timeout, output: {} },
+      { ...timeout, cleanup: { ...timeout.cleanup, reaped: false } },
+      { ...timeout, cleanup: { ...timeout.cleanup, errors: ['cleanup failed'] } },
+      { ...timeout, cleanup: { ...timeout.cleanup, terminate_attempted: 'true' } },
+    ]) expect(normalize(value)?.commandTimedOut).toBeUndefined();
+    expect(normalize(timeout, 'mcp__remote__poll_process')?.commandTimedOut).toBeUndefined();
+  });
   it('identifies a proven native launch refusal without erasing its error or diagnostic', () => {
     const receipt = {
       schema: 'nomifun.process-start-observation.v1', state: 'not_started',

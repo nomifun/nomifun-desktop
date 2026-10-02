@@ -22,6 +22,21 @@ const rejected = (name = 'report_completion') => ({
 }) as TMessage;
 
 describe('completion outcome display', () => {
+  test('distinguishes a proven same-turn timeout without claiming success or changing counts', () => {
+    const timeout = { ...receipt, state: 'timed_out', exit_code: undefined,
+      cleanup: { ...receipt.cleanup, terminate_attempted: true } };
+    const original = `The command reached its deadline.${footer()}`;
+    expect(projectCompletionOutcomes(message, original, [tool(timeout)])).toEqual({
+      body: 'The command reached its deadline.', toolCount: 1, commandCount: 1, kind: 'native_timeout', exitCodes: [],
+    });
+    for (const rows of [[], [tool(timeout, 'turn-b')], [tool(timeout, 'turn-a', 'conversation-b')],
+      [tool({ ...timeout, cleanup: { ...timeout.cleanup, errors: ['failed to reap'] } })]]) {
+      expect(projectCompletionOutcomes(message, original, rows)?.kind).toBe('counts');
+    }
+    expect(projectCompletionOutcomes(message, `Result${footer(2,1)}`, [tool(timeout)])?.kind).toBe('counts');
+    expect(projectCompletionOutcomes(message, `Result${footer(2,1)}`, [tool(timeout), rejected()])?.kind).toBe('counts');
+    expect(original).toBe(`The command reached its deadline.${footer()}`);
+  });
   test('uses proven native nonzero outcomes without changing source text or counts', () => {
     const original = message.content.content;
     const display = projectCompletionOutcomes(message, original, [tool()])!;

@@ -109,6 +109,7 @@ const MessageText: React.FC<{
   const completion = useMemo(() => presentation.hasToolPayload ? undefined
     : projectCompletionOutcomes(message, presentation.text, messageList), [message, presentation, messageList]);
   const completionKey = completion?.kind === 'native_nonzero' ? 'messages.completionSummary.nativeNonzero'
+    : completion?.kind === 'native_timeout' ? 'messages.completionSummary.nativeTimeout'
     : completion?.kind === 'native_nonzero_and_arguments' ? 'messages.completionSummary.nativeNonzeroAndArguments'
     : completion?.kind === 'native_nonzero_and_unclassified' ? 'messages.completionSummary.nativeNonzeroAndOther'
     : completion?.kind === 'arguments_not_executed' ? 'messages.completionSummary.argumentsNotExecuted'

@@ -1,5 +1,6 @@
 {
   "completionSummary": {
+    "nativeTimeout": "本轮 {{commandCount}} 次命令达到了运行时限，进程已结束并清理。该结果计入 {{toolCount}} 次调用结果；可在执行步骤中查看输出和清理详情。",
     "nativeNonzero": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）。这些结果计入了 {{toolCount}} 次未成功调用，请查看执行步骤中的命令输出。",
     "nativeNonzeroAndArguments": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）；另有 {{argumentCount}} 次调用因参数检查未通过而未执行。以上共计 {{toolCount}} 次未成功结果，命令输出和参数详情保留在执行步骤中。",
     "argumentsNotExecuted": "本轮 {{argumentCount}} 次调用因参数检查未通过而未执行，共计 {{toolCount}} 次未成功结果。请在执行步骤中查看参数详情。",
@@ -14,6 +15,7 @@
   "toolDetailLoading": "加载中...",
   "toolDetailLoadFailed": "加载完整输出失败",
   "toolSummary": {
+    "commandTimedOut": "{{target}} 达到了运行时限，进程已结束并清理",
     "running": "正在运行 {{target}}",
     "completed": "已运行 {{target}}",
     "failed": "运行失败 {{target}}",
@@ -26,6 +28,7 @@
     "processReferenceInvalid": "未找到本次执行的进程，未执行 {{target}}"
   },
   "processReceipt": {
+    "commandTimedOut": "{{count}} 条命令达到了运行时限，进程已结束并清理",
     "tool": "工具",
     "tools": "{{count}} 个工具",
     "readFiles": "已读取 {{count}} 个文件",

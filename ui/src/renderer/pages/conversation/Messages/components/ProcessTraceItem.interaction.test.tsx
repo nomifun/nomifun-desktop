@@ -14,6 +14,21 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000051
 afterEach(cleanup);
 
 describe('replayed process trace', () => {
+  test('shows a clean timeout as a deadline outcome and retains its failed receipt details', () => {
+    const output = JSON.stringify({ state: 'timed_out', success: false, process_id: 'owned', output: { text: '' },
+      cleanup: { reaped: true, errors: [], interrupt_attempted: false, terminate_attempted: true, force_kill_attempted: false } });
+    const item = { id: 'timeout', type: 'tool_call', conversation_id: conversationId,
+      position: 'left', created_at: 1, content: { call_id: 'timeout', name: 'poll_process', status: 'error',
+        args: { process_id: 'owned', cursor: 25 }, output, artifacts: [] } } as IMessageToolCall;
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
+    );
+    expect(getByRole('button').textContent).toContain('reached its time limit; process cleanup completed');
+    expect(container.querySelector('.turn-process-trace__row--failed')).not.toBeNull();
+    fireEvent.click(getByRole('button'));
+    expect(container.textContent).toContain(output);
+    expect(item.content.status).toBe('error');
+  });
   test('a proven launch refusal explains that the command was not run and retains its diagnostic', () => {
     const output = JSON.stringify({ schema: 'nomifun.process-start-observation.v1', state: 'not_started',
       code: 'PROCESS_NOT_STARTED', user_code_started: false, success: false,
