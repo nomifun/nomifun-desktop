@@ -108,10 +108,11 @@ impl AgentPlan {
                 "Invalid plan: provide 1..16 unique steps (1..512 characters each), a nonempty explanation (up to 2048 characters), and at most one in_progress step. The current plan was not changed."));
         }
         let requirements =
-            match crate::requirements::merge(&self.requirements, &update.requirements, inputs) {
+            match crate::requirements::merge_with_location(&self.requirements, &update.requirements, inputs) {
                 Ok(requirements) => requirements,
                 Err(reason) => {
-                    return Ok(self.feedback(call, "rejected", &reason));
+                    return Ok(self.feedback_with_source_location(call,"rejected",&reason.message,
+                        reason.source_location.as_ref().map(|(path,input)|(path.as_str(),*input))));
                 }
             };
         let ignored_restatements = update.requirements.iter().filter(|item| {
@@ -144,14 +145,23 @@ impl AgentPlan {
     }
 
     fn feedback(&self, call: &ChatToolCall, status: &str, message: &str) -> AgentToolResult {
-        AgentToolResult::text(call.call_id.clone(), serde_json::json!({
+        self.feedback_with_source_location(call,status,message,None)
+    }
+
+    fn feedback_with_source_location(&self,call:&ChatToolCall,status:&str,message:&str,location:Option<(&str,usize)>) -> AgentToolResult {
+        let mut value=serde_json::json!({
             "status": status,
             "plan_revision": self.revision,
             "needs_replan": self.needs_replan,
             "plan": self.steps,
             "requirement_ids": self.requirements.iter().map(|item| &item.id).collect::<Vec<_>>(),
             "message": message,
-        }).to_string(), status == "rejected")
+        });
+        if let Some((path,input))=location {
+            value["rejected_parameter_path"]=serde_json::json!(path);
+            value["source_input_index"]=serde_json::json!(input);
+        }
+        AgentToolResult::text(call.call_id.clone(),value.to_string(),status=="rejected")
     }
 
     pub(crate) fn effect_gate(&self) -> Option<&'static str> {
@@ -233,6 +243,43 @@ mod tests {
                 "requirements":[{"id":"R1", "description":"inspect", "source":{"input":0,"quote":"inspect"}}],
             })),
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_new_citation_locates_the_middle_source_and_preserves_committed_plan() {
+        let mut plan=AgentPlan::default();
+        let sink=RecordingSink::default();
+        let mut accepted=inputs();
+        plan.update(&update_call("in_progress"),&accepted,&sink).await.unwrap();
+        plan.needs_replan=true;
+        let before=plan.clone();
+        accepted.push(crate::context_lifecycle::text_message(ChatRole::User,
+            "Write final.txt once; keep helper running until Stop. PRIVATE_INPUT_SENTINEL".into()));
+        let mut call=update_call("in_progress");
+        call.arguments.0["requirements"]=serde_json::json!([
+            {"id":"name","description":"Use final.txt","source":{"input":1,"quote":"Write final.txt once"}},
+            {"id":"keep","description":"Keep helper running","source":{"input":1,"quote":"keep helper alive"}},
+            {"id":"stop","description":"Wait for Stop","source":{"input":1,"quote":"Stop"}},
+        ]);
+        let original_args=call.arguments.clone();
+        let rejected=plan.update(&call,&accepted,&sink).await.unwrap();
+        assert!(rejected.is_error);
+        let feedback:serde_json::Value=serde_json::from_str(&rejected.output_text()).unwrap();
+        assert_eq!(feedback["status"],"rejected");
+        assert_eq!(feedback["rejected_parameter_path"],"/requirements/1/source");
+        assert_eq!(feedback["source_input_index"],1);
+        assert!(!rejected.output_text().contains("PRIVATE_INPUT_SENTINEL"));
+        assert!(!rejected.output_text().contains("keep helper alive"));
+        assert_eq!(plan,before);
+        assert_eq!(call.arguments,original_args);
+        assert_eq!(sink.0.lock().unwrap().len(),1,"a rejected source cannot persist a partial plan");
+        call.arguments.0["requirements"][1]["source"]["quote"]=serde_json::json!("keep helper running until Stop");
+        assert!(!plan.update(&call,&accepted,&sink).await.unwrap().is_error);
+        assert_eq!(plan.requirements[0],before.requirements[0]);
+        assert_eq!(plan.requirements.len(),4);
+        assert_eq!(plan.requirements[1].source.quote,"Write final.txt once");
+        assert_eq!(plan.requirements[3].source.quote,"Stop");
+        assert!(plan.effect_gate().is_none());
     }
 
     #[tokio::test]
