@@ -402,6 +402,19 @@
 - 新模型0/UI未启动，证据`2026-10-02/macos/completion-prompt-footprint/`；完整A/B/C/N3、
   公开交付及原Mac/Windows失败不覆盖，不扩固定预算/权限、不丢历史结果。
 
+### C06-13 参数/引用正确不等于任务无漏项（2026-10-02，MAC-A-11 正式FAIL）
+
+- 最新合并源11b7d0164/正式Tauri/StepFun原A，7请求/2压缩/338events、UI41秒completed；
+  六命令各一次、两Bun实exit0/1且reaped，九组native/canonical全同，原件/Git/sentinel不变。
+  提示减重确已进入请求，但单例无重做/较短执行不证明其单独因果或完整A/N3通过。
+- 两指定搜索未执行，最终漏真实cwd/头尾原文且英文，整组FAIL。最后模型请求仍有完整四项
+  用户输入和语言规则；仅引用input_0的supported账本没有独立语义完整性证明。第二压缩后
+  旧文件原文不在最终请求，history工具已展示但未用；未做文本启发式补任务/翻译或重复观察。
+- 正式空stop纠正后exec仍展示/required并实际运行两测试；终态UI先存、Cmd-Q0/native156.81秒
+  无expiry/signals/CEF错误、fixture200/0/无残留、完整338-row只读库同。具体tool-row展开未捕获。
+  证据2026-10-02/macos/mac-a-completion-copy-recheck；本批无源码猜修/第二付费任务，旧失败/
+  A/B/C/语言/N3及Windows独立结果保持，下一缺口聚焦漏项与公开交付，不再扩底层矩阵。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
