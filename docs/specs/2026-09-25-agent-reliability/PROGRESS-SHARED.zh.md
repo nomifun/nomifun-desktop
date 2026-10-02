@@ -2991,3 +2991,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - Windows正式GEN 6秒deadline一次start、两poll正确游标0/25，父子READY、timed_out/reaped；独立CIM20样本/心跳/原件/旧事件核对，原12/13保持。报告两次拒绝后update_plan/第三report完成，内部警告仍在；不是首发/N3/完整B。
 - 确定性修复：干净明确timeout终态可直接报告optional plan，仍不授权后续effect；错误/丢失/未知与patch保护不变。真实pipe因无控制台interrupt却总尝试该阶段而产生日志错误；平台支持度用于清理阶段选择，Windows pipe跳过、ConPTY/Unix保留，显式请求及真正失败不吞错。
 - Agent8项、native期限/pipe Job/ConPTY/信号错误4项共12项通过，首败/测试桩耗尽另留，fmt配置/diff通过。修后正式/N3、READY/证据/警告语言及A/B/C仍缺，共享未结案；证据在仓库外2026-10-02/windows/w226-process-timeout-live。
+
+### W227 干净受控超时正式子链（2026-10-02，GEN N1）
+
+- W226修后正式Windows GEN原诊断5步/0压缩：一次start、两poll正确0→25，父子READY/实际timed_out/reaped，跳过不支持interrupt、errors=[]、清理187ms；CIM18样本/心跳/原件/旧事件独立核对。报告首次接受，无update_plan/参数拒绝或重启，原1/1超时计数仍在。
+- 只新增干净timeout/直接收尾GEN N1。旧样本首败不覆盖；复制oracle限定旧exit_code回答短语，原12/13和补充审计分开保存。公开回答的无退出码/信号说明间接，READY“可用证据”警告仍不合格，整体体验/完整B/N3不代判。
+- 仓库外2026-10-02/windows/w227-timeout-cleanup-recheck保留正式构建/DB/事件/UI/物理见证，无新源码或重复回归。A/C和共享门槛继续开放。
