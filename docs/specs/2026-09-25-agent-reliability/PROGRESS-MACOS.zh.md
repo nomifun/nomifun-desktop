@@ -400,6 +400,22 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   请求用户选择；未收到前不在未改 Auto 条件下继续付费循环，4096/上下文/权限上限不变。
 - 完整证据外置 `2026-10-03/macos/history-cursor-live/`，首败不覆盖，Windows结果未改。
 
+#### B09 历史构建身份兼容与固定读取截止点（2026-10-03）
+
+- 零模型核对发现确定阻断：原 B 与三次补报告的 Session/runtime/build_id/snapshot 相同，
+  无 clear-context/Agent transition，但实现 build_digest 不同；旧 archive 全 binding Eq
+  必然拒绝原 B。游标及低思考均不能绕过这个产品矛盾，故先停止准备付费复跑。
+- 历史文本导入现保留原 source_binding/turn 并计入 archive ID 摘要；仅实现 digest 可不同，
+  其他身份及完整 journal 校验保持。不是把旧 binding 改为当前，不更改 EngineBinding Eq、
+  checkpoint/recovery、current evidence、权限或进程控制资格；owner-auth port 仍决定来源。
+  Native/message history 的 supplied cursor 同时拒绝当前/未来 Turn，固定 accepted-root cutoff。
+- Runtime294/294、1项显式外部夹具测试默认 ignored；本次另运行该项，用原 B 原库只读派生
+  的634事件，33/33记录原正文/错误标记/原 binding/完整READ逐项相等、无截断，模型/owner0。
+  App history 5/5与独立只读复核通过。首次兼容失败及首次损坏夹具假设错误分别保留，修后另记。
+- 正式原B报告仍 OPEN，不能把原记录读取回归当模型实际采用。Mac再次锁定、下一任务未启动/
+  未发送；已请求解锁。完整外证据 history-cursor-live，下一隔离目录 history-upgrade-report
+  仅预备，无新模型调用；Windows验收未改，A13原完整N1继续复用。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

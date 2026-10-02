@@ -49,6 +49,13 @@ fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Engine history: {message}"))
 }
 
+fn require_prior_cursor(cursor_seq: u64, accepted_root_seq: u64) -> Result<(), AppError> {
+    if cursor_seq >= accepted_root_seq {
+        return Err(failure("historical cursor is not before the fixed accepted root"));
+    }
+    Ok(())
+}
+
 fn native_replay_floor(
     events: &[SessionEventRecord],
     event_payloads: &BTreeMap<String, Value>,
@@ -179,6 +186,7 @@ pub(super) async fn load_messages_before(
                 event.kind.0 == "turn/started" && event.correlation_id.as_ref() == operation
             })
             .ok_or_else(|| failure("historical cursor is outside the current Session"))?;
+        require_prior_cursor(turn.seq,current_root.seq)?;
         source_message(&facts, turn)?.0.seq
     } else {
         current_root.seq
@@ -275,6 +283,7 @@ pub(super) async fn load_before(
             .seq,
         None => current_root.seq,
     };
+    if before_operation.is_some() {require_prior_cursor(before_seq,current_root.seq)?;}
     let mut turns = facts
         .events
         .iter()
@@ -390,6 +399,14 @@ mod tests {
         IdempotencyKey, OperationId, PresetRevisionRef, ResolvedSnapshotId, ResolvedSnapshotRef,
         SessionEventKind, SessionEventPayloadRef,
     };
+
+    #[test]
+    fn supplied_history_cursors_cannot_cross_the_fixed_accepted_root() {
+        assert!(require_prior_cursor(9,10).is_ok());
+        assert!(require_prior_cursor(10,10).is_err());
+        assert!(require_prior_cursor(11,10).is_err());
+        assert!(require_prior_cursor(u64::MAX,10).is_err());
+    }
 
     fn event(seq: u64, kind: &str) -> SessionEventRecord {
         SessionEventRecord {
