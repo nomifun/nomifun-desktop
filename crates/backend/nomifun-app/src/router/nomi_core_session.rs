@@ -5829,6 +5829,33 @@ mod session_boundary_tests {
     }
 
     #[test]
+    fn history_preserves_each_accepted_steer_identity_without_reopening_its_turn() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let operation = format!("turn:user:{SESSION_ID}:root:operation");
+        let ids = ["0190f5fe-7c00-7a00-8abc-012345678921", "0190f5fe-7c00-7a00-8abc-012345678922"];
+        let mut messages = Vec::new();
+        for (index, id) in ids.iter().enumerate() {
+            let message = canonical_message_response(&session_id, 1_000, MessageProjection {
+                session_id: session_id.clone(), projection_id: format!("message:{id}"),
+                first_seq: 10 + index as u64, last_seq: 10 + index as u64,
+                presentation_intent: "message".into(), message_type: None, message_status: None,
+                projection: json!({"projection_id":format!("message:{id}"), "correlation_id":operation,
+                    "presentation_intent":"message", "content":"改为结果/纠正结果.txt", "state":"accepted"}),
+                semantic_digest: "digest".into(),
+            }).unwrap().expect("an admitted steering message must survive cold history");
+            assert_eq!(message.message_id, *id);
+            assert_eq!(message.msg_id.as_deref(), Some(*id));
+            assert_eq!(message.position, Some(MessagePosition::Right));
+            assert_eq!(message.status, Some(MessageStatus::Finish));
+            assert_eq!(message.content["content"], "改为结果/纠正结果.txt");
+            assert!(message.content["turn_id"].is_null());
+            messages.push(message);
+        }
+        assert_ne!(messages[0].message_id, messages[1].message_id);
+        assert!(messages[0].created_at < messages[1].created_at);
+    }
+
+    #[test]
     fn finalized_assistant_projection_is_realtime_without_reopening_a_turn() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let message_id = "0190f5fe-7c00-7a00-8abc-012345678913";
@@ -12833,7 +12860,15 @@ fn canonical_message_response_with_observation(
         }));
     }
 
-    let Some(message_id) = document.get("correlation_id").and_then(Value::as_str) else {
+    // Steering has one message per admission event, while correlation_id
+    // deliberately remains the owning Turn operation. Use the persisted
+    // message identity for accepted user rows, including existing projections.
+    let message_id = if projection.presentation_intent == "message" && state == "accepted" {
+        projection.projection_id.strip_prefix("message:")
+    } else {
+        document.get("correlation_id").and_then(Value::as_str)
+    };
+    let Some(message_id) = message_id else {
         return Ok(None);
     };
     if Uuid::parse_str(message_id)

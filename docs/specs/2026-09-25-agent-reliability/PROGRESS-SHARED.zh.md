@@ -3155,3 +3155,29 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 修后正式GEN完整B：第二步以无摘要保护的write_file直接覆盖新建文件，违反明确来源SHA要求；首败原调用已保存。正式Stop后cancelled，保留最后read已执行及磁盘正确18-byte/echo输入、原件hash、父子cancel/reaped证据，工具结果错误0，未报告成功。
 - 原audit23/28保留，来源保护/重复write和停止后的未交付保持失败；无相同根因重跑。UI还出现私有推理省略占位文本，合并记录展示残余，按用户优先收尾要求转C链，不新增说明优化批次。
 - 本批仅真实主线走查，仓库外2026-10-02/windows/w240-mainline-b-closeout保存原参数/阶段首败/取消DB、字节/进程/原事件审计及UI；没有产品源码或新回归，共享未结案。
+
+### W241 连续纠正首败与冷读展示（2026-10-02，正式FAIL）
+
+- 正式COD完整C：27步/15压缩，同回合steer-accepted接受纠正；却启动helper三次/自行cancel两次、来源各读三次。写纠正结果被计划门禁阻止，四次来源引用拒绝后failed；引用多加原输入没有的“核对”，未产生结果或禁止初稿，未执行操作者Stop/Retry。
+- 原audit10/21不改；同回合纠正另以canonical事件证明。原件hash/宿主清理/当前PID消失成立，70条见证不证明三次启动全部拓扑；failed不改判cancelled，完整C未通过。
+- 正式零模型冷启动：events/turns/sessions全行数/hash及全部夹具文件不变、无复活，但实时纠正气泡在冷读UI不可见，canonical纠正仍在。记录恢复展示残余，不用数据库完整代判UI完整。
+- 外部2026-10-02/windows/w241-mainline-c保存所有首败和独立冷读证据。按收尾约束合并处理A重复/报告、B来源保护/交付、C重启重读/引用和恢复展示，不对未改根因付费循环，不展开旧矩阵。共享仍未结案。
+
+### W242 纠正消息在冷读中被错误过滤（2026-10-02，正式子断言PASS）
+
+- W241的steer message projection使用独立事件UUID，但correlation_id是拥有该输入的Turn operation；历史响应误拿operation当消息UUID而丢弃。accepted用户消息改用已有message projection ID，旧记录也恢复；不改canonical来源、Turn归属、执行或权限。
+- 双纠正独立身份回归修前红/修后绿，相关历史17项通过，fmt/diff与desktop边界通过；原失败会话正式Tauri零模型冷读7/7，纠正/failed提示可见，全表与磁盘hash不变、无复活或新动作。
+- 只关闭C冷读纠正展示；完整C执行/实际Stop、A重复/报告、B来源保护/交付及必要N3仍开放。外部2026-10-02/windows/w242-mainline-recovery保留首红/根因/回归/正式冷读，不启动未改根因的付费循环，下一项合并A复验。
+
+### W243 合并A复验仍受替换预算阻断（2026-10-02，正式FAIL）
+
+- 一次正式COD A、约2分57秒、11步/8压缩：cwd/list/专用全文及两搜索/Git各取得结果且Git未重复，第一指定测试exit0；自选PowerShell摘要脚本先exit1，修正提议未dispatch。十文件/Git/原事件不变，第二测试/报告未到达。
+- 压缩两次候选后83,681 bytes/27,894估算tokens超过27,854限制40而自行failed，UI确有Nomi内部失败；未Stop/Retry。原audit10/16与交付0/6保留，不代判W237报告反馈/语言采用或完整A。
+- 外部2026-10-02/windows/w243-mainline-a-closeout保存原始首败和终态。下一步直接核对正常压缩的触发阈值与冻结硬接纳上限，供应商margin/权限/原context保持；不继续删说明以追逐几十token，不重跑未改根因。A/B/C共享仍未结案。
+
+### W244 正常摘要误用触发阈值及立即再压缩（2026-10-02，正式预算N1）
+
+- 两首红：27,857-token合法摘要被27,294 soft trigger拒绝，原冻结硬接纳上限28,160未超；修接纳后下一小步又立即摘要。正常replacement现使用原硬上限扣实际usage margin，token floor给后续小步留余量；typed overflow严格cap、输出/字节/消息限、原上下文/回执/一纠正上限不改。
+- 一个最小回归覆盖两故障，compaction19项和7项严格预算/summary邻近，共26项不同定向通过，fmt/diff及正式构建通过。正式COD A约1分33秒、七步/五压缩、summary拒绝0，两个指定测试各一次exit0/1、报告首发接受、精确测试scope和1/1失败计数、UI正常非零成立，预算/测试链为N1。
+- 整体A仍FAIL：Git status/diff各两次，前四项实际值交付省略；原15/16及交付1/6不改，completed不是完整A PASS，N3/GEN不代判。B来源SHA/交付、C重启重读/来源纠正/Stop等仍开放；只处理这些主线直接阻断，不新增矩阵或未改根因的付费循环。
+- 外部2026-10-02/windows/w244-mainline-compaction-envelope保存两首红、26项/构建、正式原参数/DB/事件/独立scope与UI；Git仅预算接纳/余量、一个回归和短进度。共享门槛仍未达。
