@@ -3004,3 +3004,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 现仅为完整保留、同process_id且已清理的exit0/非零/timeout调用链保留早期成功poll的历史事实资格；context关联精确terminal ID，明确早期running不代表当前运行。启动/stdin、旧文件/产物不升格，不修改工作区epoch、valid_through、权限或原参数。
 - 实际WorkStatus/CommandTracker正向三终态及21种失败/错配/缺链反例、新旧completion共36项通过；首红/修后分日志，fmt配置/diff通过。正式Tauri/模型采用、公开语言、取消历史poll及N3、完整A/B/C仍待验，共享未结案。
 - 证据在仓库外2026-10-02/windows/w228-historical-process-poll；本批无新付费模型或原生进程，Git仅源码、两项回归和短进度。
+
+### W229 READY历史引用正式GEN样本（2026-10-02，N1）
+
+- W228正式custom-protocol/StepFun原六秒任务，5步/无压缩：start一次、poll0→25两次、report首次接受；分别引用早期READY与精确timeout终态，无重规划/拒绝/重做，W228新分支实际生效N1。
+- 独立17/17：两READY各一次、真实timed_out/无exit/无signal、父子存活亲缘及消失、清理187ms/errors=[]、原件/旧事件保持，无外部kill。断言发送前冻结；poll数按真实cursor链核对，旧W227原oracle不改。
+- 公开回答不再出现READY不可引用警告，但仍大量process_id/cursor/cleanup字段；最终没有明确无signal，UI仍以“曾有1次尝试未成功”和通用计数表示受控timeout。保留体验缺口，不以账本完成/17项动作断言关闭完整B、N3或共享阶段。
+- 仓库外2026-10-02/windows/w229-ready-timeout-live保留构建、隔离夹具、DB/事件/原调用、17项audit/人工复核及折叠/展开UI；本批无新源码或重复测试。

@@ -3724,3 +3724,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：三类真实tracker终态（exit0/非零/timeout）经后来命令后早期输出/terminal均可准确引用，文件与启动仍失效；21种反例拒绝。新两项及相关completion模块36/36，fmt配置/diff通过，首红/修后分日志。
 - 未覆盖：正式Tauri/StepFun采用该资格及公开回答、取消历史poll、进程首发N3/COD、完整A/B/C与共享门槛。本批只有确定性源码修复，不以单元结果覆盖正式失败，无新模型/进程/构建样本。
 - 证据：仓库外2026-10-02/windows/w228-historical-process-poll，01首红、02修后及03～05配置/diff/同步；Git仅源码、两项最小回归和短进度。
+
+### W229 READY历史引用正式GEN N1（2026-10-02；基线1524c2498）
+
+- Case/子断言：C05/C06/C07/C08、CTRL-006/007及A05/A08/A09/A11/A13/A17/A19；正式Tauri/StepFun、原六秒任务、独立workspace/profile、已有隔离data/work，所需desktop增量构建35.62秒。
+- 正式5步/0压缩completed，start一次/poll0→25两次/report一次，无参数拒绝、update_plan、新进程或补查；criteria分别引用READY poll、精确timeout poll，W228新历史资格分支实证GEN N1，原W227警告/首败不覆盖。
+- 独立断言在发送前记录，动作/回配/文件/原事件/报告引用17/17；CIM18样本确认同一父子存活亲缘及消失、心跳停止，实际timed_out/exit_code和signal均null，reaped=true/errors=[]、清理187ms，无外部kill。poll数量按返回cursor链而非固定次数判定。
+- 体验仍未闭合：最终回答夹杂完整process_id/cursor/cleanup字段，未明确无signal；展开过程和页尾仍以“曾有1次尝试未成功”及通用调用/命令计数归纳预期timeout。人工复核另记FAIL_VISIBLE_UX，不把17/17当完整任务体验PASS。
+- 未覆盖：公开语言/typed timeout汇总、首发N3/COD、取消历史poll、完整联合B/A/C及共享门槛。无新源码/重复cargo检查，不追加相同付费循环。
+- 证据：仓库外2026-10-02/windows/w229-ready-timeout-live，01构建、02不可变事件/DB/调用/audit/人工复核、03折叠UI与04展开UI、独立process witness；Git只留短进度。
