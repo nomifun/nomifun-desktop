@@ -383,6 +383,14 @@
   单独保留、按接口修正，不代判修后live。原UI/202-row快照/文件/清理独立核对在
   `2026-10-02/macos/current-command-sync/`；公开语言/完整A/B/C/N3未关闭，Windows记录未改。
 
+- **2026-10-02 MAC-A-10 修后formalN1**：原A任务/独立约束，源ef626f626/正式Tauri/StepFun；
+  两次真实reasoning-only stop均进入有界纠正，后续仍有exec/read且required并实际结算，
+  无未暴露拒绝/工具错误。一次Task内两分支不当N2/N3，不承诺模型不新提议已完成观察。
+  整组仍FAIL：16请求/4压缩/一次伪摘要拒绝、后续sh重复、两指定测试与report未做，正式cap取消；
+  397events/原件/Git/真实退出/UI/只读快照独立保持，未扩大预算/翻译原文/稀释重复计数。
+  全证据`2026-10-02/macos/empty-stop-live-recheck/`；只关闭该空答复误收尾的正式N1子断言，
+  完整A/B/C/语言/N3及旧CEF/MM不关闭，Windows独立结果不代判。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/

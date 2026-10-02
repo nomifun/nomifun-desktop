@@ -27,7 +27,7 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-09 cwd/目录/97-byte文件已观察交付，空公开stop错误进入report-only，搜索/Git/两测试未执行；已修确定性分支，正式修后/完整A/N3仍待验 |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-10 空公开stop纠正真实N1，原动作未被关；后续重复观察/两测试未执行/本地cap取消仍FAIL，完整A/N3未达 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-08 原文件任务报告形态N1，公开交付/整体超时仍FAIL；B07联合未close/EOF/交付，03 EOF/04 Stop各N1，完整链/N3仍开放 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
@@ -1720,3 +1720,19 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   正式终态截图/AX先保存，Cmd-Q0/312.44秒/无expiry/TERM/KILL/cleanup错误，fixture shutdown200/0，
   App/listener无。writer/WAL/shm无后完整202-row只读快照同/ok，keyaudit0/299；证据
   `2026-10-02/macos/current-command-sync/`。公开语言/完整A/B/C/N3及旧CEF/MM仍开放，Windows不代判。
+
+- **MAC-A-10 空公开stop修后正式样本**（2026-10-02）：源`ef626f626`/正式App`0470356677ee…`/
+  新隔离Session，原A任务/7文件/独立断言与1task/16requests含摘要/4096/360秒/独立App480秒不变。
+  实际 **16 requests/4压缩/396暂停→397取消events**，localcap后正式End Turn，cancelled/headready，
+  无report/两指定测试未运行，**整组FAIL**，local429不是provider认证/额度故障证明。
+- C06-11分支实际 **N1**：两次零公开text/零call/仅private reasoning的stop被有界纠正；
+  后续请求仍展示原exec/read且required，下一read/exec实际结算，工具错误0，无未暴露拒绝。
+  同一Task两分支不当N2/N3，也不据此保证所有空答复/完整A或模型无重做；原A09首败保持。
+- 原cwd/隐藏项/97-byte4行回读/精确两搜索/Git观察已执行；模型后来新提议sh脚本重做这些
+  观察并grep||true，原参数和偏差保留；另有一次TOOL_SHAPED_TEXT摘要拒绝，纠正计入原budget。
+  11组raw/canonical全同，7原件/Git/sentinel保持，不以唯一action统计稀释重复或假报测试通过。
+- 暂停/取消UI截图/AX先保存，Cmd-Q0/280.27秒/无expiry/TERM/KILL/cleanup错误，fixture200/0，
+  无App/helper/listener残留。post-Q inspector SQLite14首败保留，writer/WAL/shm无后另作完整
+  397-row只读快照/ok；final仅从该快照导出，不误用空库。证据`2026-10-02/macos/empty-stop-live-recheck/`。
+  本批无新可证实产品根因，只短进度/不追加模型；公开语言/重复根因/完整A/B/C/N3及旧问题
+  仍开放，Windows记录未改写。
