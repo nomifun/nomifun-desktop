@@ -293,9 +293,13 @@ impl Engine {
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
         if self.stopped.completed() { return Ok(()); }
         if self.stopped.blocks_work() { return Err("CEF shutdown is still in progress; completion has not been acknowledged".into()); }
+        #[cfg(debug_assertions)]
+        let shutdown_started = Instant::now();
         self.closing.store(true, Ordering::Release);
         self.ready.send_replace(false);
         let pages: Vec<_> = self.pages.lock().unwrap().values().filter_map(Weak::upgrade).collect();
+        #[cfg(debug_assertions)]
+        eprintln!("CEF_SHUTDOWN phase=page_close_begin pages={}", pages.len());
         for page in pages { page.force_close().await?; }
         let (tx, rx) = oneshot::channel();
         let engine = self.clone();
@@ -307,10 +311,16 @@ impl Engine {
                 return;
             }
             let contexts: Vec<_> = std::mem::take(&mut *engine.contexts.lock().unwrap()).into_values().filter_map(|context| context.upgrade()).collect();
+            #[cfg(debug_assertions)]
+            eprintln!("CEF_SHUTDOWN phase=context_release_begin contexts={} elapsed_ms={}", contexts.len(), shutdown_started.elapsed().as_millis());
             for context in contexts { let raw = context.raw.lock().unwrap().take(); drop(raw); }
             if !engine.stopped.begin() { let _ = tx.send(Err("CEF shutdown entry was already claimed".into())); return; }
+            #[cfg(debug_assertions)]
+            eprintln!("CEF_SHUTDOWN phase=native_entry elapsed_ms={}", shutdown_started.elapsed().as_millis());
             shutdown();
             engine.stopped.finish();
+            #[cfg(debug_assertions)]
+            eprintln!("CEF_SHUTDOWN phase=native_return elapsed_ms={}", shutdown_started.elapsed().as_millis());
             let _ = tx.send(Ok(()));
         });
         rx.await.map_err(|_| "CEF shutdown acknowledgement was lost")?

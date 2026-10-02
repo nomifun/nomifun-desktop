@@ -29,7 +29,7 @@
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-12 历史97-byte文本保留正式N1；literal脚本错误→重复观察/预期非零未执行/无report、本地cap与观察者480秒超时仍FAIL，完整A/N3未达 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-09 完整链24-call样本仍FAIL：先patch后create、写入漏LF、只到cp；未到helper/report且观察者超时；转C，不循环B，旧03/04子链保持 |
-| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | MAC-C-02纠正→两压缩→UI取消→冷读主链N1，旧Turn/效果不重放；冷Cmd-Q真实CEF未确认/KILL、公开占位及poll/交付缺口仍FAIL，N3未达 |
+| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | MAC-C-03补成功READY/后续poll、精确纠正回读/中文说明、live Stop与完整冷读N1；原四次拒绝保留，准备公开报告/新review分支未覆盖，旧C02冷KILL未修、N3未达 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
 MAC-GEN-01 已有通用模板仅减去 Computer/自动化资源模块的正式目录观察 N1；不代表完整默认
@@ -1810,3 +1810,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   删除来通过；成功后续poll/完整中文交付未验证，完整C仍FAIL。冷强退WAL存在，初错immutable
   副本不作验收，普通readonly WAL备233rows同/ok另存；首个审计误用event kind失败保留后按
   turn/steer-accepted修正。证据`2026-10-02/macos/mac-c-mainline/`；无付费重跑/猜修/Windows代判。
+
+- **MAC-C05-08 冷退出零模型定位**（2026-10-02）：同C02制品/数据，GUID直接Cmd-Q0/13.90秒、
+  进入cancelled会话后Cmd-Q0/21.85秒，两不同条件均无expiry/信号，未卡住故采样0。原C02
+  95秒/KILL首败不覆盖，233events/取消状态只读复核全同；未诊断为钥匙串或特定线程根因。
+- 仅加10行debug阶段记录：page close/context release/native entry/native return，数目/耗时不含
+  profile或凭据，无新锁/等待/CEF调用/完成判定，release不变；Mac lib13/13。路径替换造成的一次
+  launcher ENOENT先留、未启动进程后按精确原制品修正；不重跑同条件循环。证据
+  `2026-10-02/macos/cold-exit-stack/`；记录版正式native未重编/重验，完整C05/C/N3仍开放。
+
+- **MAC-C-03 正式连续/Stop/冷读补缺口**（2026-10-02）：源`e2f7e47ca`，arm64/APFS，正式Tauri
+  `e270148c33ff…`；沿用C02原任务/纠正与16/4096/360预算，13请求/两压缩/335events/15原生参数
+  与canonical全同。先成功READY poll再实际steer；一helper/一20-byte正确写，真实回读/hash和中文
+  说明后继续cursor=60/wait30000 poll，无模型cancel/report。Stop前父子存活，866ms后检查均消失，
+  cancelled/host_cleanup_proven及后续零派发；三原件不变。live Cmd-Q0/124.83秒、冷0/18.77秒，
+  均无expiry/信号，debug native entry/return实际成对；冷读四表/全部文件全同、UI空闲/保留纠正。
+- 四拒绝原样保留：new-input阻止一poll，plan+read+poll整批三拒绝后恢复；未证明准备状态公开报告。
+  首审误把伴随poll的公开回复当无tool收尾，缺新review notice断言首败保留；新分支live未覆盖，
+  不代判W248修复或覆盖C02冷KILL/占位首败。完整C/N3仍开放，旧MM未关闭，不追加未改根因循环。
+- 零模型复用B09：原末LF要求在接受输入和供应商请求15/17/20均保持，三原始SSE写提议已缺LF、
+  canonical参数全同；不能归因owner裁剪，不自动补字节。证据`2026-10-02/macos/mac-c-live-progress/`；
+  首败/修后/完整DB与UI在外，凭据审计0/348，未改Windows结果；下一步只补A/B直接缺口及必要N3。
