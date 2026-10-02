@@ -3780,3 +3780,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原独立操作13/15保留：first report和canonical completed未达到，最终六项具体交付均缺失。不能由动作正确、不重做或有界失败关闭完整A/N3；下一步缩减重复完成说明的固定开销，硬预算/required input/资格仍保持。
 - 未覆盖：缩减后正式效果、成功摘要纠正N3、A引用/交付、完整B/C与共享门槛。本批无新源码/重复组件检查，W232原首败不改。
 - 证据：仓库外2026-10-02/windows/w234-summary-fit-live，01构建、02-first-fail原DB/事件/参数/13-15 audit/人工复核与六次压缩/两拒绝、03失败UI；Git仅短进度。
+
+### W235 完成context说明精简（2026-10-02；基线d4d856276，正式待验）
+
+- Case/子断言：C06/C07/C08、完成/上下文边界与A08/A09/A15/A17/A19；沿W234真实122-token余量不足，减少不可压缩的重复说明，无新付费循环。
+- 调整：completion.context英文说明由3,856缩至2,400 UTF-8 bytes，减少1,456；原context JSON/原生输出缓存、eligible集合/epoch、required input、Schema/权限/计数/硬预算全同。指引仍明确只用匹配scope的top-level证据、历史/当前状态分开、历史恢复不升格、unknown/未完成保持blocked、不重做、每criterion八ID与全需求覆盖。
+- 验证：复用completion39项（含旧引用/借用范围提示/历史/失败计数/文件/进程与输出边界）及mandatory预算、实际usage余量、健康报告修正不重做三项，共42项不同检查通过；fmt配置/diff通过。只改说明，无新增同构测试或语义NLP校验。
+- 未覆盖：正式Tauri/StepFun实际余量、是否减少压缩/完成交付、W234成功恢复及N3、A引用语义/完整B/C/共享门槛。尺寸减少不是正式任务PASS，未放宽assert或预算、未改原首败。
+- 证据：仓库外2026-10-02/windows/w235-completion-context-copy，01/02原新说明、copy-size-audit及03组件/三项邻近与04/05配置/diff；Git只保留一行模型说明和短进度。

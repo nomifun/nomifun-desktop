@@ -3065,3 +3065,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - W233正式Windows COD原综合A，8步/六次成功压缩，cwd/list/完整读/两单文件搜索/Git status/diff各一次，两Bun依序start→poll exit0/1，四进程reaped，无重做、参数拒绝或原件/Git/旧事件变化。原操作13/15保留；两项失败为未到report及未completed，最终六项交付缺失。
 - W233新分支实际触发：两条REPLACEMENT_CONTEXT_BUDGET拒绝后failed，替换83,993 bytes/27,998估算tokens仍大于27,876余量；一次纠正上限和原context保护生效，但未恢复任务。真实1/1业务非零与NomiFun预算失败分开，未Stop/Retry或继续付费重跑。
 - 仅新增不重做的操作子样本及二次拒绝合同实证，不能关闭完整A/N3或共享门槛。下一步缩减重复完成说明造成的固定上下文开销，保留证据规则、用户输入及冻结预算；仓库外2026-10-02/windows/w234-summary-fit-live保存全证据。
+
+### W235 完成说明的固定开销（2026-10-02，正式待验）
+
+- 沿W234仍超122 tokens，缩减每轮重复的completion说明：3,856→2,400 UTF-8 bytes，减少1,456 bytes。保留旧/当前区分、精确scope、历史恢复、unknown/blocked、证据/需求及禁止重做规则；JSON状态/输出、Schema和资格谓词未改。
+- completion39项及mandatory/实际usage/报告修正防重做三项，共42项既有定向通过，fmt配置/diff通过；无需新镜像测试。只证明固定说明变短及合同未回归，正式实际余量/模型交付/N3/完整A/B/C仍待验，W234失败继续保留。
+- 仓库外2026-10-02/windows/w235-completion-context-copy保存原/新说明与尺寸审计、42项定向日志；无新付费模型、命令或正式构建，Git仅一行说明和短进度。
