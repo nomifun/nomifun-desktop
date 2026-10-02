@@ -119,7 +119,9 @@ impl ToolArgumentValidators {
                         }
                     }
                     payload["ineligible_evidence_criteria"] = json!(affected);
-                    payload["evidence_repair_notice"] = json!("These zero-based criterion positions contain IDs outside current evidence. Cite another ID only when its own scope actually supports the claim. Otherwise deliver known earlier results in summary, mark current verification unverified and omit evidence fields. Do not infer that missing verification means a tool never ran, invent missing results, or repeat work. Adapt this example to the user's language and actual uncertainty.");
+                    payload["ineligible_evidence_criterion_numbers"] = json!(affected.iter().map(|index| index + 1).collect::<Vec<_>>());
+                    payload["ineligible_evidence_criterion_paths"] = json!(affected.iter().map(|index| format!("/criteria/{index}")).collect::<Vec<_>>());
+                    payload["evidence_repair_notice"] = json!("Repair only the exact JSON locations in ineligible_evidence_criterion_paths. ineligible_evidence_criterion_numbers counts items from ONE; ineligible_evidence_criteria counts array indexes from ZERO. Keep already eligible criteria unchanged. Cite another ID only when its own scope supports the claim. Otherwise deliver earlier results in summary, use unverified and omit evidence fields. Do not infer unexecuted work, invent results or repeat operations. Write the rationale in the SAME LANGUAGE as report.summary and explain the actual uncertainty; do not copy the example's English rationale verbatim.");
                     payload["unverified_criterion_example"] = json!({"disposition":"unverified",
                         "rationale":"Earlier actual results are reported in the summary; later state was not rechecked."});
                 }
@@ -284,6 +286,9 @@ mod tests {
         let text=rejected[0].1.as_ref().unwrap().output_text();
         let payload:Value=serde_json::from_str(&text).unwrap();
         assert_eq!(payload["ineligible_evidence_criteria"],json!([1,2,3]),"the model must be told which criteria failed");
+        assert_eq!(payload["ineligible_evidence_criterion_numbers"],json!([2,3,4]),"public item numbers start at one");
+        assert_eq!(payload["ineligible_evidence_criterion_paths"],json!(["/criteria/1","/criteria/2","/criteria/3"]),
+            "repair targets must identify exact JSON positions without private values");
         assert_eq!(payload["status"],"not_executed");
         assert_eq!(payload["correction_counters_after_rejected_batch"],json!({"observed_tool_error_count":2,"observed_command_failure_count":1}));
         for issue in payload["issues"].as_array().unwrap() {
