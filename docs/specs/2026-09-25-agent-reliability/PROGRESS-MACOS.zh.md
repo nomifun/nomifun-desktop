@@ -415,6 +415,10 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 正式原B报告仍 OPEN，不能把原记录读取回归当模型实际采用。Mac再次锁定、下一任务未启动/
   未发送；已请求解锁。完整外证据 history-cursor-live，下一隔离目录 history-upgrade-report
   仅预备，无新模型调用；Windows验收未改，A13原完整N1继续复用。
+- 合并远端进程lease修复后源 `2e21af9e4`：macOS新增lease-retirement回归1/1、Runtime294
+  再通过。正式Tauri debug构建及ad-hoc deep-strict包已准备（非release/notarization），
+  产品hash55aab3f2…、未改UI hash4ab19979…，完整元数据外置history-upgrade-report；
+  App/relay/fixture均未启动、下一任务未发送。构建不替代正式UI/模型验收，等待手动解锁。
 
 #### Keychain 清理前置：Robot 的真实本地 join（2026-10-03）
 
