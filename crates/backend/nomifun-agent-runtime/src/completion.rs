@@ -731,10 +731,19 @@ impl CompletionTracker {
         let mut ineligible = Vec::new();
         let mut detail_bytes = 0usize;
         for item in self.observations.iter().rev().filter(|item| !self.is_usable(item,work.workspace_observation_epoch)).take(8) {
-            let detail = omit_absent_metadata(serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
+            let mut detail = serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
                 "invocation_attempted":item.invocation_attempted,"successful_result":item.successful,
                 "observed_workspace_epoch":item.workspace_epoch,"eligible_current_evidence":false,
-                "scope":self.model_scope(&item.call_id)}));
+                "scope":self.model_scope(&item.call_id)});
+            // A live process cannot prove completion, but losing its owned ID
+            // and output cursor after compaction encourages a duplicate launch.
+            // Keep exact already-observed data for a still-tracked process.
+            if let Some(output)=self.command_outputs.get(&item.call_id).filter(|output|
+                output["state"]=="running" && output["process_id"].as_str()
+                    .is_some_and(|id|work.running_processes.contains(id))) {
+                detail["observed_output"]=output.clone();
+            }
+            let detail=omit_absent_metadata(detail);
             let Ok(size) = crate::stream_limits::serialized_size(&detail,4096-detail_bytes) else { break; };
             detail_bytes += size;
             ineligible.push(detail);
@@ -745,6 +754,7 @@ impl CompletionTracker {
             "failed_command_observations":work.failed_commands,
             "observed_tool_error_count":work.failed_tools,
             "observed_command_failure_count":work.failed_commands,
+            "last_observed_running_processes":work.running_processes,
             "available_evidence":self.observations.iter().filter(|item| self.is_usable(item, work.workspace_observation_epoch))
                 .map(|item| {
                     let mut evidence = serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
@@ -1483,6 +1493,40 @@ mod tests {
             observed_workspace_epoch: epoch,
             was_current_at_observation: true,
         }
+    }
+
+    #[test]
+    fn live_process_data_retains_owner_identity_and_cursor_without_completion_evidence() {
+        let mut tracker=CompletionTracker::default();
+        let mut work=AgentWorkStatus::default();
+        let mut commands=crate::workflow::CommandTracker::default();
+        for (id,action,args,text,cursor) in [
+            ("hold-start","workspace.process/start",serde_json::json!({"command":"bun","args":["helper.mjs","hold"]}),"",0),
+            ("hold-ready","workspace.process/poll",serde_json::json!({"process_id":"held-process","cursor":0}),"READY_PARENT\nREADY_CHILD\n",25),
+        ] {
+            let binding=process_binding(action);
+            let call=ChatToolCall {call_id:id.into(),name:if action.ends_with("start") {"start_process"}else{"poll_process"}.into(),
+                arguments:StrictJsonValue(args),provider_metadata:None};
+            let result=AgentToolResult::text(call.call_id.clone(),serde_json::json!({"process_id":"held-process","state":"running",
+                "success":null,"output":{"text":text,"next_cursor":cursor,"dropped_bytes":0}}).to_string(),false);
+            work.observe(&binding,&call,&result,&mut commands);
+            tracker.observe(&work,&binding,&call,&result,true);
+        }
+        let context=context_value(&tracker,&work);
+        assert!(context["available_evidence"].as_array().unwrap().is_empty());
+        assert_eq!(context["last_observed_running_processes"],serde_json::json!(["held-process"]));
+        let ready=context["ineligible_observations"].as_array().unwrap().iter()
+            .find(|row|row["call_id"]=="hold-ready").unwrap();
+        assert_eq!(ready["eligible_current_evidence"],false);
+        assert_eq!(ready["observed_output"]["process_id"],"held-process");
+        assert_eq!(ready["observed_output"]["output"]["text"],"READY_PARENT\nREADY_CHILD\n");
+        assert_eq!(ready["observed_output"]["output"]["next_cursor"],25);
+        assert!(tracker.observations.iter().all(|row|!tracker.is_usable(row,work.workspace_observation_epoch)));
+        work.running_processes.clear();
+        let stale=context_value(&tracker,&work);
+        assert!(stale["last_observed_running_processes"].as_array().unwrap().is_empty());
+        assert!(stale["ineligible_observations"].as_array().unwrap().iter()
+            .all(|row|row.get("observed_output").is_none()),"an earlier running snapshot cannot assert that the process is still running");
     }
 
     #[test]
