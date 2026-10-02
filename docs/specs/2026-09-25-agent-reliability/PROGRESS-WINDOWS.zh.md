@@ -1,6 +1,6 @@
 # Windows 命令与会话可靠性进度
 
-更新：2026-10-02。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-10-03。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 用户2026-09-30已收敛为简单系统命令、步骤、过程状态和结果可靠性；活动范围以最新实施计划为准。
 旧675＋82、2,374槽保留为历史全产品参考，不再领取其全部余项。共享根因及已有Windows修复保留。
 
@@ -22,7 +22,7 @@ GEN/COD已各有正式执行，源码未受影响的操作/EOF/停止/冷读证�
 2026-10-02同步379a54052的最新实施计划：停止按B→C→A整组排程，改为具体缺陷→最小回归→必要的一次正式UI。
 同一未改根因不付费循环，暂停纯说明微调和历史矩阵扩展；只修有证据的产品原因，已通过子链复用。
 
-### 当前交付与残余（W259；既有机制复用）
+### 当前交付与残余（W264；既有机制复用）
 
 - 多项结果交付：W255正式COD短任务13秒、三model步骤，cwd/完整九条目及真实Hidden标记/文件首尾与摘要全部交付，首次report引用逐项正确、无重复观察，20/20不同定向检查。历史真实性由W254正式GEN两步/一次实际压缩/13项复用；仅关闭这两条针对性链N1，原完整A/B首败仍FAIL。
 - 已修机制交付：命令形态与结果回配、非零与系统错误区分、文件原件/字节保护、实际Stop及取消冷读、压缩硬预算和历史回执保留，按各批直接证据复用。没有因本次短任务追加全仓构建、完整A/B/C、固定N3或角色矩阵。
@@ -30,7 +30,7 @@ GEN/COD已各有正式执行，源码未受影响的操作/EOF/停止/冷读证�
 - 提议/步骤精度：B漏stdin及重复cursor0，C末LF，W240来源SHA首败继续开放。0/17-byte实物及原调用保留，不自动补步骤/字节或改断言。W256确认关闭前摘要仍保留stdin待办、冻结快照允许input；原拒绝输出及实际请求工具表缺失，漏步骤的唯一根因仍待证，不由组件或reasoning字段代判供应商/宿主责任。
 
 确定产品缺口：W250摘要漏拦tool_call包装、W251/253历史回执丢失。后者已修，W254正式短任务13/13，完成一次当前读取并如实交付旧EOF0；W251首败仍保留，不关闭完整B或所有生成精度问题。
-共享退出码组件回归复用；W259新隔离实例经人工托盘Quit实际exit0、进程/监听最终清理及原记录不变，正常空闲退出N1通过，失败退出分支与活动Turn退出native未验。
+共享退出码组件回归复用；W259人工托盘Quit正常空闲N1已验。W264当前正式产物自主调用已有原生退出API：活动Turn正常exit0、真实写锁清理失败exit1均已验；冷恢复未重放已完成写入，但本地模型复用旧call ID被拒绝，恢复任务完成未验。活动托盘点击、其他失败分支及完整平台认证仍未验。
 上述生成精度问题仍未完成。W259确认原W250压缩摘要及保留回执含cursor25、后续完成提议仍为0，实际历史HTTP/SSE缺证；发布稳定性/旧完整矩阵另列未认证。没有新的产品反例或根因变更，不追加付费循环；不展开专属全队列或假称共享全阶段完成。
 
 2026-10-02 W252方案纠偏：实施计划已删除残留B→C→A/N3活动门槛，按30分钟定位时间盒和
@@ -4082,3 +4082,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 
 - Case/子断言：WIN-012、PROC-020，复用未变生产nomi-process-runtime库，仓库外单独编译探针、自有实际子进程双pipe；只读GetACP=936，不更改OS/控制台设置。stdout真实ACP中文5bytes、stderr UTF-8含emoji16bytes逐字节读取，按实际顺序进入生产OutputBuffer；两stream raw/text完全匹配、总游标21/mixed、8byte环精确丢13bytes，空当前游标/eviction仍保存lifetime metadata，child exit0并消失。
 - 无产品源码修复。decode_errors=1表示首次严格UTF-8失败后选择有效ACP的既有诊断，文本未丢失；探针初始误假设计数0的失败保留，按既有计数语义核对，未放宽任何字节/文本断言。首编译误调用supervisor-private finalize亦保留，后仅用导出API及完整字符/EOF。不是完整Supervisor/renderer验收或全部代码页；证据外部2026-10-03/windows/w263-native-encoding，Git仅本条短进度。
+
+### W264 活动回合与清理失败的正式原生退出（2026-10-03；限定N1）
+
+- 子断言：Desktop退出协调器的活动Turn/失败码、失败后冷恢复安全；不计完整WIN-016、活动托盘点击或全失败矩阵。当前源52bdf3ee8正式custom-protocol构建和既有conversation_gui_fixture构建均成功，binary SHA前缀2ED7321143A3，frontend_build_id=4839fca4-409b-4553-a8bf-c89651730f21。正式初始化两个新data/work、三个新profile；真实Tauri输入与已有process.exit API均自主操作，没有新增退出入口。
+- 正常活动退出12/12：本地模型第二SSE保持、Turn running、唯一write_file returned，实物73bytes。PID2220请求code0后自然exit0，同Turn仅一次cancelled、65条原event逐项保持，最终71条；原文件精确字节/hash不变、调用仍2、stream释放，后代/监听全部消失。
+- 真实失败退出10/10：新PID50812同样唯一写入后，外部SQLite BEGIN IMMEDIATE保持title=title的可回滚写锁。请求code0，日志明确清理失败/保留authority/有界重试耗尽，113.812秒后实际exit1；锁一直保持到终态后才rollback。原65events/returned回执/73bytes保持、调用仍2、stream释放；数据库仍running，如实保留未证清理，不改成功。退出瞬间2个WebView残余后自然消失，最终后代/监听0。
+- 同数据冷启动安全9/9：释放锁后新PID50304按既有策略恢复原Turn，未新增用户输入/Turn、未重放write effect，原65events/文件保持。第三个本地模型响应复用旧tool-call identity被正确拒绝，同Turn failed、最终90events；UI显示上游错误/retry，未点击retry，恢复完成不计PASS。随后原生API自然exit0，90events/文件保持、后代/监听最终0，fixture正常shutdown/exit0。
+- 无产品源码修复、付费/StepFun请求0，复用已验正常空闲托盘Quit与退出码组件规则。外部2026-10-03/windows/w264-active-native-quit保存构建身份、三个UI/实际退出、原/冷DB、日志与31项限定断言；首次观察器误读整个work中活跃锁文件的PermissionError保留，后仅核对指定文件，不声称整个work字节不变。78份文本凭据审计0命中；全部自有GUI/fixture/锁/监听、Cargo已结束。复杂交付、W250/W249/W240/引用采用及其余平台/发布缺口仍开放，全面目标active。
