@@ -4705,11 +4705,12 @@ mod tests {
             }
         }
         let bad="<tool_call>\n<exec_command>\n<args><cmd>DO_NOT_PUBLISH_OR_EXECUTE</cmd></args>";
-        for invalid_kind in ["xml","json","native"] {
+        for invalid_kind in ["xml","json","wrapped_json","native"] {
         for invalid_twice in [false,true] {
             let invalid_step = || match invalid_kind {
                 "native" => control_step("not-admitted","exec_command",json!({"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"})),
                 "json" => text_step(r#"{"call_id":"not-admitted","name":"exec_command","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}"#),
+                "wrapped_json" => text_step(r#"{"tool_call":{"call_id":"not-admitted","name":"exec_command","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}}"#),
                 _ => text_step(bad),
             };
             let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![

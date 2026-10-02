@@ -3237,3 +3237,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 命令减权GEN原C任务12请求/一压缩，准备公开一次/纠正/真实回读/后续poll/live Stop/冷读为本机N1，一次replan拒绝保留。冷进程0/85.13秒，但清理四轮未验证；实样本主线程CEF shutdown、worker钥匙串解密RPC，native等待61.851秒。不改保护，不代判完整C/默认GEN/N3或Windows。
 - 锁定Wry2.11.2 RequestExit传code给回调后只设置ControlFlow::Exit，App::run在Tao直接exit0，既有协调器失败码没有到达进程。现run_return后显式采用协调器终态；未验证/未获允许保持非零，正常0/原非零/fatal和Tauri restart所有权保持。两最小回归＋原邻近共12项不同检查、正式Tauri通过；无CEF调用/清理判定/预算/权限改变。
 - 修后同数据零模型正式冷读正常0/32.51秒且清理无失败、原四表/六文件全同；本次未重触发失败分支，真实失败码路径和CEF卡顿仍须分开，未宣称全部根因关闭。原native首败及严格红保留于外部2026-10-02/macos/mac-gen-continuous；Windows native与真实restart未验、Windows结果未改。
+
+### W250 包装工具提议误入压缩摘要，集中主线收尾（2026-10-02）
+
+- 正式GEN原完整B复验最后交付缺口：真实SHA patch/复制移动/精确删除/18-byte末LF终版及最后read各一次，原件保持；没有stdin写入却close，真实EOF0 bytes，hold重复cursor0，未报告。20步/11压缩、原20/28及三模型拒绝/一截断/两摘要拒绝保持。观察组织越240秒限14.275秒后正式Stop为cancelled，父子原cancel159ms/69样本、host cleanup/后续零派发及真实取消UI成立；完整B仍FAIL。
+- 确定摘要缺口：三次接受仅含tool_call的JSON包装提议，原校验仅识别直接调用对象。只补该形态到已有CompactionInvalidSummary/一纠正路径；首红保留，普通历史/文档数据、原输入/context、无工具摘要及冻结预算不改。两个既有回归加强，8项不同定向及fmt/diff通过，不追加付费循环；未证明它是漏stdin原因或新修复已被真实模型采用。
+- 主线剩余集中为摘要修后正式验证、A结果/引用语言、B输入/游标/交付、C末LF及必要N3/入口，复用已验子链，不扩业务/旧矩阵。Windows完整场景0/3，共享未达；来源保护本次遵循不抹W240首败。外部2026-10-02/windows/w250-mainline-b-final存完整证据，Git只保留必要源码/已有回归/短进度。
+- 正常同步a3a0bf001；共享退出码修复的两项回归在Windows通过，合计10项不同定向检查，未跑全仓测试。正式Windows退出和摘要新修复的live效果保持待验；旧正式构建及macOS证据不移植为本机PASS。

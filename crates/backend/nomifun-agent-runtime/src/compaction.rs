@@ -132,10 +132,14 @@ fn tool_shaped_summary(text: &str) -> bool {
     if lower.starts_with("<tool_call>") || lower.starts_with("<function=") {
         return true;
     }
-    serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value|
-        value.is_object() && value.get("name").is_some_and(serde_json::Value::is_string)
-            && value.get("arguments").is_some_and(serde_json::Value::is_object)
-            && value.get("call_id").is_some_and(serde_json::Value::is_string))
+    serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value| {
+        let is_call = |candidate: &serde_json::Value| candidate.is_object()
+            && candidate.get("name").is_some_and(serde_json::Value::is_string)
+            && candidate.get("arguments").is_some_and(serde_json::Value::is_object)
+            && candidate.get("call_id").is_some_and(serde_json::Value::is_string);
+        is_call(&value) || value.as_object().is_some_and(|object|
+            object.len() == 1 && object.get("tool_call").is_some_and(is_call))
+    })
 }
 
 pub async fn run_compaction(
@@ -447,12 +451,16 @@ mod tests {
             "<tool_call><function=write_file><parameter=content>private payload",
             "<function=exec_command>",
             r#"{"call_id":"made-up","name":"exec_command","arguments":{"cmd":"unexpected"}}"#,
+            r#"{"tool_call":{"call_id":"chatcmpl-tool-xxxx-step2","name":"write_file","arguments":{"path":"临时 空格/新建.txt","content":"alpha\n值=2\nomega\n","source_sha256":"fab9c24aa5c6d8b8601695086b35cc6e1d6baad5b569d11d21cd5f660b10a404"}}}"#,
+            r#"{"tool_call":{"call_id":"made-up","name":"cancel_process","arguments":{"process_id":"unverified"}}}"#,
         ] {
             assert!(summary(text).is_err(),"a bare invocation is not a continuation summary");
         }
         for text in ["The original command exited with code 1. No more work was executed.",
             "The user is documenting the <tool_call> marker; no invocation was made.",
             "Example preserved as data:\n```xml\n<tool_call><exec_command>example</exec_command></tool_call>\n```",
+            r#"{"tool_call":"This is the name of a documented field"}"#,
+            r#"{"completed":[{"tool_call":{"call_id":"observed","name":"read_file","arguments":{"path":"reference.txt"}}}],"pending":["write answer"]}"#,
             r#"{"goal":"Explain JSON","completed":["read reference"],"pending":["write answer"]}"#] {
             assert!(summary(text).is_ok(),"legitimate summary data remains valid");
         }
