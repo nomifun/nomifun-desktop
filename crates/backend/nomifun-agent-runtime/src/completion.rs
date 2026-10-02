@@ -399,6 +399,12 @@ impl CompletionTracker {
         let refs = self.delivery_results().into_keys().collect::<Vec<_>>();
         tool.input_schema.0["properties"]["summary"]["description"] = serde_json::json!(
             "Brief public outcome in the user's language. Exact selected results are published separately by the host; do not duplicate them in this summary. Disclose deviations and missing work plainly. There is no later reply. Delivery references do not grant evidence freshness or extra authority.");
+        let fields=&mut tool.input_schema.0["properties"]["criteria"]["items"]["properties"];
+        for (name,description) in [
+            ("disposition","supported requires matching current evidence; unverified describes earlier observations without current-state proof; blocked means required work/effects remain; scope_changed requires an exact later user citation. All requested earlier values still belong in selected delivery results, not vague labels."),
+            ("evidence_call_ids","Actual JSON array, at most eight exact top-level available_evidence IDs. Never substitute newest/unrelated/nested IDs. Missing current eligibility uses unverified with no ID; historical recovery or delivery never restores freshness and never authorizes rerunning work."),
+            ("evidence_paths","Actual JSON array of listed eligible non-null workspace paths. Old writes/deletions/artifact source paths are not current content proof. No verification or re-read is authorized by this field."),
+        ] {fields[name]["description"]=serde_json::json!(description);}
         let result_schema = if refs.is_empty() {
             serde_json::json!({"type":"array","maxItems":0})
         } else {
@@ -1307,12 +1313,21 @@ mod tests {
         assert_eq!(catalog["final-copy"]["file_exists"],false);
         let mut definition=tracker.definition_with_evidence(&AgentPlan::default(),&AgentWorkStatus {workspace_observation_epoch:8,..Default::default()},false);
         let old_summary=definition.input_schema.0["properties"]["summary"].clone();
+        let old_criteria=definition.input_schema.0["properties"]["criteria"].clone();
         tracker.add_delivery_schema(&mut definition,&inputs);
         assert_eq!(definition.input_schema.0["properties"]["delivery_items"]["minItems"],5);
         assert_eq!(definition.input_schema.0["properties"]["delivery_items"]["items"]["properties"]["results"]["items"]["properties"]["result_ref"]["enum"].as_array().unwrap().len(),13);
         let mut new_summary=definition.input_schema.0["properties"]["summary"].clone();
         let mut old_assertions=old_summary;old_assertions.as_object_mut().unwrap().remove("description");
         new_summary.as_object_mut().unwrap().remove("description");assert_eq!(new_summary,old_assertions);
+        let mut projected=definition.input_schema.0["properties"]["criteria"].clone();
+        let mut original=old_criteria;
+        for value in [&mut projected,&mut original] {
+            for field in ["disposition","evidence_call_ids","evidence_paths"] {
+                value["items"]["properties"][field].as_object_mut().unwrap().remove("description");
+            }
+        }
+        assert_eq!(projected,original,"only duplicate presentation prose changes, never criterion assertions");
     }
 
     #[test]

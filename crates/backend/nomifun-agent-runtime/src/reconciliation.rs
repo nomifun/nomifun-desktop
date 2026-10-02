@@ -141,6 +141,7 @@ pub fn reconcile_execution_tail(
     }
     let discard_last = !keep_batch;
     next.plan.needs_replan = true;
+    crate::exact_actions::close_receivers(&mut next.plan.exact_actions);
     if next.plan.exact_actions!=checkpoint.plan.exact_actions {
         observations.push(AgentEngineEvent::PlanUpdated {plan:next.plan.clone()});
     }

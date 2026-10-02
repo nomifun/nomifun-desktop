@@ -15,6 +15,13 @@ pub struct AgentExactAction {
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub stdin_sha256: Option<String>,
     #[serde(default, skip_serializing_if="Option::is_none")]
+    pub receiver_ref: Option<String>,
+    /// Host-owned binding; a digest is not a recoverable live handle.
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub receiver_digest: Option<String>,
+    #[serde(default,skip_serializing_if="std::ops::Not::not")]
+    pub receiver_closed: bool,
+    #[serde(default, skip_serializing_if="Option::is_none")]
     pub attempted_call_id: Option<String>,
     #[serde(default)]
     pub settled: bool,
@@ -29,15 +36,19 @@ pub(crate) struct ExactActionInput {
     pub source: crate::AgentInputCitation,
     pub tool: String,
     pub expected_arguments: serde_json::Value,
+    #[serde(default)]
+    pub receiver_ref: Option<String>,
 }
 
 pub(crate) fn schema() -> serde_json::Value {
-    serde_json::json!({"type":"array","maxItems":24,"description":"Optional ordered, exact action commitments. For explicit exact file/stdin tasks, declare separate create/intermediate/modify/interaction actions before effects. At most 24. Source quotes locate user wording, not proof of interpretation. Matching calls execute once; successful owner receipts advance order. Other mutations cannot bypass a pending commitment. Status-only updates omit exact_actions; commitments cannot be rewritten or dropped. No env or credentials; stdin target comes only from the fresh owned start/poll receipt and is retained as a digest, not live recovery authority. Parameters use the frozen tool's native form. stdin compares UTF-8 input plus append_newline, not JSON spelling.",
+    serde_json::json!({"type":"array","maxItems":24,"description":"Ordered exact commitments, not intent proof or authority. Declare byte-sensitive phases before effects. Use receiver_ref for stdin referencing a prior start_process ID, so start+stdin can be committed before the process lifetime begins. The host binds only its real running receipt. No env, credentials or fabricated handles. Status-only updates omit exact_actions; once/outcome state cannot reset. stdin compares actual UTF-8 input plus append_newline; no normalization. Cleanup/poll remain ordinary owner controls, not exact_actions.",
         "items":{"type":"object","additionalProperties":false,"required":["id","source","tool","expected_arguments"],
             "properties":{"id":{"type":"string","minLength":1,"maxLength":64},"source":crate::requirements::citation_schema(),
-                "tool":{"type":"string","minLength":1,"maxLength":128},
+                "tool":{"type":"string","minLength":1,"maxLength":128,
+                    "enum":["write_file","apply_patch","exec_command","start_process","read_file","delete_path","write_process_stdin"]},
+                "receiver_ref":{"type":"string","minLength":1,"maxLength":64,"description":"stdin only: ID of an earlier start_process exact action. Declare start+stdin before launching; the host binds only its real running receipt. Mutually exclusive with expected_arguments.process_id. No placeholder handle or new authority."},
                 "expected_arguments":{"type":"object","minProperties":1,"maxProperties":8,
-                    "description":"Exact fields only: path/content for write_file, files for apply_patch, command/args/cmd/tty/wait_ms/timeout_ms for launches, path/format/missing_ok for reads, or process_id/input/append_newline for stdin. No env. stdin process_id is required from the actual owned start/poll receipt and retained only as a digest, never a recoverable live handle. Supplied arrays and values must match exactly, including source guards. Declare guard/handle-dependent actions only after the actual source receipt is available."}}}})
+                    "description":"Frozen tool fields: path/content; files; command/args/cmd/tty/wait_ms/timeout_ms/cwd; path/format/missing_ok/expected_sha256; stdin input/append_newline plus either current process_id or receiver_ref. No env. receiver_ref omits process_id until the actual native call. Supplied values/arrays match exactly, including guards; guard-dependent declarations wait for the real source receipt."}}}})
 }
 
 fn sha(value: &serde_json::Value) -> Result<String,String> {
@@ -69,19 +80,28 @@ impl ExactActionInput {
         let object=self.expected_arguments.as_object().ok_or("Exact arguments must be an object")?;
         if object.is_empty()||object.keys().any(|key|!allowed.contains(&key.as_str())) {return Err("Exact arguments contain unsupported or private fields".into());}
         if self.tool=="write_file" && (!object.contains_key("path")||!object.contains_key("content")) {return Err("Exact file write requires both path and complete content".into());}
-        if self.tool=="write_process_stdin"&&!object.get("process_id").and_then(serde_json::Value::as_str).is_some_and(|id|!id.is_empty()&&id.len()<=128) {
+        if self.receiver_ref.as_ref().is_some_and(|id|self.tool!="write_process_stdin"||id.is_empty()||id.len()>64||object.contains_key("process_id")) {
+            return Err("receiver_ref is stdin-only and exclusive with an explicit process_id".into());
+        }
+        if self.tool=="write_process_stdin"&&self.receiver_ref.is_none()&&!object.get("process_id").and_then(serde_json::Value::as_str).is_some_and(|id|!id.is_empty()&&id.len()<=128) {
             return Err("Exact stdin needs the actual current owned process_id; declare it only after the start/poll receipt, not a made-up or cold-recovered handle".into());
         }
         let stdin_sha256=if self.tool=="write_process_stdin" {Some(digest_bytes(&stdin_bytes(&self.expected_arguments)?).as_ref().to_owned())} else {None};
         let fields=object.iter().filter(|(key,_)|self.tool!="write_process_stdin"||!matches!(key.as_str(),"input"|"append_newline"))
             .map(|(key,value)|Ok((key.clone(),sha(value)?))).collect::<Result<_,String>>()?;
-        Ok(AgentExactAction {id:self.id,source:self.source,tool:self.tool,fields,stdin_sha256,attempted_call_id:None,settled:false,succeeded:false})
+        Ok(AgentExactAction {id:self.id,source:self.source,tool:self.tool,fields,stdin_sha256,receiver_ref:self.receiver_ref,
+            receiver_digest:None,receiver_closed:false,attempted_call_id:None,settled:false,succeeded:false})
     }
 }
 
 impl AgentExactAction {
     pub(crate) fn matches(&self,call:&ChatToolCall)->bool {
+        !self.receiver_closed&&self.matches_observation(call)
+    }
+    pub(crate) fn matches_observation(&self,call:&ChatToolCall)->bool {
         self.tool==call.name && self.fields.iter().all(|(key,digest)|call.arguments.0.get(key).is_some_and(|value|sha(value).ok().as_ref()==Some(digest)))
+            && (self.receiver_ref.is_none() || self.receiver_digest.as_ref().is_some_and(|digest|
+                call.arguments.0.get("process_id").is_some_and(|value|sha(value).ok().as_ref()==Some(digest))))
             && self.stdin_sha256.as_ref().is_none_or(|digest|stdin_bytes(&call.arguments.0).ok()
                 .is_some_and(|bytes|digest_bytes(&bytes).as_ref()==digest))
     }
@@ -89,6 +109,26 @@ impl AgentExactAction {
 
 pub(crate) fn pending(actions:&[AgentExactAction])->Option<&AgentExactAction> {
     actions.iter().find(|action|!action.succeeded)
+}
+
+pub(crate) fn validate_receivers(actions:&[AgentExactAction])->Result<(),String> {
+    for (index,action) in actions.iter().enumerate() {
+        if let Some(id)=&action.receiver_ref {
+            if action.tool!="write_process_stdin"||action.fields.contains_key("process_id")
+                || !actions[..index].iter().any(|start|start.id==*id&&start.tool=="start_process") {
+                return Err("receiver_ref must name an earlier start_process commitment in this same plan".into());
+            }
+        } else if action.receiver_digest.is_some() {return Err("receiver binding requires its source start action".into());}
+    }
+    Ok(())
+}
+
+pub(crate) fn process_digest(value:&serde_json::Value)->Option<String> {
+    value.as_str().filter(|id|!id.is_empty()&&id.len()<=128).and_then(|_|sha(value).ok())
+}
+
+pub(crate) fn close_receivers(actions:&mut [AgentExactAction]) {
+    for action in actions.iter_mut().filter(|action|action.receiver_ref.is_some()&&!action.succeeded) {action.receiver_closed=true;}
 }
 
 pub(crate) fn proven_nonstart(call:&ChatToolCall,result:&crate::AgentToolResult)->bool {
@@ -135,7 +175,7 @@ mod tests {
     fn action(tool:&str,mut args:serde_json::Value)->AgentExactAction {
         if tool=="write_process_stdin" {args["process_id"]=serde_json::json!("owned");}
         ExactActionInput {id:"one".into(),source:crate::AgentInputCitation {input:0,quote:"Exact requested bytes".into()},
-            tool:tool.into(),expected_arguments:args}.compile(&[crate::context_lifecycle::text_message(ChatRole::User,"Exact requested bytes".into())]).unwrap()
+            tool:tool.into(),expected_arguments:args,receiver_ref:None}.compile(&[crate::context_lifecycle::text_message(ChatRole::User,"Exact requested bytes".into())]).unwrap()
     }
     fn call(name:&str,args:serde_json::Value)->ChatToolCall {ChatToolCall {call_id:"proposed".into(),name:name.into(),arguments:StrictJsonValue(args),provider_metadata:None}}
     #[test]

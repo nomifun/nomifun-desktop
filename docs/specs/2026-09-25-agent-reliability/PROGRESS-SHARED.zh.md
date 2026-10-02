@@ -3416,3 +3416,14 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 后续聚焦声明时机和真实顺序/交付；不延长预算/寿命或以模型契约作语义证明。此版改变
   共享控制schema，Windows未正式采用，旧平台结果保持。证据外部2026-10-03/macos/
   b09-exact-actions；真实Keychain与公开元数据呈现风险仍开放。
+
+### macOS B09 receiver 预声明与声明反馈（2026-10-03）
+
+- receiver_ref引用前序start exact动作，在真实running owner回执后绑定目标digest；stdin
+  原参数/字节/TTL不变，未知/已结束/cold不能造live receiver，同ID重声明不复位host状态。
+  仅digest checkpoint、当前项投影，编号报告说明去重的结构断言严格相同。
+- 原B formal仍FAIL：9请求/116events/0effects，错误patch声明连续拒绝，未进入receiver实际
+  采用。正常UI/Cmd-Q0/102.47秒及冷五表成立，不以零效果关闭字节/步骤/交付缺口。
+- 补schema支持tool枚举和精确声明参数定位/脱敏反馈；同源成功stdin不可换ref新ID重入。
+  Runtime279及直接负例通过，最后反馈/别名保护未新live。外部2026-10-03/macos/
+  b09-receiver-ref保留首败；共享新控制字段Windows未代验，Keychain/公开表达仍开放。
