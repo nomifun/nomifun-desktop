@@ -121,9 +121,15 @@ impl ToolArgumentValidators {
                     payload["ineligible_evidence_criteria"] = json!(affected);
                     payload["ineligible_evidence_criterion_numbers"] = json!(affected.iter().map(|index| index + 1).collect::<Vec<_>>());
                     payload["ineligible_evidence_criterion_paths"] = json!(affected.iter().map(|index| format!("/criteria/{index}")).collect::<Vec<_>>());
-                    payload["evidence_repair_notice"] = json!("Repair only the exact JSON locations in ineligible_evidence_criterion_paths. ineligible_evidence_criterion_numbers counts items from ONE; ineligible_evidence_criteria counts array indexes from ZERO. Keep already eligible criteria unchanged. Cite another ID only when its own scope supports the claim. Otherwise deliver earlier results in summary, use unverified and omit evidence fields. Do not infer unexecuted work, invent results or repeat operations. Write the rationale in the SAME LANGUAGE as report.summary and explain the actual uncertainty; do not copy the example's English rationale verbatim.");
+                    let numbered_delivery=definition.input_schema.0["properties"]["delivery_items"].is_object();
+                    payload["evidence_repair_notice"] = json!(if numbered_delivery {
+                        "Repair ONLY criteria.evidence_call_ids/evidence_paths at ineligible_evidence_criterion_paths; item numbers are ONE-based, indexes ZERO-based. Keep eligible criteria unchanged. Use unverified and omit those CRITERION evidence fields when matching current evidence is absent. This does NOT invalidate delivery_items.results: its result_ref enum independently includes recorded historical data. Preserve every still-advertised delivery result, including compound items' sub-results; never delete it or mark it missing merely because its current evidence ID is ineligible. Selected exact values are published by the host, not duplicated in summary. Missing execution is different from stale verification; do not claim unperformed work or repeat settled operations. Write public labels, explanations and rationales in the SAME LANGUAGE as report.summary without internal eligibility terminology."
+                    } else {
+                        "Repair only the exact JSON locations in ineligible_evidence_criterion_paths. ineligible_evidence_criterion_numbers counts items from ONE; ineligible_evidence_criteria counts array indexes from ZERO. Keep already eligible criteria unchanged. Cite another ID only when its own scope supports the claim. Otherwise deliver earlier results in summary, use unverified and omit evidence fields. Do not infer unexecuted work, invent results or repeat operations. Write the rationale in the SAME LANGUAGE as report.summary and explain the actual uncertainty; do not copy the example's English rationale verbatim."
+                    });
+                    let chinese=call.arguments.0["summary"].as_str().is_some_and(|text|text.chars().any(|c|matches!(c as u32,0x3400..=0x9fff)));
                     payload["unverified_criterion_example"] = json!({"disposition":"unverified",
-                        "rationale":"Earlier actual results are reported in the summary; later state was not rechecked."});
+                        "rationale":if chinese {"当前状态未复核；已经取得的结果另行列出。"} else {"Current state was not rechecked; recorded results are reported separately."}});
                 }
             }
             let result = AgentToolResult::text(call.call_id.clone(), payload.to_string(), true);
@@ -327,6 +333,32 @@ mod tests {
         for index in [1,2,3] {corrected.arguments.0["criteria"][index]=template.clone();}
         definition.input_schema.0["properties"]["observed_tool_error_count"]["const"]=json!(2);
         assert!(validators.reject_invalid_batch(&[corrected],&AgentToolPlan::default(),&[definition]).unwrap().is_none());
+    }
+
+    #[test]
+    fn numbered_evidence_repair_preserves_independent_historical_delivery() {
+        let mut definition=crate::completion::definition();
+        definition.input_schema.0["properties"]["criteria"]["items"]["properties"]["evidence_call_ids"]["items"]["enum"]=json!(["current"]);
+        definition.input_schema.0["properties"]["delivery_items"]=json!({"type":"array","items":{"type":"object",
+            "properties":{"results":{"type":"array","items":{"type":"object","properties":{
+                "result_ref":{"type":"string","enum":["historic-head","historic-git"]}}}}}}});
+        let mut report=call("report",json!({"summary":"历史实值仍要完整交付。","criteria":[{
+            "disposition":"supported","evidence_call_ids":["historic-git"],"rationale":"PRIVATE_INTERPRETATION"}],
+            "delivery_items":[{"results":[{"result_ref":"historic-head"},{"result_ref":"historic-git"}]}]}));
+        report.name=crate::completion::TOOL_NAME.into();
+        let original=report.arguments.clone();
+        let mut validators=ToolArgumentValidators::default();
+        let rejected=validators.reject_invalid_batch(std::slice::from_ref(&report),&AgentToolPlan::default(),std::slice::from_ref(&definition)).unwrap().unwrap();
+        let feedback:Value=serde_json::from_str(&rejected[0].1.as_ref().unwrap().output_text()).unwrap();
+        let notice=feedback["evidence_repair_notice"].as_str().unwrap();
+        assert!(notice.contains("ONLY criteria.evidence_call_ids/evidence_paths") && notice.contains("does NOT invalidate delivery_items.results"));
+        assert!(notice.contains("never delete it or mark it missing") && !notice.contains("deliver earlier results in summary"));
+        assert!(feedback["unverified_criterion_example"]["rationale"].as_str().unwrap().contains("已经取得的结果"));
+        assert!(!feedback.to_string().contains("PRIVATE_INTERPRETATION"));
+        assert_eq!(report.arguments,original,"only the model can repair arguments; the host preserves data");
+        report.arguments.0["criteria"][0]=feedback["unverified_criterion_example"].clone();
+        assert!(validators.reject_invalid_batch(std::slice::from_ref(&report),&AgentToolPlan::default(),std::slice::from_ref(&definition)).unwrap().is_none());
+        assert_eq!(report.arguments.0["delivery_items"],original.0["delivery_items"]);
     }
 
     #[test]
