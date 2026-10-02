@@ -4090,3 +4090,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 真实失败退出10/10：新PID50812同样唯一写入后，外部SQLite BEGIN IMMEDIATE保持title=title的可回滚写锁。请求code0，日志明确清理失败/保留authority/有界重试耗尽，113.812秒后实际exit1；锁一直保持到终态后才rollback。原65events/returned回执/73bytes保持、调用仍2、stream释放；数据库仍running，如实保留未证清理，不改成功。退出瞬间2个WebView残余后自然消失，最终后代/监听0。
 - 同数据冷启动安全9/9：释放锁后新PID50304按既有策略恢复原Turn，未新增用户输入/Turn、未重放write effect，原65events/文件保持。第三个本地模型响应复用旧tool-call identity被正确拒绝，同Turn failed、最终90events；UI显示上游错误/retry，未点击retry，恢复完成不计PASS。随后原生API自然exit0，90events/文件保持、后代/监听最终0，fixture正常shutdown/exit0。
 - 无产品源码修复、付费/StepFun请求0，复用已验正常空闲托盘Quit与退出码组件规则。外部2026-10-03/windows/w264-active-native-quit保存构建身份、三个UI/实际退出、原/冷DB、日志与31项限定断言；首次观察器误读整个work中活跃锁文件的PermissionError保留，后仅核对指定文件，不声称整个work字节不变。78份文本凭据审计0命中；全部自有GUI/fixture/锁/监听、Cargo已结束。复杂交付、W250/W249/W240/引用采用及其余平台/发布缺口仍开放，全面目标active。
+
+### W265 固定说明去重的Windows正式采用（2026-10-03；五项最终交付未达）
+
+- 子断言：88ab60155固定工作区说明去重采用与复杂交付，原五项只读提示/文件/测试全部保留，仅一次正式COD/StepFun Coding Plan、step-3.7-flash。源1d3712209当前前端构建成功；首个正式Cargo在nomifun-db rustc中STATUS_ILLEGAL_INSTRUCTION/exit101、无源码诊断，首错保留，同源同命令重编及初始化helper均exit0。binary SHA前缀B24066F375C5、前端e247ffd0-e4df-4804-98ec-d4e5453b9fad，与实际Tauri页面1280×832/嵌入manifest一致。
+- 新data/work正式bootstrap、0本地模型、正常shutdown后仅内存重加密导入既有选定连接；新项目/profile、书签夹具后实际UI选择/输入/发送均自主操作。真实首请求的root说明仅一处instructions、tool description重复0，未更改schema/工具权限或产品硬预算。W264同源合并后的Runtime281/native_pause13/desktop-ui-boundary直接复用。
+- 独立核对16/16：实际cwd及完整9条/真实Hidden、完整43bytes/原SHA、两个限定搜索、Git status/diff、指定Bun两测试按序各一次exit0/1，四个command均reaped；无重复观察，所有非Git文件/HEAD/status/diff与原始index字节保持。10组原生完成参数与canonical相同，其中9个实际owner派发、1个本地update_plan。6模型步/4次压缩；没有report_completion或最终五项交付，不把实际操作/去重/安全检查计整任务PASS。
+- 正式首败：12真实HTTP200，11完整SSE；第11摘要请求max_tokens4096、提示204 UTF-8 bytes，供应商实际finish_reason=length、completion_tokens4096、15309bytes reasoning_content且正文0。产品对同源只做一次更短纠正，第12未完成的SSE在Stop后中断；无录制器cap429，不归因旧W250/W249缺失wire，也不同于W262合规摘要无法装入的原根因。自动观察器120秒到限，正式Stop前观测120.214秒（0.214秒界面/截图延迟，如实记录，不计严格限内完成），同Turn cancelled、无重新派发/实例重启。
+- 推理配置核对：摘要clone沿用原路由，真实wire无reasoning_effort，原能力traits=[]。官方[Step 3.7说明](https://platform.stepfun.com/docs/zh/guides/models/step-3.7-flash)把low列为摘要用途，但尚未证明修改该冻结配置能修复本次失败；不盲加none/enable_thinking、扩大输出限或再付费循环。产品唯一根因/复杂最终交付继续开放，未新增源码修复。
+- PID46748任务终态后已有原生API自然exit0，退出瞬间2个WebView随后自然消失、最终后代/监听0，原记录不变；这是API退出，未计新托盘点击。forwarder按路径与启动UTC ticks核对后清理；首个ISO字符串与PowerShell自动DateTime比较误拒清理保留，实际身份未变。93份文本凭据审计0命中，bootstrap/watchdog/GUI/forwarder/自有Cargo全部结束。外部2026-10-03/windows/w265-context-delivery-adoption保存首编译/实际身份、新wire/原参数/DB/UI/summary-wire-analysis/review；全面目标active，原失败和平台/发布缺口保持。
