@@ -8,7 +8,7 @@
 
 | 场景 | 入口与候选证据 | 当前状态 |
 | --- | --- | --- |
-| A 观察、只读、小测试 | W217 GEN执行链；W225 COD操作13/13且未重做，但报告错引/漏交付 | 操作已有GEN/COD单次证据；完整结果与引用交付、首发N3未达 |
+| A 观察、只读、小测试 | W225 COD操作13/13；W232 cwd/list重复并因压缩预算failed；W233有界摘要纠正组件已修 | 实际重做、完整结果与引用交付、修后预算/N3仍待验 |
 | B 文件、进程、停止 | W209文件链三例各31/31；W194输入/EOF；W196 Stop5秒N1；W227干净timeout/W229 READY引用N1；W230分类冷读12/12 | 文件链N3已验；进程首发N3/COD、公开语言/等待播报及完整B衔接仍缺 |
 | C 连续、纠正、恢复 | W182取消冷读；W223六压缩保留原输入/回执且无重做，组件修复与反例已有 | 压缩局部实证不能代替完整C；追加纠正→压缩→取消→重启链待补 |
 
@@ -3762,3 +3762,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原三次成功压缩before82,174/81,123/81,702→after79,234/78,280/80,743，保留1/1/2调用。不能以W231组件PASS或缓存存在代判模型效果；报告具体值/引用仍缺。下一步按实际mandatory前缀余量核对summary上限，冻结token/byte/输出及accepted input不变。
 - 未覆盖：修后压缩预算、W231真实输出采用、禁止重做/完整A首发与N3、B/C及共享门槛。本批无新源码/重复测试；拟Stop前已failed，历史不记cancelled。
 - 证据：仓库外2026-10-02/windows/w232-comprehensive-a-output，01构建、02-first-replay原DB/事件/调用/11-15 audit/compaction尺寸/人工复核、03失败UI；无模型请求完整投影夹具，不声称已核对observed_output全部实际发送内容，Git仅短进度。
+
+### W233 合法摘要仍超替换余量的有界纠正（2026-10-02；基线5203270e3，正式待验）
+
+- Case/子断言：C06/C07/C08、compaction输入边界及A08/A09/A15/A17/A19；沿W232实际79-token超限，先补最小确定性反例，无新付费循环。
+- 首红：4,000-byte摘要本身小于原8KiB硬限，但62,000-byte固定前缀加accepted input后整体66,571超过65,536，原prepare直接失败；01保存。新校验按完整replacement的实际序列化byte、token estimate/message及必须缩减条件，尚未适配的draft不会先写入replacement。
+- 修复：记录原operation的REPLACEMENT_CONTEXT_BUDGET摘要拒绝，整个prepare仅一次同一完整source的更短、无工具纠正；原protocol/output纠正、分片及调用上限不扩大。第二次仍不能适配则明确失败并保留原context，不剪裁draft、丢accepted input或放宽硬限/actual usage余量。
+- 验证：新三项通过：字节近固定前缀一次恢复、500-token实际额外余量保持、二次失败只有两次请求且原input逐字一致/两条拒绝事件/零ContextCompacted。旧fixed-prefix/usage/硬token/typed恢复/mandatory/协议/输出过长/耗尽八项通过，共11项不同检查；fmt配置/diff通过，首红/修后分日志。
+- 未覆盖：正式Tauri/StepFun采用新纠正、完整输入/原输出保留的模型效果、W232重做及A最终引用/交付、N3/完整B/C/共享门槛。组件恢复不关闭W232首败，本批无新模型/命令/正式构建。
+- 证据：仓库外2026-10-02/windows/w233-summary-fit-recovery，01首红/02修后、token及二次失败原上下文与03事件、八项邻近检查及04/05配置/diff；Git仅两处源码、三项最小回归与短进度。
