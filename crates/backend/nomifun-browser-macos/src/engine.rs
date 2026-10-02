@@ -42,7 +42,7 @@ pub struct Engine {
 
 impl Engine {
     /// Must be called on the main thread after the application implements
-    /// CefAppProtocol, and before the backend advertises a native provider.
+    /// CefAppProtocol, and before the host creates its first native context.
     pub fn initialize(paths: Paths) -> Result<Arc<Self>, String> {
         if objc2::MainThreadMarker::new().is_none() { return Err("CEF initialization requires the main thread".into()); }
         if INITIALIZED.set(()).is_err() { return Err("CEF cannot be initialized twice in one process".into()); }
