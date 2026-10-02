@@ -79,11 +79,38 @@
 | R1 字节/步骤 | 当前正式文件短链N1，精确创建/局部改/回读首次正确；无有据的新执行层改动 | B09原复杂生成失败未改PASS，生成稳定性/N3未认证 |
 | R2 结果交付 | 完整默认GEN未减权配置、三项实际结果正式N1；修复验证入口缺资源选择 | A13复杂漏项、全GEN其他业务/N3仍未关闭 |
 | R3 MM retry/pause | 产品pause链路修复、真实失败消息retry/同key核对/冷读negative N1已交付 | 隔离等价数据，不冒充原Windows历史或全MM/N3；首次观察超时保留FAIL |
-| R4 退出清理 | 未受影响的真实已用CEF证据复用；当前三项退出/未确认清理回归通过 | 系统Keychain等待仍OPEN，修后native失败分支未live触发；不记完整风险PASS |
+| R4 退出清理 | 原真实已用CEF证据复用；后续重开已补正式native确认丢失失败码/不重入N1，见下节 | 系统Keychain等待仍OPEN，真实物理CEF失败/阻塞未修后重现；不记完整风险PASS |
 
 本表是最新快速方案的执行/交付结果，不是所有实际体验问题或原阶段二、三全范围达标。
 本轮实际StepFun请求共9；R3/R4付费0，未扩大权限/关闭保护/放宽断言，完整证据在仓库外。
 后续仅在新根因、受影响源码或明确新风险出现时重开对应簇，不恢复长A/B/C或旧全量矩阵。
+
+### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
+
+- 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
+  macOS26.6.2/25G83 arm64、APFS 非大小写敏感 Data 卷/普通用户。保留原 Keychain/exit0
+  首败；不恢复旧矩阵，不把复杂 A13/B09 的生成残余改为 PASS。
+- 真实风险边界进一步确认：旧样本的 CEF worker 在 `SecItemCopyMatching → SecurityServer`
+  decrypt RPC 等待，`cef_shutdown` 占用应用主线程。后端30秒 timeout 和 `app.exit` 排队
+  **不能取消这次 FFI，也不保证主线程卡住时按期限退出**。本次未安全重现系统等待；没有改
+  Keychain、加密、Sandbox/TCC，未将 shutdown 移出要求的主线程或跳过物理清理。此风险未修。
+- 补可重复的最小 native 验证入口：仅 debug、有效 UUID 与当前隔离数据根标记同时匹配，
+  **实际 `cef_shutdown` 返回后**才丢弃完成确认；保持未确认状态，所有重试禁止再次进入 CEF。
+  release 不包含入口，原正常机制不变。这是确认丢失故障，不伪称物理 CEF 故障或 Keychain 阻塞。
+- 源 `513a8efcd` + 外置 source.patch 的正式 Tauri/adhoc strict 包，两独立 Session 均实际
+  打开 Browser、导航本地页、真实点击；独立 witness trusted/count1/model0，终态截图后 Cmd-Q。
+  正常 PID36232：CEF return51ms、native exit0、Quit后约127ms；确认丢失 PID36834：实际
+  return57ms、原有限重试4次，native **exit1**、Quit后约3.195秒，无虚假清理成功/原生重入。
+  两样本均无 expiry/TERM/KILL，模型调用0；生命周期分别73.69/82.74秒，未增加180+5期限。
+- 3项 native 状态/故障根绑定与2项正式进程退出码回归通过。闭库后五表源/备份逐行全同，
+  integrity ok，Turns/effects0、精确3个 bootstrap lifecycle events，无模型事件；两独立
+  Principal/Session profile 的真实URL仅在绑定History而非全局Default。App/Helper/fixture/
+  listeners全部消失。首地址粘贴拒绝、首次导航未结算、首审SQLite14及错误events0假设分别
+  保留，后续输入/观察/只读审计另记，不重复任务、不覆盖首败或放宽产品断言。
+- 结果：**native 确认丢失 → 不重入 → 未确认退出码1**正式 N1 已补；真实系统 Keychain
+  等待/物理清理失败仍 OPEN，不可由本样本关闭。复杂 A13/B09 尚未在本批复跑或修复；
+  无权限绕过或新的共因，故共享/Windows结果不改。完整证据
+  `2026-10-02/macos/native-cleanup-failure/`，Git仅保留2处最小debug验证源码和本进度。
 
 ### 快速执行 R1：精确文件短链（2026-10-02）
 
