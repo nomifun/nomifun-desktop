@@ -4150,6 +4150,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_summary_beyond_soft_trigger_fits_the_frozen_hard_envelope() {
+        let note = "s".repeat(4000);
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&note), text_step(&note)]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(79_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(600),
+        ));
+        let before = request.input.clone();
+        let mut mandatory = before.clone();
+        mandatory.messages = vec![original.clone()];
+        let mandatory_tokens = crate::media_context::estimate_tokens(
+            &mandatory, serde_json::to_vec(&mandatory).unwrap().len(),
+        );
+        let hard_input_limit = 32768 - 4096 - 512;
+        let soft_trigger = mandatory_tokens + (hard_input_limit - mandatory_tokens) / 2;
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), AgentContextBudget::default(),
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        let after_tokens = crate::media_context::estimate_tokens(&request.input, after);
+        assert!(after_tokens >= soft_trigger && after_tokens < hard_input_limit);
+        assert!(after < serde_json::to_vec(&before).unwrap().len());
+        assert_eq!(request.input.instructions, before.instructions);
+        assert_eq!(request.input.tools, before.tools);
+        assert_eq!(request.input.max_output_tokens, Some(4096));
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "a valid note inside the frozen envelope must not spend a second summary request");
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "Small continuation after accepted compaction.".into(),
+        ));
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "an accepted note beyond the soft trigger must retain headroom for the next small step");
+    }
+
+    #[tokio::test]
     async fn valid_summary_that_cannot_fit_the_fixed_prefix_gets_one_source_preserving_repair() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(4000)), text_step("Earlier checks recorded; finish the accepted task without replay.")]),

@@ -3167,3 +3167,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 一次正式COD A、约2分57秒、11步/8压缩：cwd/list/专用全文及两搜索/Git各取得结果且Git未重复，第一指定测试exit0；自选PowerShell摘要脚本先exit1，修正提议未dispatch。十文件/Git/原事件不变，第二测试/报告未到达。
 - 压缩两次候选后83,681 bytes/27,894估算tokens超过27,854限制40而自行failed，UI确有Nomi内部失败；未Stop/Retry。原audit10/16与交付0/6保留，不代判W237报告反馈/语言采用或完整A。
 - 外部2026-10-02/windows/w243-mainline-a-closeout保存原始首败和终态。下一步直接核对正常压缩的触发阈值与冻结硬接纳上限，供应商margin/权限/原context保持；不继续删说明以追逐几十token，不重跑未改根因。A/B/C共享仍未结案。
+
+### W244 正常摘要误用触发阈值及立即再压缩（2026-10-02，正式预算N1）
+
+- 两首红：27,857-token合法摘要被27,294 soft trigger拒绝，原冻结硬接纳上限28,160未超；修接纳后下一小步又立即摘要。正常replacement现使用原硬上限扣实际usage margin，token floor给后续小步留余量；typed overflow严格cap、输出/字节/消息限、原上下文/回执/一纠正上限不改。
+- 一个最小回归覆盖两故障，compaction19项和7项严格预算/summary邻近，共26项不同定向通过，fmt/diff及正式构建通过。正式COD A约1分33秒、七步/五压缩、summary拒绝0，两个指定测试各一次exit0/1、报告首发接受、精确测试scope和1/1失败计数、UI正常非零成立，预算/测试链为N1。
+- 整体A仍FAIL：Git status/diff各两次，前四项实际值交付省略；原15/16及交付1/6不改，completed不是完整A PASS，N3/GEN不代判。B来源SHA/交付、C重启重读/来源纠正/Stop等仍开放；只处理这些主线直接阻断，不新增矩阵或未改根因的付费循环。
+- 外部2026-10-02/windows/w244-mainline-compaction-envelope保存两首红、26项/构建、正式原参数/DB/事件/独立scope与UI；Git仅预算接纳/余量、一个回归和短进度。共享门槛仍未达。
