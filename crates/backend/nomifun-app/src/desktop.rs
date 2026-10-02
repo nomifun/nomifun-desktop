@@ -1201,13 +1201,13 @@ impl DesktopServer {
             }
         }
 
-        // Stop the robot gateway before the listeners go: its accept loop and the
-        // loopback MCP front are pure in-process tasks with nothing durable to
-        // write, so this is unconditional and cannot fail. Live sessions end with
-        // their own sockets when the listener closes.
+        // The gateway owns session producers too. An abort request alone does
+        // not prove they stopped; pending or failed joins must keep SQLite open.
         if !nomi_core_owned_cleanup {
             if let Some(robot) = &self.robot {
-                robot.shutdown();
+                if let Err(error) = robot.shutdown_and_wait().await {
+                    errors.push(format!("Robot task cleanup failed: {error:#}"));
+                }
             }
         }
 
