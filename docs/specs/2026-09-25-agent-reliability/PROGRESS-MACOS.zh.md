@@ -275,6 +275,29 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 原完整B仍FAIL；A13新源码正式交付、helper预声明采用、Keychain物理等待/清理及自由
   语言质量仍待验证，不把本机回归或旧N1记新完整PASS。Windows结果未改。
 
+#### B09 首次完整效果链与末端包络阻断（2026-10-03）
+
+- clean`e22e329ca`正式Tauri和当前UI重建/签名验证；arm64/macOS26.6.2/25G83、Data APFS
+  非大小写敏感；原task/四seed不变，StepFun次数不设cap，4096输出/360秒请求预算及
+  原helper期限未变。33组native参数逐项等于canonical，46请求/33步骤/1020events/14effects。
+- **本次实际核心链成立**：before33创建→独立patch after32，cp/mv各一次，真实read内容/hash
+  后仅删临时；第一helper实际READY→13B一次input→EOF→完整40B stdout/exit0/reaped；
+  第一退出后第二helper按原参数启动，双READY后cancel正确owner，143ms/reaped/errors[]。
+  独立witness证明父子同PGID同时存活→均消失，heartbeat各43条。最后read终版32B/末LF/
+  SHA6ab0c427…，临时/副本无、四原件全同。8次门前拒绝+2次实际test exit2均保留，不记首发无错。
+- **原完整B仍FAIL**：report0，最后fresh read后的protected prefix连空summary wrapper都
+  装不下，未发送下一个摘要便NOMIFUN_INTERNAL_ERROR；不是凭据/网络/付费次数cap。
+  实际Cmd-Q exit0/332.15秒，无expiry/TERM/KILL；五表1020/1/1/1/14同源/ok、effects全
+  returned，自有App/fixture/helper/listener关闭。未初始化CEF，不以此关闭Keychain物理风险。
+- 直接修复仅去重说明：真实admitted workspace已有完整root/cwd/relative-path规则时，剥
+  重复tool suffix但不再追加336B独立mandatory hint；部分/无context保持原说明，不删除或
+  重索引adaptive slots。schema/原文/证据/预算不变，空wrapper跨界及短摘要可容纳回归通过，
+  Runtime284/284。最后修复未正式复验，不把离线尺寸或核心链成功当完整交付PASS。
+- 首prepare在ready前调用及普通readonly闭库CANTOPEN14保留，后按实际ready和确认无WAL/
+  写者的immutable快照封存；没有重发任务。外部`2026-10-03/macos/b09-postfix-live/`含
+  独立audit、完整HTTP/事件/数据库/UI。A13现格式正式受影响验证、B最终报告、native失败
+  重试live与Keychain物理阻塞仍OPEN；Windows记录未改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
