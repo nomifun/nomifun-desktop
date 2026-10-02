@@ -13,7 +13,9 @@ impl NomiCoreSessionOwner {
             .fetch_all(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
         let mut scheduled = 0;
         for (session, operation) in candidates {
-            if self.runtime_sessions.get_runtime(&session).is_some() { continue; }
+            // UI preparation may keep an idle runtime slot. Only a driver or
+            // relay holding actual turn admission supersedes cold recovery.
+            if self.runtime_sessions.active_turn_generation(&session).is_some() { continue; }
             let owner = Arc::downgrade(self);
             let engines = Arc::downgrade(&engines);
             let task = async move {
@@ -29,7 +31,7 @@ impl NomiCoreSessionOwner {
                         Err(_) => { drop(owner); tokio::time::sleep(Duration::from_secs(5)).await; continue; }
                     };
                     if receipt.status != nomifun_agent_session::TurnReceiptStatus::Running
-                        || owner.runtime_sessions.get_runtime(session.as_ref()).is_some() { return; }
+                        || owner.runtime_sessions.active_turn_generation(session.as_ref()).is_some() { return; }
                     let until = match store.native_execution_deadline(&session, &operation).await {
                         Ok(until) => until,
                         Err(_) => { drop(owner); tokio::time::sleep(Duration::from_secs(5)).await; continue; }
