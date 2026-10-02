@@ -365,6 +365,23 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   不宣称入口曝光就能跨build加载或B报告已恢复。日志仍外置complex-report-closure-fixed，
   公开语言及真实Keychain/物理native风险保持OPEN，Windows结果不代判。
 
+#### B09 历史 loader 正式使用与不透明游标（2026-10-03）
+
+- clean dc686a7dd正式同Session只补报告，精确标明最初原B operation而不重发操作。
+  第一请求已有LOAD，实际LOAD1及SEARCH1，但LOAD把完整operation截为末UUID，端口拒绝；
+  SEARCH又以operation作全文词，归档0/hits0，无READ。后3响应thinking-only length，
+  末completion各4096、reasoning12190/15365/14914B、public/tool0，5请求/5步骤/63新events。
+  **报告仍FAIL/0**；不能把调用LOAD或SEARCH成功当已加载原回执，binding import尚未进入。
+- 旧1020及本轮前1065events全值前缀保持，14effects全值保持，无重放/新effect。中途Mac
+  再锁、首次观察文件EEXIST保持；解锁后真实UI终态/正常Cmd-Q0/454.34秒、noexpiry/signals。
+  五表1128/1/1/3/14同源/ok，原failed不改，App/fixture/relay关闭。A13已通过N1不重跑。
+- LOAD参数现明确opaque/exclusive游标：从latest prior遍历，只复制完整next_before_turn，
+  不截UUID/不作为目标selector；错误返回history_not_loaded/0及omit-to-restart说明。
+  不自动补/归一化cursor、不回显私值/存储错、不扩大scope/binding/预算。Runtime289/289
+  含传给port的原身份及失败archive不变回归；最后未formal，B完整报告仍OPEN。
+- 外证据2026-10-03/macos/history-report-bootstrap保留全部首次失败/HTTP/UI/数据库，
+  不以exit0关闭原任务或Keychain物理风险，不改Windows结果。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

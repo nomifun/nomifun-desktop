@@ -3410,6 +3410,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_cursor_failure_preserves_identity_and_offers_scoped_restart() {
+        #[derive(Debug,Default)] struct Port(std::sync::Mutex<Vec<Option<String>>>);
+        #[async_trait] impl crate::AgentHistoryPort for Port {
+            async fn read_previous(&self,_:&ChatCausality,before:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                self.0.lock().unwrap().push(before.map(str::to_owned));
+                if before.is_some() {return Err(AgentEngineError::ReplayContract("PRIVATE_STORE_DETAIL".into()));}
+                Ok(crate::AgentHistoryPage {turn:None,has_older:false})
+            }
+        }
+        let port=Port::default();let mut archive=crate::tool_archive::ToolArchive::new("scoped-test".into());
+        let before=archive.context();let mut call=ChatToolCall {call_id:"bad-cursor".into(),name:crate::tool_archive::LOAD.into(),
+            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"before_turn":"PRIVATE_SUFFIX_ONLY"})),provider_metadata:None};
+        let result=archive.load(&call,&port,&request().causality,&binding(),&CancellationToken::new()).await.unwrap();
+        assert!(result.is_error);let text=result.output_text();
+        let value:serde_json::Value=serde_json::from_str(&text).unwrap();
+        assert_eq!(value["status"],"history_not_loaded");assert_eq!(value["records_loaded"],0);
+        assert!(text.contains("Omit before_turn") && text.contains("copy the entire returned next_before_turn verbatim"));
+        assert!(!text.contains("PRIVATE_SUFFIX_ONLY") && !text.contains("PRIVATE_STORE_DETAIL"));
+        assert_eq!(archive.context(),before,"a failed cursor cannot import or rewrite records");
+        assert_eq!(port.0.lock().unwrap().as_slice(),[Some("PRIVATE_SUFFIX_ONLY".into())],"the host must not repair a cursor silently");
+        call.call_id="restart".into();call.arguments=nomifun_agent_contracts::StrictJsonValue(json!({}));
+        assert!(!archive.load(&call,&port,&request().causality,&binding(),&CancellationToken::new()).await.unwrap().is_error);
+        assert_eq!(port.0.lock().unwrap().as_slice(),[Some("PRIVATE_SUFFIX_ONLY".into()),None]);
+    }
+
+    #[tokio::test]
     async fn reasoning_only_truncation_uses_non_effect_recovery_without_expanding_the_budget() {
         let limited=||vec![Ok(ChatModelEvent::ReasoningDelta {text:"PRIVATE_REASONING_DISCARDED".into()}),
             Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::MaxOutputTokens})];

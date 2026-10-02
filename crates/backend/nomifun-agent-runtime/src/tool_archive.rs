@@ -235,7 +235,10 @@ impl ToolArchive {
             result = port.read_previous(causality, args.before_turn.as_deref()) => match result {
                 Ok(page) => page,
                 Err(AgentEngineError::Cancelled) => return Err(AgentEngineError::Cancelled),
-                Err(_) => return Ok(AgentToolResult::text(call.call_id.clone(), "Historical read unavailable or outside its scoped budget. No historical tools were executed and no archive was changed.", true)),
+                Err(_) => return Ok(AgentToolResult::text(call.call_id.clone(), json!({
+                    "status":"history_not_loaded","records_loaded":0,
+                    "notice":"Historical read unavailable or outside its scoped budget. No historical tools were executed and no archive was changed.",
+                    "recovery":"If before_turn was supplied, do not extract a UUID, session ID or message ID. It is an exclusive opaque operation cursor, not a target selector. Omit before_turn to restart at the latest permitted prior turn, then copy the entire returned next_before_turn verbatim until the target source_turn is reached. Search only loaded result text or use an empty query to list records; searching an operation ID cannot load a turn. No permission or current evidence is gained by this recovery."}).to_string(), true)),
             },
         };
         if cancellation.is_cancelled() {
@@ -538,5 +541,6 @@ pub(crate) fn load_definition() -> ChatToolDefinition {
     ChatToolDefinition { name: LOAD.into(), deferred: false,
         description: "Import already-persisted tool results from one older turn in this same Session. Omit before_turn to start at the latest prior turn; follow next_before_turn toward older turns, then use search_tool_history/read_tool_history. Single call alone. No original tool is rerun, no private reasoning/media is restored, no new success/cleanup evidence. Bounded imports can evict archive entries; the 64 most recently loaded turns are not imported twice, even if some records were evicted. no_engine_records means unavailable, not no effects.".into(),
         input_schema: StrictJsonValue(json!({"type":"object","additionalProperties":false,"properties":{
-            "before_turn":{"type":"string","minLength":1,"maxLength":256}},"required":[]})) }
+            "before_turn":{"type":"string","minLength":1,"maxLength":256,
+                "description":"EXCLUSIVE opaque canonical operation cursor: load the turn before it, not that target turn. Omit for the latest prior turn, then copy an entire returned next_before_turn verbatim. Never shorten it to a UUID or use a session/message ID. Locate a target by following returned cursors until source_turn matches."}},"required":[]})) }
 }
