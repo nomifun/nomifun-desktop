@@ -3817,3 +3817,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原audit20/28不改：copy/delete两项只识别PowerShell，echo两项忽略stdin/close的output游标及EOF位置；另审精确cmd参数/结果和完整交互/磁盘回执均正确。真正的final read、report、canonical completed与全顺序缺口保留。00夹具源生成嵌套引号首错独立记录，发生在模型/应用前，不混成产品失败。
 - 未覆盖：完整B交付/修后预算、N3/COD、其他停止/timeout连续首发、完整C及共享门槛。下一步只减掉模型context重复空metadata，不放宽硬限、证据、参数或源任务；无新源码/重复组件测试。
 - 证据：仓库外2026-10-02/windows/w238-combined-b，00夹具错误、01构建、02-first-fail原DB/事件/参数/20-28 audit及精确复核、03失败UI、独立process witness；Git仅短进度。
+
+### W239 空metadata字段的模型投影（2026-10-02；基线03562c54b，正式待验）
+
+- Case/子断言：C06/C07/C08、上下文/完成与A05/A08/A09/A15/A16/A17/A19；沿W238已结算全部进程但最后交付仍超244 tokens，减少每轮重复的空metadata，无新付费循环。
+- 首红：真实tracker的三个可引用过程观察仍输出无值wrapper字段，01保存。现available/ineligible/root metadata及scope只省略一层null；scope中的original requested_arguments及command/output/数组不递归处理，原参数里的显式null继续逐字保持，零cursor/false/非零exit/清理及精确身份均保留。
+- 原Scope/observations台账、资格谓词/Schema、known/unknown效果、计数/权限/required input和冻结token/byte/message预算保持；派生context更短不等于刷新证据或补齐未执行任务。缺失字段继续表示无该metadata值。
+- 验证：新回归原参数/观测不变、三个精确eligible ID/早期poll→terminal、非零及false等断言通过；completion41/41及mandatory过限不调用模型、actual usage余量、健康报告修正不重做三项，共44项不同检查。首红/修后、fmt配置/diff分日志。
+- 未覆盖：正式Tauri/StepFun实际省下多少预算及B最后read/report、模型语言与N3/COD、完整A/C及共享门槛。W238真实预算failed、原20/28与复核保持，本批无新模型/命令/正式构建。
+- 证据：仓库外2026-10-02/windows/w239-absent-context-metadata，01首红/02修后精确语义、03完整completion与三项邻近、04/05配置/diff；Git仅一层metadata投影、一个最小回归和短进度。
