@@ -24,6 +24,7 @@ pub struct AgentCompactionRequest {
     pub outstanding_work: String,
     pub retained_facts: Vec<String>,
     pub max_summary_bytes: usize,
+    pub(crate) action_schemas: Vec<nomifun_chat_model_broker::ChatToolDefinition>,
 }
 
 impl AgentCompactionRequest {
@@ -43,12 +44,17 @@ impl AgentCompactionRequest {
             outstanding_work: outstanding_work.into(),
             retained_facts,
             max_summary_bytes: DEFAULT_MAX_COMPACTION_BYTES,
+            action_schemas: Vec::new(),
         }
     }
 
     pub fn with_max_summary_bytes(mut self, max_summary_bytes: usize) -> Self {
         self.max_summary_bytes = max_summary_bytes;
         self
+    }
+
+    pub(crate) fn with_action_schemas(mut self, schemas: Vec<nomifun_chat_model_broker::ChatToolDefinition>) -> Self {
+        self.action_schemas=schemas;self
     }
 }
 
@@ -132,10 +138,25 @@ fn tool_shaped_summary(text: &str) -> bool {
     if lower.starts_with("<tool_call>") || lower.starts_with("<function=") {
         return true;
     }
-    serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value|
-        value.is_object() && value.get("name").is_some_and(serde_json::Value::is_string)
-            && value.get("arguments").is_some_and(serde_json::Value::is_object)
-            && value.get("call_id").is_some_and(serde_json::Value::is_string))
+    serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value| {
+        let is_call = |candidate: &serde_json::Value| candidate.is_object()
+            && candidate.get("name").is_some_and(serde_json::Value::is_string)
+            && candidate.get("arguments").is_some_and(serde_json::Value::is_object);
+        is_call(&value) || value.as_object().is_some_and(|object|
+            (object.len() == 1 && object.get("tool_call").is_some_and(is_call))
+            || object.get("tool_calls").and_then(serde_json::Value::as_array)
+                .is_some_and(|calls| !calls.is_empty() && calls.iter().all(is_call)))
+    })
+}
+
+fn bare_action_arguments(text: &str, tools: &[nomifun_chat_model_broker::ChatToolDefinition]) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).ok()
+        .filter(serde_json::Value::is_object)
+        .is_some_and(|value| tools.iter().any(|tool|
+            tool.input_schema.0.get("required").and_then(serde_json::Value::as_array)
+                .is_some_and(|required| !required.is_empty())
+            && jsonschema::options().with_retriever(crate::tool_validation::NoExternalSchemaReads).build(&tool.input_schema.0)
+                .is_ok_and(|validator| validator.is_valid(&value))))
 }
 
 pub async fn run_compaction(
@@ -170,6 +191,9 @@ pub(crate) async fn run_compaction_recorded(
             field: "compaction_identity",
         });
     }
+    let summary_action_schemas = if request.action_schemas.is_empty() {
+        request.model_request.input.tools.clone()
+    } else { std::mem::take(&mut request.action_schemas) };
     request.model_request.input.tools.clear();
     request.model_request.input.tool_choice = ChatToolChoice::None;
     request.model_request.input.reasoning = None;
@@ -279,7 +303,10 @@ pub(crate) async fn run_compaction_recorded(
         }
     }
 
-    let result = AgentCompactionSummary::new(
+    let bare_arguments = bare_action_arguments(&summary, &summary_action_schemas);
+    let result = if bare_arguments {
+        Err(AgentEngineError::CompactionInvalidSummary)
+    } else { AgentCompactionSummary::new(
         binding,
         request.source_event_cursor,
         summary,
@@ -287,7 +314,7 @@ pub(crate) async fn run_compaction_recorded(
         request.completed_tools,
         request.outstanding_work,
         request.retained_facts,
-    );
+    ) };
     if matches!(&result, Err(AgentEngineError::CompactionInvalidSummary)) {
         if let Some(sink) = sink {
             sink.emit(crate::AgentEngineEvent::CompactionSummaryRejected {
@@ -378,6 +405,18 @@ mod tests {
 
     struct CompactionModel;
 
+    #[test]
+    fn bare_write_arguments_cannot_replace_continuation_state() {
+        let tools=crate::standard_tools::standard_agent_tool_exposures().into_iter()
+            .filter(|exposure| exposure.definition.name == "write_file")
+            .map(|exposure| exposure.definition).collect::<Vec<_>>();
+        assert!(bare_action_arguments(r#"{"path":"临时 结果.txt","content":"第一行 MAC-B\n第二行 after"}"#,&tools));
+        for text in [r#"{"completed":["created file"],"pending":["modify then copy"]}"#,
+            r#"{"goal":"explain JSON","path":"a historical path"}"#] {
+            assert!(!bare_action_arguments(text,&tools));
+        }
+    }
+
     #[async_trait]
     impl AgentModelPort for CompactionModel {
         async fn open_stream(
@@ -447,12 +486,18 @@ mod tests {
             "<tool_call><function=write_file><parameter=content>private payload",
             "<function=exec_command>",
             r#"{"call_id":"made-up","name":"exec_command","arguments":{"cmd":"unexpected"}}"#,
+            r#"{"tool_call":{"call_id":"chatcmpl-tool-xxxx-step2","name":"write_file","arguments":{"path":"临时 空格/新建.txt","content":"alpha\n值=2\nomega\n","source_sha256":"fab9c24aa5c6d8b8601695086b35cc6e1d6baad5b569d11d21cd5f660b10a404"}}}"#,
+            r#"{"tool_call":{"call_id":"made-up","name":"cancel_process","arguments":{"process_id":"unverified"}}}"#,
+            r#"{"tool_calls":[{"name":"copy_file","arguments":{"source":"a.txt","destination":"b.txt"}}]}"#,
+            r#"{"name":"not-advertised","arguments":{"path":"unexecuted"}}"#,
         ] {
             assert!(summary(text).is_err(),"a bare invocation is not a continuation summary");
         }
         for text in ["The original command exited with code 1. No more work was executed.",
             "The user is documenting the <tool_call> marker; no invocation was made.",
             "Example preserved as data:\n```xml\n<tool_call><exec_command>example</exec_command></tool_call>\n```",
+            r#"{"tool_call":"This is the name of a documented field"}"#,
+            r#"{"completed":[{"tool_call":{"call_id":"observed","name":"read_file","arguments":{"path":"reference.txt"}}}],"pending":["write answer"]}"#,
             r#"{"goal":"Explain JSON","completed":["read reference"],"pending":["write answer"]}"#] {
             assert!(summary(text).is_ok(),"legitimate summary data remains valid");
         }

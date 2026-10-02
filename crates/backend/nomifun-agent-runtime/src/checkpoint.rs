@@ -26,6 +26,8 @@ pub struct AgentExecutionCheckpoint {
     pub segments: Option<crate::AgentExecutionSegmentState>,
     #[serde(default)]
     pub control_rejections: crate::AgentControlRejectionState,
+    #[serde(default)]
+    pub delivery_review: crate::AgentDeliveryReviewState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,8 +43,21 @@ impl AgentExecutionCheckpoint {
         self.patch_recovery.validate()?;
         if let Some(segments) = &self.segments { segments.validate(self.model_steps)?; }
         self.control_rejections.validate()?;
+        if !self.delivery_review.valid_for(self.accepted_input_count) {
+            return Err(AgentEngineError::InvalidContract("checkpoint delivery review state is invalid".into()));
+        }
         crate::requirements::validate_ledger_budget(&self.plan.requirements)
             .map_err(AgentEngineError::InvalidContract)?;
+        let mut exact_ids=std::collections::BTreeSet::new();
+        if self.plan.exact_actions.len()>24 || crate::stream_limits::serialized_size(&self.plan.exact_actions,8192).is_err()
+            || self.plan.exact_actions.iter().any(|action|action.source.input>=self.accepted_input_count
+                || action.id.is_empty()||action.id.len()>64||!exact_ids.insert(&action.id)||action.source.quote.chars().count()>512
+                || action.fields.values().chain(action.stdin_sha256.iter()).chain(action.receiver_digest.iter()).any(|digest|digest.len()!=64||!digest.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))
+                || (action.succeeded&&(!action.settled||action.attempted_call_id.is_none()))
+                || (action.settled&&action.attempted_call_id.is_none())) {
+            return Err(AgentEngineError::InvalidContract("checkpoint exact action metadata is invalid".into()));
+        }
+        crate::exact_actions::validate_receivers(&self.plan.exact_actions).map_err(AgentEngineError::InvalidContract)?;
         let operation = self.turn_operation_id.as_ref();
         let mut receipts = std::collections::BTreeSet::new();
         let mut steps = std::collections::BTreeSet::new();
@@ -86,7 +101,7 @@ mod tests {
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 1, tool_call_count: 1,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: AgentPlan::default(),
             work: AgentWorkStatus { running_processes: std::collections::BTreeSet::from(["live-process".into()]), ..Default::default() },
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(),
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), delivery_review: Default::default(),
         };
         assert!(checkpoint.validate().is_err());
     }

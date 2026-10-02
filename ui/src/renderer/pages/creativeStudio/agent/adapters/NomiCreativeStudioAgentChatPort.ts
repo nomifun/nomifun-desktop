@@ -25,6 +25,7 @@ import type {
   NomiCreativeStudioAgentSessionBinding,
   NomiCreativeStudioAgentSessionResolution,
   NomiCreativeStudioAgentTransport,
+  NomiCreativeStudioConversationSnapshot,
 } from './types';
 
 const DEFAULT_TURN_START_TIMEOUT_MS = 30_000;
@@ -440,7 +441,12 @@ export function createNomiCreativeStudioAgentChatPort(
           'Nomi conversation selected model changed before send'
         );
       }
-      if (beforeSend.authority === 'unknown') {
+      const correlatedPause = (snapshot: NomiCreativeStudioConversationSnapshot, expectedTurn?: string) =>
+        snapshot.conversationId === binding.conversationId && snapshot.pause &&
+        snapshot.activeTurnId === snapshot.pause.turnId &&
+        (!expectedTurn || snapshot.pause.turnId === expectedTurn) ? snapshot.pause : null;
+      const beforePause = correlatedPause(beforeSend);
+      if (beforeSend.authority === 'unknown' && !beforePause) {
         throw new NomiCreativeStudioAgentRuntimeError(
           'CONVERSATION_AUTHORITY_UNKNOWN',
           'Bound Nomi conversation has no authoritative runtime state'
@@ -460,70 +466,82 @@ export function createNomiCreativeStudioAgentChatPort(
       const streamedByMessageId = new Map<string, string>();
       let emittedAssistantText = '';
       let admittedNonTerminalTurn = false;
+      let lastPauseKey: string | null = null;
+      const turnStartDeadline = Date.now() + turnStartTimeoutMs;
 
       try {
-        const receiptPromise = transport.sendMessage({
-          conversationId: binding.conversationId,
-          modelInput: planningEnvelope.modelInput,
-          skillIds: planningEnvelope.skillIds,
-          idempotencyKey: request.idempotencyKey,
-        });
-        const receipt = await waitForReceiptOrAbort(receiptPromise, request.signal);
+        if (beforePause) {
+          activeTurnId = beforePause.turnId;
+          lastPauseKey = JSON.stringify(beforePause);
+          yield { type: 'paused', pause: beforePause };
+        } else {
+          const receiptPromise = transport.sendMessage({
+            conversationId: binding.conversationId,
+            modelInput: planningEnvelope.modelInput,
+            skillIds: planningEnvelope.skillIds,
+            idempotencyKey: request.idempotencyKey,
+          });
+          const receipt = await waitForReceiptOrAbort(receiptPromise, request.signal);
 
-        if (receipt.kind === 'aborted') {
-          void receiptPromise.catch(() => undefined);
-          return await stopAfterAbort(transport, binding.conversationId);
-        }
-
-        if (receipt.value.completed) {
-          if (receipt.value.result_ok !== true) {
-            yield {
-              type: 'failed',
-              code: 'DURABLE_REPLAY_FAILED',
-              message:
-                receipt.value.result_error?.trim() ||
-                'Durable NomiFun replay completed without a successful result',
-              retryable: false,
-            };
-            return;
+          if (receipt.kind === 'aborted') {
+            void receiptPromise.catch(() => undefined);
+            return await stopAfterAbort(transport, binding.conversationId);
           }
-          const resolution = await reconcileCompleted();
-          for (const event of settledEvents(resolution)) yield event;
-          return;
-        }
-        admittedNonTerminalTurn = true;
-        const turnStartDeadline = Date.now() + turnStartTimeoutMs;
 
-        if (!receipt.value.replayed && beforeSend.authority !== 'idle') {
-          throw new NomiCreativeStudioAgentRuntimeError(
-            'CONVERSATION_NOT_IDLE',
-            'A fresh Agent turn was admitted while its exclusive conversation was already running'
-          );
-        }
-
-        if (receipt.value.replayed) {
-          const afterSend = await transport.inspect(binding.conversationId);
-          if (!sameModel(afterSend.model, request.model)) {
-            throw new NomiCreativeStudioAgentBindingError(
-              'Nomi conversation selected model changed after replay admission'
-            );
-          }
-          if (afterSend.authority === 'processing' && afterSend.activeTurnId) {
-            // WebSocket events are not replayed. An accepted replay may already
-            // own a live turn, so adopt only the exact active_turn_id from a
-            // fresh authoritative GET. Fresh admissions prefer their verified
-            // turn.started event and use the same authoritative polling path
-            // below only when WebSocket delivery is missed.
-            activeTurnId = afterSend.activeTurnId;
-          } else if (afterSend.authority === 'idle') {
+          if (receipt.value.completed) {
+            if (receipt.value.result_ok !== true) {
+              yield {
+                type: 'failed',
+                code: 'DURABLE_REPLAY_FAILED',
+                message:
+                  receipt.value.result_error?.trim() ||
+                  'Durable NomiFun replay completed without a successful result',
+                retryable: false,
+              };
+              return;
+            }
             const resolution = await reconcileCompleted();
             for (const event of settledEvents(resolution)) yield event;
             return;
-          } else {
+          }
+          admittedNonTerminalTurn = true;
+
+          if (!receipt.value.replayed && beforeSend.authority !== 'idle') {
             throw new NomiCreativeStudioAgentRuntimeError(
-              'REPLAY_RUNTIME_UNRESOLVED',
-              'Accepted NomiFun replay has no authoritative active turn or terminal receipt'
+              'CONVERSATION_NOT_IDLE',
+              'A fresh Agent turn was admitted while its exclusive conversation was already running'
             );
+          }
+
+          if (receipt.value.replayed) {
+            const afterSend = await transport.inspect(binding.conversationId);
+            if (!sameModel(afterSend.model, request.model)) {
+              throw new NomiCreativeStudioAgentBindingError(
+                'Nomi conversation selected model changed after replay admission'
+              );
+            }
+            const pause = correlatedPause(afterSend);
+            if (pause) {
+              activeTurnId = pause.turnId;
+              lastPauseKey = JSON.stringify(pause);
+              yield { type: 'paused', pause };
+            } else if (afterSend.authority === 'processing' && afterSend.activeTurnId) {
+              // WebSocket events are not replayed. An accepted replay may already
+              // own a live turn, so adopt only the exact active_turn_id from a
+              // fresh authoritative GET. Fresh admissions prefer their verified
+              // turn.started event and use the same authoritative polling path
+              // below only when WebSocket delivery is missed.
+              activeTurnId = afterSend.activeTurnId;
+            } else if (afterSend.authority === 'idle') {
+              const resolution = await reconcileCompleted();
+              for (const event of settledEvents(resolution)) yield event;
+              return;
+            } else {
+              throw new NomiCreativeStudioAgentRuntimeError(
+                'REPLAY_RUNTIME_UNRESOLVED',
+                'Accepted NomiFun replay has no authoritative active turn or terminal receipt'
+              );
+            }
           }
         }
 
@@ -549,10 +567,20 @@ export function createNomiCreativeStudioAgentChatPort(
                   'Nomi conversation selected model changed during recovery'
                 );
               }
+              const pause = correlatedPause(snapshot, activeTurnId);
+              if (pause) {
+                const key = JSON.stringify(pause);
+                if (key !== lastPauseKey) { lastPauseKey = key; yield { type: 'paused', pause }; }
+                continue;
+              }
               if (
                 snapshot.authority === 'processing' &&
                 snapshot.activeTurnId === activeTurnId
               ) {
+                if (lastPauseKey !== null) {
+                  lastPauseKey = null;
+                  yield { type: 'activity', label: activityCopy('creativeStudio.agent.activity.connectionRestored', 'Connection restored; Agent is still running') };
+                }
                 continue;
               }
               if (snapshot.authority === 'idle') {
@@ -570,6 +598,13 @@ export function createNomiCreativeStudioAgentChatPort(
               throw new NomiCreativeStudioAgentBindingError(
                 'Nomi conversation selected model changed while recovering turn start'
               );
+            }
+            const pause = correlatedPause(snapshot);
+            if (pause) {
+              activeTurnId = pause.turnId;
+              lastPauseKey = JSON.stringify(pause);
+              yield { type: 'paused', pause };
+              continue;
             }
             if (
               snapshot.authority === 'processing' &&
@@ -606,12 +641,23 @@ export function createNomiCreativeStudioAgentChatPort(
           const runtimeEvent = queued.value;
           if (runtimeEvent.kind === 'reconnected') {
             const snapshot = await transport.inspect(binding.conversationId);
+            if (!sameModel(snapshot.model, request.model)) {
+              throw new NomiCreativeStudioAgentBindingError('Nomi conversation selected model changed after reconnect');
+            }
+            const pause = correlatedPause(snapshot, activeTurnId);
+            if (pause) {
+              activeTurnId = pause.turnId;
+              const key = JSON.stringify(pause);
+              if (key !== lastPauseKey) { lastPauseKey = key; yield { type: 'paused', pause }; }
+              continue;
+            }
             if (
               snapshot.authority === 'processing' &&
               snapshot.activeTurnId &&
               (!activeTurnId || snapshot.activeTurnId === activeTurnId)
             ) {
               activeTurnId = snapshot.activeTurnId;
+              lastPauseKey = null;
               yield {
                 type: 'activity',
                 label: activityCopy(
@@ -658,8 +704,28 @@ export function createNomiCreativeStudioAgentChatPort(
             ) {
               continue;
             }
+            if (lastPauseKey !== null) {
+              const snapshot = await transport.inspect(binding.conversationId);
+              const pause = sameModel(snapshot.model, request.model) ? correlatedPause(snapshot, activeTurnId) : null;
+              if (pause) {
+                const key = JSON.stringify(pause);
+                if (key !== lastPauseKey) { lastPauseKey = key; yield { type: 'paused', pause }; }
+                continue;
+              }
+              // Only a matching live snapshot may make late stream content
+              // current again; pause itself never grants idle/send authority.
+              if (snapshot.authority !== 'processing' || snapshot.activeTurnId !== activeTurnId || !sameModel(snapshot.model, request.model)) continue;
+              lastPauseKey = null;
+            }
 
             if (event.type === 'error') {
+              const snapshot = await transport.inspect(binding.conversationId);
+              const pause = sameModel(snapshot.model, request.model) ? correlatedPause(snapshot, activeTurnId) : null;
+              if (pause) {
+                const key = JSON.stringify(pause);
+                if (key !== lastPauseKey) { lastPauseKey = key; yield { type: 'paused', pause }; }
+                continue;
+              }
               await transport.stopAndConfirm(binding.conversationId);
               admittedNonTerminalTurn = false;
               yield {

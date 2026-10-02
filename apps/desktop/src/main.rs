@@ -50,7 +50,7 @@ mod updater_install_context;
 /// secret never leaks off-box). Runs before any page script.
 pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
     // `{:?}` emits properly quoted/escaped JS string literals.
-    format!(
+    let script = format!(
         r#"window.__backendPort = {port}; window.__os = {os:?}; window.__nomiLocalTrust = {secret:?};
 (function () {{
   var secret = {secret:?};
@@ -105,7 +105,48 @@ pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
         os = std::env::consts::OS,
         secret = trust_secret,
         port = port,
-    )
+    );
+    #[cfg(debug_assertions)]
+    let script = {
+        let mut script = script;
+        if let Ok(key) = std::env::var("NOMIFUN_RELIABILITY_DROP_TURN_ACK_KEY") {
+            if let Some(fault) = turn_ack_loss_fixture_script(port, &key) { script.push_str(&fault); }
+        }
+        script
+    };
+    script
+}
+
+/// Debug-only transport fault: a real authenticated submit must finish first.
+/// One exact durable key loses its reply; no request, receipt or authority is
+/// rewritten, and ordinary windows/releases have no opt-in flag.
+#[cfg(debug_assertions)]
+fn turn_ack_loss_fixture_script(port: u16, key: &str) -> Option<String> {
+    let valid = key.len() == 36 && key.bytes().enumerate().all(|(i, b)|
+        if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() });
+    if !valid { return None; }
+    Some(format!(r#"
+(function() {{
+  var target={key:?}, origin="http://127.0.0.1:{port}", used=false;
+  var realFetch=window.fetch.bind(window);
+  window.fetch=async function(input, init) {{
+    var candidate=false;
+    try {{
+      var url=new URL(typeof input==="string"?input:input.url, location.href);
+      candidate=!used && init && String(init.method).toUpperCase()==="POST" &&
+        url.origin===origin && /^\/api\/agent-sessions\/[0-9a-f-]{{36}}\/turns$/.test(url.pathname) &&
+        typeof init.body==="string" && JSON.parse(init.body).idempotency_key===target;
+    }} catch (_) {{}}
+    var response=await realFetch(input,init);
+    if (candidate && !used && response.ok) {{
+      used=true;
+      console.warn("MM_ACK_LOSS_FIXTURE_TRIGGERED");
+      throw new TypeError("MM_ACK_LOSS_FIXTURE: submit receipt unavailable");
+    }}
+    return response;
+  }};
+}})();
+"#))
 }
 
 /// Resolve an optional, non-empty `NOMIFUN_WEBUI_DIST` override once. Empty
@@ -1565,6 +1606,27 @@ impl ExitCoordinator {
         }
     }
 
+    fn process_exit_code(&self, runtime_code: i32) -> i32 {
+        // Tauri owns restart/relaunch and run_return normally never returns
+        // for that sentinel. Do not reinterpret its handoff as a normal quit.
+        if self.is_restart_requested() {
+            return runtime_code;
+        }
+        if self.is_exit_allowed() {
+            let owned = self.final_exit_code();
+            return if owned != 0 {
+                owned
+            } else if runtime_code == 0 && self.phase.load(Ordering::Acquire) == EXIT_PHASE_FATAL {
+                1
+            } else {
+                runtime_code
+            };
+        }
+        // An event-loop return without the coordinator's terminal permission
+        // proves neither backend cleanup nor a successful desktop close.
+        if runtime_code == 0 { 1 } else { runtime_code }
+    }
+
     fn mark_no_cleanup_needed(&self) {
         self.mark_cleanup_verified();
     }
@@ -2876,7 +2938,7 @@ fn main() -> std::process::ExitCode {
 
     #[cfg(target_os = "macos")]
     let cef_engine = Arc::new(std::sync::OnceLock::<
-        Result<Arc<nomifun_browser_macos::engine::Engine>, String>,
+        Result<Arc<browser_surface::macos::lifecycle::DeferredEngine>, String>,
     >::new());
     #[cfg(target_os = "macos")]
     let setup_cef_engine = cef_engine.clone();
@@ -2928,11 +2990,11 @@ fn main() -> std::process::ExitCode {
             #[cfg(target_os = "macos")]
             let browser_resources = match setup_cef_engine
                 .get()
-                .expect("macOS CEF availability is resolved before app setup")
+                .expect("macOS CEF bundle availability is resolved before app setup")
             {
                 Ok(engine) => Some(Arc::new(
                     nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
-                        browser_surface::macos::host::DesktopBrowserHost::new(
+                        browser_surface::macos::host::DesktopBrowserHost::new_deferred(
                             app_handle.clone(),
                             engine.clone(),
                         ),
@@ -3335,7 +3397,7 @@ fn main() -> std::process::ExitCode {
 
     #[cfg(target_os = "macos")]
     {
-        let initialized = browser_surface::macos::lifecycle::initialize(&cef_data_dir);
+        let initialized = browser_surface::macos::lifecycle::prepare(&cef_data_dir);
         if let Err(error) = &initialized {
             eprintln!("managed macOS Browser Provider unavailable: {error}");
         }
@@ -3346,13 +3408,33 @@ fn main() -> std::process::ExitCode {
 
     // `Builder::run(context)` installs an empty app-level event callback. Build
     // manually so a Dock click after close-to-tray can surface the hidden main window.
-    app.run(handle_run_event);
-
-    std::process::ExitCode::SUCCESS
+    let exit_coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
+    // The pinned Wry RequestExit path forwards the requested code to the
+    // callback but sets ControlFlow::Exit (zero). App::run then exits the
+    // process inside Tao, so the coordinator's nonzero handoff is lost. Return
+    // from the event loop and explicitly preserve the proven owner outcome;
+    // process::exit also retains the existing no-destructor exit semantics.
+    let runtime_code = app.run_return(handle_run_event);
+    std::process::exit(exit_coordinator.process_exit_code(runtime_code));
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
+    #[test]
+    fn receipt_loss_fixture_is_exact_key_scoped_and_preserves_real_authenticated_fetch() {
+        let key = "0190f5fe-7c00-7a00-8000-000000000106";
+        let script = super::turn_ack_loss_fixture_script(9123, key).unwrap();
+        assert!(script.contains(key));
+        assert!(script.contains("url.origin===origin"));
+        assert!(script.contains("idempotency_key===target"));
+        assert!(script.contains("await realFetch(input,init)"));
+        assert!(script.contains("candidate && !used && response.ok"));
+        assert!(!script.contains("headers="));
+        for invalid in ["", "*", "not-a-key", "0190f5fe-7c00-7a00-8000-000000000106\n"] {
+            assert!(super::turn_ack_loss_fixture_script(9123, invalid).is_none());
+        }
+    }
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -3890,6 +3972,42 @@ mod tests {
         verified.mark_cleanup_verified();
         assert_eq!(verified.final_exit_code(), 0, "real cleanup still permits success");
         assert!(verified.is_exit_allowed());
+    }
+
+    #[test]
+    fn process_exit_preserves_the_owned_cleanup_outcome_after_a_zero_runtime_return() {
+        for (requested, expected) in [(None, 1), (Some(0), 1), (Some(9), 9)] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(requested));
+            allow_handoff_without_verified_cleanup(&coordinator);
+            assert_eq!(coordinator.process_exit_code(0), expected);
+            assert!(!coordinator.cleanup_verified.load(Ordering::Acquire));
+        }
+        for (requested, runtime, expected) in [(0, 0, 0), (0, 17, 17), (23, 0, 23)] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(Some(requested)));
+            coordinator.mark_cleanup_verified();
+            assert_eq!(coordinator.process_exit_code(runtime), expected);
+        }
+    }
+
+    #[test]
+    fn process_exit_keeps_restart_ownership_and_rejects_unowned_success() {
+        let unowned = ExitCoordinator::default();
+        assert_eq!(unowned.process_exit_code(0), 1);
+        assert_eq!(unowned.process_exit_code(17), 17);
+        let fatal = ExitCoordinator::default();
+        fatal.mark_cleanup_verified();
+        assert!(fatal.claim_fatal_exit());
+        assert_eq!(fatal.process_exit_code(0), 1);
+        assert_eq!(fatal.process_exit_code(17), 17);
+        let restarting = ExitCoordinator::default();
+        assert!(restarting.request_restart());
+        restarting.allow_unverified_handoff();
+        for runtime in [0, 23, tauri::RESTART_EXIT_CODE] {
+            assert_eq!(restarting.process_exit_code(runtime), runtime);
+        }
+        assert!(!restarting.cleanup_verified.load(Ordering::Acquire));
     }
 
     #[test]

@@ -5847,6 +5847,33 @@ mod session_boundary_tests {
     }
 
     #[test]
+    fn history_preserves_each_accepted_steer_identity_without_reopening_its_turn() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let operation = format!("turn:user:{SESSION_ID}:root:operation");
+        let ids = ["0190f5fe-7c00-7a00-8abc-012345678921", "0190f5fe-7c00-7a00-8abc-012345678922"];
+        let mut messages = Vec::new();
+        for (index, id) in ids.iter().enumerate() {
+            let message = canonical_message_response(&session_id, 1_000, MessageProjection {
+                session_id: session_id.clone(), projection_id: format!("message:{id}"),
+                first_seq: 10 + index as u64, last_seq: 10 + index as u64,
+                presentation_intent: "message".into(), message_type: None, message_status: None,
+                projection: json!({"projection_id":format!("message:{id}"), "correlation_id":operation,
+                    "presentation_intent":"message", "content":"改为结果/纠正结果.txt", "state":"accepted"}),
+                semantic_digest: "digest".into(),
+            }).unwrap().expect("an admitted steering message must survive cold history");
+            assert_eq!(message.message_id, *id);
+            assert_eq!(message.msg_id.as_deref(), Some(*id));
+            assert_eq!(message.position, Some(MessagePosition::Right));
+            assert_eq!(message.status, Some(MessageStatus::Finish));
+            assert_eq!(message.content["content"], "改为结果/纠正结果.txt");
+            assert!(message.content["turn_id"].is_null());
+            messages.push(message);
+        }
+        assert_ne!(messages[0].message_id, messages[1].message_id);
+        assert!(messages[0].created_at < messages[1].created_at);
+    }
+
+    #[test]
     fn finalized_assistant_projection_is_realtime_without_reopening_a_turn() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let message_id = "0190f5fe-7c00-7a00-8abc-012345678913";
@@ -10668,6 +10695,16 @@ async fn create_nomi_core_agent_session(
         .session_owner
         .initialize_idmm_state(opened.session.agent_session_id.as_ref(), idmm_config)
         .await?;
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "conversation.listChanged",
+            json!({
+                "conversation_id": opened.session.agent_session_id,
+                "action": "created",
+            }),
+        ),
+    );
     Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
         agent_session_id: opened.session.agent_session_id.as_ref().to_owned(),
         agent_binding: binding,
@@ -12486,6 +12523,16 @@ async fn update_nomi_core_agent_session_metadata(
         .ok_or_else(|| AppError::Conflict(
             "updated AgentSession has no canonical projection".to_owned(),
         ))?;
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "conversation.listChanged",
+            json!({
+                "conversation_id": session_id,
+                "action": "updated",
+            }),
+        ),
+    );
     Ok(Json(ApiResponse::ok(projection)))
 }
 
@@ -12864,7 +12911,15 @@ fn canonical_message_response_with_observation(
         }));
     }
 
-    let Some(message_id) = document.get("correlation_id").and_then(Value::as_str) else {
+    // Steering has one message per admission event, while correlation_id
+    // deliberately remains the owning Turn operation. Use the persisted
+    // message identity for accepted user rows, including existing projections.
+    let message_id = if projection.presentation_intent == "message" && state == "accepted" {
+        projection.projection_id.strip_prefix("message:")
+    } else {
+        document.get("correlation_id").and_then(Value::as_str)
+    };
+    let Some(message_id) = message_id else {
         return Ok(None);
     };
     if Uuid::parse_str(message_id)
@@ -14288,6 +14343,16 @@ async fn execute_nomi_core_agent_session_delete(
             "Wave 4 resource and receipt cleanup deferred to orphan reconciliation"
         );
     }
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "conversation.listChanged",
+            json!({
+                "conversation_id": session_id,
+                "action": "deleted",
+            }),
+        ),
+    );
     Ok(deleted)
 }
 

@@ -17,14 +17,22 @@ mod evaluation;
 #[path = "../screenshot.rs"]
 mod screenshot;
 
-pub struct DesktopBrowserHost { app: tauri::AppHandle, engine: Arc<Engine> }
+enum HostEngine { Initialized(Arc<Engine>), Deferred(Arc<super::lifecycle::DeferredEngine>) }
+pub struct DesktopBrowserHost { app: tauri::AppHandle, engine: HostEngine }
 impl DesktopBrowserHost {
-    pub fn new(app: tauri::AppHandle, engine: Arc<Engine>) -> Self { Self { app, engine } }
+    pub fn new(app: tauri::AppHandle, engine: Arc<Engine>) -> Self { Self { app, engine: HostEngine::Initialized(engine) } }
+    pub(crate) fn new_deferred(app: tauri::AppHandle, engine: Arc<super::lifecycle::DeferredEngine>) -> Self {
+        Self { app, engine: HostEngine::Deferred(engine) }
+    }
 }
 #[async_trait]
 impl BrowserRuntimeFactory for DesktopBrowserHost {
     async fn create(&self, request: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
-        let context = self.engine.create_context(match &request.profile { BrowserProfile::Ephemeral => None, BrowserProfile::Persistent(path) => Some(path.clone()) }).await.map_err(native_error)?;
+        let engine = match &self.engine {
+            HostEngine::Initialized(engine) => engine.clone(),
+            HostEngine::Deferred(engine) => engine.get(&self.app).await.map_err(native_error)?,
+        };
+        let context = engine.create_context(match &request.profile { BrowserProfile::Ephemeral => None, BrowserProfile::Persistent(path) => Some(path.clone()) }).await.map_err(native_error)?;
         let app = self.app.clone();
         let parent: Arc<ParentView> = Arc::new(move || {
             let window = app.get_window("main").ok_or("Browser parent window is gone")?;
@@ -34,7 +42,7 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
         });
         let input_enabled = request.user_input_enabled;
         Ok(Arc::new_cyclic(|weak| DesktopBrowserRuntime {
-            weak: weak.clone(), app: self.app.clone(), engine: self.engine.clone(), context, parent, request,
+            weak: weak.clone(), app: self.app.clone(), engine, context, parent, request,
             input_locked: Arc::new(AtomicBool::new(!input_enabled)), revision: Default::default(),
             creating: Mutex::new(()), site_data_view: Mutex::new(None), pending_work: Mutex::new(BTreeMap::new()), closing: CancellationToken::new(),
             state: Mutex::new(RuntimeState { tabs: BTreeMap::new(), active: None, bounds: None, visible: false, closed: false,
@@ -43,7 +51,10 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
     }
 
     async fn shutdown(&self) -> Result<(), WorkspaceError> {
-        self.engine.shutdown().await.map_err(native_error)
+        match &self.engine {
+            HostEngine::Initialized(engine) => engine.shutdown().await,
+            HostEngine::Deferred(engine) => engine.shutdown().await,
+        }.map_err(native_error)
     }
 }
 struct NativeTab {

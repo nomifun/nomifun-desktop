@@ -5,7 +5,7 @@
  */
 
 import { conversation } from '@/common/adapter/ipcBridge';
-import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { getConversationPauseNotice, getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import {
   stopConversationAndConfirmRelease,
   waitForConversationTurnReleaseUntilSettled,
@@ -22,6 +22,7 @@ export function createNomiCreativeStudioAgentTransport(): NomiCreativeStudioAgen
   return {
     async inspect(conversationId) {
       const snapshot = await conversation.get.invoke({ conversation_id: conversationId });
+      const pause = getConversationPauseNotice(snapshot);
       return {
         conversationId: snapshot.id,
         model: {
@@ -29,6 +30,7 @@ export function createNomiCreativeStudioAgentTransport(): NomiCreativeStudioAgen
           model: snapshot.model.use_model,
         },
         authority: getConversationRuntimeAuthority(snapshot),
+        ...(pause ? { pause } : {}),
         ...(snapshot.runtime?.active_turn_id
           ? { activeTurnId: snapshot.runtime.active_turn_id }
           : {}),

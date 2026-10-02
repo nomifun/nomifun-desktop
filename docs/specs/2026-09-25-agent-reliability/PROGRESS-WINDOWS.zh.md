@@ -4,20 +4,55 @@
 用户2026-09-30已收敛为简单系统命令、步骤、过程状态和结果可靠性；活动范围以最新实施计划为准。
 旧675＋82、2,374槽保留为历史全产品参考，不再领取其全部余项。共享根因及已有Windows修复保留。
 
-## 当前正式会话验收
+## 既有综合会话证据（追溯，不再整组复跑）
 
 | 场景 | 入口与候选证据 | 当前状态 |
 | --- | --- | --- |
-| A 观察、只读、小测试 | W236正式COD恢复完成并交付六项具体结果，四项历史/未复核披露、测试精确poll引用；W237位置反馈已修 | 重复Git/三次报告拒绝/英文警告仍为FAIL；首发N3/GEN完整A待验 |
-| B 文件、进程、停止 | W209文件链N3；W238正式GEN文件→18-byte输入/EOF→父子取消已执行，原件/进程清理正确 | W238最后read/report前预算failed；完整交付、N3/COD及公开语言仍缺 |
-| C 连续、纠正、恢复 | W182取消冷读；W223六压缩保留原输入/回执且无重做，组件修复与反例已有 | 压缩局部实证不能代替完整C；追加纠正→压缩→取消→重启链待补 |
+| A 观察、只读、小测试 | W245正式COD十一阶段/四压缩完成，全部观察/两测试各一次，原文/SHA/搜索/Git修改已交付，具体交付4/6 | 整体FAIL：实际cwd/完整九条目仍缺，报告旧引用一拒后纠正，三个英文提示；完整首发/N3/GEN待验 |
+| B 文件、进程、停止 | W209文件链N3；W250正式GEN使用来源SHA、18-byte文件链及最后回读；echo/hold各启动一次，父子取消159ms | 整体FAIL：没有stdin写入、实际EOF为0 bytes，hold重复cursor0；未交付报告后Stop，原20/28保留。W240来源保护首败不覆盖 |
+| C 连续、纠正、恢复 | W248/249同Turn纠正、实际压缩、活父子Stop后385/536ms消失；无自cancel/重启，冷读无复活 | 整体FAIL：传到工具的content漏末LF、17bytes；W249未触发新的引用定位反馈，原21/24与必要N3/入口待验 |
 
-关键bad-case/正向任务取N3，GEN/COD各有正式执行；不同角色不机械重复所有底层断言。
-现有cargo回归按受影响代码定向复用；业务UI常规手测、外部生态和发布认证移出本轮，均不记PASS。
-先通知共同命令链路达标，再补这些场景的Windows差异并收尾；不等待全部82条旧专属Case。
+截至W250，旧综合场景仍为0/3，不改历史断言或把子链拼成完整PASS。最新实施计划优先采用缺陷驱动收尾，
+不再为这个分母串行复跑整组或固定N3/角色矩阵。实际体验仍有下面两类未完成项，保留失败与边界。
 
-2026-10-02再次收敛：按B完整交付→C完整连续/纠正/取消冷读→A合并复验→必要N3/入口→Windows差异→集中结案推进。
-同一未改根因不付费循环，暂停纯说明微调和历史矩阵扩展；只修当前主线直接失败，已通过子链定向复用。
+GEN/COD已各有正式执行，源码未受影响的操作/EOF/停止/冷读证据直接复用；统计稳定性及发布认证另列未认证。
+现有cargo回归按受影响代码定向复用；业务UI常规手测、外部生态和旧82条专属全队列不阻断本轮收尾。
+共同产品根因和核心体验要求仍须据实说明；不把生成精度残余当业务非零，也不假称已经解决。
+
+2026-10-02同步379a54052的最新实施计划：停止按B→C→A整组排程，改为具体缺陷→最小回归→必要的一次正式UI。
+同一未改根因不付费循环，暂停纯说明微调和历史矩阵扩展；只修有证据的产品原因，已通过子链复用。
+
+### 当前交付与残余（W259；既有机制复用）
+
+- 多项结果交付：W255正式COD短任务13秒、三model步骤，cwd/完整九条目及真实Hidden标记/文件首尾与摘要全部交付，首次report引用逐项正确、无重复观察，20/20不同定向检查。历史真实性由W254正式GEN两步/一次实际压缩/13项复用；仅关闭这两条针对性链N1，原完整A/B首败仍FAIL。
+- 已修机制交付：命令形态与结果回配、非零与系统错误区分、文件原件/字节保护、实际Stop及取消冷读、压缩硬预算和历史回执保留，按各批直接证据复用。没有因本次短任务追加全仓构建、完整A/B/C、固定N3或角色矩阵。
+- stdin接合：W257正式GEN短链UI18秒，六model步骤/一次压缩，完整7请求及SSE已录制；六原生调用参数与canonical逐项相同，发送/EOF/实物均18 bytes，精确游标0→11→119、exit0/reaped和中文交付成立，21项不同定向断言。只证明当前短链N1；W250旧拒绝未复现，其遗漏唯一原因仍未证。
+- 提议/步骤精度：B漏stdin及重复cursor0，C末LF，W240来源SHA首败继续开放。0/17-byte实物及原调用保留，不自动补步骤/字节或改断言。W256确认关闭前摘要仍保留stdin待办、冻结快照允许input；原拒绝输出及实际请求工具表缺失，漏步骤的唯一根因仍待证，不由组件或reasoning字段代判供应商/宿主责任。
+
+确定产品缺口：W250摘要漏拦tool_call包装、W251/253历史回执丢失。后者已修，W254正式短任务13/13，完成一次当前读取并如实交付旧EOF0；W251首败仍保留，不关闭完整B或所有生成精度问题。
+共享退出码组件回归复用；W259新隔离实例经人工托盘Quit实际exit0、进程/监听最终清理及原记录不变，正常空闲退出N1通过，失败退出分支与活动Turn退出native未验。
+上述生成精度问题仍未完成。W259确认原W250压缩摘要及保留回执含cursor25、后续完成提议仍为0，实际历史HTTP/SSE缺证；发布稳定性/旧完整矩阵另列未认证。没有新的产品反例或根因变更，不追加付费循环；不展开专属全队列或假称共享全阶段完成。
+
+2026-10-02 W252方案纠偏：实施计划已删除残留B→C→A/N3活动门槛，按30分钟定位时间盒和
+每个直接修复最多一次短UI验证收尾。W254/255各补一条已有修复的明确覆盖缺口；阶段性产品交付与生成精度必修范围待用户明确，
+不因等待或方案调整把已有正式FAIL改记PASS。
+
+2026-10-02整体复盘：最后按实施计划的四个工作包结算，预计1～2小时有效工作用于机制/残余/退出
+边界与最终交付，不能解释为全部Case达标时间。W257从建目录至提交18分35秒、实际任务18秒，
+夹具/观察/核账占主要时间；W256/257未关闭旧漏步骤根因，不继续补同根因正向样本。单主agent，
+Cargo/UI各一个活动运行，审查和文档合并结算；新产品反例出现才修源码并最小验证。Windows退出
+可达性诊断最多15分钟，未验/阻断照实交付；生成精度全部修复的完成时间尚不可可靠估计。
+
+W258已完成上述“机制结算＋生成残余归类”：12份已有独立断言、当前源码差异和首败边界已核对，
+见共享页八簇交付表；没有新模型/测试/构建。Windows正式退出入口已结算为BLOCKED_UI_REACHABILITY：
+原W257隔离data/work、新profile的零模型冷实例，15分钟内未取得托盘实际Quit，实际码/清理未证。
+实例一直存活，原观察器到期未重启；到点核对身份后仅清理空闲夹具。原复杂A/B/C及所有生成偏差
+保持原状态，阶段交付不代判全阶段。核心机制、残余、平台阻断及发布未认证项已分列，不追加正向复跑。
+
+用户新目标明确允许按四包结案并将退出阻断交接人工；[阶段交付总结](DELIVERY-SUMMARY.zh.md)已给出
+对应产出与重新准备实例后的验证步骤。W258有限阶段交付时Windows正式Quit仍BLOCKED，
+生成残余和旧完整A/B/C状态不变；当前没有活动测试/GUI或新的模型调用。
+后续W259已取得正常空闲Quit的新实例正式证据，原W258阻断保留；详见本页末记录。
 
 ## 历史全产品统计口径（本轮已停用）
 
@@ -3838,3 +3873,198 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原audit23/28保留：来源摘要缺失、两write、未首report/未completed/整序未关闭为真实FAIL。UI取消前历史/最后残留“Private reasoning omitted from replay”占位文本，归合并展示余项；不为说明单开批次。未取得报告不能代判预算完全修复或B结案。
 - 未覆盖：来源保护修复、完整B/N3/COD及最终报告/公开语言；下一主线为C连续→纠正→压缩→停止→冷读，不对同一未改B根因重复付费。本批无新产品源码/组件测试，原W238失败保留。
 - 证据：仓库外2026-10-02/windows/w240-mainline-b-closeout，01构建、02-first-unprotected-write原首败、03-cancelled完整DB/事件/23-28 audit/原两write及独立物理复核、04正式取消UI、process witness；Git仅短进度。
+
+### W241 主线C连续、纠正与冷读（2026-10-02；基线67617e1cf，FAIL）
+
+- Case/子断言：完整C、C05/C06/C07/C08与A05/A06/A09/A10/A12/A13/A17/A19；正式Tauri/StepFun/COD，新workspace/profile，复用hash核对一致的现有正式构建，无重复编译。
+- 首败：用户明确只启动一次helper、完整来源读取不重做，实际start三次/cancel两次、两份来源各读三次。追加纠正通过正式“立刻发送”进入同一回合，原turn/steer-accepted保留；不是新回合，也没有操作者Stop/Retry。
+- 27步/15次实际压缩后自行failed：纠正写入被重规划门禁阻止，四次update_plan被逐字来源校验拒绝。其中“再回读该结果一次核对”多加了原输入没有的“核对”，重复原错未恢复；纠正文件和被禁止的初稿均未生成。保留原audit10/21及另审same-turn steering事实，不改历史失败。
+- 保护文件全部hash不变、当前父子PID均消失、宿主清理事件存在；70条进程见证不能代判三次启动的全部亲缘。正式Stop环节因回合提前失败未到达，不能把failed计成cancelled。
+- 零模型冷启动后agent_events/turns/sessions全行数/hash及全部夹具文件保持，全部Turn仍终态，无复活/新执行。但实时UI曾展示的纠正气泡在冷读会话不可见，canonical仍有纠正；记录为恢复展示缺陷，冷读完整性不计PASS。
+- 未覆盖：C正确执行/实际Stop/完整冷读展示/N3，A报告纠正与重复观察，B摘要保护与最终交付，共享门槛仍未达。不付费重复未修根因；下一步合并定位这些主线阻断，不开说明微调批次。
+- 证据：仓库外2026-10-02/windows/w241-mainline-c，02纠正前、04/05失败原事件/参数/DB/audit、06实时UI/冷读前全表基线、07正式冷启动、08冷读UI、09全表/磁盘/当前PID复核；本批Git仅短进度。
+
+### W242 已接受纠正的冷读消息身份（2026-10-02；基线c2cae2177，子断言PASS）
+
+- Case/子断言：C07/C06、LIFE冷读与A03/A09/A12/A17；直接修W241正式首败，不重启模型或重放操作。
+- 根因：steer的projection_id是独立message:event UUID，correlation_id保留所属Turn operation。历史响应误把operation当消息UUID并过滤，导致原始纠正仍在DB、重启UI却消失。现accepted用户消息从已有message projection身份读取，兼容旧记录，不迁移/改写canonical事件或Turn归属。
+- 验证：新增双纠正身份回归修前红/修后绿；相关历史17/17、fmt/diff及desktop边界通过。正式Tauri构建40.84秒，原W241失败会话零模型冷读7/7：纠正气泡与failed提示可见，events/turns/sessions全部行数/hash、全部磁盘字节保持，无旧Turn复活。未调用Stop/Retry。
+- 未覆盖：只关闭既有纠正消息的冷读展示缺陷；W241重启/重读/逐字来源循环、C执行及实际Stop/N3仍FAIL或待验。B来源保护/交付、A重复Git/报告及共享仍未结案，下一项按固定顺序合并A复验。
+- 证据：仓库外2026-10-02/windows/w242-mainline-recovery，01首红、02真实projection根因、03历史回归、04正式构建及原会话冷读UI/DB/7项审计；初始化元数据文件路径首错另存，已启动GUI直接核对恢复，未重复启动模型。Git仅消息身份修复、最小回归及短进度。
+
+### W243 合并A复验与压缩预算首败（2026-10-02；基线77351ad09，FAIL）
+
+- Case/子断言：完整A、C01/C02/C03/C06/C07/C08；正式Tauri/StepFun/COD，一次新workspace/profile样本，冻结4分钟观察上限，复用正式构建。
+- 首败：自主PowerShell文件摘要命令把-join放在ForEach-Object管道后，真实exit1；修正提议被重规划门禁拒绝、未执行。cwd/含真实Hidden标记目录、专用read_file全文/摘要、精确两搜索、Git只读各取得实际结果，Git没有重复，第一Bun测试实际exit0/reaped。
+- 约2分57秒、11步/8压缩后自行failed，第二Bun测试和report未到达；最终预算拒绝83,681 bytes/27,894估算tokens超过27,854输入限制40。UI“应用处理失败”对应真实Nomi压缩错误，未点击Stop/Retry、未消耗完整观察上限，不计报告位置/语言修复的采用或A PASS。
+- 原audit10/16及交付0/6保留；初始夹具把cwd/listing强制为单一进程，原脚本另存，按两项请求可分开执行纠正合法形态，完整结果/各一次/顺序/无额外scope断言保持。被拒且未dispatch的命令不证明孤儿，实际已启动进程的exit0/清理另审；十文件/Git及原事件保持。
+- 未覆盖：A完整首发/N3/GEN和报告纠正采用，B来源保护/交付、C重读重启/引用/Stop。下一步只定位正常压缩触发阈值是否误作替换接纳上限，保留冻结硬预算及供应商usage margin，不再减少说明来追逐少量token或付费循环。
+- 证据：仓库外2026-10-02/windows/w243-mainline-a-closeout，02前缀首败、03终态原DB/事件/参数/audit/独立复核、04正式UI；本批Git仅短进度，共享仍未达。
+
+### W244 压缩触发阈值与接纳上限混用（2026-10-02；基线5b1198819，预算正式N1）
+
+- Case/子断言：C06/C07/C08与A05/A09/A15/A17/A19；沿W238/W243内部预算终止直接定位，不扩展相邻Case。
+- 根因及两首红：正常压缩把留余量的soft trigger当replacement接纳上限。夹具摘要27,857 tokens在原冻结28,160硬上限内，却因27,294触发值被拒；只修接纳后下一小步又付费重复压缩。两首红分别保留，当前正常替换按原冻结硬上限扣actual usage margin验收，accepted token floor为后续小步保留余量；typed PromptTooLong严格恢复cap、字节/消息/输出限、原输入/工具/回执与一纠正上限均保持。
+- 验证：新增一个完整反例同时核对接纳与下一小步无重复摘要；相关compaction19项、typed cap/mandatory各1及另外5项summary共26项不同定向通过，fmt/diff通过，正式构建45.80秒。
+- 正式一次COD原完整A，约1分33秒、七步/五压缩，summary拒绝/typed恢复0，两指定Bun测试各执行一次exit0/1、清理证据成立；report一次首发接受，supported引用精确两测试，四项历史unverified使用中文，失败计数1/1保留。UI把exit1显示为命令正常结束非零，没有应用失败；未Stop/Retry/外部kill。
+- 整体A仍FAIL：Git status和diff各执行两次，最终只用“沿用先前观察/当前未验证”代替cwd/九条目/完整样本与SHA/两搜索/Git修改的实际交付。原audit15/16、具体交付1/6保持，canonical completed不替代验收。测试链和预算正式N1不计完整A/N3，W243原首败不覆盖；通用计数英文尾注另归已有展示残余，不开微调批次。
+- 未覆盖：完整A防重复/具体结果、B来源SHA/最终报告、C不重启重读/引用纠正/实际Stop，必要N3/入口及Windows差异，共享未达。不对这些未改根因付费循环；下批只处理主线直接阻断，复用本次预算/测试及W242冷读证据。
+- 证据：仓库外2026-10-02/windows/w244-mainline-compaction-envelope，01原接纳首红、03再触发首红、04/05不同回归、06构建、07独立正式夹具、08重复Git原记录、09完整DB/事件/参数/audit/精确scope复核、10正式UI。Git仅预算修复、一个最小回归与短进度。
+
+### W245 搜索/Git实际只读结果在压缩中丢失（2026-10-02；基线0c7d6786c，交付改善N1）
+
+- Case/子断言：C02/C03/C06/C07/C08与A05/A06/A09/A15/A16/A17/A19；沿W244遗漏结果直接修复数据保留，不补说明微调或重复旧矩阵。
+- 首红：原completion scope只保留search/git请求参数，实际匹配/零匹配/status entries/diff正文没有进入压缩后固定context，缺值只能依赖摘要。强化既有四结果回归，01保存；现仅保留已dispatch、同call返回、成功、scoped ReadOnly的三个指定action字段，单快照512 bytes、原scope2048/detail4096/台账32KiB不变，超限整项省略不截断。私密额外字段、未知记录字段、错query/身份/能力/动作、未dispatch/失败/opaque/effectful均不保留；截断/不完整事实原样保持。
+- 原观察/权限/Schema/资格/epoch及计数保持，历史snapshot不是当前证据。completion45/45、mandatory硬限/合法摘要无立即再压缩/健康报告修正不重做三项，共48项不同定向通过，fmt/diff与正式构建26.63秒；一个空匹配测试filter不计验证，已另用精确名称验证。
+- 正式一次COD原完整A约1分24秒、11步/四压缩，全部请求观察与两测试各一次，exit0/1，原件/Git/原事件保持，summary拒绝0。原文/43bytes/四行/全SHA、两搜索及Git修改已交付，原audit15/16、具体交付4/6；首report第2/3/4项的五个旧ID被enum预检拒绝、未dispatch，随后只改report无新平台动作，计数2/1保持。
+- 整体A仍FAIL：实际cwd及完整九条目未交付，三个rationale复制英文示例；不把操作无重复或canonical completed代判完整A/N3。UI分清正常exit1与一项参数未执行，没有Nomi应用失败。未Stop/Retry/外部kill；旧W244失败保持。
+- 未覆盖：完整A首发/全部结果/语言/N3/GEN，B来源SHA/最终报告、C重启重读/逐字引用/实际Stop。按收尾约束转C直接阻断，不启动未修A的付费循环；本批只关闭丢失search/Git小结果的确定性根因。
+- 证据：仓库外2026-10-02/windows/w245-mainline-read-result-retention，01首红/02修后、03/04定向回归及真实原结果大小、05构建、06隔离正式夹具、07原DB/事件/参数/audit/两report与独立复核、08正式UI。Git仅数据保留/最小回归与短进度。
+
+### W246 运行进程身份/游标被完成资格过滤（2026-10-02；基线3302b055e，连续纠正N1）
+
+- Case/子断言：C05/C06/C07/C08与A03/A05/A06/A09/A10/A12/A13/A15/A17/A19；沿W241重启/重读查实际固定context，无新角色或旁支矩阵。
+- 首红：running结果不能作完成证据，原缓存process_id/READY/next_cursor却只给eligible条目，压缩后活进程信息丢失。现原缓存里running且仍在work tracker的结果进入ineligible数据，另给last_observed_running_processes；资格仍false、无授权/刷新，旧running记录不能在tracker清空后冒充活进程。原单输出2048/aggregate4096/detail4096/台账32KiB及冻结预算保持。
+- 验证：新回归修前红/修后绿，包含失去tracked状态后不展示；completion46项及三项硬预算/余量/报告不重做，共49项不同检查通过，fmt/diff与正式构建27.08秒。测试READY两个LF的正确游标25另校准；仅测试夹具修改，没有再次编译产品或额外模型循环。
+- 正式一次COD C：13步/四压缩，同Turn的steer-accepted与steering_inputs均保存，一个实际helper、两来源各完整读一次、无cancel/restart；新输入使一poll/一write提议未dispatch，replan后仅一次实际写入及一次回读，18-byte UTF-8/LF内容/hash完全匹配，禁止初稿不存在、原件全保持。
+- 正式Stop为cancelled，但独立277条CIM及毫秒时间核对证明父子已在helper原120秒deadline后约120.106秒消失，cleanup170ms/reaped/errors=[]，不能代判运行中Stop。下一覆盖样本应在冻结前按实测model/steering耗时给helper留足观察余量；不扩大产品硬预算，不改本次首败为PASS。
+- 原audit17/21不改：计入未执行write提议、把wire turn_input_scope当纠正内容、对全部后续poll强制初始READY阶段的1000ms，均保留并以原参数/实际dispatch/steering_inputs另审；真实timeout及live Stop缺口仍在。运行审阅误把18bytes当字节首败已独立更正，原说明保留；自适应观测未记录初始start，真实owner receipt+CIM证明一次，不把缺观测当未启动。
+- 零模型正式冷读，events/turns/sessions全部行数/hash及全部磁盘字节保持、纠正和正确结果/取消显示、无旧Turn复活。原AX文字审计7/8保留；移去浮层后截图明确“已取消执行”且AX有“停止前尚未完成”提示，独立视觉复核补足显示语义，没有声称原自动审计全绿。
+- 未覆盖：C运行中Stop/必要N3/另一关键入口，A实际cwd/完整条目/报告首发与语言，B来源SHA/最终报告，Windows差异；共享未达。复用本批不重启/不重读/纠正和冷读证据，只补实际缺口，不重复未改根因。
+- 证据：仓库外2026-10-02/windows/w246-mainline-live-process-context，01首红、02/03定向、04构建、05纠正时、06正式Stop、07/08原DB/事件/audit/实际dispatch与澄清、09暖UI/误判更正、10/11冷启动、12/13原冷读与补充截图、14物理deadline核对、15测试游标；Git仅数据保留、一个最小回归和短进度。
+
+### W247 宿主收尾指令导致用户保持进程被取消（2026-10-02；基线4e07701ed，FAIL）
+
+- Case/子断言：C05/C06/C07/C08与A05/A06/A09/A10/A13/A17/A18/A19；补live Stop覆盖，按W246实测冻结helper300秒/观察240秒，原任务约束和产品预算不变，复用正式构建。
+- 正式COD一次、19步/八压缩，helper实际300000ms启动；来源各一次、纠正结果18-byte写入/回读且原件保持。但在操作者Stop前模型自行cancel一次，171ms/reaped/errors=[]，之后report一拒后接受、canonical completed；公开称“按系统要求cancel”。新输入造成的未执行write和旧report引用拒绝均保留，未重试模型或外部kill。
+- 首败及根因：provider无tool的等待进度被当作完成复核，workflow completion_review_message明确要求“Before ending, poll or explicitly cancel running_processes; no process may survive this turn”，与用户保持到Stop矛盾。W248既有running-process回归强化后修前红；不是helper deadline、权限缺失或无法原生停止。
+- 操作者停止前CIM已见父子均消失，点击先前Stop索引时回合已完成、按钮不可用，未实际停止，不生成伪Stop记录或运行依赖Stop成功的audit。原目标、旧审计与新运行前的审计语义修正均外置保留，原安全拒绝不删除；完整C仍FAIL。
+- 未覆盖：修后停止保持语义/完整C/N3，A实际cwd/完整条目/报告与语言、B来源SHA/交付，Windows差异及共享门槛。下一批只修活进程等待被错误归入收尾的直接根因，普通完成/未知效果/取消/宿主清理底线保持。
+- 证据：仓库外2026-10-02/windows/w247-mainline-live-stop，冻结期限/原与修正oracle、02纠正时、03/04原事件/DB/自cancel与completion_review、05原UI、CIM353样本和stop-not-executed；本批Git仅短进度。
+
+### W248 活进程等待仍在执行，不能为收尾自取消（2026-10-02；基线e35980276，live Stop N1）
+
+- Case/子断言：C05/C06/C07/C08与A05/A06/A09/A10/A13/A17/A18/A19；只修W247直接根因，同任务/helper300秒/观察240秒、正式Tauri/StepFun/COD。
+- 修复：完成复核显式区分has_running_processes与can_report。活进程无tool的公开进度继续原执行，保留poll/原约束，不要求完成报告或把用户helper取消；宿主notice去掉“结束前明确cancel”的新指令，实际终态清理仍强制。无活进程的完成/未知patch/blocked分支、报告唯一表面、计数/权限/冻结预算不改。
+- 验证：强化既有live-process回归修前红/修后绿；压缩后的复核、拒绝额外命令、报告修正不重做、两取消及blocked patch等七项不同定向通过，fmt/diff通过，正式构建49.56秒。中间把!can_report误等同活进程导致一项回归红，另记后显式拆开，原断言不改。
+- 正式一次C、22步/八压缩，同Turn纠正，一helper/两来源各一次，无模型cancel/restart或额外进程；操作者Stop前CIM父子均存活，正式cancelled后约385ms均消失，419样本/亲缘/心跳停止/host_cleanup_proven与取消后零已派发观测成立。没有helper timeout、外部kill/Retry或虚报completed，关闭此live Stop子断言N1，W247自cancel首败保持。
+- 整体C仍FAIL：一write因new-input/replan未派发，两次update_plan引用不逐字被拒；实际仅写一次/回读一次，但传入content已为C_FINAL_CORRECTED、缺末LF，真实磁盘17bytes，与用户18byte要求不符。原audit20/24及全部三次拒绝保留，不补写、不把结果改成PASS；只观察到工具参数阶段已缺LF，provider/codec归因未验。
+- 零模型冷读三表所有行数/hash、全部文件字节保持，纠正/停前未完成提示保留，无旧Turn复活；错误17bytes也原样保留。原冷读6/8不覆盖：AX取消字样未匹配、期望LF仍缺，截图与停止提示另审，不宣称全绿。
+- 未覆盖：C末LF/来源引用/必要N3/另一入口，A实际cwd/完整条目/报告首发/语言、B来源SHA/最终报告，Windows差异及共享门槛。复用本批停止/无重启重读/冷读，只修具体缺口，不重复未改根因或增加矩阵。
+- 证据：仓库外2026-10-02/windows/w248-mainline-live-progress，01首红/03中间红/04七项、05构建、06纠正时、07/08原DB/事件/参数/audit/385ms复核、09正式取消UI、10～13冷启动/原冷读/原错字节；Git仅执行/收尾条件、一个既有回归强化与短进度。
+
+### W249 被拒逐字引用的参数位置（2026-10-02；基线caf7e2e81，正式采用未触发）
+
+- Case/子断言：C06/C07/C08、CTRL-006/007与A02/A05/A09/A16/A17/A19；W248三要求中第2项多加“核对”，反馈只给input 1，导致原错重复。先强化middle-source/完整计划保留反例，01首红保存。
+- 修复：内部merge保留同一验证集合，同时返回被拒addition的数字JSON路径与来源索引；update_plan反馈给rejected_parameter_path=/requirements/1/source、source_input_index=1，原message/拒绝/计划版本/needs_replan/计数保持。旧merge的String错误API兼容，非引用失败不伪造位置；不回显引用/整段输入、不自动改quote、不接受改写或新权限。
+- 验证：planning9、requirements6、报告修正不重做与mandatory硬预算各1，共17项不同定向通过，fmt/diff/正式构建2分38秒。原参数/既有计划及persist次数严格不变；只修第2来源后保留第1/3项与原输入义务，新显式坏引用仍拒绝。
+- 正式一次原完整COD C，38步/15压缩，约239.114秒在冻结240秒观察限内正式Stop；helper一次、来源完整分页0→200→398（UTF-8安全返回198 bytes不是重读）/结果回读各一次，无自cancel/重启/额外进程，父子Stop前存活，canonical cancelled后CIM约536ms均消失，539样本及后续零派发/心跳/清理成立。
+- 原audit21/24、三项字节失败保持：实际content仍为C_FINAL_CORRECTED，缺末LF，owner/磁盘17bytes，未补写。两update_plan省略requirements，无引用拒绝，所以不证明新位置反馈的模型采用或C首发/N3；两new-input/replan安全拒绝及计数原样保存。
+- 零模型冷读三表所有行数/hash、全部文件字节不变无复活，纠正与17-byte结果保留；原6/8不覆盖，期待LF仍缺且AX取消字样未匹配。原ToolCallDelta只有空参数片段，无法与完成参数比较；只知工具参数阶段已缺LF，原HTTP/供应商/codec因果未验，不因计划文本提LF就归罪某层。review复制旧capture名首错已另存纠正，不计产品失败。
+- 未覆盖：C末LF/引用反馈采用/必要N3/另一入口，A实际cwd/完整条目/报告首发/语言，B来源SHA/最终报告、Windows差异与共享门槛。本批仅一次新修复对应正式样本，不继续同一未改LF根因的付费循环；下一步集中原字节要求和A/B直接缺口。
+- 证据：仓库外2026-10-02/windows/w249-mainline-citation-location，01首红/02修后/03十七项/04构建、05纠正时、06/07原DB/事件/参数/原21-24审计/536ms/空delta及澄清、08观察限、10～13冷读；Git仅位置反馈/最小回归与短进度。
+
+### W250 主线B集中核账及包装工具摘要（2026-10-02；正式FAIL，组件修后PASS）
+
+- Case/子断言：B、C04/C05/C06/C07/C08及A05/A08/A09/A10/A13/A17/A19；原完整任务、正式Tauri/StepFun/GEN、新workspace/profile，hash核对复用W249构建，无新模型配置或权限。
+- 实际文件链：write/read/带真实整源SHA的patch各一次，原生cmd复制/移动及限定删除各一次，18-byte终版含LF、最后回读/hash及四保护文件保持。W240未使用SHA的首败不改，本次遵循不是未修根因的N3闭环。
+- 首败：模型没有完成任何stdin写入调用便close，真实EOF及echo-input.bin均0 bytes；echo退出0/reaped不代判18字节任务。hold两次poll都cursor0而非第二次25，父子READY后取消一次/reaped，159ms及69条CIM证明亲缘/消失。来源/最后文件未重读，但未交付报告。
+- 原audit20/28保留。20步/11压缩、三个model_response_rejected、一次output_truncated、TOOL_SHAPED_TEXT及REPLACEMENT_CONTEXT_BUDGET各一拒均保留；没有自行应用失败。预设240秒观察限，实际254.275秒才提交Stop，越限作为执行组织问题留档，不记限内PASS；canonical cancelled、host cleanup及后续零派发成立，真实UI已取消。
+- 确定产品缺口：三条仅含tool_call包装的工具提议被接纳为摘要。现沿既有CompactionInvalidSummary拒绝这一个包装形态；普通文字/JSON历史与文档数据保持，原上下文、无工具摘要请求、一次纠正及硬预算保持。强化两个已有回归，真实223-byte反例首红单存；五项compaction和三项修复/源保持/硬包络检查共8项不同定向通过，fmt/diff通过。未证明该缺口导致漏stdin，也未代判修后正式采用。
+- 收尾：正常同步a3a0bf001，保留macOS工作；本次正式构建不含新合并的应用退出码修复。A具体结果/引用语言、B输入/游标/交付、C末LF、摘要修后正式效果与必要N3/入口仍开放，完整场景0/3、共享未达；已集中列在页首，不扩旧矩阵或新业务Case。
+- 合并验证：新退出码逻辑在Windows的两项process_exit回归通过（编译3分25秒），与本批8项共10项不同定向检查。只证明协调器失败/正常/重启码规则，不代判Windows正式应用退出；检查已结束，无后台cargo或模型任务遗留。
+- 证据：仓库外2026-10-02/windows/w250-mainline-b-final保存原任务/基线/DB/事件/20-28及独立复核、首红/8项/Stop越限、正式取消UI；一次截图遮挡误取前景另存纠正，非产品失败。Git仅摘要判定、已有回归及短进度。
+
+### W251 历史回执丢失与错误EOF交付（2026-10-02；组件修后PASS，正式仍FAIL）
+
+- Case/子断言：C05/C06/C07/C08、历史真实性与A05/A09/A16/A17/A19；复用W250已取消会话及工作区，仅新增授权一次read_file和中文结果说明，不重做文件/进程。已有加密StepFun/GEN，独立profile，正式构建33.06秒。
+- 首败：两步、UI17秒，一次真实read，当前18-byte/三行/完整SHA/LF交付成立；却把旧EOF说成18，实物/原close回执均0。原audit12/17保留；其误要求report_completion、漏自然文本的限制另审，独立12/13仅EOF失败，不用夹具限制洗掉真实错误。
+- 零模型直接调用真实Runtime重放W250：仅两条消息、原ToolResult为0，错误“发送18字节”摘要仍在。确定数据保留缺口；现仅从匹配原生process准入及结果保留选定回执字段，互动须匹配process_id，经原tool_context策略，单记录2 KiB/整体连同标签4 KiB，超限整条省略并计数。仅补已移出原tool结果的历史数据，不生成工具交换、执行/当前证据或新权限；当前恢复前缀及隔离归档不补入。
+- 验证：反例首红独存；历史5项、初始history预算/mandatory硬限/隐私reasoning/报告修正不重做4项，以及重复恢复/owner核对/不覆盖已完成结果3项，共12项不同定向和fmt/diff通过。真实旧回合修后重放为三消息、9回执/1省略，EOF0准确保留，错误摘要/原事件未改写。
+- 修后只做一次原提示正式GEN，新profile及包含未提交修复的构建1分11秒（源hash/二进制hash已记）。一模型步、UI5秒、无新工具调用，仍复述EOF18并称本次读取；独立11/13，当前读取及EOF均FAIL，原文件/全部旧事件/Turn行保持。不得记修后模型采用、完整B或共享达标；没有再付费循环。
+- 接线核对：API端口属于该新GUI PID，cargo产物路径/mtime/hash一致；同Session/Snapshot无清空或切换，初始history截断0，App使用32回合原生重放，编码保留User文本。尚未取得原始请求/HTTP，不能由源码和零模型证明实际wire收到0或归因供应商；真实采用和生成精度保持开放。Windows正式托盘退出未验，退出观察器到期没有杀进程，不代判正常退出。
+- 证据：仓库外2026-10-02/windows/w251-report-closeout留前/后原文、DB/事件/原audit及独立复核、真实重放/首红/12项/构建及边界。诊断首次解析独立离线依赖锁、编译目录误落仓库，已校验路径后移出并留纠正记录；后续均仓库外，非产品失败。Git仅history源码、两项最小回归及短进度。
+- 同步结算：源码c0baac7a8，合并3bc5a7fb6并保留macOS阶段记录；命令结果策略相关原回归在Windows再验1项通过，合计13项不同定向。正式样本为合并前构建，不移植macOS交付/文件短链结果或把新策略算本机live采用。
+
+### W252 收敛方案与零模型请求边界（2026-10-02）
+
+- Case/子断言：C06/C07/C08；复用W250和W251原记录，依正式Runtime闭合回合重放顺序构造历史，再用正式OpenAI Chat编码器检查请求body。9条源消息/9条编码消息，真实STDIN_EOF bytes=0逐字段保持，网络请求0、真实凭据读取0；没有新UI/模型样本或产品源码改动。
+- 限制：这是记录重建及编码边界证明，未复原当时宿主instructions/tool定义，不能代判W251实际HTTP收到0、模型忽略正确数据或生成精度已修。W251首次/修后FAIL、当前读取缺失、原件及历史记录继续保持。
+- 方案根因：整组复跑、生成误差与系统缺陷混作门槛、实际边界证据取得太晚，以及计划残留旧B/C/A/N3排程。现删除矛盾活动门槛，先零模型定位、修直接原因、最小回归及必要的一次短UI，交付和残余分开；不新增邻近Case或整组矩阵。
+- 证据：仓库外2026-10-02/windows/w252-convergence-audit；探针首次ChatModelError类型转换编译失败保留，改为显式错误传播后完成。未读取/写回原数据库，未运行命令/进程/文件效果；Git仅计划与短进度，文档改动不重跑产品构建或全仓测试。
+
+### W253 较早回执被后续回合压缩再次清掉（2026-10-02；确定性修复）
+
+- Case/子断言：C06/C07/C08、历史真实性及A05/A09/A16/A17/A19；限定W251回执保留机制。合法零模型两回合反例：第一回合EOF0已有回执，第二回合压缩移除其tool尾部，整组重放又丢EOF0；也覆盖第一回合原ToolResult尚未压缩的情况。行为首红独存，夹具字段/事件顺序的两项首错分开，不算产品失败。
+- 修复：新增整组闭合历史重放入口，暂存每回合从原准入/结果验证出的有界数据；所有原对话及未交付纠正重放完再附入，正式App改用该入口。原单回合入口兼容，原对话/事件不改写，历史数据不变成工具交换/当前证据或权限；原单条2 KiB/块4 KiB、宿主32回合窗口与原context预算保持。不同Turn可能复用call ID，不用全局同名ID排除旧回执。
+- 验证：历史6项＋恢复/硬预算/报告不重做3项，共9项不同定向；App check、fmt/diff通过。后续回合不再清掉回执、未交付纠正只保留一次、错误后候选history完全不变、无新增tool交换。App check首轮1分17、最终8.83秒；没有全仓测试或正式构建。
+- 复用真实W250/W251两回合经新入口及正式编码器：9条源/编码消息，EOF0保持，错误旧回答在索引6，原生历史数据在索引7、当前输入仍最后；网络/真实凭据读取0，前次输出不覆盖。数据排序是一项生成策略候选，不能证明W251原失败因果或模型采用；旧错误回答不删，当前读取/生成精度仍未解决。
+- 未覆盖：本修复正式Tauri采用、实际过去HTTP、不同后续生成的语义正确性、Windows托盘退出。按停止线不新增模型循环/邻近Case，活动GUI仍为此前构建，不冒充新版本。本批证据仓库外2026-10-02/windows/w253-closed-history-receipts，Git仅三处接线/重放、一个最小回归及短进度。
+
+### W254 历史真值正式短任务达标（2026-10-02；N1，原首败保留）
+
+- Case/子断言：C05/C06/C07/C08、当前读取/历史结果真实性与A05/A09/A16/A17/A19；源b1c21a0a5，正式Tauri/custom-protocol构建44.19秒、独立profile，复用原W250隔离data/work/workspace及原只读提示，没有给模型补充EOF0答案或缩减断言。
+- 正式GEN/已有加密StepFun：两个model步骤、一次实际压缩，UI18秒后completed；read_file全文一次、无工具/模型/摘要拒绝，无进程/命令/写入或补查。当前三行18-byte/LF及完整SHA与实际文件/回执相同；公开旧echo的EOF0、exit0/reaped及hold cancelled/159ms/清理，明确是历史事实、不升格为本次验证或18字节输入已完成。
+- 独立13/13与人工语义/UI核对通过：原全部文件及文件集合、全部旧事件hash和旧Turn整行均保持；原cancelled未复活，错误旧回答仍可见，未点Stop/Retry或外部kill子进程。真实产物mtime/hash、源身份及新GUI PID已记录，正式截图与完整canonical备份仓库外；复用组件回归，不再跑整组B/C或固定N3。
+- 只关闭这条真实历史结果保留/交付的针对性链N1，不声称唯一因果、原完整B/C、所有生成精度或共享全阶段通过。剩余仍为结果漏项/生成步骤字节偏差及Windows正式托盘退出等未验；过去实际HTTP未取得，不追加同根因付费循环。本批仅验证，无新产品源码。
+- 证据：仓库外2026-10-02/windows/w254-native-history-final；复用已有prepare/launch/inspect/review，保留before DB/字节/事件基线、原提示、build/host、真实终态/13项/正文/UI。观察器只等自有GUI退出，观测到期不杀进程、不记正常退出PASS。
+
+### W255 三项结果完整交付，核心机制阶段收尾（2026-10-02；N1）
+
+- Case/子断言：C01/C02/C06/C08、CMD-131/134与A05/A09/A13/A16/A17/A19；针对已同步ace29cdd0命令事实策略补Windows采用。复用W254正式b1c21a0a5产物及隔离data/work/profile，在原A工作区新建COD Session，只要求cwd、直属含Hidden条目、中文空格文件首尾/字节/SHA三项，不附带Git/测试/搜索/进程链。
+- 正式已有加密StepFun：三model步骤、零压缩、UI13秒completed；两个正确PowerShell命令各一次exit0/reaped，read_file全文一次，report首次接纳、三项各引用对应真实call，错误计数0/0。公开完整cwd、九条目逐项真实Hidden（仅.git/.hidden-item.txt为true，.hidden-note为false）、alpha/omega、43 bytes及完整SHA，中文回答与UI/canonical/磁盘相同。
+- 13项独立检查及另外7项参数/Hidden/清理/首report核对共20项不同断言通过；所有文件及集合（含.git）、全部旧事件hash和Turn行不变，新Session不借旧结果。源/产物身份及before/after DB/UI留仓库外；无新构建或全仓测试，没有Stop/Retry/副作用或重复观察。原W245完整A交付4/6及首拒不覆盖，短链N1不拼成完整A PASS。
+- 本轮机制交付收敛：W254历史真值与W255多结果交付缺口已针对性验证，其他未受影响的命令/非零/文件/Stop/冷读直接复用。仍开放W250漏stdin/重复cursor、W249漏末LF及W240缺来源SHA的生成精度；Windows托盘正式退出因UI观察器不可达未验。旧完整A/B/C、N3/100 seed/LONG/99%未认证，共享全阶段仍不记达标；没有新根因不再付费复跑。
+- 正常fast-forward同步d2f9da387并保留macOS/MM工作；本次live二进制身份仍为b1c21a0a5，不代判新业务UI采用。证据外部2026-10-02/windows/w255-multi-result-final；Git仅简短进度和清理矛盾活动门槛，不扩业务Case或大型索引。
+- 夹具收尾：全部canonical Turn终态后核对自有GUI PID/绝对路径/精确启动UTC，再停止空闲测试GUI；这不是正式托盘退出PASS。首次观察器DateTime转字符串损失时区/精度而拒绝清理，未杀进程；按反序列化类型核对UTC后完成，首错单存，无cargo或模型任务遗留。
+
+### W256 stdin遗漏的零模型责任边界（2026-10-02；原因待证）
+
+- Case/子断言：C05/C07/C08、原W250 stdin遗漏及A02/A05/A09/A19；只复用原DB/事件/磁盘，定位时间盒内结束，无新UI/模型调用或产品改动。
+- 事实：close前第3次摘要明确18字节/append_newline=false尚待执行、process_id/游标11保留；第8步ModelResponseRejected无原生派发，第9步直接close，receipt和实物EOF均0。冻结Snapshot允许workspace.process/input，process_session绑定execute；排除本记录中“摘要已把输入标为完成”和“冻结Snapshot未准入input”，不代判实际请求工具表。
+- 7项直接记录/实物核对通过；仅从ReasoningDelta抽出的XML写法经当前正式PublicOutputGuard在234个UTF-8两片分割位置均拒绝文本调用并保留write_process_stdin名称，正文未公开。该重建不是原始OutputTextDelta/SSE；原tool_hint空值的原因和实际请求暴露仍缺证，不能认定宿主守卫、供应商或已修摘要包装是唯一原因，也不把stdin残余关掉。
+- 停止线：保留原FAIL，不新增猜测修复、补写字节、限制合法无输入EOF或重跑整组B。现有安全拒绝/清理机制继续复用；唯一原因未证，后续若取原现场须先有实际请求/拒绝帧边界证据。首个诊断中的同文件hash自比不算不变证明，原产物保留并改为独立18-byte要求/0-byte实物核对；没有读取凭据或写回原DB。
+- 证据外部2026-10-02/windows/w256-stdin-attribution，完整提取/有限探针/首个核对及修正结果在仓库外；Git仅短进度。文档改动无需产品构建/全仓检查，共享全阶段及Windows退出仍未结案。
+
+### W257 真实stdin请求/响应接合与短链N1（2026-10-02）
+
+- Case/子断言：C05/C06/C07/C08、CMD-139/REAL-005及A04/A05/A09/A13/A16/A17/A19；限定18-byte stdin→EOF→exit真实接合缺口。b1c21a0a5正式Tauri产物复用，新data/work/profile、官方通用入口，已有加密StepFun连接；仓库外loopback录制夹具转发实际正文/SSE、不记录认证头，不替换模型或工具owner。
+- 正式一次：六model步骤＋一次压缩，共7个真实请求，UI18秒completed；start/poll/input/close/poll/report严格一次链，同一turn-owned handle。input含末LF且append_newline=false；真实参数/磁盘/EOF bytes18及hex完全相同，poll推进0→11、最终用close返回119，exit0/reaped/errors空。report首次接纳，中文交付实际输入/EOF/退出/清理，无工具/协议错误或文件探测/附带进程。
+- 19项独立oracle＋真实PID消失/68个日志及wire制品无凭据共21项不同断言通过；全部6个原生提议的真实SSE参数与canonical逐项相同，7个流完整留存，执行请求真实暴露stdin。helper/AGENTS字节及文件集合保持仅新增echo-input.bin；原W255备份与当前源data的三张canonical表整行一致。不是只读wire-only、组件拼接或普通直连网络拓扑认证。
+- 夹具首败保留：两次复制旧DB而缺完整dataset身份均在模型前被正式启动门禁拒绝，未删凭据/改绑定/校验。改为正式初始化全新数据，只将所选加密连接在内存解密并以新夹具key加密导入，保留原数据；之前两次拒绝、一次观察器SQL引号错误/失效AX索引分别留档，模型调用仍只属于上述一次任务。初始化/最终自有GUI及forwarder均按PID/路径/启动UTC核对后清理，不算托盘退出PASS。
+- 未覆盖：原W250被拒输出/tool_hint空值原因未复现，旧完整B、生成漏步骤/重复cursor、C末LF/来源前提、Windows正式托盘退出及发布认证仍开放。本次不改产品源码/预算/权限，不重跑整组或继续相同根因付费循环。证据外部2026-10-02/windows/w257-stdin-wire；Git仅短进度，无新构建/全仓测试。
+
+### W258 核心机制与残余最终结算（2026-10-02；阶段交付）
+
+- Case/子断言：C01～C08已有断言核账；读取12份独立产物，按当前源码差异判断指定操作证据可复用。共享页八簇表列清合法命令/读搜/Git小测试、源保护文件链、stdin/EOF/Stop、非零/timeout/历史真值、纠正冷读及原生参数回配；不将8行计成8个完整Case PASS。
+- 剩余归类：W250漏stdin/重复cursor的唯一原因待证；W249原17-byte参数/owner实物一致，但Windows旧SSE缺失；W240用户要求的source guard未遵循与原复杂交付继续开放。没有新可修产品原因，不新增模型、夹具或正向样本消除旧失败；共享全阶段仍未达。
+- Windows正式退出：b1c21a0a5正式二进制、原W257隔离data/work、新profile，模型0。三表整行hash/全部文件集合与字节/无活动Turn5/5，原记录无复活；自有8进程/5监听端口在观察前记录。window2 inventory及Win+B未提供可观察的Quit，已请求一次人工操作；15分钟内无实际Quit。原10分钟观察器超时后核对同PID仍活并续观察，未重启；到点仅清理空闲自有GUI，BLOCKED_UI_REACHABILITY保持，不把kill或组件退出码回归当native PASS。
+- 交付：机制结算、生成残余归类、退出边界及最终记录四包已完成，源码修复和既有直接回归按原批交付。本批Git仅两页简短结算；无新源码、构建/套件、模型调用或角色/旧矩阵扩展。全角色、N3/100 seed/LONG/99%仍未认证，完整体验残余未完成，不标记全目标完成。
+- 证据外部2026-10-02/windows/w258-core-delivery：选定断言/产物hash/源码影响审查、归类、冷读DB与5项、正式UI/进程/监听及退出超时/边界。首个核账脚本误选W255集合字段另存后改为原automated_checks，断言/原产物不变。后续正式退出需要可观察托盘的环境或重新准备后人工操作；已结束实例的迟到回复不当作Quit证明。
+
+### W259 开放项有限定位与人工托盘Quit（2026-10-02；正常退出N1）
+
+- Case/子断言：C05/C07/C08、A05/A09/A13/A17/A19；从干净且远端一致的fb89666b9继续，仅定位开放参数/上下文和正常正式退出，不重复W258机制核账或整组A/B/C。无源码修复、Cargo/模型调用或新正向命令样本。
+- W250重复cursor新边界：原seq528 poll返回25；seq564压缩摘要明确cursor=25，并保留同call原工具回执的next_cursor=25；seq570响应拒绝后，seq576完成提议仍请求同进程cursor=0。因此该次压缩记录没有完全丢失游标；参数层重复及原FAIL保持。实际历史HTTP/SSE未恢复，不能断言供应商或解码层唯一原因。漏stdin复用W256缺证边界，不重新执行探针或用W257短链覆盖。
+- W249实际写入的完成参数与owner仍为17-byte无LF，旧Windows SSE缺失；W240实际第二次write_file整写替代要求的来源SHA保护，合法schema不把自然语言义务自动变成全局强制guard。原复杂任务漏项与W251失实EOF分别保留，既有数据保留修复/W254/W255指定链复用。没有新可修产品根因，不补LF、stdin、cursor或强制所有patch带SHA。
+- 正式Quit：当前window2仍无托盘目标，用户明确提供人工协助后才准备新profile；复用已正式初始化的W257隔离data/work，不克隆旧DB或改身份。二进制SHA及前端build ID与b1c21a0a5原产物相同，当前退出链源码未漂移。新PID43056、启动UTC13:38:56.1249366Z，正式窗口及8进程/5监听先记录；用户确认实际托盘“退出／Quit”。观察器保留同一Process handle，13:39:34.7459333Z自然退出、实际exit0、未kill，五端口消失。首快照两个WebView后代仍活，退出后33.4秒的复核8个PID全无，窗口消失；三表整行hash、全部工作区文件和无活动Turn五项成立。原stderr的WebView class unregister Error1412与首快照原样保留。
+- 验证与未覆盖：只关闭空闲隔离实例正常托盘Quit N1；W258原PID21636阻断/清理记录不改。失败退出码分支与活动Turn应用退出未做native验证，既有协调器组件证据复用；生成残余、原完整共享/Windows Case与N3/100 seed/LONG/99%仍未认证。自有GUI/后代/监听已自然清理，退出观察器已结束。
+- 证据：仓库外2026-10-02/windows/w259-open-items-closeout，open-items-review.json记录原seq/参数与源hash；01-native-quit含身份、UI、实际退出码、两次进程快照、原记录核对及quit-result.json。Git仅本次简短结算，文档变更无需产品构建或renderer检查。
+
+### W260 当前共享Creative在Windows正式采用（2026-10-02；全面走查进行中）
+
+- Case/子断言：C06/C07/C08、AMUL-001、OBS-008/014/020与A06/A09/A10/A12/A17/A19；补后续Creative pause/retry在Windows产物中的实际采用。新目标覆盖其余共享/Windows验证，本批不代判整体完成，原生成残余及旧MM失败保持。
+- 验证产物：源9118d3fab，34项Creative UI/port回归、desktop-ui-boundary、当前前端、正式`cargo build -p nomifun-desktop --features tauri/custom-protocol`及现有conversation_gui_fixture均通过。正式binary SHA前缀1CE1C5342933、frontend_build_id=4839fca4-409b-4553-a8bf-c89651730f21；新data/work由正式bootstrap初始化、新profile，不克隆用户DB或改身份。
+- 暂停正式N1：本地HTTP400仅一次，canonical native_pause=EXECUTION_MODEL_INVALID_REQUEST、cleanup_proven；UI显示“执行已暂停”、无运行spinner/retry、pending保留。正式Stop后同Turn cancelled、pending清除、UI“已停止”；28events、0effects、画布0节点/连接、本地调用仍1。用户托盘Quit，PID73680实际exit0，最终后代/监听消失，退出前后四表整行hash保持。
+- 实际retry正式N1：debug既有注入只匹配新夹具生成的精确key，真实鉴权提交成功后丢一次返回；UI出现“提交结果尚未确认”和实际retry按钮。正式点击后两次submit均200，仍仅原一个Turn/operation/key、本地模型仅1、0effects；释放原响应后30events/completed，pending清除、正式UI完整回复、空画布保持。PID70280用户Quit实际exit0；新PID46044同data/work、新profile冷读原画布，原30events/四表逐行hash及回复保持、无retry/重发/复活，本地调用仍1；用户Quit实际exit0，最终自有进程/监听全部消失，fixture正常shutdown/exit0。
+- 首错与边界：夹具构建未完成时误启动旧helper，unsupported mode/exit1，发生在模型/产品启动前，原样保留后增加外部runner产物hash门禁；一次输入几何失败/错误前景截图与用户输入检测另留档，错误截图排除。未修改产品源码；付费/真实StepFun请求0，本地模型共2。仅关闭上述隔离negative子断言N1，不关闭原Windows旧MM/N3/全MM、真实供应商生成、W250/W249/W240、复杂任务、引用反馈采用或其余平台/发布认证。
+- 证据外部2026-10-02/windows/w260-creative-adoption：构建/34回归/边界、原首错、三个GUI身份/UI/原生退出、真实点击的两submit日志、原DB/事件/完整表hash及review.json。当前无Cargo、测试GUI、fixture或其监听遗留。下一步真实模型统一使用用户指定StepFun Coding Plan / step-3.7-flash；跨盘/真实UNC缺隔离夹具保持未验，全面目标继续。
+
+### W261 精确引用反馈真实模型采用尝试（2026-10-02；未验证/生成首败保留）
+
+- Case/子断言：C05/C06/C07/C08、CTRL-006/007与A01/A05/A09/A13/A17/A19；目标为W249中间新增来源引用的真实拒绝→按参数位置纠正，尚未取得该断言。源/产物复用W260，正式Coding UI、独立新data/work/profile、已有加密StepFun Coding Plan / step-3.7-flash。所选连接在内存重加密导入，未复制旧DB/身份；实际loopback请求/SSE不记录认证头。
+- 第一载体未达：两次实际HTTP200，初始工具表无update_plan，ToolSearch仅一次返回无匹配；模型如实说明不可用，未启动进程/副作用。源码configure_tools仅在adaptive.task_ledger激活后暴露控制，夹具错误要求首次调用未暴露控制；不归因供应商漏工具，也不扩产品工具表。修正载体为先执行实际已暴露进程动作，第一原记录保留，同PID/同Session未重启。
+- 修正后的正式首败：start/poll各一次，真实READY_CITATION/cursor15；模型未收到追加输入便自行cancel一次、172ms/reaped/errors空并report收尾，违背保持运行/不自取消要求。操作者观察到READY后未在模型结束前提交steering，新增input1/目标引用拒绝均未发生；原生cancel参数与canonical一致，旧StepFun拒绝/旧Windows LF的HTTP仍未恢复。report披露引用测试unverified，所谓按回合终止规则取消的解释与实际请求08的明确等待/不取消notice矛盾。该notice原文、进程身份及游标都在真实wire中，不能归为W247已修的宿主强制cancel或丢失回执，也不把canonical completed计成任务PASS。
+- 核对：合计9真实请求/SSE全部完成、5组原生调用参数与canonical逐项相同；工作区两文件完整bytes/hash/集合保持，helper实际PID76260消失，凭据审计70份文本制品0命中。无新明确产品根因/源码修复，不再同根因付费循环；精确引用反馈采用、原W250/W249/W240及复杂任务仍开放。
+- 夹具/观察首错：初始化已有无关local provider，导入旧整数PK导致冲突，三次模型前失败/rollback保留，外部import改为目标生成内部PK且保留provider UUID/model/role。一次SSE choices=[]观察器IndexError、错误前景截图、目录弹窗控件缓存缺失/人工目录选择单列；后续优先自行操作，真正不可达入口保留未验继续其他项。15分钟GUI观察超时后核对同PID39400/启动UTC并续观察，未重启；两Turn均终态/helper已清理后才核对身份清理空闲GUI和forwarder，未计正式Quit。全部自有PID/监听无遗留。
+- 证据外部2026-10-02/windows/w261-citation-adoption：正式初始化/连接导入与首错、两载体原提示/实际DB/UI、9份新真实wire、review.json/secret-audit/最终清理。Git仅简短失败与边界；全面目标保持active，下一步继续Windows生命周期及其他可执行平台/共享余项，未验证项不计PASS。

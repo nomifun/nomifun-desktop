@@ -157,7 +157,7 @@ mod tests {
                 nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() }).unwrap(),
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(),
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), delivery_review: Default::default(),
         }
     }
 

@@ -34,6 +34,7 @@ export function serializeCreativeStudioAgentHistory(
         ? { activityLabel: message.activityLabel ?? null }
         : {}),
       ...(message.status === 'failed' ? { errorMessage: message.errorMessage } : {}),
+      ...(message.status === 'paused' ? { pause: message.pause } : {}),
     }))
   );
 }

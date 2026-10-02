@@ -42,7 +42,7 @@ pub struct Engine {
 
 impl Engine {
     /// Must be called on the main thread after the application implements
-    /// CefAppProtocol, and before the backend advertises a native provider.
+    /// CefAppProtocol, and before the host creates its first native context.
     pub fn initialize(paths: Paths) -> Result<Arc<Self>, String> {
         if objc2::MainThreadMarker::new().is_none() { return Err("CEF initialization requires the main thread".into()); }
         if INITIALIZED.set(()).is_err() { return Err("CEF cannot be initialized twice in one process".into()); }
@@ -293,9 +293,13 @@ impl Engine {
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
         if self.stopped.completed() { return Ok(()); }
         if self.stopped.blocks_work() { return Err("CEF shutdown is still in progress; completion has not been acknowledged".into()); }
+        #[cfg(debug_assertions)]
+        let shutdown_started = Instant::now();
         self.closing.store(true, Ordering::Release);
         self.ready.send_replace(false);
         let pages: Vec<_> = self.pages.lock().unwrap().values().filter_map(Weak::upgrade).collect();
+        #[cfg(debug_assertions)]
+        eprintln!("CEF_SHUTDOWN phase=page_close_begin pages={}", pages.len());
         for page in pages { page.force_close().await?; }
         let (tx, rx) = oneshot::channel();
         let engine = self.clone();
@@ -307,9 +311,24 @@ impl Engine {
                 return;
             }
             let contexts: Vec<_> = std::mem::take(&mut *engine.contexts.lock().unwrap()).into_values().filter_map(|context| context.upgrade()).collect();
+            #[cfg(debug_assertions)]
+            eprintln!("CEF_SHUTDOWN phase=context_release_begin contexts={} elapsed_ms={}", contexts.len(), shutdown_started.elapsed().as_millis());
             for context in contexts { let raw = context.raw.lock().unwrap().take(); drop(raw); }
             if !engine.stopped.begin() { let _ = tx.send(Err("CEF shutdown entry was already claimed".into())); return; }
+            #[cfg(debug_assertions)]
+            eprintln!("CEF_SHUTDOWN phase=native_entry elapsed_ms={}", shutdown_started.elapsed().as_millis());
             shutdown();
+            #[cfg(debug_assertions)]
+            eprintln!("CEF_SHUTDOWN phase=native_return elapsed_ms={}", shutdown_started.elapsed().as_millis());
+            // Exercise the real native/desktop failure path after physical
+            // cleanup, not instead of it. A lost acknowledgement stays
+            // unverified and retries must never re-enter cef_shutdown.
+            #[cfg(debug_assertions)]
+            if shutdown_state::lose_completion_ack(&engine.root) {
+                eprintln!("CEF_SHUTDOWN phase=completion_ack_lost_fixture");
+                let _ = tx.send(Err("CEF native cleanup returned but its completion acknowledgement was lost (isolated acceptance fixture)".into()));
+                return;
+            }
             engine.stopped.finish();
             let _ = tx.send(Ok(()));
         });
