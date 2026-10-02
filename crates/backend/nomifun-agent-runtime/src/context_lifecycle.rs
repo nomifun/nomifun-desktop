@@ -666,7 +666,7 @@ impl ContextLifecycle {
     }
 }
 
-fn fitting_summary_prompt_limit(
+pub(crate) fn fitting_summary_prompt_limit(
     input: &ChatModelInput,
     mandatory: &[ChatMessage],
     desired: usize,

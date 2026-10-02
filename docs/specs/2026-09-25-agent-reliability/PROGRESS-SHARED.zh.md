@@ -3464,3 +3464,14 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - exact邻近指导保持initial创建→实际receipt→独立修改，不自动解释任务/补字节。
   无付费或正式UI重跑；原B/A13新源码正式证据及Keychain物理等待未闭环，Windows未代验。
   外部证据2026-10-03/macos/late-input-terminal，不提交完整日志/数据库/模型轨迹。
+
+### macOS B09 完整效果链与末端summary wrapper（2026-10-03）
+
+- clean e22e329ca正式原B首次取得实际before33→patch32→cp/mv→内容read/hash→rm、
+  13B输入/EOF/exit0、第二helper父子Stop完整链；33native参数等于canonical，原件全同。
+  46请求/33步骤/1020events/14effects，8门拒+2真实exit2保留；report0，完整B仍FAIL。
+- 最后protected前缀可单独容纳，但额外空摘要wrapper跨硬线，摘要尚未发送。去掉已被
+  admitted workspace完整规则覆盖的独立336B hint，不丢任何结果/Schema/预算；部分上下文
+  仍原说明，不移除adaptive索引。冻结边界及Runtime284/284通过，最后未formal复验。
+- 正式Cmd-Q0/332.15s/noexpiry/noTERM、父子witness和五表封存独立成立；非CEF/Keychain
+  样本，不代判系统物理风险或Windows结果。外证据2026-10-03/macos/b09-postfix-live。
