@@ -254,6 +254,50 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   参数或凭据。模块/Display首编译错在外保持，修后结果另记。此修复仅本机定向，尚未修后
   native失败恢复；不以PID消失洗绿、不将Agent失败缓存原因当作Keychain唯一原因。
 
+#### B09 后台超时终态与公开交付格式（2026-10-03）
+
+- arm64/macOS26.6.2/25G83、Data APFS非大小写敏感。复用原69.5秒晚输入失败，不再
+  重查执行层改字节。原owner冻结terminal只读查询不消费running输出、不改cursor、
+  不续lease、不cancel；stdin/close/resize前已有确切reap则返回真实终态/输出、本次控制
+  未执行且success=false。未证明cleanup/lookup失败仍unknown，不用PID消失作证明。
+- Runtime仍摄取终态、移除已回收running标记、累计超时/控制失败；未输入控制不再无谓
+  推进workspace epoch。exact动作仍未成功，不复位未知状态、不重发输入或启动。
+- 真实/bin/sh pipe短期限及正常交互/字面argv等定向11/11；首观察断言误要求READY
+  在晚控制重复交付失败保持，修后核对start+terminal完整输出、cursor0重放和真实reap。
+  此为本机native runner，不是正式Tauri/StepFun修后B或Quit失败恢复live证明。
+- 公开报告加宿主格式版本，旧缺字段记录仍旧文本精确回放，新版只匹配自身完整delivery。
+  原文以literal块/可逆JSON保持；已知状态/字节/hash/行数/EOF/loss简短显示，中文摘要
+  采用中文显示回退（非语言语义认证），0/false/未知/失败计数保持。已知输出不倾倒owner
+  句柄/cursor/null；未知类型仍安全JSON，不过滤自由正文。Runtime283/283含格式、冷读、
+  markup、未知和终态epoch负例；exact邻近说明明确initial→实际receipt→独立修改，
+  不新增Case识别/自动补字节，指导不算语义闭环。本批零付费复跑，日志外置
+  `2026-10-03/macos/late-input-terminal/`。
+- 原完整B仍FAIL；A13新源码正式交付、helper预声明采用、Keychain物理等待/清理及自由
+  语言质量仍待验证，不把本机回归或旧N1记新完整PASS。Windows结果未改。
+
+#### B09 首次完整效果链与末端包络阻断（2026-10-03）
+
+- clean`e22e329ca`正式Tauri和当前UI重建/签名验证；arm64/macOS26.6.2/25G83、Data APFS
+  非大小写敏感；原task/四seed不变，StepFun次数不设cap，4096输出/360秒请求预算及
+  原helper期限未变。33组native参数逐项等于canonical，46请求/33步骤/1020events/14effects。
+- **本次实际核心链成立**：before33创建→独立patch after32，cp/mv各一次，真实read内容/hash
+  后仅删临时；第一helper实际READY→13B一次input→EOF→完整40B stdout/exit0/reaped；
+  第一退出后第二helper按原参数启动，双READY后cancel正确owner，143ms/reaped/errors[]。
+  独立witness证明父子同PGID同时存活→均消失，heartbeat各43条。最后read终版32B/末LF/
+  SHA6ab0c427…，临时/副本无、四原件全同。8次门前拒绝+2次实际test exit2均保留，不记首发无错。
+- **原完整B仍FAIL**：report0，最后fresh read后的protected prefix连空summary wrapper都
+  装不下，未发送下一个摘要便NOMIFUN_INTERNAL_ERROR；不是凭据/网络/付费次数cap。
+  实际Cmd-Q exit0/332.15秒，无expiry/TERM/KILL；五表1020/1/1/1/14同源/ok、effects全
+  returned，自有App/fixture/helper/listener关闭。未初始化CEF，不以此关闭Keychain物理风险。
+- 直接修复仅去重说明：真实admitted workspace已有完整root/cwd/relative-path规则时，剥
+  重复tool suffix但不再追加336B独立mandatory hint；部分/无context保持原说明，不删除或
+  重索引adaptive slots。schema/原文/证据/预算不变，空wrapper跨界及短摘要可容纳回归通过，
+  Runtime284/284。最后修复未正式复验，不把离线尺寸或核心链成功当完整交付PASS。
+- 首prepare在ready前调用及普通readonly闭库CANTOPEN14保留，后按实际ready和确认无WAL/
+  写者的immutable快照封存；没有重发任务。外部`2026-10-03/macos/b09-postfix-live/`含
+  独立audit、完整HTTP/事件/数据库/UI。A13现格式正式受影响验证、B最终报告、native失败
+  重试live与Keychain物理阻塞仍OPEN；Windows记录未改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

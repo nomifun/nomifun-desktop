@@ -332,6 +332,17 @@ impl EngineProcessScope {
             }))),
             None => return Err(error("process_id is not owned by this exact turn")),
         };
+        let input_control = matches!(params.operation, Operation::Stdin | Operation::CloseStdin | Operation::Resize);
+        if input_control && entry.terminal.is_none() {
+            // A deadline can settle in the owner between model steps. Read its
+            // frozen terminal before attempting input; do not consume running
+            // output or turn a missing/uncertain owner into a successful stop.
+            if let Some(poll) = self.owner.terminal_if_ready(&mut entry.session).map_err(outcome_unknown)? {
+                if !cleanup_is_proven(&poll) { return Err(outcome_unknown("the original owner terminal has no proven cleanup receipt")); }
+                entry.terminal = Some(poll.clone());
+                return rejected_terminal_control(&id, &poll, params.operation);
+            }
+        }
         if let Some(poll) = &entry.terminal {
             if params.operation == Operation::Cancel {
                 return process_output(&id, poll, params.operation);
@@ -340,9 +351,7 @@ impl EngineProcessScope {
                 // Re-poll the retained terminal session so the caller's output
                 // cursor is honored even when another interaction observed exit.
             } else {
-                return Err(error(
-                    "process already terminated; stdin/resize cannot restart it",
-                ));
+                return rejected_terminal_control(&id, poll, params.operation);
             }
         }
         let session = &mut entry.session;
@@ -456,6 +465,18 @@ impl EngineProcessScope {
     }
 }
 
+fn rejected_terminal_control(id: &str, poll: &EngineProcessPoll, operation: Operation) -> Result<StrictJsonValue, Wave2HostPortError> {
+    if !cleanup_is_proven(poll) { return Err(outcome_unknown("the original owner terminal has no proven cleanup receipt")); }
+    let mut output = process_output(id, poll, operation)?;
+    output.0["success"] = serde_json::json!(false);
+    output.0["control_applied"] = serde_json::json!(false);
+    output.0["schema"] = serde_json::json!("nomifun.process-control-observation.v1");
+    output.0["operation"] = serde_json::to_value(operation).map_err(error)?;
+    output.0["code"] = serde_json::json!("PROCESS_ALREADY_TERMINATED");
+    output.0["message"] = serde_json::json!("The original process already terminated. This control was not applied. Its actual terminal output and cleanup receipt are retained; do not restart or replay input merely to repair the report.");
+    Ok(output)
+}
+
 async fn reconcile_unregistered_start(
     state: &mut ProcessState,
     proof: impl std::future::Future<Output = bool>,
@@ -527,6 +548,57 @@ mod tests {
         assert_eq!(corrected["exit_code"], 0);
         assert_eq!(corrected["success"], true);
         assert_eq!(corrected["cleanup"]["reaped"], true);
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        drop(scope);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn expired_pipe_rejects_late_input_with_original_terminal_and_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let started = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"start", "command":"/bin/sh", "args":["-c", "printf 'READY\\n'; IFS= read -r line; printf 'ECHO:%s\\n' \"$line\""],
+            "tty":false, "wait_ms":0, "timeout_ms":1000
+        })), "start-expiring-pipe").await.unwrap().0;
+        let id = started["process_id"].as_str().unwrap();
+        // Observe the original owner, not scope.invoke/poll: the scope has not
+        // cached a terminal. This is the same between-step deadline condition.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                {
+                    let mut state = scope.state.lock().await;
+                    let entry = state.sessions.get_mut(id).unwrap();
+                    let cursor=entry.session.cursor();
+                    let ready=scope.owner.terminal_if_ready(&mut entry.session).unwrap().is_some();
+                    assert_eq!(entry.session.cursor(),cursor,"terminal inspection must not consume output");
+                    if ready { break; }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        for (index, operation) in ["stdin", "close_stdin", "resize"].into_iter().enumerate() {
+            let mut args = serde_json::json!({"operation":operation,"process_id":id});
+            if operation == "stdin" { args["input"] = serde_json::json!("must-not-be-sent\n"); }
+            if operation == "resize" { args["cols"] = serde_json::json!(80); args["rows"] = serde_json::json!(24); }
+            let rejected = scope.invoke(StrictJsonValue(args), &format!("late-control-{index}")).await.unwrap().0;
+            assert_eq!(rejected["state"], "timed_out");
+            assert_eq!(rejected["success"], false);
+            assert_eq!(rejected["control_applied"], false);
+            assert_eq!(rejected["code"], "PROCESS_ALREADY_TERMINATED");
+            assert_eq!(rejected["cleanup"]["reaped"], true);
+            let original_output=format!("{}{}",started["output"]["text"].as_str().unwrap(),rejected["output"]["text"].as_str().unwrap());
+            assert!(original_output.contains("READY\n"));
+        }
+        let replay = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"poll", "process_id":id,"cursor":0,"wait_ms":0
+        })), "replay-original-output").await.unwrap().0;
+        let text = replay["output"]["text"].as_str().unwrap();
+        assert!(text.contains("READY\n"));
+        assert!(!text.contains("ECHO:") && !text.contains("must-not-be-sent"));
         assert!(scope.is_quiescent().await);
         scope.cleanup().await.unwrap();
         drop(scope);
@@ -766,6 +838,8 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(unreaped["success"], false);
+        assert!(rejected_terminal_control("process-1", &poll, Operation::Stdin).is_err(),
+            "unreaped or lost ownership cannot become a proven non-input receipt");
 
         if let EngineProcessPoll::Cancelled { cleanup, .. } = &mut poll {
             cleanup.reaped = true;
