@@ -3427,3 +3427,20 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 补schema支持tool枚举和精确声明参数定位/脱敏反馈；同源成功stdin不可换ref新ID重入。
   Runtime279及直接负例通过，最后反馈/别名保护未新live。外部2026-10-03/macos/
   b09-receiver-ref保留首败；共享新控制字段Windows未代验，Keychain/公开表达仍开放。
+
+### macOS B09 定位反馈采用与固定说明去重（2026-10-03）
+
+- clean5de6798ec正式原B定位反馈后plan接纳，32请求/591events/六effects，但首写直接
+  after32而非before33→修改，stdin未预声明而helper活动期控制/压缩后结果未知，原B仍FAIL。
+  read内容/hash后delete与copy/move各一次成立；未知动作不重放，真实失败与修正均保留。
+- 正式Quit请求native exit1/noexpiry/noTERM，Agent shutdown不验证重试失败；非CEF/
+  Keychain样本，冷五表全同不代判cleanup已完成。
+- 只在既有host mandatory root/default-cwd上下文时合并七份tool root说明，规则一处，
+  独立工具原说明/schema/名称/曝光不变。Runtime280及结构/幂等/serialized减少回归通过，
+  最后去重未live，未扩大预算。证据外部2026-10-03/macos/b09-contract-feedback，
+  语义生成/receiver采用/完整报告/真实Keychain仍开放，Windows结果保持。
+
+- 同native样本定位resource cleanup失败结果被永久缓存，阻断上层显式原owner重试。
+  完成失败且未消耗release才允许新settlement flight，pending/success/最终release继续缓存；
+  不清unknown/panic、不跑任务或重放参数。新缓存判定1项+cleanup_retry9项通过，
+  最后修复未native，Agent failed cleanup与Keychain物理阻塞不混同，Windows未代验。
