@@ -442,6 +442,13 @@
   WAL-aware完整只读库保持，证据2026-10-02/macos/mac-b-mainline-recheck；不加额/重跑或猜修，
   转C主线，旧Mac/Windows操作子链及完整B/N3缺口原样保留。
 
+- **2026-10-02 MAC-C-02 核心链formalN1**：源e46e63a90/正式Tauri/StepFun，12请求/2压缩/
+  233events；原输入及正式steer保留，纠正后单写/回读20-byte新目标，旧目标未写，三原件保持。
+  UI Stop取消/父子清理、live Cmd-Q0；零模型冷读用户两输入/全部233events不变，旧Turn不复活。
+  整组仍FAIL：cold CEF shutdown未ack，90秒TERM/KILL；上游实际公开输出英文omission占位，
+  不删/译原文、早期poll被steer拒绝不计成功，完整交付/N3待验。证据2026-10-02/macos/mac-c-mainline，
+  原冷WAL错误副本另留，正确readonly WAL备份作核账，无付费重跑/源码猜修/Windows代判。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
