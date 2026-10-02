@@ -29,10 +29,10 @@
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-13合并复验7请求/两压缩、全部实际操作N1、六命令各一次exit0/1/reaped；report修正无重做、中文UI计数准确，但漏cwd/隐藏项名称/原文头尾，完整A/N3仍FAIL |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-09 完整链24-call样本仍FAIL：先patch后create、写入漏LF、只到cp；未到helper/report且观察者超时；转C，不循环B，旧03/04子链保持 |
-| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | MAC-C-03补成功READY/后续poll、精确纠正回读/中文说明、live Stop与完整冷读N1；原四次拒绝保留，准备公开报告/新review分支未覆盖，旧C02冷KILL未修、N3未达 |
+| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | GEN-C-02补准备公开一次/GEN连续链N1；冷退出实际CEF/Keychain等待及未验证清理exit0首败已采样，C05-09修失败码传递，正常native另验；卡顿/失败分支live/N3未闭 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
-MAC-GEN-01 已有通用模板仅减去 Computer/自动化资源模块的正式目录观察 N1；不代表完整默认
+MAC-GEN-01 的目录观察、GEN-C-02 的连续纠正/Stop N1均为通用模板仅减去 Computer/自动化资源模块；不代表完整默认
 通用配置、完整 A/B/C 或 N3。原 persona/instructions/模型路由/其余授权逐项保持，未扩权限。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
 M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后真实请求已恢复。
@@ -1843,3 +1843,20 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   A12三后续请求六组pwd/ls全文/游标也全同。close wrapper ENOENT、snapshot把.git当文件EISDIR
   及缺status首错保留后只修外置夹具；原完整385-row备份不替换，readonly复核/前缀/ok成立。
   证据`2026-10-02/macos/mac-a-shared-results/`，无产品源码修改、Windows结果未动。
+
+- **MAC-GEN-C-02 / C05-09**（2026-10-02）：源`e2f7e47ca`正式App/命令减权General，原C任务/
+  16/4096/360预算；12请求/一压缩/302events/9原生参数与canonical全同。先READY和一次公开
+  准备再实际steer；首write因需replan未派发保留，二提议/一实际20-byte写、回读/hash/中文说明/
+  后续cursor poll成立。Stop前父子活、883ms后检查消失/cleanup证明；冷四表/全部文件全同，
+  未复活。独立General文档只减computer/automation.schedule，其余全同，不代判完整默认配置。
+- 冷首败 **FAIL_UNVERIFIED_CLEANUP_ZERO_EXIT**：0/85.13秒无信号，却四轮清理未验证；实际
+  native entry等待61.851秒后才return，page/context均0。一秒自有PID样本：主线程CEF shutdown，
+  CEF foreground worker停SecItemCopyMatching→CSSM解密RPC；不外推所有历史原因或改钥匙串保护。
+- 锁定Tauri/Wry2.11.2的RequestExit回调收到code却用ControlFlow::Exit，App::run在Tao直接exit0。
+  改run_return后按协调器终态显式退出：未验证/未获终态不为0，已验正常/原非零/失败及restart
+  所有权保持；两最小回归及原邻近共12项不同定向通过、正式Tauri/签名通过。修后同数据零模型
+  正式冷读0/32.51秒、CEF12.412秒返回且无清理失败、302events/四表/六文件全同；未再触发失败
+  分支，不宣称卡顿根因/N3/完整C闭环。原C02强杀、GEN冷首敗及断言红均保留。
+- 发送前只读SQL14/观察器动态代码拒绝/暂白屏、冷尚活时snapshot ENOENT、打包替换路径及签名
+  字节比较首错均在外另存；不重启任务/扩预算，改静态观察器及正确包复制前hash/签名校验。
+  证据`2026-10-02/macos/mac-gen-continuous/`，凭据0/421；Windows原生/真实重启未验、结果未改。

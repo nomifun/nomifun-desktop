@@ -3225,3 +3225,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 
 - 正式Tauri/StepFun原A任务、源e2f7e47ca/预算16：7请求/两压缩，全部观察/两测试各一次、实际exit0/1/reaped，无重复或改文件。首report旧三ID拒绝后只修报告，真实错误计数/UI2/1、completed及正常Cmd-Q为本机操作链N1；共享预算首败未再触发，不代判完整A/N3。
 - 整组仍缺cwd/隐藏项名称/原文头尾交付；末任务请求07中这些实际值及两搜索都存在。A12零模型三请求六组pwd/ls输出/游标也精确，现证据不支持再加缓存或owner裁剪归因。原首败、未展开详情和夹具首错保留；不放宽交付或重复未改根因，外部2026-10-02/macos/mac-a-shared-results，未改Windows结果。
+
+### C05-09 Tauri退出传递丢失失败码（macOS实测，2026-10-02）
+
+- 命令减权GEN原C任务12请求/一压缩，准备公开一次/纠正/真实回读/后续poll/live Stop/冷读为本机N1，一次replan拒绝保留。冷进程0/85.13秒，但清理四轮未验证；实样本主线程CEF shutdown、worker钥匙串解密RPC，native等待61.851秒。不改保护，不代判完整C/默认GEN/N3或Windows。
+- 锁定Wry2.11.2 RequestExit传code给回调后只设置ControlFlow::Exit，App::run在Tao直接exit0，既有协调器失败码没有到达进程。现run_return后显式采用协调器终态；未验证/未获允许保持非零，正常0/原非零/fatal和Tauri restart所有权保持。两最小回归＋原邻近共12项不同检查、正式Tauri通过；无CEF调用/清理判定/预算/权限改变。
+- 修后同数据零模型正式冷读正常0/32.51秒且清理无失败、原四表/六文件全同；本次未重触发失败分支，真实失败码路径和CEF卡顿仍须分开，未宣称全部根因关闭。原native首败及严格红保留于外部2026-10-02/macos/mac-gen-continuous；Windows native与真实restart未验、Windows结果未改。
