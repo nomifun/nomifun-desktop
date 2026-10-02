@@ -38,6 +38,7 @@ export interface ToolReceiptSummaryPart {
   notExecutedReason?: NormalizedToolNotExecutedReason;
   commandExitCode?: number;
   commandNotStarted?: boolean;
+  commandTimedOut?: boolean;
 }
 
 export interface ToolReceiptDetailRow {
@@ -53,6 +54,7 @@ export interface ToolReceiptDetailRow {
   notExecutedReason?: NormalizedToolNotExecutedReason;
   commandExitCode?: number;
   commandNotStarted?: boolean;
+  commandTimedOut?: boolean;
   retryCount?: number;
   attempts?: ToolReceiptAttemptRow[];
 }
@@ -73,6 +75,7 @@ interface ToolReceiptAttemptRow {
   truncated?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
   commandNotStarted?: boolean;
+  commandTimedOut?: boolean;
 }
 
 interface ToolRetryGroup {
@@ -441,6 +444,7 @@ export const buildToolReceiptSummaryParts = (
       notExecutedReason?: NormalizedToolNotExecutedReason;
       commandExitCode?: number;
       commandNotStarted?: boolean;
+      commandTimedOut?: boolean;
     }
   >();
 
@@ -449,7 +453,7 @@ export const buildToolReceiptSummaryParts = (
     const target = getToolReceiptTarget(tool, action);
     // A pre-dispatch rejection is a different receipt outcome from a tool that
     // actually ran. Keep them separate even when their semantic action matches.
-    const groupKey = `${action}:${tool.notExecutedReason ?? 'executed'}:${tool.commandExitCode ?? 'unknown'}:${tool.commandNotStarted === true}`;
+    const groupKey = `${action}:${tool.notExecutedReason ?? 'executed'}:${tool.commandExitCode ?? 'unknown'}:${tool.commandNotStarted === true}:${tool.commandTimedOut === true}`;
     const current = grouped.get(groupKey) ?? {
       action,
       count: 0,
@@ -459,6 +463,7 @@ export const buildToolReceiptSummaryParts = (
       ...(tool.notExecutedReason ? { notExecutedReason: tool.notExecutedReason } : {}),
       ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
       ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
+      ...(tool.commandTimedOut ? { commandTimedOut: true } : {}),
     };
     current.count += 1;
     if (tool.skipped) current.skippedCount += 1;
@@ -476,6 +481,7 @@ export const buildToolReceiptSummaryParts = (
     ...(value.notExecutedReason ? { notExecutedReason: value.notExecutedReason } : {}),
     ...(value.commandExitCode !== undefined ? { commandExitCode: value.commandExitCode } : {}),
     ...(value.commandNotStarted ? { commandNotStarted: true } : {}),
+    ...(value.commandTimedOut ? { commandTimedOut: true } : {}),
   }));
 };
 
@@ -508,6 +514,7 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
       ...(tool.notExecutedReason ? { notExecutedReason: tool.notExecutedReason } : {}),
       ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
       ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
+      ...(tool.commandTimedOut ? { commandTimedOut: true } : {}),
       ...(attempts.length > 1
         ? {
             retryCount: attempts.length - 1,
@@ -520,6 +527,7 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
               ...(attempt.truncated ? { truncated: attempt.truncated } : {}),
               ...(attempt.notExecutedReason ? { notExecutedReason: attempt.notExecutedReason } : {}),
               ...(attempt.commandNotStarted ? { commandNotStarted: true } : {}),
+              ...(attempt.commandTimedOut ? { commandTimedOut: true } : {}),
             })),
           }
         : {}),

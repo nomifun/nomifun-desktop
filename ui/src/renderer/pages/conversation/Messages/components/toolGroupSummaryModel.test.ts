@@ -21,6 +21,25 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 });
 
 describe('buildToolReceiptSummaryParts', () => {
+  test('keeps clean timeouts separate from unknown errors and preserves a timed-out retry attempt', () => {
+    const timeout = tool({ key: 'timeout', name: 'poll_process', status: 'error', commandTimedOut: true,
+      output: 'exact timeout and cleanup receipt' });
+    const unknown = tool({ key: 'unknown', name: 'poll_process', status: 'error', output: 'cleanup unknown' });
+    const parts = buildToolReceiptSummaryParts([timeout, unknown], 'failed');
+    expect(parts.map(({ state, commandTimedOut }) => ({ state, commandTimedOut }))).toEqual([
+      { state: 'failed', commandTimedOut: true }, { state: 'failed', commandTimedOut: undefined },
+    ]);
+    expect(buildToolReceiptDetailRows([timeout])[0]).toMatchObject({
+      state: 'failed', commandTimedOut: true, output: timeout.output,
+    });
+    const retried = buildToolReceiptDetailRows([
+      { ...timeout, retry: { retryGroupId: timeout.key, attemptNo: 1 } },
+      tool({ key: 'later', name: 'poll_process', commandExitCode: 0,
+        retry: { retryGroupId: timeout.key, attemptNo: 2, retryOfCallId: timeout.key } }),
+    ])[0];
+    expect(retried.commandTimedOut).toBeUndefined();
+    expect(retried.attempts?.[0]).toMatchObject({ state: 'failed', commandTimedOut: true, output: timeout.output });
+  });
   test('separates a proven launch refusal from other failures and keeps it in retry history', () => {
     const first = tool({ key: 'not-started', name: 'exec_command', status: 'error',
       commandNotStarted: true, output: 'original launch diagnostic' });

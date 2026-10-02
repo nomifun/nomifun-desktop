@@ -1,5 +1,6 @@
 {
   "completionSummary": {
+    "nativeTimeout": "{{commandCount}} command(s) reached their time limit; their processes ended and cleanup completed. These outcomes are included in {{toolCount}} call results. See output and cleanup details in the execution steps.",
     "nativeNonzero": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}). These results are included in {{toolCount}} unsuccessful calls; see each command's output in the execution steps.",
     "nativeNonzeroAndArguments": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}); another {{argumentCount}} call(s) did not run because their arguments failed validation. These account for {{toolCount}} unsuccessful results. Command output and argument details remain in the execution steps.",
     "argumentsNotExecuted": "{{argumentCount}} call(s) did not run because their arguments failed validation, accounting for {{toolCount}} unsuccessful results. See argument details in the execution steps.",
@@ -14,6 +15,7 @@
   "toolDetailLoading": "Loading...",
   "toolDetailLoadFailed": "Failed to load full output",
   "toolSummary": {
+    "commandTimedOut": "{{target}} reached its time limit; process cleanup completed",
     "running": "Running {{target}}",
     "completed": "Ran {{target}}",
     "failed": "Failed {{target}}",
@@ -26,6 +28,7 @@
     "processReferenceInvalid": "Process not found in this execution; did not run {{target}}"
   },
   "processReceipt": {
+    "commandTimedOut": "{{count}} commands reached their time limit; process cleanup completed",
     "tool": "tool",
     "tools": "{{count}} tools",
     "readFiles": "Read {{count}} files",
