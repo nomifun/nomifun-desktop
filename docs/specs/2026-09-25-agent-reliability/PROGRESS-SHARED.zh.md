@@ -3174,3 +3174,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 一个最小回归覆盖两故障，compaction19项和7项严格预算/summary邻近，共26项不同定向通过，fmt/diff及正式构建通过。正式COD A约1分33秒、七步/五压缩、summary拒绝0，两个指定测试各一次exit0/1、报告首发接受、精确测试scope和1/1失败计数、UI正常非零成立，预算/测试链为N1。
 - 整体A仍FAIL：Git status/diff各两次，前四项实际值交付省略；原15/16及交付1/6不改，completed不是完整A PASS，N3/GEN不代判。B来源SHA/交付、C重启重读/来源纠正/Stop等仍开放；只处理这些主线直接阻断，不新增矩阵或未改根因的付费循环。
 - 外部2026-10-02/windows/w244-mainline-compaction-envelope保存两首红、26项/构建、正式原参数/DB/事件/独立scope与UI；Git仅预算接纳/余量、一个回归和短进度。共享门槛仍未达。
+
+### W245 已返回search/Git小结果未进入固定context（2026-10-02，正式交付改善N1）
+
+- W244只有请求参数、无匹配/status/diff数据，压缩摘要丢值后无法直接交付。既有四结果回归首红保留；现scoped ReadOnly、成功dispatch且同call的search/status/diff仅复制指定字段，每snapshot512 bytes，原scope/detail/台账预算不改，超限不剪裁，私密/错身份/query/动作/未执行/opaque等负例不入context。
+- 原epoch/资格/权限/Schema/计数保持，历史数据不升级current；45项completion及三项硬预算/余量/报告不重做，共48项不同定向通过，fmt/diff/正式构建通过。
+- 一次正式COD A约1分24秒，11步/四压缩、summary拒绝0，观察/两测试各一次exit0/1；交付由W244的1/6改善为4/6，实际原文/SHA/两搜索/Git修改进入答案。首report三项的五个旧ID被预检拒绝后仅纠正report，无重做，2/1计数及首败保存。
+- 整体A仍FAIL：实际cwd/完整九条目及三个英文rationale残余，原15/16、4/6保持，不计N3/GEN或共享达标。外部2026-10-02/windows/w245-mainline-read-result-retention存全证据；按固定收尾规则转C直接阻断，不继续未修根因的付费循环。

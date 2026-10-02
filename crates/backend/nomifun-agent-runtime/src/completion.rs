@@ -162,7 +162,45 @@ fn observation_scope(
     serde_json::json!({"capability":binding.capability_id,"action":binding.action_id,
         "requested_arguments":if retained { serde_json::to_value(selected).ok() } else { None },
         "requested_arguments_omitted":!retained,"effects_are_scoped":effects_are_scoped,
-        "owner_observation":owner_observation})
+        "owner_observation":owner_observation,
+        "observed_result":owner_result.and_then(|value| short_read_result(binding,call,value,effects_are_scoped))})
+}
+
+/// Already-returned read-only data survives summary loss without acquiring
+/// freshness or permission. Retain whole selected fields inside the existing
+/// scope/detail budgets; omitted data remains available only in original history.
+fn short_read_result(
+    binding:&AgentToolBinding,
+    call:&ChatToolCall,
+    value:&serde_json::Value,
+    effects_are_scoped:bool,
+) -> Option<serde_json::Value> {
+    if !effects_are_scoped || binding.effect_class!=crate::AgentEffectClass::ReadOnly { return None; }
+    let fields:&[&str]=match (binding.capability_id.as_ref(),binding.action_id.as_ref()) {
+        ("workspace.files","workspace.files/search")
+            if value["query"].is_string() && value["query"]==call.arguments.0["query"]
+                && read_records_only_have_fields(&value["matches"],&["path","line","column_bytes","byte_offset","sha256","text","text_start_column_bytes","truncated"])
+                && value["truncated"].is_boolean()
+                && value["incomplete_reasons"].is_array() =>
+            &["query","matches","truncated","incomplete_reasons","files_scanned","files_skipped","source_bytes_read"],
+        ("workspace.vcs","workspace.vcs/status")
+            if value["is_repository"].is_boolean()
+                && read_records_only_have_fields(&value["entries"],&["path","status"]) =>
+            &["is_repository","entries"],
+        ("workspace.vcs","workspace.vcs/diff")
+            if value["patch"].is_string() && value["truncated"].is_boolean() =>
+            &["path","patch","truncated"],
+        _ => return None,
+    };
+    let selected=fields.iter().filter_map(|key|value.get(*key).map(|value|(*key,value)))
+        .collect::<BTreeMap<_,_>>();
+    if crate::stream_limits::serialized_size(&selected,512).is_err() { return None; }
+    serde_json::to_value(selected).ok()
+}
+
+fn read_records_only_have_fields(value:&serde_json::Value,fields:&[&str]) -> bool {
+    value.as_array().is_some_and(|rows|rows.iter().all(|row|row.as_object()
+        .is_some_and(|record|record.keys().all(|key|fields.contains(&key.as_str())))))
 }
 
 /// An exact already-returned page is historical data, not file freshness or
@@ -452,7 +490,7 @@ impl CompletionTracker {
         // gate cause. Steering/instruction/unknown-effect invalidations use
         // invalidate() and clear that cause explicitly.
         self.invalidate_report();
-        let owner_result = (matches!(binding.capability_id.as_ref(), "workspace.files" | "workspace.artifacts")
+        let owner_result = (matches!(binding.capability_id.as_ref(), "workspace.files" | "workspace.vcs" | "workspace.artifacts")
             && invocation_attempted && !result.is_error && result.call_id==call.call_id)
             .then(|| serde_json::from_str::<serde_json::Value>(&result.output_text()).ok()).flatten();
         let owner_path = owner_result.as_ref().filter(|_| binding.capability_id.as_ref() == "workspace.files"
@@ -1204,26 +1242,87 @@ mod tests {
     #[test]
     fn stale_search_and_git_calls_remain_visible_without_becoming_current_evidence() {
         let mut tracker = CompletionTracker::default();
-        for (name,capability,action,args) in [
-            ("search_files","workspace.files","workspace.files/search",serde_json::json!({"query":"needle","path":"."})),
-            ("git_status","workspace.vcs","workspace.vcs/status",serde_json::json!({})),
-            ("git_diff","workspace.vcs","workspace.vcs/diff",serde_json::json!({"path":"."})),
+        let matches=serde_json::json!([{"path":"资料/样本.txt","line":2,"text":"needle"}]);
+        let patch="diff --git a/tracked.txt b/tracked.txt\n+EXISTING_CHANGE\n";
+        for (name,capability,action,args,result) in [
+            ("search_found","workspace.files","workspace.files/search",serde_json::json!({"query":"needle","path":"资料/样本.txt"}),
+                serde_json::json!({"query":"needle","matches":matches,"truncated":false,"incomplete_reasons":[],"files_scanned":1,"files_skipped":0})),
+            ("search_empty","workspace.files","workspace.files/search",serde_json::json!({"query":"missing","path":"资料/样本.txt"}),
+                serde_json::json!({"query":"missing","matches":[],"truncated":false,"incomplete_reasons":[],"files_scanned":1,"files_skipped":0})),
+            ("git_status","workspace.vcs","workspace.vcs/status",serde_json::json!({}),
+                serde_json::json!({"is_repository":true,"entries":[{"path":"tracked.txt","status":["worktree_modified"]}]})),
+            ("git_diff","workspace.vcs","workspace.vcs/diff",serde_json::json!({"path":"tracked.txt"}),
+                serde_json::json!({"path":"tracked.txt","patch":patch,"truncated":false})),
         ] {
             let mut binding = file_binding(action); binding.capability_id=capability.into();
+            binding.effect_class=crate::AgentEffectClass::ReadOnly;
             let call = ChatToolCall {call_id:name.into(),name:name.into(),arguments:StrictJsonValue(args),provider_metadata:None};
-            tracker.observe(&AgentWorkStatus::default(),&binding,&call,&AgentToolResult::text(call.call_id.clone(),"observed result",false),true);
+            tracker.observe(&AgentWorkStatus::default(),&binding,&call,&AgentToolResult::text(call.call_id.clone(),result.to_string(),false),true);
         }
         let work = AgentWorkStatus { workspace_observation_epoch:1,..Default::default() };
         let context = context_value(&tracker,&work);
         assert_eq!(context["available_evidence"],serde_json::json!([]));
         let old = context["ineligible_observations"].as_array().unwrap();
-        assert_eq!(old.len(),3);
+        assert_eq!(old.len(),4);
         assert!(old.iter().all(|item| item["invocation_attempted"]==true && item["successful_result"]==true
             && item["eligible_current_evidence"]==false));
-        let search = old.iter().find(|item| item["tool"]=="search_files").unwrap();
+        let search = old.iter().find(|item| item["tool"]=="search_found").unwrap();
         assert_eq!(search["scope"]["requested_arguments"]["query"],"needle");
+        assert_eq!(search["scope"]["observed_result"]["matches"],matches);
+        assert_eq!(search["scope"]["observed_result"]["truncated"],false);
+        let empty=old.iter().find(|item| item["tool"]=="search_empty").unwrap();
+        assert_eq!(empty["scope"]["observed_result"]["matches"],serde_json::json!([]));
+        let status=old.iter().find(|item| item["tool"]=="git_status").unwrap();
+        assert_eq!(status["scope"]["observed_result"]["entries"][0]["path"],"tracked.txt");
+        let diff=old.iter().find(|item| item["tool"]=="git_diff").unwrap();
+        assert_eq!(diff["scope"]["observed_result"]["patch"],patch);
+        assert!(tracker.observations.iter().all(|item| !tracker.is_usable(item,1)));
         assert!(tracker.definition_with_evidence(&AgentPlan::default(),&work,false).input_schema.0
             ["properties"]["criteria"]["items"]["properties"]["evidence_call_ids"]["maxItems"]==0);
+    }
+
+    #[test]
+    fn historical_read_results_keep_loss_facts_and_omit_unbound_private_or_oversized_data() {
+        for defect in ["healthy","truncated","wrong-result-call","not-dispatched","failed","unscoped",
+            "effectful","wrong-capability","wrong-action","wrong-query","wrong-shape","nested-private","oversized"] {
+            let mut tracker=CompletionTracker::default();
+            let mut binding=file_binding("workspace.files/search");
+            binding.effect_class=crate::AgentEffectClass::ReadOnly;
+            let call=ChatToolCall {call_id:"search-data".into(),name:"search_files".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":"sample.txt","query":"needle","env":{"PRIVATE_ENV":"secret-sentinel"}})),provider_metadata:None};
+            let mut value=serde_json::json!({"query":"needle","matches":[{"path":"sample.txt","line":1,"text":"needle"}],
+                "truncated":false,"incomplete_reasons":[],"files_scanned":1,"files_skipped":0,
+                "Authorization":"secret-sentinel","env":{"PRIVATE_ENV":"secret-sentinel"}});
+            match defect {
+                "truncated" => {value["truncated"]=serde_json::json!(true);value["incomplete_reasons"]=serde_json::json!(["source_byte_budget"]);},
+                "effectful" => binding.effect_class=crate::AgentEffectClass::ManagedEffect,
+                "wrong-capability" => binding.capability_id="workspace.vcs".into(),
+                "wrong-action" => binding.action_id="workspace.files/write".into(),
+                "wrong-query" => value["query"]=serde_json::json!("another query"),
+                "wrong-shape" => value["matches"]=serde_json::json!("not records"),
+                "nested-private" => value["matches"][0]["env"]=serde_json::json!({"PRIVATE_ENV":"secret-sentinel"}),
+                "oversized" => value["matches"][0]["text"]=serde_json::json!("needle".repeat(256)),
+                _ => {},
+            }
+            let mut result=AgentToolResult::text(call.call_id.clone(),value.to_string(),defect=="failed");
+            if defect=="wrong-result-call" {result.call_id="other-call".into();}
+            tracker.observe_with_effect_scope(&AgentWorkStatus::default(),&binding,&call,&result,
+                defect!="not-dispatched",defect!="unscoped");
+            let later=AgentWorkStatus {workspace_observation_epoch:1,..Default::default()};
+            let context=context_value(&tracker,&later);
+            let scope=&context["ineligible_observations"][0]["scope"];
+            if matches!(defect,"healthy"|"truncated") {
+                assert_eq!(scope["observed_result"]["matches"],value["matches"]);
+                assert_eq!(scope["observed_result"]["truncated"],value["truncated"]);
+                assert_eq!(scope["observed_result"]["incomplete_reasons"],value["incomplete_reasons"]);
+                assert!(crate::stream_limits::serialized_size(&scope["observed_result"],512).is_ok());
+            } else {
+                assert!(scope.get("observed_result").is_none(),"{defect} must not supply recorded read data");
+            }
+            assert!(!serde_json::to_string(&context).unwrap().contains("secret-sentinel"));
+            assert!(context["available_evidence"].as_array().unwrap().is_empty());
+            assert!(!tracker.is_usable(&tracker.observations[0],1));
+        }
     }
 
     #[test]
