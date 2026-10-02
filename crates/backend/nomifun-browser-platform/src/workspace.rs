@@ -158,6 +158,9 @@ impl BrowserResource {
     pub async fn runtime_changes(
         &self,
     ) -> Result<tokio::sync::watch::Receiver<u64>, WorkspaceError> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(WorkspaceError::WorkspaceClosed);
+        }
         self.slot
             .ensure()
             .await?
@@ -465,10 +468,17 @@ pub struct BrowserResourceService {
     factory: Arc<dyn BrowserRuntimeFactory>,
     profile_store: Option<BrowserProfileStore>,
     resources: Mutex<BTreeMap<BrowserResourceKey, Arc<BrowserResource>>>,
-    lifecycle: Mutex<()>,
+    lifecycle: Mutex<ServiceLifecycle>,
     retired_sessions: Mutex<BTreeSet<(String, String)>>,
     next_generation: AtomicU64,
     stopping: AtomicBool,
+}
+
+#[derive(Default)]
+struct ServiceLifecycle {
+    resources_closed: bool,
+    native_shutdown: Option<tokio::task::JoinHandle<Result<(), WorkspaceError>>>,
+    native_closed: bool,
 }
 
 impl BrowserResourceService {
@@ -503,7 +513,7 @@ impl BrowserResourceService {
             factory,
             profile_store: None,
             resources: Mutex::new(BTreeMap::new()),
-            lifecycle: Mutex::new(()),
+            lifecycle: Mutex::new(ServiceLifecycle::default()),
             retired_sessions: Mutex::new(BTreeSet::new()),
             next_generation: AtomicU64::new(1),
             stopping: AtomicBool::new(false),
@@ -738,10 +748,33 @@ impl BrowserResourceService {
         }).await.map_err(|_|WorkspaceError::Admission(RunAdmissionError::WorkerFailed))?
     }
 
-    pub async fn shutdown(&self) -> Result<(), WorkspaceError> {
-        let _lifecycle = self.lifecycle.lock().await;
+    /// Factory opt-in only; this is not proof that resources have closed.
+    pub fn supports_storage_independent_shutdown(&self) -> bool {
+        self.factory.supports_storage_independent_shutdown()
+    }
+
+    /// Permanently close admission and wait for every Resource's native view
+    /// and owned operation cleanup. Process-wide native infrastructure remains
+    /// alive so the host can complete its other shutdown prerequisites.
+    /// Failure or cancellation keeps the barrier unproven and can be retried.
+    pub async fn close_resources(&self) -> Result<(), WorkspaceError> {
         self.stopping.store(true, Ordering::Release);
-        let keys: Vec<_> = self.resources.lock().await.keys().cloned().collect();
+        let mut lifecycle = self.lifecycle.lock().await;
+        if lifecycle.resources_closed {
+            return Ok(());
+        }
+        let keys: Vec<_> = self
+            .resources
+            .lock()
+            .await
+            .iter()
+            .map(|(key, resource)| {
+                // Close every cached Resource's ingress before awaiting any one
+                // native view; a delayed first close cannot admit later runs.
+                resource.closing.store(true, Ordering::Release);
+                key.clone()
+            })
+            .collect();
         let mut failure = None;
         for key in keys {
             if let Err(error) = self.close(&key).await {
@@ -751,7 +784,44 @@ impl BrowserResourceService {
         if let Some(error) = failure {
             return Err(error);
         }
-        self.factory.shutdown().await
+        lifecycle.resources_closed = true;
+        Ok(())
+    }
+
+    /// Close process-wide native infrastructure only after a successful
+    /// `close_resources` barrier. The host owns any intervening prerequisites.
+    /// The stored worker survives a dropped caller; retries join that same
+    /// physical shutdown, and an acknowledged success is never re-entered.
+    pub async fn close_native_runtime(&self) -> Result<(), WorkspaceError> {
+        let mut lifecycle = self.lifecycle.lock().await;
+        if !lifecycle.resources_closed {
+            return Err(WorkspaceError::NativeCommandFailed);
+        }
+        if lifecycle.native_closed {
+            return Ok(());
+        }
+        if lifecycle.native_shutdown.is_none() {
+            let factory = self.factory.clone();
+            lifecycle.native_shutdown =
+                Some(tokio::spawn(async move { factory.shutdown().await }));
+        }
+        let result = lifecycle
+            .native_shutdown
+            .as_mut()
+            .expect("native shutdown worker was installed")
+            .await
+            .unwrap_or(Err(WorkspaceError::Admission(RunAdmissionError::WorkerFailed)));
+        lifecycle.native_shutdown = None;
+        if result.is_ok() {
+            lifecycle.native_closed = true;
+        }
+        result
+    }
+
+    /// Compatibility entry point for hosts with no intervening prerequisites.
+    pub async fn shutdown(&self) -> Result<(), WorkspaceError> {
+        self.close_resources().await?;
+        self.close_native_runtime().await
     }
 }
 

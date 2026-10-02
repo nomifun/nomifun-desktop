@@ -13,7 +13,15 @@ struct Factory {
     shutdowns: AtomicUsize,
     initial_locked: AtomicBool,
     fail_close_once: Arc<AtomicBool>,
+    fail_shutdown_once: AtomicBool,
+    shutdown: Option<Arc<DelayedShutdown>>,
     clear: Option<Arc<DelayedClear>>,
+}
+
+#[derive(Default)]
+struct DelayedShutdown {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -57,6 +65,13 @@ impl BrowserRuntimeFactory for Factory {
 
     async fn shutdown(&self) -> Result<(), WorkspaceError> {
         self.shutdowns.fetch_add(1, Ordering::SeqCst);
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.started.notify_one();
+            shutdown.release.notified().await;
+        }
+        if self.fail_shutdown_once.swap(false, Ordering::SeqCst) {
+            return Err(WorkspaceError::NativeCommandFailed);
+        }
         Ok(())
     }
 }
@@ -725,6 +740,135 @@ async fn service_shutdown_closes_runtimes_before_process_wide_factory() {
 
     assert!(resource.native_close_proven().await);
     assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_resource_barrier_keeps_native_shutdown_fenced_and_can_retry() {
+    let clear = Arc::new(DelayedClear::default());
+    let factory = Arc::new(Factory {
+        clear: Some(clear.clone()),
+        ..Default::default()
+    });
+    let service = Arc::new(service(factory.clone(), &["managed"]));
+    let first = service.ensure(
+        authority("alice", "a-shutdown", "managed", all_actions()),
+        BrowserProfile::Ephemeral,
+    ).await.unwrap();
+    let second_authority = authority("alice", "b-shutdown", "managed", all_actions());
+    let second = service.ensure(
+        second_authority.clone(), BrowserProfile::Ephemeral,
+    ).await.unwrap();
+    first.user_command(create()).await.unwrap();
+    second.user_command(create()).await.unwrap();
+    assert_eq!(service.close_native_runtime().await, Err(WorkspaceError::NativeCommandFailed));
+    let clearing = tokio::spawn({
+        let resource = first.clone();
+        async move {
+            resource.user_command(BrowserTabCommand::ClearSiteData {
+                runtime_generation: resource.runtime_generation(),
+            }).await
+        }
+    });
+    clear.started.notified().await;
+    let barrier = tokio::spawn({
+        let service = service.clone();
+        async move { service.close_resources().await }
+    });
+    while !second.closing.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+    assert!(!barrier.is_finished());
+    assert!(matches!(second.begin_run().await, Err(WorkspaceError::WorkspaceClosed)));
+    assert!(matches!(second.runtime_changes().await, Err(WorkspaceError::WorkspaceClosed)));
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(1), service.close_native_runtime(),
+    ).await.is_err());
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 0);
+    barrier.abort();
+    assert!(barrier.await.unwrap_err().is_cancelled());
+    assert_eq!(service.close_native_runtime().await, Err(WorkspaceError::NativeCommandFailed));
+    assert!(matches!(service.ensure(second_authority, BrowserProfile::Ephemeral).await,
+        Err(WorkspaceError::WorkspaceClosed)));
+    clear.release.notify_one();
+    clearing.await.unwrap().unwrap();
+    service.close_resources().await.unwrap();
+    assert!(first.native_close_proven().await);
+    assert!(second.native_close_proven().await);
+    assert!(!clear.closed_before_completion.load(Ordering::SeqCst));
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 0);
+    service.close_native_runtime().await.unwrap();
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_resource_barrier_retains_exact_resource_and_blocks_native_until_retry() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let bound = authority("alice", "shutdown-close-retry", "managed", all_actions());
+    let resource = service.ensure(bound.clone(), BrowserProfile::Ephemeral).await.unwrap();
+    resource.user_command(create()).await.unwrap();
+    factory.fail_close_once.store(true, Ordering::SeqCst);
+
+    assert_eq!(service.close_resources().await, Err(WorkspaceError::NativeCommandFailed));
+    assert!(Arc::ptr_eq(&resource, &service.get(&bound).await.unwrap().unwrap()));
+    assert!(!resource.native_close_proven().await);
+    assert_eq!(service.close_native_runtime().await, Err(WorkspaceError::NativeCommandFailed));
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 0);
+    assert!(matches!(service.ensure(bound.clone(), BrowserProfile::Ephemeral).await,
+        Err(WorkspaceError::WorkspaceClosed)));
+
+    service.close_resources().await.unwrap();
+    assert!(resource.native_close_proven().await);
+    assert!(service.get(&bound).await.unwrap().is_none());
+    service.close_native_runtime().await.unwrap();
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cancelled_native_shutdown_joins_existing_worker_and_never_reenters_success() {
+    let shutdown = Arc::new(DelayedShutdown::default());
+    let factory = Arc::new(Factory {
+        shutdown: Some(shutdown.clone()),
+        ..Default::default()
+    });
+    let service = Arc::new(service(factory.clone(), &["managed"]));
+    service.close_resources().await.unwrap();
+    let first = tokio::spawn({
+        let service = service.clone();
+        async move { service.close_native_runtime().await }
+    });
+    shutdown.started.notified().await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let second = tokio::spawn({
+        let service = service.clone();
+        async move { service.close_native_runtime().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!second.is_finished());
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
+    shutdown.release.notify_one();
+    second.await.unwrap().unwrap();
+    service.close_native_runtime().await.unwrap();
+    service.shutdown().await.unwrap();
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_native_shutdown_allows_explicit_retry_without_reopening_resources() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    factory.fail_shutdown_once.store(true, Ordering::SeqCst);
+    assert_eq!(service.shutdown().await, Err(WorkspaceError::NativeCommandFailed));
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
+    assert!(matches!(service.ensure(
+        authority("alice", "native-shutdown-retry", "managed", all_actions()),
+        BrowserProfile::Ephemeral,
+    ).await, Err(WorkspaceError::WorkspaceClosed)));
+
+    service.shutdown().await.unwrap();
+    service.close_native_runtime().await.unwrap();
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]

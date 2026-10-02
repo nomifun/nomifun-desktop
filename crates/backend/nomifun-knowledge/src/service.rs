@@ -79,6 +79,7 @@ use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
 use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 
 mod anchored_fs;
+pub(crate) mod background;
 mod bound;
 pub use bound::{
     BoundKnowledgeBase, BoundKnowledgeDocument, BoundKnowledgeReadService,
@@ -728,6 +729,7 @@ struct RelocateIdempotencyCache {
 
 pub struct KnowledgeService {
     repo: Arc<dyn IKnowledgeRepository>,
+    background_tasks: background::BackgroundTasks,
     /// Rebuildable stable-identity projection. It is deliberately late-wired
     /// so lightweight/path-only test repositories remain valid and the
     /// filesystem stays usable if projection persistence is degraded.
@@ -893,6 +895,7 @@ impl KnowledgeService {
             .unwrap_or_else(|_| data_dir.to_path_buf());
         Self {
             repo,
+            background_tasks: background::BackgroundTasks::default(),
             entry_repository: RwLock::new(None),
             source_repository: RwLock::new(None),
             tree_operation_repository: RwLock::new(None),
@@ -2101,22 +2104,40 @@ impl KnowledgeService {
         root_path: Option<&str>,
         source: Option<KnowledgeSource>,
     ) -> Result<KnowledgeBaseInfo, AppError> {
-        let (row, info, snapshot_source) = self
-            .register_base(name, description, root_path, source, None)
-            .await?;
-        if let Some(src) = snapshot_source {
-            // Same pattern as the import handler's spawned autogen
-            // (`routes.rs::import_base`): the task holds its own Arc so it
-            // outlives the request.
-            let service = Arc::clone(&self);
-            tokio::spawn(async move {
+        let name = name.to_owned();
+        let description = description.to_owned();
+        let root_path = root_path.map(str::to_owned);
+        let service = Arc::clone(&self);
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.background_tasks.spawn(async move {
+            let registration = async {
+                let _publication = background::publication_guard().await?;
+                service.register_base(&name, &description, root_path.as_deref(), source, None).await
+            }.await;
+            let (row, info, snapshot_source) = match registration {
+                Ok(registration) => registration,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            };
+            let _ = reply.send(Ok(info));
+            if let Some(src) = snapshot_source {
                 let kb_id = row.knowledge_base_id.clone();
                 if let Err(e) = service.fetch_source_and_autogen(row, src).await {
                     tracing::warn!(kb_id = %kb_id, error = %e, "background knowledge source fetch failed");
                 }
-            });
-        }
-        Ok(info)
+            }
+        })?;
+        response.await.map_err(|_| AppError::Internal("knowledge background registration task did not return its result".into()))?
+    }
+
+    /// Close source-job admission, fence publication, and join all retained
+    /// create/resume jobs before the application closes their database pool.
+    /// A deadline or cancelled caller leaves the same handles available for
+    /// retry; successful completion is never inferred from an abort or panic.
+    pub async fn quiesce_background_tasks(&self, timeout: Duration) -> Result<(), String> {
+        self.background_tasks.quiesce(timeout).await
     }
 
     /// Shared first phase of base creation: validate, provision/verify the
@@ -2315,6 +2336,23 @@ impl KnowledgeService {
     /// entries whose file disappeared between filesystem and database commit.
     /// Failures stay warn-only; the next boot or a manual refresh can retry.
     pub async fn resume_pending_source_fetches(self: Arc<Self>) {
+        let service = Arc::clone(&self);
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if let Err(error) = self.background_tasks.spawn(async move {
+            service.resume_pending_source_fetches_owned().await;
+            let _ = reply.send(());
+        }) {
+            tracing::warn!(%error, "knowledge boot-resume was not admitted");
+            return;
+        }
+        let _ = response.await;
+    }
+
+    async fn resume_pending_source_fetches_owned(&self) {
+        let publication = match background::publication_guard().await {
+            Ok(publication) => publication,
+            Err(_) => return,
+        };
         let rows = match self.repo.list_bases().await {
             Ok(rows) => rows,
             Err(e) => {
@@ -2324,6 +2362,9 @@ impl KnowledgeService {
         };
         let mut pending: Vec<(KnowledgeBaseRow, KnowledgeSource)> = Vec::new();
         for mut row in rows {
+            if background::ensure_open().is_err() {
+                return;
+            }
             let mut source = match source_from_extra(&row.extra) {
                 Ok(source) => source,
                 Err(error) => {
@@ -2433,6 +2474,7 @@ impl KnowledgeService {
                 pending.push((row, src));
             }
         }
+        drop(publication);
         if pending.is_empty() {
             return;
         }
@@ -2441,6 +2483,9 @@ impl KnowledgeService {
             "knowledge boot-resume: re-fetching interrupted snapshot sources"
         );
         for (row, src) in pending {
+            if background::ensure_open().is_err() {
+                return;
+            }
             let kb_id = row.knowledge_base_id.clone();
             if let Err(e) = self.fetch_source_and_autogen(row, src).await {
                 tracing::warn!(kb_id = %kb_id, error = %e, "knowledge boot-resume fetch failed");
@@ -2464,6 +2509,7 @@ impl KnowledgeService {
     ) -> Result<KnowledgeBaseInfo, AppError> {
         let (fetched, errors, persisted_stamp, fatal_error) =
             if self.source_repository().is_some() && self.entry_repository().is_some() {
+                let preparation = background::publication_guard().await?;
                 self.ensure_projection_reconciled(&row).await?;
                 self.recover_pending_source_publications(&row).await?;
                 let normalized = self
@@ -2474,9 +2520,11 @@ impl KnowledgeService {
                             "knowledge source normalization did not produce an aggregate".into(),
                         )
                     })?;
+                drop(preparation);
                 let (files, mut errors) = self
                     .prepare_managed_source_items(&normalized.items)
                     .await?;
+                let _publication = background::publication_guard().await?;
                 let publication = self
                     .publish_managed_source_items(&mut row, &normalized.source, files)
                     .await;
@@ -2494,6 +2542,7 @@ impl KnowledgeService {
             } else {
                 let (files, mut errors) =
                     self.prepare_source_snapshots(&mut src.entries).await;
+                let _publication = background::publication_guard().await?;
                 let publication = self
                     .publish_prepared_url_source(&mut row, &mut src, files, false)
                     .await;
@@ -2531,6 +2580,7 @@ impl KnowledgeService {
             }
         }
         // Re-read + re-emit so clients see final stats/description.
+        let _publication = background::publication_guard().await?;
         let row = self.require_base(&row.knowledge_base_id).await?;
         let mut info = self.row_to_info(row).await?;
         self.emitter.emit_base_updated(&info);
@@ -5952,6 +6002,7 @@ impl KnowledgeService {
         preserve_existing_description: bool,
         model_override: Option<(String, String)>,
     ) -> Result<AutogenOutcome, AppError> {
+        background::ensure_open()?;
         let completer = self.require_completer()?;
         let row = self.require_base(kb_id).await?;
         require_editable_knowledge_tree(&row)?;
@@ -5969,6 +6020,7 @@ impl KnowledgeService {
         let mut parsed = None;
         let mut last_err = String::new();
         for attempt in 0..2 {
+            background::ensure_open()?;
             let raw =
                 complete_overview(completer.as_ref(), &user, model_override.as_ref()).await?;
             match autogen::parse_overview_output(&raw) {
@@ -5987,6 +6039,8 @@ impl KnowledgeService {
                 "knowledge autogen output unparseable: {last_err}"
             )));
         };
+
+        let _publication = background::publication_guard().await?;
 
         let description = autogen::clamp_description(&output.description);
         let readme = output.readme_markdown.trim();
@@ -7015,6 +7069,7 @@ impl KnowledgeService {
         &self,
         items: &[KnowledgeSourceItemRow],
     ) -> Result<(Vec<PreparedManagedSourceFile>, Vec<String>), AppError> {
+        let preparation = background::publication_guard().await?;
         let repository = self.source_repository().ok_or_else(|| {
             AppError::Internal("knowledge source identity repository is unavailable".into())
         })?;
@@ -7035,6 +7090,8 @@ impl KnowledgeService {
             );
         }
 
+        drop(preparation);
+
         let fetches = attempted_items.into_iter().map(|item| {
             let completer = completer.clone();
             async move {
@@ -7052,6 +7109,7 @@ impl KnowledgeService {
             .buffer_unordered(SOURCE_FETCH_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
+        let _publication = background::publication_guard().await?;
         let mut prepared = Vec::new();
         let mut errors = Vec::new();
         for (item, result) in results {
@@ -7283,6 +7341,7 @@ impl KnowledgeService {
         rendered: bool,
         completer: Option<&dyn KnowledgeCompleter>,
     ) -> Result<PreparedSnapshot, String> {
+        background::ensure_open().map_err(|error| error.to_string())?;
         let page = if rendered {
             let port = self.browser_render_content_port();
             let content = port
@@ -7309,6 +7368,8 @@ impl KnowledgeService {
                 format!("{url}: {error}")
             })?
         };
+
+        background::ensure_open().map_err(|error| error.to_string())?;
 
         let final_url = normalize_source_url(&page.final_url).map_err(|error| {
             format!("{url}: fetcher returned an invalid final URL: {error}")
@@ -7898,6 +7959,7 @@ impl KnowledgeService {
                         continue;
                     }
                     Err(error) => {
+                        background::record_join_failure(&error);
                         let message = format!(
                             "web-capture path allocation task failed: {error}"
                         );
@@ -10416,7 +10478,7 @@ async fn write_text_atomic_if_unchanged(
         )));
     }
 
-    let current = match tokio::time::timeout(
+    let current = match background::local_io_timeout(
         KNOWLEDGE_FILE_IO_TIMEOUT,
         tokio::fs::read(path),
     )
@@ -10558,6 +10620,7 @@ async fn preserve_replaced_file_metadata(
     })
     .await
     .map_err(|error| {
+        background::record_join_failure(&error);
         std::io::Error::other(format!("metadata preservation task failed: {error}"))
     })?
 }
@@ -11727,9 +11790,13 @@ async fn bounded_root_blocking<T: Send + 'static>(
         let _root_guard = root_guard;
         f()
     });
-    match tokio::time::timeout(remaining, handle).await {
+    match background::local_io_timeout(remaining, handle).await {
         Ok(Ok(value)) => value,
-        Ok(Err(_)) | Err(_) => on_timeout,
+        Ok(Err(error)) => {
+            background::record_join_failure(&error);
+            on_timeout
+        }
+        Err(_) => on_timeout,
     }
 }
 
@@ -12092,7 +12159,7 @@ async fn resolve_portable_md_path(
 ) -> Result<PortablePathResolution, AppError> {
     let display_path = rel_path.clone();
     let timeout_display_path = display_path.clone();
-    tokio::time::timeout(KNOWLEDGE_PATH_INSPECTION_TIMEOUT, async move {
+    background::local_io_timeout(KNOWLEDGE_PATH_INSPECTION_TIMEOUT, async move {
         let components = rel_path.split('/').collect::<Vec<_>>();
         let mut directory = root;
         let mut actual_components = Vec::with_capacity(components.len());
@@ -19804,6 +19871,85 @@ mod tests {
     #[derive(Default)]
     struct RecordingBroadcaster {
         names: std::sync::Mutex<Vec<String>>,
+    }
+
+    struct HeldSourceFetcher {
+        entered: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl PageFetcher for HeldSourceFetcher {
+        async fn fetch_page(&self, raw_url: &str) -> Result<source_url::FetchedPage, AppError> {
+            self.entered.wait().await;
+            self.release.wait().await;
+            Ok(source_url::FetchedPage {
+                final_url: raw_url.into(),
+                title: Some("prepared after shutdown".into()),
+                markdown: "late body".into(),
+                truncated: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn background_source_quiesce_retains_create_and_resume_tasks_without_late_publication() {
+        for from_resume in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let database = nomifun_db::init_database_memory().await.unwrap();
+            let events = Arc::new(RecordingBroadcaster::default());
+            let (service, repository, _) = durable_sqlite_service(
+                &database, &dir.path().join("data"), events.clone(),
+            );
+            let entered = Arc::new(tokio::sync::Barrier::new(2));
+            let release = Arc::new(tokio::sync::Barrier::new(2));
+            let service = Arc::new(service.with_url_fetcher(HeldSourceFetcher {
+                entered: entered.clone(), release: release.clone(),
+            }));
+            let source = url_source(KnowledgeSourceMode::Snapshot, &["https://example.com/held"]);
+            let (info, resume_caller) = if from_resume {
+                let (_, info, _) = service.register_base("held resume", "", None, Some(source), None).await.unwrap();
+                let caller = tokio::spawn(service.clone().resume_pending_source_fetches());
+                (info, Some(caller))
+            } else {
+                (service.clone().create_base_with_background_fetch("held create", "", None, Some(source)).await.unwrap(), None)
+            };
+            entered.wait().await;
+            if let Some(caller) = resume_caller {
+                // Cancelling the boot caller cannot detach the actual source job.
+                caller.abort();
+                let _ = caller.await;
+            }
+            let mut drain = Box::pin(service.quiesce_background_tasks(Duration::from_secs(5)));
+            assert!(futures_util::poll!(&mut drain).is_pending());
+            drop(drain);
+            assert!(service.quiesce_background_tasks(Duration::from_millis(5)).await.is_err());
+            let rejected = service.clone().create_base_with_background_fetch("closed admission", "", None, None).await;
+            assert!(matches!(rejected, Err(AppError::Conflict(_))));
+            assert_eq!(repository.list_bases().await.unwrap().len(), 1, "closed admission must not leave a new row");
+
+            release.wait().await;
+            service.quiesce_background_tasks(Duration::from_secs(5)).await.unwrap();
+            service.quiesce_background_tasks(Duration::from_secs(5)).await.unwrap();
+            let sources = repository.list_sources_for_base(&info.knowledge_base_id, false).await.unwrap();
+            let items = repository.list_source_items(&sources[0].knowledge_source_id, false).await.unwrap();
+            assert_eq!(items[0].sync_status, KnowledgeSourceItemSyncStatus::Syncing);
+            assert!(items[0].last_success_at.is_none());
+            assert!(items[0].pending_published_hash.is_none());
+            let row = repository.get_base(info.knowledge_base_id.as_str()).await.unwrap().unwrap();
+            assert!(source_from_extra(&row.extra).unwrap().unwrap().last_fetched_at.is_none());
+            assert!(!Path::new(&info.root_path).join(source_url::SNAPSHOT_REL_DIR).exists());
+            assert!(!events.names.lock().unwrap().iter().any(|name| name == "knowledge.base-updated"));
+
+            // The existing retry state is still meaningful on a new owner.
+            let (fetcher, _) = MutableSourceFetcher::new("resumed after restart");
+            let (next, _, _) = durable_sqlite_service(&database, &dir.path().join("data"), events);
+            let next = Arc::new(next.with_url_fetcher(fetcher));
+            next.clone().resume_pending_source_fetches().await;
+            let items = repository.list_source_items(&sources[0].knowledge_source_id, false).await.unwrap();
+            assert_eq!(items[0].sync_status, KnowledgeSourceItemSyncStatus::Synced);
+            next.quiesce_background_tasks(Duration::from_secs(5)).await.unwrap();
+        }
     }
 
     impl nomifun_realtime::UserEventSink for RecordingBroadcaster {
