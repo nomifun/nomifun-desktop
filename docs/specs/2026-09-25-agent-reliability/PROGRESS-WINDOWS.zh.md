@@ -3743,3 +3743,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 正式隔离profile冷读W229，页尾/阶段/详情均为时限分类，原READY/timeout和compact JSON回执可展开；events/turns/sessions行数与全字节、全部6个夹具文件保持，模型/事件新增0。首audit11/12因03截图尚未展开，原记录保留；03b展开后另审12/12，断言不改，不把采集错误当产品失败。
 - 未覆盖：新实时timeout、混合汇总的正式UI、模型公开内部字段/无signal说明、首发N3/COD、完整A/B/C及共享门槛。本批只关闭分类冷读子缺口，不把原W229整体体验改PASS。
 - 证据：仓库外2026-10-02/windows/w230-timeout-outcome-ui，01首红/02修后/03～12相关检查与构建，01-cold的before/after DB、原11/12与复核12/12、折叠/展开/原始回执UI；Git仅相关源码、五项最小回归和短进度。
+
+### W231 错摘要之后仍可读的原生输出（2026-10-02；基线8cca7d4b7，正式待验）
+
+- Case/子断言：C01/C06/C07/C08、CMD-134/CTRL-006/007及A05/A08/A09/A15/A16/A17/A19；先审W225原轨迹，不继续付费盲重跑。
+- 根因证据：原cwd/list stdout分别138/778 UTF-8 bytes；首压缩摘要有完整cwd及九项列表，后三摘要却改为pending或未执行。对应两个exec的精确身份/终态仍可引用，但完成上下文只给scope/terminal，没有原输出；模型最终只说“已列出”而漏具体值。01最小首红确认原生结果在context中缺失，不覆盖W225语义FAIL。
+- 修复：仅保留同调用、同owner的完整小原生output.text和原cursor/retained/dropped/encoding元数据，作为当前已合格call的observed_output数据；优先记录事实而非冲突摘要，缺字段表示未保留。非派发、错result ID/owner、别的capability/action不提供该数据；env/stdin/文件正文/额外字段不复制。
+- 边界：每条2KiB、总计4KiB，仍纳入原32KiB/64观察限制，超限整条省略、随观察一起淘汰。原日志/失败计数、freshness/路径/报告Schema/权限及token/byte硬限不变，旧调用资格和unknown工作不因输出缓存升格。
+- 验证：实际WorkStatus/CommandTracker经过后来非零命令仍保留完整中文cwd/list及原exit/失败计数；九类错配/未派发/未证明/非JSON反例拒绝，Unicode大输出及聚合限制/淘汰无剪裁。completion39/39（含新三项）及mandatory/fixed-prefix/observed-usage三项，共42项不同检查通过；首红/修后、fmt配置/diff分日志。
+- 未覆盖：正式Tauri/StepFun是否用原输出抵抗错摘要及交付cwd/列表、报告语义/引用范围、N3/完整A/B/C。本批无新模型/命令/正式构建，只记确定性子根因修复。
+- 证据：仓库外2026-10-02/windows/w231-retained-command-output，00原轨迹尺寸/摘要哈希、01首红、02/03修后和04/05及三项预算保护；Git仅源码、三项最小回归及短进度。
