@@ -4132,3 +4132,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 只补6c3fdb6e1对应正式采用，未重跑原强杀样本。夹具新增显式lease-retirement模式，原crash-tree默认30000ms不变；新用户输入/实际原生start参数均声明1000ms期限，生产lease仍按原规则=期限+60秒、sweep30秒，未扩生命周期/模型预算或修改退出入口。新data/work/profile正式初始化，完整同一回合留到100.544秒，超过61秒lease及一轮sweep且在120秒观察内；不是原30秒故障样本或WIN-016认证。
 - 当前源9250009b4正式桌面与helper构建成功，binary SHA前缀B9757B30E417、前端e247ffd0-e4df-4804-98ec-d4e5453b9fad。正式UI输入一次；原start回执有真实三层树READY/PID、唯一effect returned、本地请求2/第二SSE保持，原树按期限结束无重启。100.544秒时同Turn仍running、native_pause=null；自主调用已有Tauri process.exit(0)，PID70300实际exit0，同Turn仅一次cancelled、无cleanup_unproven暂停，原65events保持/最终71events、唯一effect/915bytes脚本保持，SSE释放、调用仍2，最终后代/监听0。
 - 独立14/14限定核对、退出后3表冷读保持；fixture正常shutdown/exit0，观察器全部结束。付费0、无新生产修复/全仓套件，上一批Core/Runtime/baseline失败证据复用；源码只新增明确短期测试模式。制品仍同W268根04-lease-fixed保存前/后实际UI/DB、原参数、100秒观察、actual exit及review。此N1关闭当前短期限lease退休退出采用；原两例的历史唯一原因、原30秒参数同场景复验、强杀/冷启动、实际托盘点击、原生成/复杂和完整平台/发布边界仍开放，全面目标active。
+
+#### W268 当前正式强杀与冷隔离恢复（2026-10-03；应用故障N1及warmup阻断修复）
+
+- 复用已核对的B9757B30E417当前生产产物；9250009b4至2f13e28f8仅helper/进度变化。观察器明确传本次run路径并用GetFullPath/启动UTC ticks核对；原30000ms/原PIDs/原失败均保留。新正式PID77676在canonical READY、真实三层父子关系/路径/出生UTC、running Turn及第二本地SSE保持后，仅对精确GUI PID作Stop-Process故障注入。实际GUI exit -1、非Quit；原parent61308/child38860/grandchild73956的已持有句柄55/56/56ms终态，树/后代/监听最终0，无替换进程。
+- 第一同data/work、新profile冷PID20144没有新模型/effect/输入或进程，但运行状态未隔离；记录两次replay boundary拒绝后，9秒UI warmup创建空闲runtime，恢复循环以get_runtime存在为由退出，原running卡住。原Checkpoint之后有工具事件，现有合同应拒绝自动回放；fence预验证使用next_fence，未删/改Checkpoint、fence、lease或放宽tail校验。
+- 明确产品修复：调度入口和重试循环改用已有active_turn_generation判定本地实际driver/relay admission，空闲warmup不再阻断第三次拒绝隔离，真正active owner仍优先。现有真实warmup不产生admission/明确Turn才绑定generation两项回归通过，当前正式构建通过（新binary SHA前缀71FCB2A445DD）。按路径/UTC核对后清理空闲旧冷实例用于源码升级，旧观察器到期不是退出证据；未因此重启原任务或改原库身份。
+- 修后同一原data/work、新profile PID50532：新构建与原Checkpoint不兼容时仍正确拒绝，第三次失败在warmup之后持久化NATIVE_RECOVERY_RECONCILIATION_REQUIRED、cleanup_proven=false/暂停，不假称已恢复完成。原65events完整保持，唯一start effect returned/915bytes脚本、模型调用仍2、原树无复活；实际UI结束本回合后同Turn仅一次cancelled、最终68events，原生API自然exit0，最终后代/监听0。控制HTTP400后续模型分支未派发，本批没有供应商模型请求。
+- 独立16/16限定检查、two warmup回归/正式构建，原同代码冷失败与两个强杀组织首错不改PASS。制品同W268根05-crash-fixed/06-cold-crash/07-cold-fixed含实际故障意图/退出/原句柄与55ms观察、原/修后DB/UI、warmup因果日志及crash-cold-review。只关闭应用强杀树清理与受控冷隔离安全N1；OS重启、sleep/wake、成功自动续做、原完整WIN-016/所有平台/发布认证仍未验。全部自有GUI/fixture/进程/监听清理，全面目标active。
