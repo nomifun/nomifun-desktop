@@ -10664,6 +10664,16 @@ async fn create_nomi_core_agent_session(
         .session_owner
         .initialize_idmm_state(opened.session.agent_session_id.as_ref(), idmm_config)
         .await?;
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "conversation.listChanged",
+            json!({
+                "conversation_id": opened.session.agent_session_id,
+                "action": "created",
+            }),
+        ),
+    );
     Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
         agent_session_id: opened.session.agent_session_id.as_ref().to_owned(),
         agent_binding: binding,
@@ -12482,6 +12492,16 @@ async fn update_nomi_core_agent_session_metadata(
         .ok_or_else(|| AppError::Conflict(
             "updated AgentSession has no canonical projection".to_owned(),
         ))?;
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "conversation.listChanged",
+            json!({
+                "conversation_id": session_id,
+                "action": "updated",
+            }),
+        ),
+    );
     Ok(Json(ApiResponse::ok(projection)))
 }
 
@@ -14292,6 +14312,16 @@ async fn execute_nomi_core_agent_session_delete(
             "Wave 4 resource and receipt cleanup deferred to orphan reconciliation"
         );
     }
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "conversation.listChanged",
+            json!({
+                "conversation_id": session_id,
+                "action": "deleted",
+            }),
+        ),
+    );
     Ok(deleted)
 }
 
