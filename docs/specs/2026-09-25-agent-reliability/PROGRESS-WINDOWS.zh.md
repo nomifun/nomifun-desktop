@@ -4099,3 +4099,9 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 正式首败：12真实HTTP200，11完整SSE；第11摘要请求max_tokens4096、提示204 UTF-8 bytes，供应商实际finish_reason=length、completion_tokens4096、15309bytes reasoning_content且正文0。产品对同源只做一次更短纠正，第12未完成的SSE在Stop后中断；无录制器cap429，不归因旧W250/W249缺失wire，也不同于W262合规摘要无法装入的原根因。自动观察器120秒到限，正式Stop前观测120.214秒（0.214秒界面/截图延迟，如实记录，不计严格限内完成），同Turn cancelled、无重新派发/实例重启。
 - 推理配置核对：摘要clone沿用原路由，真实wire无reasoning_effort，原能力traits=[]。官方[Step 3.7说明](https://platform.stepfun.com/docs/zh/guides/models/step-3.7-flash)把low列为摘要用途，但尚未证明修改该冻结配置能修复本次失败；不盲加none/enable_thinking、扩大输出限或再付费循环。产品唯一根因/复杂最终交付继续开放，未新增源码修复。
 - PID46748任务终态后已有原生API自然exit0，退出瞬间2个WebView随后自然消失、最终后代/监听0，原记录不变；这是API退出，未计新托盘点击。forwarder按路径与启动UTC ticks核对后清理；首个ISO字符串与PowerShell自动DateTime比较误拒清理保留，实际身份未变。93份文本凭据审计0命中，bootstrap/watchdog/GUI/forwarder/自有Cargo全部结束。外部2026-10-03/windows/w265-context-delivery-adoption保存首编译/实际身份、新wire/原参数/DB/UI/summary-wire-analysis/review；全面目标active，原失败和平台/发布缺口保持。
+
+### W266 过期进程的Windows owner真实终态（2026-10-03；pipe/ConPTY native子断言）
+
+- 新共享c58378d25修复的实际Unix回归为cfg(unix)，Windows缺覆盖；本批源cc6a32494只新增两个Windows测试，生产执行代码不改。用实际Bun子进程分别走pipe与ConPTY，保持原1000ms期限；原owner已完成而scope尚无terminal缓存，直接查询必须不消费cursor，随后stdin/close_stdin/resize均返回原timed_out/reaped、PROCESS_ALREADY_TERMINATED、success=false/control_applied=false，未重启或重放输入。
+- `cargo test -p nomifun-app --lib --no-default-features engine_process_host::tests -- --test-threads=1 --nocapture` 11/11通过，其中新增两项native。pipe精确READY+LF/游标6，ConPTY保留原ANSI/CRLF及游标194；三份迟到控制output逐字段相同，cursor0完整回放等于start原片段+冻结终态片段，没有ECHO或迟到输入标记，scope quiescent/cleanup成立。pipe实际terminate/reaped155ms、ConPTY interrupt/reaped171ms，errors空；不是通用ConPTY EOF通过。Runtime关于拒绝控制不推进epoch但接收实际timeout的284回归按未变源码复用。
+- 首错仅新测试Vec类型缺注释导致E0282，产品/子进程尚未执行；日志保留，补显式serde_json::Value后原断言不变、首次native全部通过。没有模型、正式UI或全仓套件；W250旧漏stdin/游标、原B和真实模型对新终态的采用、完整ConPTY/Windows专项与发布认证仍开放。外部2026-10-03/windows/w266-expired-owner-windows保存首编译、11回归和两个完整native receipt/review；自有Cargo/子进程已结束。

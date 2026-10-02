@@ -605,6 +605,75 @@ mod tests {
         pool.close().await;
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_expired_pipe_keeps_terminal_truth_before_late_controls() {
+        windows_expired_transport_keeps_terminal_truth(false).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_expired_conpty_keeps_terminal_truth_before_late_controls() {
+        windows_expired_transport_keeps_terminal_truth(true).await;
+    }
+
+    #[cfg(windows)]
+    async fn windows_expired_transport_keeps_terminal_truth(tty: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let started = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"start", "command":"bun",
+            "args":["-e", "process.stdout.write('READY\\n'); process.stdin.resume(); process.stdin.on('data', b => process.stdout.write('ECHO:' + b.toString()));"],
+            "tty":tty, "wait_ms":0, "timeout_ms":1000
+        })), "windows-expiring-receiver").await.unwrap().0;
+        assert_eq!(started["state"], "running");
+        let id = started["process_id"].as_str().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready = {
+                    let mut state = scope.state.lock().await;
+                    let entry = state.sessions.get_mut(id).unwrap();
+                    assert!(entry.terminal.is_none(), "scope has not observed a terminal yet");
+                    let cursor = entry.session.cursor();
+                    let ready = scope.owner.terminal_if_ready(&mut entry.session).unwrap().is_some();
+                    assert_eq!(entry.session.cursor(), cursor, "lookup must not consume output");
+                    ready
+                };
+                if ready { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert!(!scope.is_quiescent().await, "scope still has no cached terminal");
+        let mut receipts: Vec<serde_json::Value> = Vec::new();
+        for (index, operation) in ["stdin", "close_stdin", "resize"].into_iter().enumerate() {
+            let mut args = serde_json::json!({"operation":operation,"process_id":id});
+            if operation == "stdin" { args["input"] = serde_json::json!("WINDOWS_LATE_INPUT_MUST_NOT_RUN\n"); }
+            if operation == "resize" { args["cols"] = serde_json::json!(80); args["rows"] = serde_json::json!(24); }
+            let receipt = scope.invoke(StrictJsonValue(args), &format!("windows-late-control-{index}")).await.unwrap().0;
+            assert_eq!(receipt["state"], "timed_out");
+            assert_eq!(receipt["success"], false);
+            assert_eq!(receipt["control_applied"], false);
+            assert_eq!(receipt["code"], "PROCESS_ALREADY_TERMINATED");
+            assert_eq!(receipt["cleanup"]["reaped"], true);
+            if let Some(original) = receipts.first() { assert_eq!(&receipt["output"], &original["output"]); }
+            receipts.push(receipt);
+        }
+        let replay = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"poll", "process_id":id,"cursor":0,"wait_ms":0
+        })), "windows-replay-original-output").await.unwrap().0;
+        let text = replay["output"]["text"].as_str().unwrap();
+        assert_eq!(text, format!("{}{}", started["output"]["text"].as_str().unwrap(), receipts[0]["output"]["text"].as_str().unwrap()));
+        if tty { assert!(text.contains("READY\r\n")); } else { assert_eq!(text, "READY\n"); }
+        assert!(!text.contains("ECHO:") && !text.contains("WINDOWS_LATE_INPUT_MUST_NOT_RUN"));
+        assert_eq!(replay["cleanup"]["reaped"], true);
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        println!("WINDOWS_EXPIRED_OWNER_EVIDENCE {}", serde_json::json!({"tty":tty,"started":started,"late_controls":receipts,"replay":replay}));
+        drop(scope);
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn invalid_process_reference_preserves_the_original_owned_process() {
         let root = tempfile::tempdir().unwrap();
