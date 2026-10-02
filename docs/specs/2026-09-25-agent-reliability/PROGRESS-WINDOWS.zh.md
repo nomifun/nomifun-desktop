@@ -3920,3 +3920,14 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 零模型冷读三表所有行数/hash、全部文件字节保持，纠正/停前未完成提示保留，无旧Turn复活；错误17bytes也原样保留。原冷读6/8不覆盖：AX取消字样未匹配、期望LF仍缺，截图与停止提示另审，不宣称全绿。
 - 未覆盖：C末LF/来源引用/必要N3/另一入口，A实际cwd/完整条目/报告首发/语言、B来源SHA/最终报告，Windows差异及共享门槛。复用本批停止/无重启重读/冷读，只修具体缺口，不重复未改根因或增加矩阵。
 - 证据：仓库外2026-10-02/windows/w248-mainline-live-progress，01首红/03中间红/04七项、05构建、06纠正时、07/08原DB/事件/参数/audit/385ms复核、09正式取消UI、10～13冷启动/原冷读/原错字节；Git仅执行/收尾条件、一个既有回归强化与短进度。
+
+### W249 被拒逐字引用的参数位置（2026-10-02；基线caf7e2e81，正式采用未触发）
+
+- Case/子断言：C06/C07/C08、CTRL-006/007与A02/A05/A09/A16/A17/A19；W248三要求中第2项多加“核对”，反馈只给input 1，导致原错重复。先强化middle-source/完整计划保留反例，01首红保存。
+- 修复：内部merge保留同一验证集合，同时返回被拒addition的数字JSON路径与来源索引；update_plan反馈给rejected_parameter_path=/requirements/1/source、source_input_index=1，原message/拒绝/计划版本/needs_replan/计数保持。旧merge的String错误API兼容，非引用失败不伪造位置；不回显引用/整段输入、不自动改quote、不接受改写或新权限。
+- 验证：planning9、requirements6、报告修正不重做与mandatory硬预算各1，共17项不同定向通过，fmt/diff/正式构建2分38秒。原参数/既有计划及persist次数严格不变；只修第2来源后保留第1/3项与原输入义务，新显式坏引用仍拒绝。
+- 正式一次原完整COD C，38步/15压缩，约239.114秒在冻结240秒观察限内正式Stop；helper一次、来源完整分页0→200→398（UTF-8安全返回198 bytes不是重读）/结果回读各一次，无自cancel/重启/额外进程，父子Stop前存活，canonical cancelled后CIM约536ms均消失，539样本及后续零派发/心跳/清理成立。
+- 原audit21/24、三项字节失败保持：实际content仍为C_FINAL_CORRECTED，缺末LF，owner/磁盘17bytes，未补写。两update_plan省略requirements，无引用拒绝，所以不证明新位置反馈的模型采用或C首发/N3；两new-input/replan安全拒绝及计数原样保存。
+- 零模型冷读三表所有行数/hash、全部文件字节不变无复活，纠正与17-byte结果保留；原6/8不覆盖，期待LF仍缺且AX取消字样未匹配。原ToolCallDelta只有空参数片段，无法与完成参数比较；只知工具参数阶段已缺LF，原HTTP/供应商/codec因果未验，不因计划文本提LF就归罪某层。review复制旧capture名首错已另存纠正，不计产品失败。
+- 未覆盖：C末LF/引用反馈采用/必要N3/另一入口，A实际cwd/完整条目/报告首发/语言，B来源SHA/最终报告、Windows差异与共享门槛。本批仅一次新修复对应正式样本，不继续同一未改LF根因的付费循环；下一步集中原字节要求和A/B直接缺口。
+- 证据：仓库外2026-10-02/windows/w249-mainline-citation-location，01首红/02修后/03十七项/04构建、05纠正时、06/07原DB/事件/参数/原21-24审计/536ms/空delta及澄清、08观察限、10～13冷读；Git仅位置反馈/最小回归与短进度。
