@@ -3089,3 +3089,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 最终完整cwd/九项列表/文件元数据/搜索/Git修改/两测试结果六项存在检查全通过，accepted四项unverified/最后测试supported与两精确poll对应，无借用scope。仍重复git_status一次；首report[1,2,3]零起始拒绝后先改了第1/2/3项，留下第4项，两次继续拒绝后才改准，四次report的三首败保留。
 - 原audit12/15保留：一个false来自合法合并输出的整串JSON解析限制，另存第二行解析及9项属性复核；重复status/首report不通过是真的行为失败。中文最终又重复四条英文rationale警告，整组仍FAIL，不关闭A/N3/共享；下一步让反馈提供明确的一起始序号及JSON路径，避免零/一起始误修。
 - 仓库外2026-10-02/windows/w236-compact-guidance-live保存构建、DB/事件/四报告/原audit/人工复核与澄清、正式UI；无新源码或重复测试，未Stop/Retry/追加模型。
+
+### W237 被拒criterion的一起始序号和JSON路径（2026-10-02，正式待验）
+
+- W236零起始[1,2,3]被当作第1/2/3项，错误改动合法第1项并漏掉第4项，报告额外两拒绝；最小首红确认无明确数字/位置映射。现兼容保留原索引，另给一起始[2,3,4]和精确/criteria/1～3路径，仅供同报告被拒位置修正。
+- 反馈保留原参数/Schema/计数/整批不派发和不借用其他ID规则，明确保留已合格项、rationale使用summary语言并适配实际不确定性；不复制私密summary/rationale/ID，不自动重写report或翻译模型文本。
+- tool_validation8项、同步后completion40项及防重做/重复拒绝界限两项，共50项不同定向通过；首红/修后与fmt配置/diff分日志，无新增同构测试。正式模型采用/首发与N3、重复Git及完整A/B/C仍待验，共享未结案。
+- 仓库外2026-10-02/windows/w237-explicit-criterion-locations保存全证据；本批无新付费模型、命令或构建，Git仅两字段/说明与既有回归加强及短进度。
