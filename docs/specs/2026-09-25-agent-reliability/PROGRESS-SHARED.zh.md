@@ -3215,3 +3215,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 一次正式COD C、22步/八压缩，同Turn纠正、来源各一次、无自cancel/重启；Stop前真实父子存活，canonical cancelled后CIM约385ms均消失，419样本/心跳/host cleanup/后续零派发，取得live Stop N1。W247首败不覆盖，完整C仍不代判PASS。
 - 原20/24及三拒绝保持：write未派发、两引用拒绝，实际写/读各一次但参数漏末LF，真实17bytes不符合18byte要求；缺LF的provider/codec归因未验，不补写洗绿。冷读全部DB/磁盘不变无复活，原6/8及视觉停止提示分开保存，错误文件不被恢复或隐藏。
 - 外部2026-10-02/windows/w248-mainline-live-progress保存首红/中间红/七项/正式父子停止/原参数/DB/事件/审计/冷读；仅闭此直接等待/停止根因，C字节/引用、A/B与必要N3仍开放，共享未达。
+
+### W249 引用拒绝保留精确addition位置（2026-10-02，正式采用未触发）
+
+- W248三个新要求的第2个source多加“核对”，只提示input 1导致重复原错。首红保留；内部merge沿原验证给数字JSON路径/来源索引，update_plan反馈rejected_parameter_path与source_input_index，旧String错误API/验证集合/原计划/拒绝/计数保持，不回显原输入/quote或自动修复。9计划＋6要求＋两严格预算/防重做，共17项不同定向及fmt/diff/正式构建通过。
+- 一次正式COD原C，38步/15压缩、239.114秒内Stop，helper一次/源文件完整分页无重读，父子活体Stop后约536ms消失、cancelled无新派发；零模型冷读全部三表/磁盘不变无复活。原21/24、冷读6/8与末LF缺失保留，真实17bytes，不补写洗绿。
+- 本次update_plan省略requirements，未触发引用拒绝，不代判位置反馈采用/完整C/N3。录得ToolCallDelta空参数文本，不能归因provider或codec；工具已见参数缺LF只是边界事实。外部2026-10-02/windows/w249-mainline-citation-location存全首败/审计及澄清；不重跑未改LF根因，A/B及必要N3仍开放，共享未达。
