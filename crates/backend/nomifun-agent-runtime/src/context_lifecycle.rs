@@ -124,6 +124,7 @@ pub(crate) struct ContextLifecycle {
     /// Last successful replacement, not permission to exceed the resource cap.
     /// A large but fitting summary is part of the irreducible post-compact floor.
     compacted_byte_floor: Option<usize>,
+    compacted_token_floor: Option<usize>,
 }
 
 impl ContextLifecycle {
@@ -145,6 +146,7 @@ impl ContextLifecycle {
             force_compaction: false,
             recovered_input_limit: None,
             compacted_byte_floor: None,
+            compacted_token_floor: None,
         })
     }
 
@@ -257,9 +259,25 @@ impl ContextLifecycle {
         } else {
             soft_input_limit
         };
+        let token_trigger = if self.recovered_input_limit.is_none() {
+            // Keep room for actual continuation after a fitting replacement,
+            // as the byte trigger does. A typed overflow keeps its stricter cap.
+            token_trigger.max(self.compacted_token_floor.map_or(0, |floor|
+                floor + hard_input_limit.saturating_sub(floor) / 2)).min(hard_input_limit)
+        } else {
+            token_trigger
+        };
         let observed_extra = self.observed_tokens.saturating_sub(self.observed_estimate);
         let observed_input_limit = hard_input_limit.saturating_sub(observed_extra);
         let input_limit = token_trigger.min(observed_input_limit);
+        // The normal trigger reserves headroom; it is not a provider rejection
+        // or the frozen acceptance ceiling. Apply the observed-usage margin to
+        // every replacement, and retain a typed overflow's stricter limit.
+        let replacement_accept_limit = if self.recovered_input_limit.is_some() {
+            input_limit
+        } else {
+            observed_input_limit
+        };
         let estimated_tokens = estimate.saturating_add(observed_extra);
         let token_pressure = estimated_tokens >= token_trigger;
         let soft_byte_trigger = self.resource.max_context_bytes * 3 / 4;
@@ -304,7 +322,7 @@ impl ContextLifecycle {
             let mandatory_bytes = encoded_size(&mandatory)?;
             if mandatory_bytes > self.resource.max_context_bytes
                 || mandatory.messages.len().saturating_add(1) > self.resource.max_history_messages
-                || crate::media_context::estimate_tokens(&mandatory, mandatory_bytes) >= input_limit
+                || crate::media_context::estimate_tokens(&mandatory, mandatory_bytes) >= replacement_accept_limit
             {
                 return Err(AgentEngineError::Compaction("Mandatory instructions/task state/accepted inputs and pending images exceed the token, byte or message-count budget (including the summary slot); no summary requests sent and no mandatory state discarded".into()));
             }
@@ -486,7 +504,7 @@ impl ContextLifecycle {
                         let candidate_tokens = crate::media_context::estimate_tokens(&candidate, candidate_bytes);
                         if candidate_bytes < bytes && candidate_bytes <= self.resource.max_context_bytes
                             && candidate.messages.len() <= self.resource.max_history_messages
-                            && candidate_tokens < input_limit
+                            && candidate_tokens < replacement_accept_limit
                         {
                             previous = result.task_summary;
                             break;
@@ -500,7 +518,7 @@ impl ContextLifecycle {
                         }).await?;
                         if context_fit_repair_used {
                             return Err(AgentEngineError::Compaction(format!(
-                                "summary still cannot fit the frozen replacement envelope after one correction; bytes={candidate_bytes}, tokens={candidate_tokens}, input limit={input_limit}; original context kept")));
+                                "summary still cannot fit the frozen replacement envelope after one correction; bytes={candidate_bytes}, tokens={candidate_tokens}, input limit={replacement_accept_limit}; original context kept")));
                         }
                         context_fit_repair_used = true;
                         context_fit_repair = true;
@@ -554,7 +572,7 @@ impl ContextLifecycle {
                 source.len(),
             ));
         }
-        let mut replacement_input_limit = input_limit;
+        let mut replacement_input_limit = replacement_accept_limit;
         if let Some(mut exchange) = crate::context_tail::latest(&request.input.messages)? {
             if !exchange.requires_original_images() {
                 // The pre-inference reservation uses the worst-case summary
@@ -573,11 +591,7 @@ impl ContextLifecycle {
                 // fitting latest receipt up to that ceiling, including the
                 // actual-usage margin. A typed rejection keeps its stricter
                 // recovery ceiling; older history still uses soft headroom.
-                let latest_input_limit = if self.recovered_input_limit.is_some() {
-                    input_limit
-                } else {
-                    observed_input_limit
-                };
+                let latest_input_limit = replacement_accept_limit;
                 let mut retaining_latest = true;
                 loop {
                     if !exchange.fits_text_bound(requirements)? { break; }
@@ -636,6 +650,7 @@ impl ContextLifecycle {
         .await?;
         request.input = replacement;
         self.compacted_byte_floor = Some(after);
+        self.compacted_token_floor = Some(after_tokens);
         self.force_compaction = false;
         self.observed_tokens = 0;
         self.observed_estimate = 0;
