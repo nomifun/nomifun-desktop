@@ -3384,3 +3384,16 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - Runtime270、Broker18及原35协议项、本机正式构建通过；无限付费次数是用户明确授权，不改
   产品上下文、进程/清理保护。完整轨迹仅外部2026-10-02/macos/complex-delivery-repair，
   不迁移Windows credential/结果；真实Keychain物理失败仍开放。
+
+### macOS B09 强制投影及交互合同（2026-10-03）
+
+- 完成引用目录仅ref/tool/path，不重复argv/结果/源全文；多编号简短summary与精确附件职责
+  分开，所有Schema断言和已保存字节保持。五槽/最后三read/13ref直接回归，不扩预算。
+- 编号首次file mutation/stdin前需独立plan；只证明先规划，不证明解释/字节正确。显式关闭
+  计划后的报告参数修正保持report-only。正式B09主动plan后顺序改善但仍缺LF/遗漏删除/
+  错误PTY同步exec而FAIL；Stop/正常退出/冷五表成立，不将已验子链代判整体。
+- 摘要root tool_calls数组无ID包装漏识别现拒绝；未知tool同样拒绝，普通状态/嵌套历史保持。
+  补真实exec等待结束与start先返回句柄、pipe stdin/EOF及tty字段说明，仅模型呈现，注册
+  Schema/owner字节/Frozen provenance不改。Runtime271及直接回归成立，最后补充未新live。
+- 证据仅外部2026-10-03/macos/b09-plan-envelope；原B生成精度/完整报告和真实Keychain物理
+  清理仍开放，Windows原生结果未代判，未新建动作框架或扩大权限/保护/断言。
