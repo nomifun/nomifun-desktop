@@ -3226,3 +3226,8 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 
 - 正式Tauri/StepFun、源e2f7e47ca，原C任务/16-call预算：13请求/两压缩，READY→同Turn纠正→20-byte写/回读/中文说明→后续poll→实际live Stop，父子消失/cleanup证明及冷读四表/磁盘不变为本机N1。四次预检拒绝保留；准备公开报告和W248新review分支未覆盖，原C02冷KILL未修，不代判完整C/N3或Windows结果。
 - B09零调用复用定位：末LF要求在原接受输入及写前provider请求仍保留；三次原始响应SSE的content已缺末LF，canonical参数逐项相同。因此本样本不支持codec/文件owner裁剪归因，也不自动补LF洗绿；不外推为全部平台/供应商原因。证据外部2026-10-02/macos/mac-c-live-progress，首败及完整轨迹不入Git。
+
+### macOS A13 合并复验，实际执行与公开交付分开（2026-10-02）
+
+- 正式Tauri/StepFun原A任务、源e2f7e47ca/预算16：7请求/两压缩，全部观察/两测试各一次、实际exit0/1/reaped，无重复或改文件。首report旧三ID拒绝后只修报告，真实错误计数/UI2/1、completed及正常Cmd-Q为本机操作链N1；共享预算首败未再触发，不代判完整A/N3。
+- 整组仍缺cwd/隐藏项名称/原文头尾交付；末任务请求07中这些实际值及两搜索都存在。A12零模型三请求六组pwd/ls输出/游标也精确，现证据不支持再加缓存或owner裁剪归因。原首败、未展开详情和夹具首错保留；不放宽交付或重复未改根因，外部2026-10-02/macos/mac-a-shared-results，未改Windows结果。
