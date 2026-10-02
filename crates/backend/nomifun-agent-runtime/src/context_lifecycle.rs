@@ -361,6 +361,15 @@ impl ContextLifecycle {
                 }
             }
         }
+        // The output ceiling alone is not the note's available input room.
+        // Reserve the exact selected prefix, required inputs/images and note
+        // wrapper before asking for a note that must fit the frozen envelope.
+        let summary_prompt_limit = fitting_summary_prompt_limit(
+            &request.input, &mandatory_messages,
+            summary_limit.saturating_sub((summary_limit / SUMMARY_PROMPT_HEADROOM_DIVISOR)
+                .clamp(1, MAX_SUMMARY_PROMPT_HEADROOM_BYTES)),
+            &self.resource, replacement_accept_limit,
+        )?;
         let source = crate::media_context::summary_source(source_messages)?;
         // A short summary can cover a much larger source. Size fragments by
         // INPUT capacity, including the rolling note and prompt overhead,
@@ -402,10 +411,7 @@ impl ContextLifecycle {
         let mut protocol_repair_used = false;
         let mut context_fit_repair_used = false;
         'chunks: while let Some(chunk) = pending.pop_front() {
-            let mut prompt_summary_limit = summary_limit.saturating_sub(
-                (summary_limit / SUMMARY_PROMPT_HEADROOM_DIVISOR)
-                    .clamp(1, MAX_SUMMARY_PROMPT_HEADROOM_BYTES),
-            );
+            let mut prompt_summary_limit = summary_prompt_limit;
             let mut retried_summary = false;
             let mut context_fit_repair = false;
             loop {
@@ -524,7 +530,7 @@ impl ContextLifecycle {
                         context_fit_repair_used = true;
                         context_fit_repair = true;
                         retried_summary = true;
-                        prompt_summary_limit = (prompt_summary_limit / 2).max(128);
+                        prompt_summary_limit = (prompt_summary_limit / 2).max(1);
                         continue;
                     }
                     Err(error @ AgentEngineError::CompactionInvalidSummary) => {
@@ -544,7 +550,7 @@ impl ContextLifecycle {
                             // Summary inference has no tools or effects. Give
                             // this exact source one fresh, shorter request.
                             retried_summary = true;
-                            prompt_summary_limit = (prompt_summary_limit / 2).max(128);
+                            prompt_summary_limit = (prompt_summary_limit / 2).max(1);
                             continue;
                         }
                         // Still truncated: divide only this rejected source
@@ -658,6 +664,42 @@ impl ContextLifecycle {
         self.last_request_estimate = crate::media_context::estimate_tokens(&request.input, after);
         Ok(())
     }
+}
+
+fn fitting_summary_prompt_limit(
+    input: &ChatModelInput,
+    mandatory: &[ChatMessage],
+    desired: usize,
+    resource: &AgentContextBudget,
+    token_limit: usize,
+) -> Result<usize, AgentEngineError> {
+    let mut candidate = input.clone();
+    candidate.provider_round_parent = None;
+    let mut fits = |length: usize| -> Result<bool, AgentEngineError> {
+        // JSON control-character escaping is the maximum serialized cost per
+        // UTF-8 byte. This also reserves room for ordinary quotes/newlines and
+        // Windows paths without depending on a provider's chosen prose.
+        candidate.messages = vec![summary_message(&"\0".repeat(length))];
+        candidate.messages.extend_from_slice(mandatory);
+        let bytes = encoded_size(&candidate)?;
+        Ok(bytes <= resource.max_context_bytes
+            && candidate.messages.len() <= resource.max_history_messages
+            && crate::media_context::estimate_tokens(&candidate, bytes) < token_limit)
+    };
+    if !fits(0)? {
+        return Err(AgentEngineError::Compaction(
+            "protected replacement prefix and summary wrapper exceed the frozen envelope; no summary request sent, original context kept".into()));
+    }
+    let (mut low, mut high) = (0, desired);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if fits(middle)? { low = middle; } else { high = middle - 1; }
+    }
+    if low == 0 {
+        return Err(AgentEngineError::Compaction(
+            "no continuation text fits the protected frozen replacement envelope; no summary request sent, original context kept".into()));
+    }
+    Ok(low)
 }
 
 fn encoded_size(input: &ChatModelInput) -> Result<usize, AgentEngineError> {
