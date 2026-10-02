@@ -618,6 +618,39 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires a standard Windows token and a running LanmanServer service"]
+    async fn windows_standard_token_admin_query_returns_a_reaped_nonzero_result() {
+        use std::os::windows::process::CommandExt;
+        let eligibility = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$fixturePrincipal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()); if($fixturePrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 10}; if((Get-Service LanmanServer).Status -ne 'Running'){exit 20}; exit 0"])
+            .creation_flags(0x08000000)
+            .status().unwrap();
+        assert_eq!(eligibility.code(), Some(0), "fixture requires the standard token and active service; do not elevate or start services to pass");
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let result = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"exec", "command":"net.exe", "args":["session"], "timeout_ms":5000
+        })), "standard-user-admin-query").await.unwrap().0;
+        assert_eq!(result["state"], "exited", "permission denial is not a spawn failure");
+        assert_eq!(result["exit_code"], 2);
+        assert_eq!(result["success"], false);
+        assert_eq!(result["cleanup"]["reaped"], true);
+        assert_eq!(result["output"]["dropped_bytes"], 0);
+        let text = result["output"]["text"].as_str().unwrap();
+        assert!(text.contains("5") && (text.contains("Access is denied") || text.contains("拒绝访问") || text.contains("访问被拒绝")),
+            "the actual OS output must identify access denied, not service absence");
+        assert_eq!(scope.state.lock().await.sessions.len(), 1, "no privileged fallback or command retry");
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        println!("WINDOWS_STANDARD_TOKEN_EVIDENCE {}", result);
+        drop(scope);
+        pool.close().await;
+    }
+
+    #[cfg(windows)]
     async fn windows_expired_transport_keeps_terminal_truth(tty: bool) {
         let root = tempfile::tempdir().unwrap();
         let (journal, pool) = super::super::engine_journal::test_fixture().await;

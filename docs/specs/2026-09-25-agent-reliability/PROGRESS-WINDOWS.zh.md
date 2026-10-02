@@ -4105,3 +4105,9 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 新共享c58378d25修复的实际Unix回归为cfg(unix)，Windows缺覆盖；本批源cc6a32494只新增两个Windows测试，生产执行代码不改。用实际Bun子进程分别走pipe与ConPTY，保持原1000ms期限；原owner已完成而scope尚无terminal缓存，直接查询必须不消费cursor，随后stdin/close_stdin/resize均返回原timed_out/reaped、PROCESS_ALREADY_TERMINATED、success=false/control_applied=false，未重启或重放输入。
 - `cargo test -p nomifun-app --lib --no-default-features engine_process_host::tests -- --test-threads=1 --nocapture` 11/11通过，其中新增两项native。pipe精确READY+LF/游标6，ConPTY保留原ANSI/CRLF及游标194；三份迟到控制output逐字段相同，cursor0完整回放等于start原片段+冻结终态片段，没有ECHO或迟到输入标记，scope quiescent/cleanup成立。pipe实际terminate/reaped155ms、ConPTY interrupt/reaped171ms，errors空；不是通用ConPTY EOF通过。Runtime关于拒绝控制不推进epoch但接收实际timeout的284回归按未变源码复用。
 - 首错仅新测试Vec类型缺注释导致E0282，产品/子进程尚未执行；日志保留，补显式serde_json::Value后原断言不变、首次native全部通过。没有模型、正式UI或全仓套件；W250旧漏stdin/游标、原B和真实模型对新终态的采用、完整ConPTY/Windows专项与发布认证仍开放。外部2026-10-03/windows/w266-expired-owner-windows保存首编译、11回归和两个完整native receipt/review；自有Cargo/子进程已结束。
+
+### W267 普通用户管理员查询的原生权限边界（2026-10-03；WIN-013子断言）
+
+- 文件deny-write/deny-delete、共享锁原件/暂存保护、DACL/ADS和部分失败fence已有W03/W34/W35及W36正式预览证据，相关文件执行层未变，本次直接复用；不重复文件链/锁矩阵。新增缺口是标准Windows token运行管理员查询的owner结果，仅补一个显式opt-in环境回归；不修改生产执行层，不触发UAC/自动提权、不启动或改系统服务。
+- 先只读确认当前token非管理员、LanmanServer已运行；新回归再次确认同样前提，否则明确失败，默认ignored防止管理员CI假通过。实际App EngineProcessScope只运行一次net.exe/args=[session]，返回exited、exit2、success=false、OS错误5/拒绝访问，cleanup.reaped=true/errors空；不是PROCESS_NOT_STARTED或平台不可用，没有第二session/权限回退，scope quiescent/cleanup成立。
+- 当前源4e951dc82加测试的`nomifun-app --lib --no-default-features`精确ignored回归1/1通过。完整34bytes未丢失，真实Windows-936/严格UTF8失败后fallback诊断1保留；不改代码页或错误断言。模型/正式UI0、无全仓套件；本批只新增环境受限测试。外部2026-10-03/windows/w267-windows-permission-boundary保存前提/实际日志/native receipt/review，全部自有进程结束。实际UI呈现、其他管理员操作与完整权限/角色/Windows认证仍未验，原生成与复杂交付残余不改PASS，全面目标active。
