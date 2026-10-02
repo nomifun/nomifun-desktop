@@ -27,7 +27,7 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-11 六命令各一次、两测试exit0/1、41秒completed；两搜索未执行、cwd/原文交付缺失及英文仍FAIL，完整A/N3未达 |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-12 历史97-byte文本保留正式N1；literal脚本错误→重复观察/预期非零未执行/无report、本地cap与观察者480秒超时仍FAIL，完整A/N3未达 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-08 原文件任务报告形态N1，公开交付/整体超时仍FAIL；B07联合未close/EOF/交付，03 EOF/04 Stop各N1，完整链/N3仍开放 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
@@ -1767,3 +1767,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   一次测试enum编译错误另留、按真实ManagedEffect修正，未放宽断言。Schema/提示/报告接受/
   prune源字节复核不变。证据`2026-10-02/macos/historical-file-page/`；修后正式UI/live未跑，
   A11漏搜索/交付/英文及完整A/B/C/N3仍开放，Windows独立结果不改写。
+
+- **MAC-A-12 短页修后正式原任务**（2026-10-02）：源`685e672a2`/新Tauri制品/新隔离COD，
+  原任务/7文件/断言与1task/16requests含摘要/4096/360秒/native480秒不变。实际16请求/
+  5压缩/一伪摘要拒绝/491events，localcap暂停，无report/预期非零Bun未执行，整组 **FAIL**。
+- C06-14正式 **N1**：05/08/10/12各后续task请求含原97-byte四行、epoch2/eligiblefalse，旧ID
+  不进入current enum；13～16无工具摘要请求，不是假称最后完成请求。14组raw/canonical全同，
+  两搜索/通过Bun真实执行；模型把sed脚本误装literal command→not_started、正确Bun兄弟被defer，
+  后续未引号/有引号cmd两次重读；前者pipeline0但保留sed错误，不删stderr或当成功，原件/Git保持。
+- 观察流程另 **FAIL**：暂停/进度/tool rows截图已存，观察者未及时End Turn/Cmd-Q，native480秒
+  超时owned TERM后0仍expired，非正常UI验收；late guard拒访closed绑定，无默认数据重开。
+  App/helper/listener无、fixture200/0；源WAL存在，普通readonly WAL-aware另备完整491rows同/ok。
+  paused head/running Turn保持，未伪造cancel。证据`2026-10-02/macos/mac-a-file-page-recheck/`；
+  本批仅短进度，不重复付费/猜修/扩权限，完整A/B/C/N3与旧MM仍开放，Windows不代判。
