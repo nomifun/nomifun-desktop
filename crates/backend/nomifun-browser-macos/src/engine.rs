@@ -318,9 +318,18 @@ impl Engine {
             #[cfg(debug_assertions)]
             eprintln!("CEF_SHUTDOWN phase=native_entry elapsed_ms={}", shutdown_started.elapsed().as_millis());
             shutdown();
-            engine.stopped.finish();
             #[cfg(debug_assertions)]
             eprintln!("CEF_SHUTDOWN phase=native_return elapsed_ms={}", shutdown_started.elapsed().as_millis());
+            // Exercise the real native/desktop failure path after physical
+            // cleanup, not instead of it. A lost acknowledgement stays
+            // unverified and retries must never re-enter cef_shutdown.
+            #[cfg(debug_assertions)]
+            if shutdown_state::lose_completion_ack(&engine.root) {
+                eprintln!("CEF_SHUTDOWN phase=completion_ack_lost_fixture");
+                let _ = tx.send(Err("CEF native cleanup returned but its completion acknowledgement was lost (isolated acceptance fixture)".into()));
+                return;
+            }
+            engine.stopped.finish();
             let _ = tx.send(Ok(()));
         });
         rx.await.map_err(|_| "CEF shutdown acknowledgement was lost")?
