@@ -4140,3 +4140,10 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 明确产品修复：调度入口和重试循环改用已有active_turn_generation判定本地实际driver/relay admission，空闲warmup不再阻断第三次拒绝隔离，真正active owner仍优先。现有真实warmup不产生admission/明确Turn才绑定generation两项回归通过，当前正式构建通过（新binary SHA前缀71FCB2A445DD）。按路径/UTC核对后清理空闲旧冷实例用于源码升级，旧观察器到期不是退出证据；未因此重启原任务或改原库身份。
 - 修后同一原data/work、新profile PID50532：新构建与原Checkpoint不兼容时仍正确拒绝，第三次失败在warmup之后持久化NATIVE_RECOVERY_RECONCILIATION_REQUIRED、cleanup_proven=false/暂停，不假称已恢复完成。原65events完整保持，唯一start effect returned/915bytes脚本、模型调用仍2、原树无复活；实际UI结束本回合后同Turn仅一次cancelled、最终68events，原生API自然exit0，最终后代/监听0。控制HTTP400后续模型分支未派发，本批没有供应商模型请求。
 - 独立16/16限定检查、two warmup回归/正式构建，原同代码冷失败与两个强杀组织首错不改PASS。制品同W268根05-crash-fixed/06-cold-crash/07-cold-fixed含实际故障意图/退出/原句柄与55ms观察、原/修后DB/UI、warmup因果日志及crash-cold-review。只关闭应用强杀树清理与受控冷隔离安全N1；OS重启、sleep/wake、成功自动续做、原完整WIN-016/所有平台/发布认证仍未验。全部自有GUI/fixture/进程/监听清理，全面目标active。
+
+### W269 精确来源拒绝反馈的真实载体首败（2026-10-03；采用未验）
+
+- 目标为实际StepFun在input1中间requirement的错引用拒绝→按字段反馈纠正，未取得该断言。当前f64db6365正式desktop/helper构建、新库正式bootstrap后内存重加密导入既有StepFun Coding Plan / step-3.7-flash、新workspace/profile；真实Tauri当前manifest/1280×832核对，UI项目/COD/原始输入均自主操作。初始两小文件仅作只读载体，不重跑原A/B/C。
+- 观察首错：首请求录制后只等待真实UI追加input1接受再原样转发，路由/焦点过渡期间实际文本断言失败，控制器未点击发送，也无turn/steer-accepted；首个控件值/焦点快照未保存，具体差异不重建。30秒gate到限，本地503/未派发上游，随后网络重试派发；属于夹具行为，不归因StepFun。保留原error/请求及组织失败，同时间盒不再付费循环。
+- 实际后续3个上游HTTP200/完整SSE、两read及一个report共3组完成参数与canonical相同，文件集合/全SHA保持；3模型步、约49秒completed只对应初始载体。input1/目标update_plan/引用拒绝与纠正均0，不把它计采用PASS；原要求等待补充前勿结束仍生成提前收尾残余，非产品丢失已接受input1。W249/W250/W240旧FAIL和缺失历史wire保持。
+- 没有生产代码修复/额外测试或第二付费样本。实际SDK请求退出后PID6752/后代消失、forwarder按路径/UTC ticks清理；原10分钟观察器已到期，未在退出前保留新OS句柄，实际退出码缺证，不把SDK code0或超时计Quit通过，也没有重启任务。51份文本凭据审计0命中。制品外部2026-10-03/windows/w269-real-citation-feedback保存新真实wire、原DB/UI/控件首败、review及退出缺证；全部自有进程/监听结束，精确反馈采用与原体验/平台认证继续开放，全面目标active。
