@@ -239,6 +239,8 @@ pub(crate) async fn run_turn(
 ) -> Result<AgentTurnResult, AgentEngineError> {
     request.validate_for(&binding)?;
     let recovery = request.recovery.take();
+    let interrupted_delivery_review = recovery.as_ref().is_some_and(|state|
+        state.checkpoint.delivery_review.pending && state.last_model_step > state.checkpoint.model_steps);
     if request.segment_policy.is_some() && !event_sink.supports_checkpoints() {
         return Err(AgentEngineError::InvalidContract("execution segments require durable checkpoints".into()));
     }
@@ -297,7 +299,7 @@ pub(crate) async fn run_turn(
             version: 1, binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
             active_set_generation: request.active_set_generation, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: Vec::new(), plan: Default::default(), work: Default::default(),
-            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(),
+            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), delivery_review: Default::default(),
         });
         if let Some(recovery) = &recovery { initial.model_steps = recovery.last_model_step; }
         initial.validate()?;
@@ -388,8 +390,14 @@ pub(crate) async fn run_turn(
         work.recent_commands.clear(); work.observed_processes.clear();
         work.command_observed_after_latest_mutation = false;
         let mut plan = recovery.checkpoint.plan.clone();
-        plan.needs_replan = adaptive.task_ledger();
+        // A pending delivery review can only publish a truthful account of
+        // earlier observations, never resume actions. Recovery still drops
+        // old evidence freshness; it need not reopen a completed plan merely
+        // to report historical facts or a blocker.
+        plan.needs_replan = adaptive.task_ledger() && !(recovery.checkpoint.delivery_review.pending
+            || recovery.checkpoint.delivery_review.account_repair);
         long_horizon = Some(LongHorizonState { execution_plan: plan, work_status: work, ..Default::default() });
+        long_horizon.as_mut().unwrap().completion.delivery_review = recovery.checkpoint.delivery_review.clone();
         let mut calls = BTreeMap::new();
         if let Some(archive) = tool_archive.as_mut() {
             for event in &recovery.prefix {
@@ -482,6 +490,10 @@ pub(crate) async fn run_turn(
     }
 
     'model_steps: loop {
+        if interrupted_delivery_review {
+            return fail_turn(&event_sink, model_steps,
+                "the single delivery review was interrupted after its model request started; it will not be automatically replayed or publish its candidate").await;
+        }
         if cancellation.is_cancelled() {
             return cancelled_turn(
                 &event_sink,
@@ -601,6 +613,9 @@ pub(crate) async fn run_turn(
             }
             model_request.input.instructions[slot] = latest;
         }
+        if let Some(state) = long_horizon.as_mut() {
+            state.completion.delivery_review.align_inputs(retained_inputs.len());
+        }
         synchronize_adaptive_context(
             &mut model_request,
             &request.tool_plan,
@@ -621,9 +636,18 @@ pub(crate) async fn run_turn(
             &mut adaptive_slots,
         )?;
         let review_has_running_processes = long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty());
+        let account_repair = long_horizon.as_ref().is_some_and(|state| state.completion.delivery_review.account_repair);
+        let continuing_complex_task = crate::delivery_review::multi_item_task(&retained_inputs)
+            && !account_repair && long_horizon.as_ref().is_some_and(|state| !state.completion.settled_failure_gate()
+                && (state.execution_plan.revision == 0 || state.execution_plan.is_open()));
         let review_can_report = long_horizon.as_ref().is_some_and(|state| state.work_status.running_processes.is_empty())
-            && !patch_recovery.pending() && !patch_recovery.unresolved();
-        synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used, review_can_report, review_has_running_processes);
+            && !patch_recovery.pending() && !patch_recovery.unresolved()
+            && (account_repair || !crate::delivery_review::multi_item_task(&retained_inputs)
+                || long_horizon.as_ref().is_some_and(|state| state.completion.settled_failure_gate()
+                    || (state.execution_plan.revision > 0 && !state.execution_plan.is_open())));
+        synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used || account_repair, review_can_report, review_has_running_processes, continuing_complex_task);
+        let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.delivery_review.pending);
+        synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step);
         protocol_recovery.constrain_tool_choice(
             &mut model_request.input.tool_choice, !model_request.input.tools.is_empty(),
         );
@@ -961,8 +985,41 @@ pub(crate) async fn run_turn(
             }
         }
 
+        // User input accepted during the publication review wins even when
+        // the now-obsolete response is text, malformed or truncated. Discard
+        // its complete proposed batch before the ordinary failure branches.
+        if delivery_review_step && let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, false).await?;
+            if !inputs.is_empty() {
+                let discarded_tool_call_ids = step.call_order.clone();
+                crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+                event_sink.emit(AgentEngineEvent::DeliveryReviewSuperseded {
+                    step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation: true,
+                }).await?;
+                admitted_call_ids.extend(discarded_tool_call_ids);
+                crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
+                crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs,
+                    &mut steering_receipts, &mut steering_receipt_order)?;
+                adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
+                    crate::AgentRuntimeActivationReason::Steering, event_sink.as_ref()).await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+                state.completion.delivery_review.align_inputs(retained_inputs.len());
+                completion_review_used = false;
+                protocol_recovery.observe_new_input();
+                control_rejections.reset();
+                model_request.input.provider_round_parent = None;
+                provider_round_id = None;
+                continue 'model_steps;
+            }
+        }
         if protocol_violation && step.finish_reason != Some(ChatFinishReason::MaxOutputTokens) {
             drop(stream);
+            if delivery_review_step {
+                return fail_turn(&event_sink, model_steps,
+                    "the single delivery review returned non-native tool markup; the candidate was not delivered").await;
+            }
             if cancellation.is_cancelled() {
                 return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
                     model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
@@ -1024,6 +1081,10 @@ pub(crate) async fn run_turn(
                 .await;
         }
         if matches!(finish_reason, ChatFinishReason::MaxOutputTokens) {
+            if delivery_review_step {
+                return fail_turn(&event_sink, model_steps,
+                    "the single delivery review exceeded its unchanged output budget; the candidate was not delivered").await;
+            }
             // No invoke_tool_calls/admit_tool path has run for this step.
             // Even complete calls in a truncated batch are NOT executable.
             let discarded_tool_call_ids = step.call_order.clone();
@@ -1063,6 +1124,10 @@ pub(crate) async fn run_turn(
             && adaptive.task_ledger() && !step.has_tool_calls()
             && !step.assistant_content.iter().any(|part|
                 matches!(part, ChatContentPart::Text { text } if !text.trim().is_empty()));
+        if delivery_review_step && !step.has_tool_calls() {
+            return fail_turn(&event_sink, model_steps,
+                "the single delivery review did not submit its final report; the candidate was not delivered").await;
+        }
         if !empty_task_response {
             protocol_recovery.observe_valid_step();
         }
@@ -1271,6 +1336,7 @@ pub(crate) async fn run_turn(
                         // Correct this terminal account in the existing review phase;
                         // argument repair cannot restart checks or reset an absent plan.
                         completion_review_used = true;
+                        state.completion.delivery_review.account_repair = true;
                     }
                     let made_progress = match call.name.as_str() {
                         crate::planning::TOOL_NAME => state.execution_plan.revision != plan_revision_before,
@@ -1451,6 +1517,10 @@ pub(crate) async fn run_turn(
             }
             let terminal_report = terminal_completion_requested.then(|| state.completion.current(
                 &state.execution_plan,&state.work_status,retained_inputs.len()).cloned()).flatten();
+            if delivery_review_step && terminal_report.is_none() {
+                return fail_turn(&event_sink, model_steps,
+                    "the single report-only delivery review did not produce a valid final account; the candidate was not delivered").await;
+            }
             let terminal_handoff = terminal_collaboration_accepted
                 && (!adaptive.task_ledger()
                     || (state.execution_plan.revision == 0
@@ -1536,7 +1606,13 @@ pub(crate) async fn run_turn(
             continue;
         }
 
-        append_assistant_step(&mut model_request, &step)?;
+        // Rejected reasoning-only terminals are not factual assistant history.
+        // Compatible provider codecs may flatten Reasoning into ordinary text;
+        // replaying it would turn pretend/private actions into apparent work.
+        // Keep the authoritative no-effect notice, not the rejected carrier.
+        if !empty_task_response {
+            append_assistant_step(&mut model_request, &step)?;
+        }
         // An unresolved patch already rules out task success. Preserve the
         // model's final failure/partial-result text and the recovery obligation;
         // a completion review must not reopen work the model has just ended.
@@ -1550,12 +1626,16 @@ pub(crate) async fn run_turn(
             // Keep the already-advertised action surface for unfinished work;
             // correction is bounded by the existing protocol and turn budgets.
             let continuation = protocol_recovery.admit(model_steps < total_model_limit);
+            // Private thinking is not a selected tool or task-completion
+            // decision. Correct native formatting without narrowing the
+            // existing frozen surface from an unexecuted private example.
             protocol_recovery.set_tool_hint(None);
             event_sink.emit(AgentEngineEvent::ModelResponseRejected {
                 step: model_steps, discarded_tool_call_ids: vec![], continuation, tool_hint: None,
             }).await?;
             model_request.input.messages.push(crate::protocol_recovery::empty_task_notice(continuation));
             model_request.input.provider_round_parent = None;
+            provider_round_id = None;
             if !continuation {
                 return fail_turn(&event_sink, model_steps,
                     "model produced no public answer or native tool calls after bounded correction; task completion was not accepted").await;
@@ -1716,6 +1796,7 @@ async fn persist_execution_checkpoint(
         plan: state.map(|state| state.execution_plan.clone()).unwrap_or_default(),
         work, patch_recovery: patch_recovery.snapshot(), segments: segments.cloned(),
         control_rejections: control_rejections.clone(),
+        delivery_review: state.map(|state| state.completion.delivery_review.clone()).unwrap_or_default(),
     };
     checkpoint.validate()?;
     sink.save_checkpoint(checkpoint).await
@@ -1801,6 +1882,7 @@ struct AdaptiveContextSlots {
     task_plan: Option<usize>,
     completion: Option<usize>,
     completion_review: Option<usize>,
+    delivery_review: Option<usize>,
     discovery_catalog: Option<usize>,
     task_continuation: Option<usize>,
     failure_stop: Option<usize>,
@@ -1813,6 +1895,7 @@ fn synchronize_completion_review(
     active: bool,
     can_report: bool,
     has_running_processes: bool,
+    continuing_complex_task: bool,
 ) {
     if active {
         if has_running_processes {
@@ -1821,6 +1904,11 @@ fn synchronize_completion_review(
             // user-held process merely to obtain a completion report.
             upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
                 "Execution remains unfinished for the same accepted task. A public progress reply does not complete it or authorize cancelling processes. Preserve the user's keep-alive/wait-for-input constraints, owned process IDs and output cursors; continue only the actions permitted by the accepted task. If the user requires keeping a helper until Stop, keep this turn active and poll that helper rather than cancel it to end a response. User cancellation and frozen execution budgets still apply. Unknown effects and pending recovery remain unresolved; this notice grants no verification, retry or wider scope. Claim completion only after the required work and owned processes have actually settled. Existing recovery policy may still permit a blocked partial account, which is never task success.".into());
+            return;
+        }
+        if continuing_complex_task {
+            upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
+                "A per-response stop can be a brief public progress update, not completion of this multi-item task. Remaining authorized work may still be unfinished. Continue only those unfinished parts through the frozen tools, or submit report_completion when the actual work settles. Do not restart, repeat settled observations or effects, or invent a missing-capability blocker merely because a prior response contained no tool calls. Existing plan, recovery, error-stop, cancellation and budget gates still apply; unresolved work must be disclosed rather than claimed complete. This notice grants no new authority.".into());
             return;
         }
         // The transcript review can be summarized with an oversized tool
@@ -1838,6 +1926,17 @@ fn synchronize_completion_review(
             request.input.tool_choice = ChatToolChoice::Specific { name:crate::completion::TOOL_NAME.into() };
         }
     } else if let Some(slot) = slots.completion_review {
+        request.input.instructions[slot].clear();
+    }
+}
+
+fn synchronize_delivery_review(request: &mut ChatModelRequest, slots: &mut AdaptiveContextSlots, active: bool) {
+    if active {
+        upsert_instruction(&mut request.input.instructions, &mut slots.delivery_review,
+            crate::delivery_review::INSTRUCTION.to_owned());
+        request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME);
+        request.input.tool_choice = ChatToolChoice::Specific { name: crate::completion::TOOL_NAME.into() };
+    } else if let Some(slot) = slots.delivery_review {
         request.input.instructions[slot].clear();
     }
 }
@@ -1969,6 +2068,12 @@ fn synchronize_adaptive_context(
             &state.work_status,
             patch_recovery.pending() || patch_recovery.unresolved(),
         );
+        state.completion.add_delivery_schema(completion_tool, accepted_inputs);
+        if failure_stop_gate && !crate::delivery_review::delivery_slots(accepted_inputs).is_empty() {
+            if let Some(slot) = slots.failure_stop {
+                request.input.instructions[slot].push_str(" For this numbered task, extend that minimal shape with the REQUIRED delivery_items from the advertised schema: include every advertised item_id, status=missing, results=[], and a plain explanation. Copy required exact observed error counts too. This is a blocked account, not permission to retry or discover results.");
+            }
+        }
         // Temporary workflow gates do not revoke tools from the frozen
         // capability surface. Removing schemas made repairable command errors
         // look like lost shell permission and forced needless tool discovery.
@@ -1985,11 +2090,12 @@ fn synchronize_adaptive_context(
         upsert_instruction(
             &mut request.input.instructions,
             &mut slots.completion,
-            state.completion.context(
+            format!("{}{}", state.completion.context(
                 &state.execution_plan,
                 &state.work_status,
                 input_revision,
-            )?,
+            )?, state.completion.delivery_context(accepted_inputs)
+                .map(|context| format!("\n{context}")).unwrap_or_default()),
         );
     }
     if scoped_instructions.has_context() || slots.scoped_instructions.is_some() {
@@ -2665,7 +2771,14 @@ fn append_assistant_step(
     }
     request.input.messages.push(ChatMessage {
         role: ChatRole::Assistant,
-        content: step.assistant_content.clone(),
+        content: step.assistant_content.iter().map(|part| match part {
+            // Unsigned thinking is display/diagnostic data, not a portable
+            // native continuation. Keep it out of both factual history and
+            // the context budget; signed/encrypted native state stays exact.
+            ChatContentPart::Reasoning { signature: None, encrypted_content: None, .. } =>
+                ChatContentPart::Text { text: "[Private reasoning omitted from replay]".into() },
+            _ => part.clone(),
+        }).collect(),
         provider_round_id: step.provider_round_id.clone(),
     });
     Ok(())
@@ -2906,6 +3019,26 @@ mod tests {
     };
     use serde_json::json;
     use tokio::sync::Notify;
+
+    #[test]
+    fn live_unsigned_thinking_is_not_replayed_or_charged_as_factual_context() {
+        let mut request=request();
+        let mut step=StepState::default();
+        step.assistant_content=vec![
+            ChatContentPart::Reasoning {text:"PRIVATE_STORY_NOT_A_RECEIPT".repeat(1024),signature:None,encrypted_content:None},
+            ChatContentPart::Text {text:"Public progress stays exact.".into()},
+            ChatContentPart::ToolCall {call_id:"actual".into(),name:"write_file".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"a","content":"exact\n"})),provider_metadata:None},
+        ];
+        append_assistant_step(&mut request,&step).unwrap();
+        let encoded=serde_json::to_string(&request.input).unwrap();
+        assert!(!encoded.contains("PRIVATE_STORY_NOT_A_RECEIPT"));assert!(encoded.len()<4096);
+        let content=&request.input.messages.last().unwrap().content;
+        assert_eq!(content[1..],step.assistant_content[1..]);
+        let protected=ChatContentPart::Reasoning {text:"native protected summary".into(),signature:Some("native-signature".into()),encrypted_content:None};
+        step.assistant_content=vec![protected.clone()];append_assistant_step(&mut request,&step).unwrap();
+        assert_eq!(request.input.messages.last().unwrap().content,[protected]);
+    }
 
     fn binding() -> EngineBinding {
         let engine = AgentEngine::new(AgentEngineBuild {
@@ -4630,7 +4763,7 @@ mod tests {
         let transcript_review = work.completion_review_message().unwrap();
         request.input.messages.push(transcript_review.clone());
         let mut slots = AdaptiveContextSlots::default();
-        synchronize_completion_review(&mut request, &mut slots, true, false, false);
+        synchronize_completion_review(&mut request, &mut slots, true, false, false, false);
         assert!(slots.completion_review.is_some(), "active review must have a host instruction independent of the transcript");
         assert!(request.input.instructions.iter().any(|instruction| instruction.contains("explicit prohibitions, including read-only probes")),
             "user restrictions must be explicit in the preserved model policy");
@@ -4648,9 +4781,9 @@ mod tests {
         assert_eq!(request.input.tools,tools, "review context grants no new tools");
         assert_eq!(request.input.messages.iter().filter(|message| **message==original).count(),1);
         assert!(serde_json::to_vec(&request.input).unwrap().len()<=resource.max_context_bytes);
-        synchronize_completion_review(&mut request,&mut slots,true,false,false);
+        synchronize_completion_review(&mut request,&mut slots,true,false,false,false);
         assert_eq!(request.input.instructions,instructions, "reconstruction must not append duplicate phase instructions");
-        synchronize_completion_review(&mut request,&mut slots,false,false,false);
+        synchronize_completion_review(&mut request,&mut slots,false,false,false,false);
         assert!(request.input.instructions[slots.completion_review.unwrap()].is_empty(), "new input/observations clear the old phase");
         assert_eq!(request.input.instructions[0],instructions[0]);
         request.validate().expect("clearing the turn-local review must leave a valid model request");
@@ -5202,6 +5335,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complex_progress_reply_does_not_close_unfinished_action_tools() {
+        #[derive(Default)]
+        struct Tools(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref()=="workspace.files/read" {
+                    return Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":"a","content":"file contents",
+                        "offset":0,"total_bytes":13,"eof":true,"next_offset":null,"sha256":"a".repeat(64),
+                        "start_line":1,"start_column_bytes":0,"source_version_pinned":true,
+                        "workspace_path":{"root_sha256":"d".repeat(64),"path":"a","case_resolved":true}}).to_string(),false));
+                }
+                Ok(AgentToolResult::text(invocation.call.call_id.clone(),json!({"process_id":format!("process:{}",invocation.call.call_id.as_ref()),
+                    "state":"exited","exit_code":0,"cleanup":{"reaped":true},"success":true,
+                    "output":{"text":"observed\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
+            }
+        }
+        let mut commands=control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]}));commands.pop();
+        commands.extend(control_step("entries","exec_command",json!({"command":"/bin/ls","args":["-a"]})));
+        let report=|summary:&str|json!({"summary":summary,"criteria":[{"disposition":"unverified","rationale":"Earlier observations are described without a later file-state claim."}],
+            "delivery_items":[{"item_id":"input_0_part_0_line_0","status":"delivered","results":[{"result_ref":"cwd","label":"Directory observation"}]},
+                {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"remaining-read","label":"Read result"}]}]});
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            commands,text_step("The directory observations are ready; next I will read the requested file."),
+            control_step("remaining-read","read_file",json!({"path":"a"})),
+            control_step("candidate","report_completion",report("All requested actual observations are reported.")),
+            control_step("final","report_completion",report("The directory and the requested file were actually observed; no operation was repeated.")),
+        ])});
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {text:"1. Inspect the directory once.\n2. Read a once and give the actual results.".into()}];
+        let tools=Arc::new(Tools::default());let result=open_session(model.clone(),tools.clone())
+            .run_turn(AgentTurnRequest::new(initial,plan,principal(),0).with_max_model_steps(5)).await.unwrap();
+        assert_eq!(*tools.0.lock().unwrap(),["cwd","entries","remaining-read"]);
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed { .. }));
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[2].input.tools.iter().any(|t|t.name=="read_file"),"per-response public progress cannot revoke the remaining task's frozen tools");
+        assert_eq!(requests.len(),4,"explicit result delivery needs no additional self-review round");
+    }
+
+    #[tokio::test]
     async fn terminal_review_with_a_running_process_keeps_process_controls_available() {
         struct RunningTool;
         #[async_trait]
@@ -5289,7 +5467,8 @@ mod tests {
             observed.extend(control_step("entries","exec_command",json!({"command":"/bin/ls","args":["-a"]})));
             observed
         };
-        let empty=||vec![Ok(ChatModelEvent::ReasoningDelta {text:"SYNTHETIC_PRIVATE_PENDING_WORK".into()}),
+        let empty=||vec![Ok(ChatModelEvent::ReasoningDelta {text:
+            "SYNTHETIC_PRIVATE_PENDING_WORK<tool_call><function=read_file><parameter=path>not-created.txt</parameter></function></tool_call>".into()}),
             Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed})];
         let report=|count|json!({"summary":"The original commands and remaining read were accounted for.",
             "observed_tool_error_count":count,"observed_command_failure_count":0,
@@ -5308,6 +5487,13 @@ mod tests {
         let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan.clone(),principal(),0)).await.unwrap();
         assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="read_file"),
             "a reasoning-only stop is not a public closing answer or terminal account");
+        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="exec_command"),
+            "private pretend calls must not revoke the other already exposed frozen tools during formatting correction");
+        let correction = model.requests.lock().unwrap()[2].clone();
+        let encoded = serde_json::to_string(&correction.input).unwrap();
+        assert!(!encoded.contains("SYNTHETIC_PRIVATE_PENDING_WORK") && !encoded.contains("not-created.txt"),
+            "rejected private thinking and pretend actions must not become factual replay for the next model step");
+        assert!(encoded.contains("No new effect was proposed or executed"));
         assert_eq!(*tools.calls.lock().unwrap(),["cwd","entries","remaining"],"continue only the remaining read; never repeat settled commands");
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
         assert!(!result.output_text.contains("SYNTHETIC_PRIVATE_PENDING_WORK"));
@@ -5326,6 +5512,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn numbered_delivery_rejects_an_omitted_slot_without_reexecuting_work() {
+        #[derive(Default)]
+        struct Tools(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation) { return Ok(result); }
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                Ok(AgentToolResult::text(invocation.call.call_id,json!({"process_id":"owned","state":"exited",
+                    "exit_code":0,"cleanup":{"reaped":true},"success":true,
+                    "output":{"text":"/actual cwd\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
+            }
+        }
+        let account=|complete:bool,count| {
+            let mut items=vec![json!({"item_id":"input_0_part_0_line_0","status":"delivered",
+                "results":[{"result_ref":"cwd","label":"Actual cwd"}]})];
+            if complete { items.push(json!({"item_id":"input_0_part_0_line_1","status":"delivered",
+                "results":[{"result_ref":"cwd","label":"Earlier exact result"}]})); }
+            json!({"summary":"Actual earlier command results follow.","criteria":[{"disposition":"unverified",
+                "rationale":"Earlier observations, not a new file-state claim."}],"delivery_items":items,
+                "observed_tool_error_count":count,"observed_command_failure_count":0})
+        };
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]})),
+            control_step("second-observation","exec_command",json!({"command":"/bin/pwd","args":["-P"]})),
+            control_step("omitted","report_completion",account(false,0)),
+            control_step("fixed","report_completion",account(true,1)),
+        ])});
+        let tools=Arc::new(Tools::default());
+        let plan=AgentToolPlan::new([
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+        ]).unwrap();
+        let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
+            text:"1. Observe cwd once.\n2. Deliver that earlier exact result.".into()}];
+        let outcome=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
+        let result=outcome.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert_eq!(*tools.0.lock().unwrap(),["cwd","second-observation"]);
+        assert!(result.output_text.contains("/actual cwd\n"));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+        assert_eq!(model.requests.lock().unwrap()[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["report_completion"]);
+    }
+
+    #[tokio::test]
     async fn healthy_settled_command_report_argument_repair_cannot_replay_effects() {
         #[derive(Default)]
         struct HealthyTools { calls: std::sync::Mutex<Vec<String>> }
@@ -5336,12 +5567,15 @@ mod tests {
                 self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
                 if invocation.binding.action_id.as_ref()=="workspace.files/write" {return Ok(workspace_result(invocation));}
                 Ok(AgentToolResult::text(invocation.call.call_id,json!({"process_id":"healthy-process","state":"exited",
-                    "exit_code":0,"cleanup":{"reaped":true},"success":true}).to_string(),false))
+                    "exit_code":0,"cleanup":{"reaped":true},"success":true,
+                    "output":{"text":"exit 0\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
             }
         }
         let report=|count|json!({"summary":"The original command ended with exit 0; the repeated write was not executed.",
             "observed_tool_error_count":count,"observed_command_failure_count":0,
-            "criteria":[{"disposition":"unverified","rationale":"Only the earlier recorded command result is disclosed."}]});
+            "criteria":[{"disposition":"unverified","rationale":"Only the earlier recorded command result is disclosed."}],
+            "delivery_items":[{"item_id":"input_0_part_0_line_0","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]},
+                {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]}]});
         let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
             control_step("created","write_file",json!({"path":"a","content":"original"})),
             control_step("original","exec_command",json!({"command":"bun","args":["test"]})),
@@ -5356,7 +5590,9 @@ mod tests {
             tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
             tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
-        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await;
+        let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
+            text:"1. Create a once.\n2. Run the original command and report without repeating it.".into()}];
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
         let feedback = model.requests.lock().unwrap()[3].input.messages.iter().flat_map(|message|&message.content)
             .find(|part|matches!(part,ChatContentPart::ToolResult{call_id,..} if call_id.as_ref()=="bad-report")).cloned();
         assert_eq!(*tools.calls.lock().unwrap(),["created","original"],"a parameter refusal cannot authorize a new write after a healthy settled command; feedback={feedback:?}");

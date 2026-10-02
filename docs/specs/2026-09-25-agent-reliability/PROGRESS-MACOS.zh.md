@@ -85,6 +85,65 @@
 本轮实际StepFun请求共9；R3/R4付费0，未扩大权限/关闭保护/放宽断言，完整证据在仓库外。
 后续仅在新根因、受影响源码或明确新风险出现时重开对应簇，不恢复长A/B/C或旧全量矩阵。
 
+### 当前重开目标：A13/B09 优先闭环（2026-10-02，实施中）
+
+用户明确要求完成复杂结果交付、字节/步骤、真实Keychain清理和公开报告质量，不能以短链或
+残余归类替代完成。付费调用次数上限已被用户明确取消；旧16次本地cap耗尽现场仍保留，
+产品上下文/执行窗口、进程期限及清理保护不改。本目标仍活动，未记A13/B09或Keychain PASS。
+
+- B09原实际HTTP确认：被拒绝的reasoning-only假写入被回放为普通assistant content；最小
+  反例首红后修，不再回放该载体，不解析/执行私密参数。私密名字收窄提示在真实混批后导致
+  剩余工具误判缺失，已撤回；仅要求原生格式，原冻结操作面保持，错误修正/交付复核边界不变。
+  兼容Chat编码器也不将有效轮私密思考转换为普通正文；无签名思考不计事实历史/后续预算，
+  签名/加密续接、真实调用参数和回执不变。Broker18+35、Runtime相关首败/修后均外置。
+- A13增加候选/最终两阶段：复杂编号任务有足够实际观察时，一次report-only交付复核；
+  candidate不是CompletionReported/Delivered，不冻结终态输入、不允许新操作。冷恢复、
+  流中纠正、超限/非法复核和中断不自动再试有回归。不是独立语义证明，仍需原任务验收。
+- 本次三个正式原A任务均未通过，分别封存：run003本地cap16/无报告；run006冻结替换包络
+  失败（不是StepFun限流）；run009普通进度被旧completion review过早关闭操作面、余项
+  blocked。发现只读中文禁止句未识别、重复完成工具说明占据包络及过早收尾，新增首红后修。
+  普通未完任务进度与已结算报告参数修正分开，后者保持禁止重做并保存checkpoint状态。
+- 撤回私密名字推断后Runtime268/268、Broker18+35、journal6/6、显式无限调用夹具8/8；
+  只证明机制边界。run012保留私密提示收窄导致混批拒绝/虚假缺工具首败；run015撤回后
+  原A实际操作到达completed，11请求/9步骤、候选和最终报告各1，真实UI/正常退出/五表
+  闭库通过，但严格原验收仍FAIL：最终未交付cwd和头尾原文，单次自检不足以关闭语义漏项。
+  原oracle另报grep代专用搜索、git argv的`--`差异，原产物保留、不改其FAIL。
+  证据`2026-10-02/macos/complex-delivery-repair/`；
+  原任务、原件、字节/顺序/真假结果断言未放宽，旧失败及每次新结果分别保留。
+
+#### 原复杂任务修后结果（2026-10-02，run023/024）
+
+- 单次自检未解决run015漏项，替为编号交付槽及显式受限结果引用；宿主交付已保存真实值，
+  不由模型重抄、不重跑、不自动公开所有日志、不赋予历史证据新鲜性。缺槽/无结果/伪造data
+  拒绝；missing不能completed，later scope变更需精确后续输入引用。新交付不接受旧summary-only
+  历史匹配；实际结构报告不追加候选复核。私密carrier/真实原生参数合同保持。
+- **原完整A13本次N1 PASS**：正式Tauri/ad-hoc deep-strict、arm64/macOS26.6.2/25G83、APFS
+  非大小写敏感Data卷；原任务13真实StepFun请求/9步骤/4压缩/540events，18原生参数全同，
+  11必要进程各一次/reaped。最终正文与真实UI完整交付cwd/十名称/四行头尾和行数/正零搜索/
+  Git字节/两指定测试0、1与失败断言。七原件/HEAD/status/diff不变，无哨兵/无额外文件。
+  未成功6=四未执行Git提议+两真实非零，报告/UI/WorkStatus6/2；非首发全提议无错。
+  candidate0/final1，正常Cmd-Q0/99.79秒，自有PID/listener消失，五表540/1/1/1/11全同且ok。
+  旧accept的专用read/search工具名、Git argv、summary-only假设FAIL保留；独立验收按原正文
+  和实际CompletionDelivered/UI检查，未放宽结果/保护。AX摘要截段不是真实UI遗漏。
+- **B09 run016/024仍FAIL**：run016漏末LF、修改前提前复制并成功复制两次，末尾将shell串
+  当command，后实际重启已完成helper；stop/Cmd-Q0/416.76秒不代判任务完成。run024最终32B/
+  LF/hash正确、copy/move/delete各一次、原件不变、无helper重启；但首次直接创建after，跳过
+  before33B→修改步骤，stdin含LF又append_newline=true，实物14B/双LF、stdout41B而非13/40。
+  首helper真实EOF/exit0、长helper父子曾同PGID存活后均消失成立；29请求/21步骤/770events/
+  九effects，最终强制上下文无摘要槽而失败、report0；不是付费次数cap/供应商限流。
+  正常Cmd-Q0/198.03秒、五表全同；不以正确终版或已验helper机制抵扣错误步骤/输入。
+- run016裸write参数JSON被错误接纳为摘要：现按原冻结工具schema拒绝完整匹配的动作参数，
+  schema内部传递但不发送给摘要模型，禁止外部schema读取；正常JSON状态笔记允许。run024
+  实际仅触发XML摘要拒绝及一次纠正，不冒充裸JSON live证据。Chat编码不再发送内部私密
+  省略占位普通正文，本次public OutputTextDelta0，未复制占位但不等于有合格进度文案。
+- Runtime270/270、Broker18及原35协议回归、正式App/fixture构建通过；最后另去掉交付目录
+  重复精确正文/source文本投影，仅保留引用定位，原始值/宿主解析/错误计数不变。该最后
+  轻量投影修复仅本机回归，尚未新formal B复验，未宣称已解除全部强制包络问题。
+- 构建feature/外置runner metadata/日志路径、无fixture首次App SIGABRT、readonly DB14、
+  oracle漏`./`首错全部在外另存，未发送任务的实例模型0；各结果不覆盖历史。证据
+  `2026-10-02/macos/complex-delivery-repair/`。公开结果含内部元数据的呈现仍待简化；
+  A13 N3/稳定性、B09生成步骤/字节及真实Keychain物理失败仍OPEN，Windows结果未改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

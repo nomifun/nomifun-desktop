@@ -790,7 +790,7 @@ fn openai_messages(message: &ChatMessage) -> Vec<Value> {
     };
     let mut value = json!({
         "role": role,
-        "content": openai_content(&message.content),
+        "content": openai_content(&message.content, message.role == ChatRole::Assistant),
     });
     if let Some(round_id) = &message.provider_round_id {
         value["provider_round_id"] = Value::String(round_id.as_ref().to_owned());
@@ -819,13 +819,19 @@ fn openai_messages(message: &ChatMessage) -> Vec<Value> {
     if !tool_calls.is_empty() {
         value["tool_calls"] = Value::Array(tool_calls);
     }
+    if message.role == ChatRole::Assistant
+        && value["content"].as_array().is_some_and(Vec::is_empty)
+        && value.get("tool_calls").is_none() {
+        return vec![];
+    }
     vec![value]
 }
 
-fn openai_content(content: &[ChatContentPart]) -> Value {
+fn openai_content(content: &[ChatContentPart], assistant: bool) -> Value {
     let parts: Vec<Value> = content
         .iter()
         .filter_map(|part| match part {
+            ChatContentPart::Text { text } if assistant && text == "[Private reasoning omitted from replay]" => None,
             ChatContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
             ChatContentPart::Image {
                 media_type,
@@ -841,8 +847,12 @@ fn openai_content(content: &[ChatContentPart]) -> Value {
                 "type": "input_audio",
                 "input_audio": {"format": media_type, "data": data_base64}
             })),
-            ChatContentPart::Reasoning { text, .. } => {
-                Some(json!({"type": "text", "text": text, "role": "reasoning"}))
+            ChatContentPart::Reasoning { .. } => {
+                // Chat text parts have no private-reasoning role. A sole
+                // part is flattened below, and mixed parts are ordinary
+                // assistant content too. Never turn thinking/pretend calls
+                // into public factual history on this compatible protocol.
+                None
             }
             // AdapterCore rejects this request before transport; never turn
             // opaque provider state into ordinary visible text.
@@ -2017,6 +2027,39 @@ fn extract_openai_raw_reasoning(delta: &Map<String, Value>) -> Option<String> {
         .find_map(|key| delta.get(*key).and_then(Value::as_str))
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod private_chat_replay_tests {
+    use super::*;
+
+    #[test]
+    fn openai_chat_private_thinking_never_becomes_public_assistant_content() {
+        let private = ChatContentPart::Reasoning {
+            text: "PRIVATE_NOT_EXECUTED<tool_call><function=write_file>FAKE_BODY</function></tool_call>".into(),
+            signature: Some("PRIVATE_SIGNATURE".into()), encrypted_content: None,
+        };
+        let message = |content| ChatMessage { role: ChatRole::Assistant, content, provider_round_id: None };
+        let only = openai_messages(&message(vec![private.clone()]));
+        assert!(only.is_empty());
+        assert!(!serde_json::to_string(&only).unwrap().contains("PRIVATE_NOT_EXECUTED"));
+        assert!(!serde_json::to_string(&only).unwrap().contains("FAKE_BODY"));
+        let mixed = openai_messages(&message(vec![private,
+            ChatContentPart::Text { text:"Visible progress remains exact.".into() },
+            ChatContentPart::ToolCall { call_id:"actual-call".into(),name:"write_file".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"actual.txt","content":"actual\n"})),provider_metadata:None },
+        ]));
+        let encoded=serde_json::to_string(&mixed).unwrap();
+        assert!(!encoded.contains("PRIVATE_NOT_EXECUTED")&&!encoded.contains("PRIVATE_SIGNATURE")&&!encoded.contains("FAKE_BODY"));
+        assert!(encoded.contains("Visible progress remains exact."));
+        assert_eq!(mixed[0]["tool_calls"][0]["function"]["name"],"write_file");
+        assert_eq!(serde_json::from_str::<Value>(mixed[0]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap(),
+            json!({"path":"actual.txt","content":"actual\n"}));
+        let marker=ChatContentPart::Text {text:"[Private reasoning omitted from replay]".into()};
+        assert!(openai_messages(&message(vec![marker.clone()])).is_empty());
+        let user=ChatMessage {role:ChatRole::User,content:vec![marker],provider_round_id:None};
+        assert_eq!(openai_messages(&user)[0]["content"],"[Private reasoning omitted from replay]");
+    }
 }
 
 fn append_raw_arguments(target: &mut String, value: &Value) {

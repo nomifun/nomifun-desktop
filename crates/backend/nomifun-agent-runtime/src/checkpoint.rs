@@ -26,6 +26,8 @@ pub struct AgentExecutionCheckpoint {
     pub segments: Option<crate::AgentExecutionSegmentState>,
     #[serde(default)]
     pub control_rejections: crate::AgentControlRejectionState,
+    #[serde(default)]
+    pub delivery_review: crate::AgentDeliveryReviewState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +43,9 @@ impl AgentExecutionCheckpoint {
         self.patch_recovery.validate()?;
         if let Some(segments) = &self.segments { segments.validate(self.model_steps)?; }
         self.control_rejections.validate()?;
+        if !self.delivery_review.valid_for(self.accepted_input_count) {
+            return Err(AgentEngineError::InvalidContract("checkpoint delivery review state is invalid".into()));
+        }
         crate::requirements::validate_ledger_budget(&self.plan.requirements)
             .map_err(AgentEngineError::InvalidContract)?;
         let operation = self.turn_operation_id.as_ref();
@@ -86,7 +91,7 @@ mod tests {
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 1, tool_call_count: 1,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: AgentPlan::default(),
             work: AgentWorkStatus { running_processes: std::collections::BTreeSet::from(["live-process".into()]), ..Default::default() },
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(),
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), delivery_review: Default::default(),
         };
         assert!(checkpoint.validate().is_err());
     }
