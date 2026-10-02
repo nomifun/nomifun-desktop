@@ -3136,3 +3136,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - W238长链在报告前仍超244 tokens；当前每个available/ineligible条目及scope重复序列化无值path/command/artifact/owner metadata。最小首红保留；现只在派生模型metadata对象一层省略null，不递归到原参数、command、output或数组。
 - 实际值/零/false/原参数显式null、非零终态/清理、精确call与已结算早期poll关系全部保留，原观测/Scope台账/资格/Schema/权限/计数/预算不改。completion41项及mandatory/实际usage/报告不重做三项，共44项不同检查通过，fmt配置/diff通过。
 - 只关闭空字段重复的确定性开销，正式B完成/模型效果/N3/COD与完整A/C仍待验，不用单元PASS覆盖W238失败。仓库外2026-10-02/windows/w239-absent-context-metadata保存首红/修后/41项和三项预算及配置检查；无新模型/命令/构建样本。
+
+### W240 收尾B的来源保护偏离（2026-10-02，正式FAIL/cancelled）
+
+- 修后正式GEN完整B：第二步以无摘要保护的write_file直接覆盖新建文件，违反明确来源SHA要求；首败原调用已保存。正式Stop后cancelled，保留最后read已执行及磁盘正确18-byte/echo输入、原件hash、父子cancel/reaped证据，工具结果错误0，未报告成功。
+- 原audit23/28保留，来源保护/重复write和停止后的未交付保持失败；无相同根因重跑。UI还出现私有推理省略占位文本，合并记录展示残余，按用户优先收尾要求转C链，不新增说明优化批次。
+- 本批仅真实主线走查，仓库外2026-10-02/windows/w240-mainline-b-closeout保存原参数/阶段首败/取消DB、字节/进程/原事件审计及UI；没有产品源码或新回归，共享未结案。

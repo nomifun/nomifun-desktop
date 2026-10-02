@@ -3829,3 +3829,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：新回归原参数/观测不变、三个精确eligible ID/早期poll→terminal、非零及false等断言通过；completion41/41及mandatory过限不调用模型、actual usage余量、健康报告修正不重做三项，共44项不同检查。首红/修后、fmt配置/diff分日志。
 - 未覆盖：正式Tauri/StepFun实际省下多少预算及B最后read/report、模型语言与N3/COD、完整A/C及共享门槛。W238真实预算failed、原20/28与复核保持，本批无新模型/命令/正式构建。
 - 证据：仓库外2026-10-02/windows/w239-absent-context-metadata，01首红/02修后精确语义、03完整completion与三项邻近、04/05配置/diff；Git仅一层metadata投影、一个最小回归和短进度。
+
+### W240 主线B来源SHA未使用（2026-10-02；基线4c367206c，FAIL/cancelled）
+
+- Case/子断言：完整B、C04/C05/C06/C07/C08与A05/A09/A10/A13/A17/A19；收尾清单下修后正式Tauri/StepFun/GEN、新workspace/profile，所需构建40.03秒，任务不缩减，断言在运行前按实际合法shell/输出消费修正。
+- 首败：第二步直接write_file(path,content)无来源SHA保护，未调用digest-protected patch；即使终版字节值=2正确，也违反明确用户要求。两个write原参数保留，不以最终字节正确代判该断言。
+- 写/读/原生cmd copy/move/del、echo18-byte输入/close/exit0、holdREADY/cancel均无工具错误。保护hash及终版/echo真实字节保持；CIM92样本确认父子存活亲缘与消失，hold清理已结算。首败保存后正式Stop为cancelled，最后moved-file read在停止前已完成，但report未到达，未假报全任务成功或外部kill。
+- 原audit23/28保留：来源摘要缺失、两write、未首report/未completed/整序未关闭为真实FAIL。UI取消前历史/最后残留“Private reasoning omitted from replay”占位文本，归合并展示余项；不为说明单开批次。未取得报告不能代判预算完全修复或B结案。
+- 未覆盖：来源保护修复、完整B/N3/COD及最终报告/公开语言；下一主线为C连续→纠正→压缩→停止→冷读，不对同一未改B根因重复付费。本批无新产品源码/组件测试，原W238失败保留。
+- 证据：仓库外2026-10-02/windows/w240-mainline-b-closeout，01构建、02-first-unprotected-write原首败、03-cancelled完整DB/事件/23-28 audit/原两write及独立物理复核、04正式取消UI、process witness；Git仅短进度。
