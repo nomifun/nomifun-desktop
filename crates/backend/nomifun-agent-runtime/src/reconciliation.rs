@@ -79,6 +79,8 @@ pub fn reconcile_execution_tail(
                 let (recorded_step, call) = calls.get(&result.call_id).ok_or_else(|| invalid("result has no proposal"))?;
                 if recorded_step != current || !completed.insert(result.call_id.clone()) { return Err(invalid("duplicate or mismatched result")); }
                 result.validate_for(&result.call_id)?;
+                next.plan.apply_exact_outcome(call,result,!admitted.contains(&result.call_id)
+                    || crate::exact_actions::proven_nonstart(call,result));
                 if *current > 0 {
                     current_results.insert(result.call_id.clone()); new_results = new_results.saturating_add(1);
                     if admitted.contains(&result.call_id) { if let Some(segments) = next.segments.as_mut() { segments.observe(call,result)?; } }
@@ -112,7 +114,14 @@ pub fn reconcile_execution_tail(
     if keep_batch && proposed.iter().any(|id| !calls.contains_key(id)) { return Err(invalid("admitted batch contains incomplete arguments")); }
     let mut observations = Vec::new();
     for (id, (call_step, call)) in &calls {
-        if completed.contains(id) || (*call_step > 0 && (!keep_batch || *call_step != step)) { continue; }
+        if completed.contains(id) {continue;}
+        if *call_step > 0 && (!keep_batch || *call_step != step) {
+            if !admitted.contains(id) {
+                let held=AgentToolResult::text(id.clone(),"Not dispatched: the fenced journal has no owner admission for this reserved exact action.",true);
+                next.plan.apply_exact_outcome(call,&held,true);
+            }
+            continue;
+        }
         let outcome = if let Some(outcome) = outcomes.get(id) {
             outcome.clone()
         } else if !admitted.contains(id) {
@@ -122,12 +131,19 @@ pub fn reconcile_execution_tail(
         outcome.result.validate_for(id)?;
         if admitted.contains(id) && matches!(outcome.source, AgentReconciliationSource::NotDispatched)
             && outcome.evidence_event_id.is_none() { return Err(invalid("missing dispatch needs a fenced journal witness")); }
+        next.plan.apply_exact_outcome(call,&outcome.result,
+            matches!(outcome.source,AgentReconciliationSource::NotDispatched)
+                ||crate::exact_actions::proven_nonstart(call,&outcome.result));
         if *call_step > 0 { new_results = new_results.saturating_add(1); }
         if *call_step > 0 && admitted.contains(id) { if let Some(segments) = next.segments.as_mut() { segments.observe(call,&outcome.result)?; } }
         observations.extend([AgentEngineEvent::ToolOutcomeReconciled { step: *call_step, result: outcome.result,
             source: outcome.source, evidence_event_id: outcome.evidence_event_id, owner_operation_id: outcome.owner_operation_id }]);
     }
     let discard_last = !keep_batch;
+    next.plan.needs_replan = true;
+    if next.plan.exact_actions!=checkpoint.plan.exact_actions {
+        observations.push(AgentEngineEvent::PlanUpdated {plan:next.plan.clone()});
+    }
     observations.push(AgentEngineEvent::ExecutionTailReconciled {
         model_steps: step, source_checkpoint_revision: checkpoint_revision,
         discarded_tool_call_ids: if discard_last { proposed.iter().cloned().collect() } else { vec![] },

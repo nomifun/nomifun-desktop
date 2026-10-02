@@ -48,6 +48,8 @@ mod output_limit;
 mod public_output;
 mod protocol_recovery;
 mod planning;
+mod exact_actions;
+pub use exact_actions::AgentExactAction;
 mod patch_recovery;
 pub use patch_recovery::AgentPatchRecoveryState;
 mod requirements;
