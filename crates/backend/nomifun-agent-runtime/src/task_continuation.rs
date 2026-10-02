@@ -294,6 +294,7 @@ pub(crate) async fn resume(
         steps: Vec::new(),
         needs_replan: true,
         requirements,
+        exact_actions:Vec::new(),
     };
     sink.emit(AgentEngineEvent::PlanUpdated { plan: next.clone() })
         .await?;
@@ -352,6 +353,7 @@ mod tests {
             plan: AgentPlan {
                 revision: 3,
                 explanation: "旧任务".into(),
+                exact_actions:Vec::new(),
                 steps: vec![crate::AgentPlanStep {
                     step: "修改文件".into(),
                     status: crate::AgentPlanStatus::Blocked,

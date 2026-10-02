@@ -3398,3 +3398,40 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - Runtime270、Broker18及原35协议项、本机正式构建通过；无限付费次数是用户明确授权，不改
   产品上下文、进程/清理保护。完整轨迹仅外部2026-10-02/macos/complex-delivery-repair，
   不迁移Windows credential/结果；真实Keychain物理失败仍开放。
+
+### macOS B09 强制投影及交互合同（2026-10-03）
+
+- 完成引用目录仅ref/tool/path，不重复argv/结果/源全文；多编号简短summary与精确附件职责
+  分开，所有Schema断言和已保存字节保持。五槽/最后三read/13ref直接回归，不扩预算。
+- 编号首次file mutation/stdin前需独立plan；只证明先规划，不证明解释/字节正确。显式关闭
+  计划后的报告参数修正保持report-only。正式B09主动plan后顺序改善但仍缺LF/遗漏删除/
+  错误PTY同步exec而FAIL；Stop/正常退出/冷五表成立，不将已验子链代判整体。
+- 摘要root tool_calls数组无ID包装漏识别现拒绝；未知tool同样拒绝，普通状态/嵌套历史保持。
+  补真实exec等待结束与start先返回句柄、pipe stdin/EOF及tty字段说明，仅模型呈现，注册
+  Schema/owner字节/Frozen provenance不改。Runtime271及直接回归成立，最后补充未新live。
+- 证据仅外部2026-10-03/macos/b09-plan-envelope；原B生成精度/完整报告和真实Keychain物理
+  清理仍开放，Windows原生结果未代判，未新建动作框架或扩大权限/保护/断言。
+
+### macOS 源绑定参数契约与未知恢复（2026-10-03）
+
+- 复用plan的有限exact_actions，源quote仅定位、参数digest-only checkpoint；owner前比较
+  真实参数/最终stdin字节，拒绝不改写。编号写/patch/stdin须当前契约，独立只读仍原门。
+  reservation先持久化，typed正向owner回执推进；未知效果不复位，冷恢复区分未派发/
+  真实成功/已派发未知，新ID不能重复同源已完成动作。Runtime277及六个直接回归成立。
+- 原B正式采用已改善33→32B精确变更、copy/move/delete各一次；但遗漏内容回读、运行中
+  控制/五次压缩超过默认30秒helper寿命，stdin效果未知，原完整B仍FAIL。31请求/594events/
+  八effects原样；桌面锁定阻断Quit，480+5期限TERM/exit1/expired不冒充正常退出。
+- 后续聚焦声明时机和真实顺序/交付；不延长预算/寿命或以模型契约作语义证明。此版改变
+  共享控制schema，Windows未正式采用，旧平台结果保持。证据外部2026-10-03/macos/
+  b09-exact-actions；真实Keychain与公开元数据呈现风险仍开放。
+
+### macOS B09 receiver 预声明与声明反馈（2026-10-03）
+
+- receiver_ref引用前序start exact动作，在真实running owner回执后绑定目标digest；stdin
+  原参数/字节/TTL不变，未知/已结束/cold不能造live receiver，同ID重声明不复位host状态。
+  仅digest checkpoint、当前项投影，编号报告说明去重的结构断言严格相同。
+- 原B formal仍FAIL：9请求/116events/0effects，错误patch声明连续拒绝，未进入receiver实际
+  采用。正常UI/Cmd-Q0/102.47秒及冷五表成立，不以零效果关闭字节/步骤/交付缺口。
+- 补schema支持tool枚举和精确声明参数定位/脱敏反馈；同源成功stdin不可换ref新ID重入。
+  Runtime279及直接负例通过，最后反馈/别名保护未新live。外部2026-10-03/macos/
+  b09-receiver-ref保留首败；共享新控制字段Windows未代验，Keychain/公开表达仍开放。

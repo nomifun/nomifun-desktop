@@ -29,6 +29,37 @@ fn outcome(id: &str) -> AgentReconciledOutcome {
 }
 
 #[test]
+fn exact_action_reservation_and_owner_success_reconcile_without_replay() {
+    let mut cp=checkpoint();
+    let action=crate::exact_actions::ExactActionInput {id:"save".into(),source:crate::AgentInputCitation {input:0,quote:"save".into()},
+        tool:"write_file".into(),expected_arguments:json!({"path":"answer.txt","content":"saved"}),receiver_ref:None}
+        .compile(&[crate::context_lifecycle::text_message(ChatRole::User,"save".into())]).unwrap();
+    cp.plan.revision=1;cp.plan.exact_actions=vec![action];
+    let mut reserved=cp.plan.clone();reserved.exact_actions[0].attempted_call_id=Some("written".into());
+    let mut tail=vec![started(),proposal("written"),AgentEngineEvent::PlanUpdated {plan:reserved}];
+    let held=reconcile_execution_tail(&cp,1,&tail,&BTreeSet::new(),&BTreeMap::new(),&Default::default()).unwrap();
+    assert!(held.checkpoint.plan.exact_actions[0].attempted_call_id.is_none());
+    assert!(!held.checkpoint.plan.exact_actions[0].succeeded);
+    tail.push(admitted("written"));
+    assert!(reconcile_execution_tail(&cp,1,&tail,&BTreeSet::from(["written".into()]),&BTreeMap::new(),&Default::default()).is_err(),
+        "admitted unknown effects cannot become pending/replayable");
+    let receipt=AgentToolResult::text("written".into(),json!({"path":"answer.txt","written":true,"bytes":5,
+        "sha256":nomifun_agent_contracts::digest_bytes(b"saved")}).to_string(),false);
+    let success=AgentReconciledOutcome {result:receipt.clone(),source:AgentReconciliationSource::OwnerReceipt,
+        evidence_event_id:Some("owner-receipt".into()),owner_operation_id:Some("write-operation".into())};
+    let restored=reconcile_execution_tail(&cp,1,&tail,&BTreeSet::from(["written".into()]),
+        &BTreeMap::from([("written".into(),success)]),&Default::default()).unwrap();
+    assert!(restored.checkpoint.plan.exact_actions[0].succeeded);
+    assert!(restored.checkpoint.plan.exact_actions[0].settled);
+    let AgentEngineEvent::ToolCallCompleted {call,..}=proposal("fresh-replay") else {unreachable!()};
+    assert!(restored.checkpoint.plan.exact_action_gate(&call,true).is_some());
+    tail.push(AgentEngineEvent::ToolCompleted {step:1,result:receipt});
+    let recorded=reconcile_execution_tail(&cp,1,&tail,&BTreeSet::from(["written".into()]),&BTreeMap::new(),&Default::default()).unwrap();
+    assert!(recorded.checkpoint.plan.exact_actions[0].succeeded,"owner result before PlanUpdated settle must restore satisfied");
+    assert!(!recorded.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolStarted{..})));
+}
+
+#[test]
 fn partial_batch_retains_owner_receipt_and_marks_unexecuted_proposal_without_replay() {
     let cp = checkpoint();
     let tail = vec![started(), proposal("written"), proposal("not-dispatched"), admitted("written")];
