@@ -198,6 +198,13 @@ const formatToolReceiptDetailLabel = (
     });
   }
 
+  if (row.commandTimedOut) {
+    return t('messages.toolSummary.commandTimedOut', {
+      target: displayTarget ?? row.title,
+      defaultValue: '{{target}} reached its time limit; process cleanup completed',
+    });
+  }
+
   if ((row.state === 'failed' || row.state === 'canceled') && displayTarget) {
     return t(`messages.toolSummary.${row.state}`, {
       target: displayTarget,

@@ -34,6 +34,33 @@ const renderMessage = (content: string, position: IMessageText['position']) => {
 };
 
 describe('MessageText internal tool payload display', () => {
+  test('displays a proven timeout and cleanup in both languages without rewriting the final report', async () => {
+    const raw = 'The command reached its deadline.\n\nUnsuccessful tool attempts in this turn: 1 (including argument checks and command outcomes). Details remain available in the execution steps.\n\nUnsuccessful command attempts in this turn: 1. Each command\'s exit status and output explain the result.';
+    const original = { id: 'timeout-footer', type: 'text', position: 'left', turn_id: 'timeout-turn',
+      conversation_id: conversationId, created_at: 1, content: { content: raw } } as IMessageText;
+    const rows = [{ id: 'timeout', type: 'tool_call', turn_id: original.turn_id, conversation_id: conversationId,
+      content: { call_id: 'timeout', name: 'poll_process', status: 'error', output: JSON.stringify({
+        state: 'timed_out', success: false, process_id: 'owned', output: { text: '' },
+        cleanup: { reaped: true, errors: [], interrupt_attempted: false, terminate_attempted: true, force_kill_attempted: false },
+      }) } }] as TMessage[];
+    for (const [language, messages, expected] of [
+      ['zh-CN', zhMessages, ['1 次命令达到了运行时限', '进程已结束并清理', '1 次调用结果']],
+      ['en-US', enMessages, ['1 command(s) reached their time limit', 'cleanup completed', '1 call results']],
+    ] as const) {
+      const localized = createInstance();
+      await localized.use(initReactI18next).init({ lng: language, resources: { [language]: { translation: { messages } } } });
+      const view = render(<MemoryRouter><I18nextProvider i18n={localized}><MessageListProvider initialValue={rows}>
+        <MessageText message={original} />
+      </MessageListProvider></I18nextProvider></MemoryRouter>);
+      const visible = () => `${view.container.textContent}${view.container.querySelector('.markdown-shadow')?.shadowRoot?.textContent ?? ''}`;
+      await waitFor(() => expected.forEach(text => expect(visible()).toContain(text)));
+      expect(visible()).not.toContain('Unsuccessful tool attempts');
+      expect(original.content.content).toBe(raw);
+      expect(rows[0].type).toBe('tool_call');
+      if (rows[0].type === 'tool_call') expect(rows[0].content.status).toBe('error');
+      view.unmount();
+    }
+  });
   test('renders business nonzero and rejected parameters separately in both languages', async () => {
     const raw = 'The diagnostic returned exit 1.\n\nUnsuccessful tool attempts in this turn: 2 (including argument checks and command outcomes). Details remain available in the execution steps.\n\nUnsuccessful command attempts in this turn: 1. Each command\'s exit status and output explain the result.';
     const original = { id:'mixed-footer',type:'text',position:'left',turn_id:'turn-mixed',conversation_id:conversationId,

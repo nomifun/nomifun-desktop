@@ -349,6 +349,13 @@ const formatToolReceiptPart = (
     });
   }
 
+  if (part.commandTimedOut) {
+    return t('messages.processReceipt.commandTimedOut', {
+      count: part.count,
+      defaultValue: '{{count}} commands reached their time limit; process cleanup completed',
+    });
+  }
+
   if (part.state === 'failed') {
     return t('messages.processReceipt.failedOperations', {
       count: part.count,
@@ -478,11 +485,11 @@ const buildProcessReceiptSummary = (
       ? buildToolReceiptDetailRows(tools).filter((row) => row.state === 'failed').length
       : countRecoveredToolFailures(tools);
     const recovered = recoveredFailureCount > 0;
-    const notStartedParts = options.recovered ? receiptParts.filter((part) => part.commandNotStarted) : [];
-    const otherRecoveredCount = recoveredFailureCount - notStartedParts.reduce((count, part) => count + part.count, 0);
+    const nativeOutcomeParts = options.recovered ? receiptParts.filter((part) => part.commandNotStarted || part.commandTimedOut) : [];
+    const otherRecoveredCount = recoveredFailureCount - nativeOutcomeParts.reduce((count, part) => count + part.count, 0);
     const label = recovered
       ? [
-          ...notStartedParts.map((part) => formatToolReceiptPart(part, t)),
+          ...nativeOutcomeParts.map((part) => formatToolReceiptPart(part, t)),
           ...(otherRecoveredCount > 0
             ? [t('messages.processReceipt.recoveredOperations', {
                 count: otherRecoveredCount,

@@ -8,9 +8,9 @@
 
 | 场景 | 入口与候选证据 | 当前状态 |
 | --- | --- | --- |
-| A 观察、只读、小测试 | W217正式GEN执行16/16、报告首次接受；W218终态poll修复；W219正式COD首败14/22 | 执行GEN N1；COD重复读搜/Git、报告旧引用拒绝，完整A/N3未达 |
-| B 文件、进程、停止 | W209文件链COD/GEN/COD三例，每例31/31；W194输入/EOF；W196游标/Stop5秒N1 | 文件效果/最终事实N3已验；进程/超时/N3、等待播报、报告拒绝分支正式触发仍缺 |
-| C 连续、纠正、恢复 | 压缩/最新纠正/取消冷读；W95/W98/W182等 | 组件及取消冷读已有证据，真实连续/压缩接合待补 |
+| A 观察、只读、小测试 | W217 GEN执行链；W225 COD操作13/13且未重做，但报告错引/漏交付 | 操作已有GEN/COD单次证据；完整结果与引用交付、首发N3未达 |
+| B 文件、进程、停止 | W209文件链三例各31/31；W194输入/EOF；W196 Stop5秒N1；W227干净timeout/W229 READY引用N1；W230分类冷读12/12 | 文件链N3已验；进程首发N3/COD、公开语言/等待播报及完整B衔接仍缺 |
+| C 连续、纠正、恢复 | W182取消冷读；W223六压缩保留原输入/回执且无重做，组件修复与反例已有 | 压缩局部实证不能代替完整C；追加纠正→压缩→取消→重启链待补 |
 
 关键bad-case/正向任务取N3，GEN/COD各有正式执行；不同角色不机械重复所有底层断言。
 现有cargo回归按受影响代码定向复用；业务UI常规手测、外部生态和发布认证移出本轮，均不记PASS。
@@ -3733,3 +3733,32 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 体验仍未闭合：最终回答夹杂完整process_id/cursor/cleanup字段，未明确无signal；展开过程和页尾仍以“曾有1次尝试未成功”及通用调用/命令计数归纳预期timeout。人工复核另记FAIL_VISIBLE_UX，不把17/17当完整任务体验PASS。
 - 未覆盖：公开语言/typed timeout汇总、首发N3/COD、取消历史poll、完整联合B/A/C及共享门槛。无新源码/重复cargo检查，不追加相同付费循环。
 - 证据：仓库外2026-10-02/windows/w229-ready-timeout-live，01构建、02不可变事件/DB/调用/audit/人工复核、03折叠UI与04展开UI、独立process witness；Git只留短进度。
+
+### W230 超时分类摘要与原始回执（2026-10-02；基线8bb9226b3，正式冷读12/12）
+
+- Case/子断言：C05/C06、OBS结果分类与A05/A08/A09/A13/A17/A19；沿W229阶段“曾有1次尝试未成功”和页尾通用计数，不新增付费模型。
+- 首红：normalize、completion展示及可展开详情三条新回归全部失败，01保留。修复仅识别严格原生timed_out且success=false/无矛盾exit与signal、已reaped/无清理errors及完整阶段字段的回执；保留status=error、原正文/输出/计数和Turn状态，未设nonFatalFailure或假报成功。
+- 展示：同会话/Turn及原计数完整对齐时页尾说明达到运行时限/结束并清理，阶段和工具行同义；未知/缺失/清理失败/MCP同名/混合结果保持通用披露。已timeout的历史重试记录保留，后来成功不移除原回执。
+- 验证：三个首红修后52项、邻近83项共135项不同UI检查通过；新增测试类型错误05另留，修后类型检查通过并单验该项。中英文i18n、最小880x600边界、diff及正式UI/desktop构建通过；不跑全仓。
+- 正式隔离profile冷读W229，页尾/阶段/详情均为时限分类，原READY/timeout和compact JSON回执可展开；events/turns/sessions行数与全字节、全部6个夹具文件保持，模型/事件新增0。首audit11/12因03截图尚未展开，原记录保留；03b展开后另审12/12，断言不改，不把采集错误当产品失败。
+- 未覆盖：新实时timeout、混合汇总的正式UI、模型公开内部字段/无signal说明、首发N3/COD、完整A/B/C及共享门槛。本批只关闭分类冷读子缺口，不把原W229整体体验改PASS。
+- 证据：仓库外2026-10-02/windows/w230-timeout-outcome-ui，01首红/02修后/03～12相关检查与构建，01-cold的before/after DB、原11/12与复核12/12、折叠/展开/原始回执UI；Git仅相关源码、五项最小回归和短进度。
+
+### W231 错摘要之后仍可读的原生输出（2026-10-02；基线8cca7d4b7，正式待验）
+
+- Case/子断言：C01/C06/C07/C08、CMD-134/CTRL-006/007及A05/A08/A09/A15/A16/A17/A19；先审W225原轨迹，不继续付费盲重跑。
+- 根因证据：原cwd/list stdout分别138/778 UTF-8 bytes；首压缩摘要有完整cwd及九项列表，后三摘要却改为pending或未执行。对应两个exec的精确身份/终态仍可引用，但完成上下文只给scope/terminal，没有原输出；模型最终只说“已列出”而漏具体值。01最小首红确认原生结果在context中缺失，不覆盖W225语义FAIL。
+- 修复：仅保留同调用、同owner的完整小原生output.text和原cursor/retained/dropped/encoding元数据，作为当前已合格call的observed_output数据；优先记录事实而非冲突摘要，缺字段表示未保留。非派发、错result ID/owner、别的capability/action不提供该数据；env/stdin/文件正文/额外字段不复制。
+- 边界：每条2KiB、总计4KiB，仍纳入原32KiB/64观察限制，超限整条省略、随观察一起淘汰。原日志/失败计数、freshness/路径/报告Schema/权限及token/byte硬限不变，旧调用资格和unknown工作不因输出缓存升格。
+- 验证：实际WorkStatus/CommandTracker经过后来非零命令仍保留完整中文cwd/list及原exit/失败计数；九类错配/未派发/未证明/非JSON反例拒绝，Unicode大输出及聚合限制/淘汰无剪裁。completion39/39（含新三项）及mandatory/fixed-prefix/observed-usage三项，共42项不同检查通过；首红/修后、fmt配置/diff分日志。
+- 未覆盖：正式Tauri/StepFun是否用原输出抵抗错摘要及交付cwd/列表、报告语义/引用范围、N3/完整A/B/C。本批无新模型/命令/正式构建，只记确定性子根因修复。
+- 证据：仓库外2026-10-02/windows/w231-retained-command-output，00原轨迹尺寸/摘要哈希、01首红、02/03修后和04/05及三项预算保护；Git仅源码、三项最小回归及短进度。
+
+### W232 综合A重复cwd/list及预算失败（2026-10-02；正式基线d76730452，FAIL）
+
+- Case/子断言：综合A、C01/C02/C03/C06/C07/C08与A05/A08/A09/A15/A17/A19；正式Tauri/StepFun/COD、原五项任务、新workspace/profile，复用W230 frontend，仅desktop所需构建45.77秒。
+- 首败：原正确cwd/九项目录后，第三次压缩后的第5步以完全相同参数各执行一次cwd/list，再做首次Git status/diff。读样本及两次单文件搜索此前正确且各一次，原件/十文件/Git未变；四native均exit0/reaped/errors=[]，未启动两个Bun，也没有report/假完成。独立操作原11/15、最终六项交付缺失及重复调用人工审计保留。
+- 随后回合自行failed，错误归NomiFun：compaction替换83,428 bytes、27,810估算tokens超过27,731实际输入余量79 tokens，未违反字节/消息限。正式UI“应用处理失败”；发现时已终止，没有执行取消或重试，没有外部kill或新付费循环。
+- 原三次成功压缩before82,174/81,123/81,702→after79,234/78,280/80,743，保留1/1/2调用。不能以W231组件PASS或缓存存在代判模型效果；报告具体值/引用仍缺。下一步按实际mandatory前缀余量核对summary上限，冻结token/byte/输出及accepted input不变。
+- 未覆盖：修后压缩预算、W231真实输出采用、禁止重做/完整A首发与N3、B/C及共享门槛。本批无新源码/重复测试；拟Stop前已failed，历史不记cancelled。
+- 证据：仓库外2026-10-02/windows/w232-comprehensive-a-output，01构建、02-first-replay原DB/事件/调用/11-15 audit/compaction尺寸/人工复核、03失败UI；无模型请求完整投影夹具，不声称已核对observed_output全部实际发送内容，Git仅短进度。
