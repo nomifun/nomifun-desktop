@@ -415,7 +415,7 @@ impl CompletionTracker {
             serde_json::json!({"type":"array","maxItems":16,"items":{
                 "type":"object","additionalProperties":false,"required":["result_ref","label"],
                 "properties":{"result_ref":{"type":"string","enum":refs},
-                    "label":{"type":"string","minLength":1,"maxLength":256}}
+                    "label":{"type":"string","minLength":1,"maxLength":256,"description":"Short public label in the user's language; do not expose internal evidence/routing terminology."}}
             }})
         };
         tool.input_schema.0["required"].as_array_mut().unwrap().push(serde_json::json!("delivery_items"));

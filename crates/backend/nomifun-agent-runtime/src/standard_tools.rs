@@ -252,7 +252,7 @@ fn read_schema() -> Value {
             "recursive":{"type":"boolean", "default":false},
             "missing_ok":{"type":"boolean", "default":false},
             "path":workspace_path_value(),
-            "start_line":{"type":"integer", "minimum":1, "maximum":8388609, "description":"One-based source line. Use this with line_count to inspect code; omit byte offset/limit."},
+            "start_line":{"type":"integer", "minimum":1, "maximum":8388609, "description":"One-based source line, with line_count; omit byte offset/limit. For the last N lines, first observe total L, then use max(1,L-N+1). A head-only page does not satisfy a requested tail read."},
             "line_count":{"type":"integer", "minimum":1, "maximum":2000, "default":200,"description":"Number of source lines to inspect, still bounded by the response byte budget."},
             "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0,"description":"Byte offset, NOT a line number. For pagination use the exact prior next_offset and expected_sha256."},
             "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384,"description":"Byte budget, NOT a number of lines. Omit for normal reads; use line_count for source lines."},
