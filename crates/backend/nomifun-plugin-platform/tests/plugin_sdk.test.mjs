@@ -13,7 +13,7 @@ const CONNECT = 'nomifun-plugin-bridge-connect-v1';
 const RESULT = 'nomifun-plugin-bridge-result-v1';
 const NONCE = 'a'.repeat(64);
 
-function harness(t, { connected = true, preview = false } = {}) {
+function harness(t, { connected = true, preview = false, globals = {} } = {}) {
   const channel = new MessageChannel();
   const listeners = new Map();
   const timers = new Map();
@@ -46,6 +46,7 @@ function harness(t, { connected = true, preview = false } = {}) {
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
+    ...globals,
   });
 
   function dispatch(type, event = {}) {
@@ -83,6 +84,72 @@ function harness(t, { connected = true, preview = false } = {}) {
     fireTimers() { for (const callback of [...timers.values()]) callback(); },
   };
 }
+
+test('installed readiness requires an actual Host Bridge round trip', { timeout: 5000 }, async t => {
+  const state = harness(t, { preview: false, globals: { document: { readyState: 'complete', body: {} } } });
+  let configCalls = 0;
+  const observed = new Promise(resolve => state.host.on('message', request => {
+    if (request.type === 'nomifun-plugin-ui-observation-v1') resolve(request);
+    else if (request.target?.target === 'config') {
+      configCalls += 1;
+      success(state.host, request, { target: 'config', config: {} });
+    }
+  }));
+  state.host.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: 'installed-ready', operation: 'ready' });
+  const result = await observed;
+  assert.equal(result.value, true);
+  assert.equal(result.error, undefined);
+  assert.equal(configCalls, 1);
+});
+
+test('typed UI probes require the Host channel and never evaluate supplied code', { timeout: 5000 }, async t => {
+  const state = harness(t, { preview: true });
+  state.dispatch('message', { source: {}, data: { type: 'nomifun-plugin-ui-probe-v1', probe_token: 'outside', operation: 'evaluate', code: 'globalThis.compromised=true' } });
+  assert.equal(state.parentMessages.length, 1, 'ordinary window messages do not become verification calls');
+  const reply = new Promise(resolve => state.host.once('message', resolve));
+  state.host.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: 'host', operation: 'evaluate', code: 'globalThis.compromised=true' });
+  const result = await reply;
+  assert.equal(result.type, 'nomifun-plugin-ui-observation-v1');
+  assert.equal(result.probe_token, 'host');
+  assert.match(result.error, /Unsupported UI operation/);
+});
+
+test('UI probes observe DOM behavior while installed surfaces reject mutation tests', { timeout: 5000 }, async t => {
+  const { createRequire } = await import('node:module');
+  const { pathToFileURL } = await import('node:url');
+  const uiRequire = createRequire(new URL('../../../../ui/package.json', import.meta.url));
+  const domRequire = createRequire(uiRequire.resolve('@happy-dom/global-registrator'));
+  const { Window } = await import(pathToFileURL(domRequire.resolve('happy-dom')).href);
+  const dom = new Window();
+  dom.document.body.innerHTML = '<input id="entry"><button id="add">Add</button><ul id="items"></ul>';
+  dom.document.querySelector('#add').addEventListener('click', () => {
+    const item = dom.document.createElement('li');
+    item.textContent = dom.document.querySelector('#entry').value;
+    dom.document.querySelector('#items').append(item);
+  });
+  const state = harness(t, { preview: true, globals: {
+    document: dom.document, Event: dom.Event,
+    HTMLInputElement: dom.HTMLInputElement, HTMLTextAreaElement: dom.HTMLTextAreaElement,
+    HTMLSelectElement: dom.HTMLSelectElement, setTimeout, clearTimeout,
+  } });
+  let counter = 0;
+  async function probe(operation, selector, value) {
+    const token = String(++counter);
+    const reply = new Promise(resolve => state.host.once('message', resolve));
+    state.host.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: token, operation, selector, value });
+    return reply;
+  }
+  assert.equal((await probe('fill', '#entry', 'Review')).value, null);
+  assert.equal((await probe('click', '#add')).value, null);
+  assert.equal((await probe('count', '#items li', 1)).value, 1);
+  assert.equal((await probe('text', '#items li', 'Review')).value, 'Review');
+  assert.equal(dom.document.querySelector('#items').textContent, 'Review');
+  const installed = harness(t, { preview: false });
+  const rejected = new Promise(resolve => installed.host.once('message', resolve));
+  installed.host.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: 'mutation', operation: 'click', selector: '#add' });
+  assert.match((await rejected).error, /Mutation tests require preview/);
+  await dom.happyDOM.close();
+});
 
 function resultFor(request) {
   const target = request.target;

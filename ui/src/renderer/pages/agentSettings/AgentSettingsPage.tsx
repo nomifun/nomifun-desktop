@@ -4,7 +4,7 @@ import { AGENT_SIDER_TOGGLE_EVENT, dispatchAgentSiderStateEvent } from '@/render
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import { Alert, Button, Modal, Spin } from '@arco-design/web-react';
 import { AddOne, Refresh } from '@icon-park/react';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
@@ -17,11 +17,22 @@ import OfficialTemplateOverview from './OfficialTemplateOverview';
 import { useAgentSettingsController } from './useAgentSettingsController';
 import { useAgentWorkbenchEntry } from './useAgentWorkbenchEntry';
 import styles from './AgentSettingsPage.module.css';
+import { configService } from '@/common/config/configService';
+import { launchPluginConversation } from '../plugins/pluginConversationLaunch';
 
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
+  const pluginIntent = new URLSearchParams(location.search).get('pluginIntent');
+  const [pluginLaunchError, setPluginLaunchError] = useState('');
+  const continuePlugin = async (preset?: AgentPresetSummary) => {
+    if (!pluginIntent) return;
+    try {
+      if (preset) await configService.set('guid.defaultAgentSelection', { kind: 'preset', presetId: preset.preset_id });
+      await launchPluginConversation(navigate, {}, pluginIntent);
+    } catch (error) { setPluginLaunchError(error instanceof Error ? error.message : String(error)); }
+  };
   const navigationHistory = useNavigationHistory();
   const [returned] = useState(() => agentEditorReturn(location.state, location.search));
   const [templateEditing, setTemplateEditing] = useState<TemplateEditingState | null>(null);
@@ -108,7 +119,8 @@ const AgentSettingsPage: React.FC = () => {
     if (!hasUnsavedChanges) { action(); return; }
     setPendingSwitch(() => action);
   };
-  useAgentWorkbenchEntry({ ...controller, loading: controller.loading || (!!returned && location.search === returned.search) });
+  useAgentWorkbenchEntry({ ...controller, loading: controller.loading || (!!returned && location.search === returned.search),
+    rememberedSelection: controller.editingDrafts?.readSelection() });
   useEffect(() => {
     if (!returned || restored.current || controller.loading || !controller.library) return;
     restored.current = true;
@@ -128,6 +140,10 @@ const AgentSettingsPage: React.FC = () => {
         );
   const selectedTemplate =
     controller.selection?.kind === 'template' ? controller.selection.template : null;
+  const rememberTemplateEditing = useCallback((editing: TemplateEditingState) => {
+    setTemplateEditing(editing);
+    if (selectedTemplate) controller.editingDrafts?.writeTemplate(selectedTemplate, editing);
+  }, [selectedTemplate, controller.editingDrafts]);
   const previousTemplate = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (returned?.kind === 'template' && previousTemplate.current === returned.templateKey && selectedTemplate?.template_key !== returned.templateKey) {
@@ -215,7 +231,11 @@ const AgentSettingsPage: React.FC = () => {
         okText={t('agentSettings.workbench.discardAndLeave')}
         cancelText={t('agentSettings.workbench.keepEditing')}
         onCancel={() => setPendingSwitch(null)}
-        onOk={() => { pendingSwitch?.(); setPendingSwitch(null); }}
+        onOk={() => {
+          if (selectedTemplate) controller.editingDrafts?.removeTemplate(selectedTemplate);
+          else controller.discardChanges();
+          pendingSwitch?.(); setPendingSwitch(null);
+        }}
         autoFocus
         focusLock
       >
@@ -252,6 +272,14 @@ const AgentSettingsPage: React.FC = () => {
           className={styles.pageError}
         />
       )}
+      {pluginIntent && <Alert type={pluginLaunchError ? 'error' : 'info'} showIcon
+        title={t('pluginPlatform.authoring.title')}
+        content={<div>
+          <p>{pluginLaunchError || t('pluginPlatform.authoring.workbenchHint')}</p>
+          <Button disabled={controller.busyAction !== null} onClick={() => void continuePlugin()}>
+            {t('pluginPlatform.authoring.continue')}
+          </Button>
+        </div>} />}
 
       {controller.loading && !controller.library ? (
         <div className={styles.loading}>
@@ -269,9 +297,17 @@ const AgentSettingsPage: React.FC = () => {
               busy={controller.busyAction !== null}
               catalog={controller.catalog}
               onDirtyChange={setTemplateDirty}
-              initialEditing={returned?.kind === 'template' && selectedTemplate.template_key === returned.templateKey ? templateInitialEditing : undefined}
-              onEditingChange={setTemplateEditing}
-              onSave={(displayName, document, description) => { void controller.createConfiguredPreset(displayName, document, description); }}
+              initialEditing={(returned?.kind === 'template' && selectedTemplate.template_key === returned.templateKey ? templateInitialEditing : undefined)
+                ?? controller.editingDrafts?.readTemplate(selectedTemplate)}
+              onEditingChange={rememberTemplateEditing}
+              saveLabel={pluginIntent ? t('pluginPlatform.authoring.saveContinue') : undefined}
+              onSave={(displayName, document, description) => {
+                void controller.createConfiguredPreset(displayName, document, description)
+                  .then(saved => {
+                    if (saved) controller.editingDrafts?.removeTemplate(selectedTemplate);
+                    if (saved && pluginIntent) return continuePlugin(saved.preset);
+                  });
+              }}
             />
           ) : controller.editor && controller.draft ? (
             <AgentPresetEditor
@@ -283,7 +319,10 @@ const AgentSettingsPage: React.FC = () => {
               busyAction={controller.busyAction}
               dirty={controller.dirty}
               onDraftChange={controller.setDraft}
-              onSave={() => void controller.saveRevision()}
+              saveLabel={pluginIntent ? t('pluginPlatform.authoring.saveContinue') : undefined}
+              onSave={() => void controller.saveRevision().then(saved => {
+                if (saved && pluginIntent) return continuePlugin(saved.preset);
+              })}
               onDiscard={controller.discardChanges}
               onOpenModels={() => { void openKeepingEdits('/models'); }}
               onOpenAuthor={openKeepingEdits}

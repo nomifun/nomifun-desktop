@@ -3,7 +3,7 @@ import { Alert, Button, Tag } from '@arco-design/web-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
+import { launchPluginConversation } from '../plugins/pluginConversationLaunch';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import styles from './AgentContextOrder.module.css';
 
@@ -40,11 +40,12 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
     if (!desktopShell || disabled || pending.current) return;
     pending.current = true; setCreating(true); setCreateError(false);
     try {
-      const draft = await pluginPlatform.drafts.create.invoke({ template: 'agent.before_tool' });
       if (mounted.current) {
-        const destination = `/plugins/create/${encodeURIComponent(draft.summary.draft_id)}`;
-        if (currentOpenAuthor.current) await currentOpenAuthor.current(destination);
-        else await navigate(destination);
+        await launchPluginConversation(async destination => {
+          if (typeof destination === 'number') return;
+          if (currentOpenAuthor.current && typeof destination === 'string') await currentOpenAuthor.current(destination);
+          else await navigate(destination);
+        }, { template: 'agent.before_tool' });
       }
     } catch {
       if (mounted.current) setCreateError(true);

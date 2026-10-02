@@ -23,6 +23,8 @@ pub(crate) mod remote_runtime;
 pub(crate) mod agent_binding_projection;
 pub(crate) mod nomi_core_builtins;
 mod model_management;
+mod plugin_development;
+mod plugin_authoring;
 pub(crate) mod nomi_core_tool_discovery;
 pub(crate) mod nomi_core_chat_route;
 pub(crate) mod nomi_core_control_plane;

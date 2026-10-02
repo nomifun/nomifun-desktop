@@ -222,6 +222,38 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   换receiver别名不能新ID重入。Runtime279/279及定位/脱敏/别名负例通过，最后两处仅回归，
   尚未新formal采用；原Task语义/回读/EOF/长helper与报告保持OPEN。Windows结果未代判。
 
+#### B09 声明定位正式采用与真实清理失败（2026-10-03）
+
+- clean源`5de6798ec`正式Tauri/签名/fixture，原task/四seed不变；arm64/macOS26.6.2/25G83、
+  APFS非大小写敏感Data。32 StepFun请求/24步骤/591events/六effects，定位反馈实际采用后
+  plan接纳；但源引用合法不代表解释正确：首唯一write直接after32B、没有before33/patch。
+  cp/mv的首shell串误放command拒绝保留，修cmd后各真实一次；真实read内容/hash后才delete，
+  此段顺序成立。四原件保持，不能用正确最终32B覆盖缺失的原要求中间状态。
+- 首helper正确start pipe/wait0且实际poll READY；没有预声明stdin，输入提议门前拒绝，
+  运行中修plan与压缩后再次input时结果未知，实物只有ready，无input/EOF/长helper/report。
+  暂停EXECUTION_CLEANUP_UNPROVEN，不重放未知输入。**原完整B仍FAIL**，receiver未正式绑定，
+  不把参数13B或契约接纳改记实际已送达。
+- 正式UI结束回合/正常Quit请求后native exit1/197.59秒，无expiry/TERM/KILL；真实失败原因
+  Agent runtime shutdown未证明、原有限重试4次后非零退出，不是CEF/Keychain（未初始化）。
+  正常封存exit0首断言失败保持，另失败封存五表591/1/1/1/6全同/ok，自有PID/listener
+  消失；进程消失不证明cleanup通过，不用本样本关闭系统Keychain物理风险。
+- 此现场固定包络仍高，新增最小去重：仅host mandatory workspace root/default-cwd规则
+  存在时，将七个标准tool重复root suffix合一；无该context时原说明保持。所有schema/
+  tool name/deferred字段严格相同，规则保留一处、重复应用幂等，serialized回归减少>1.5KiB。
+  Runtime280/280通过，最后去重仅回归，未再formal重跑；没有提高模型/进程预算或吞错。
+- 完整首败/修正/非零清理轨迹仅外部`2026-10-03/macos/b09-contract-feedback/`。没有新
+  receiver/owner字节矩阵、未扩大权限/保护/断言；语义步骤、预声明采用、EOF/最终报告及
+  真实Keychain和公开元数据保持OPEN，Windows结果不代判。
+
+- 同样本的native exit1进一步定位下层resource cleanup：首次失败Shared result永久缓存，
+  上层显式teardown重试只是读取旧Err。仅完成失败的同root/原tools settlement可新flight，
+  pending/success仍共享；Session release已开始不另起Turn，最终Kernel release消耗后不重入。
+  新flight仍向原owner要reap/settlement，panic/unknown标志、admission fence/quarantine不清。
+  旧prior失败保留，当前真实settlement可独立取得新证明；不运行run_turn或重发stdin。
+- 新缓存判定1项及既有cleanup_retry邻近9项通过；stage/session诊断不输出原始model/owner
+  参数或凭据。模块/Display首编译错在外保持，修后结果另记。此修复仅本机定向，尚未修后
+  native失败恢复；不以PID消失洗绿、不将Agent失败缓存原因当作Keychain唯一原因。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

@@ -10,7 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::model::{
-    InstallCommit, PluginDraftMessage, PluginDraftRecord, PluginDraftStatus, PluginGrant,
+    DraftInstallAssociation, InstallCommit, PluginDraftRecord, PluginDraftStatus, PluginGrant,
     PluginInventory, PluginLibraryState, PluginMutationKind, PluginMutationPhase,
     PluginCredentialBinding, PluginMutationRecord, PluginRecord, StoredArtifactRecord,
 };
@@ -299,8 +299,8 @@ impl PluginRepository for SqlitePluginRepository {
         sqlx::query(
             "INSERT INTO plugin_drafts \
              (draft_id, owner_user_id, plugin_id, base_revision, revision, name, workspace_path, \
-              messages_json, status, last_error, created_at_ms, updated_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              imported_context_json, status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(draft.draft_id.as_ref())
         .bind(&draft.owner_user_id)
@@ -309,11 +309,16 @@ impl PluginRepository for SqlitePluginRepository {
         .bind(u64_to_i64(draft.revision)?)
         .bind(&draft.name)
         .bind(&draft.workspace_path)
-        .bind(canonical_json(&draft.messages)?)
+        .bind(canonical_json(&draft.imported_context)?)
         .bind(draft.status.as_str())
         .bind(&draft.last_error)
         .bind(draft.created_at_ms)
         .bind(draft.updated_at_ms)
+        .bind(&draft.source_conversation_id)
+        .bind(&draft.source_message_id)
+        .bind(&draft.source_operation_key)
+        .bind(&draft.source_request_digest)
+        .bind(canonical_json(&draft.verification)?)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -325,7 +330,7 @@ impl PluginRepository for SqlitePluginRepository {
     ) -> PluginRepositoryResult<Vec<PluginDraftRecord>> {
         let rows = sqlx::query(
             "SELECT draft_id, owner_user_id, plugin_id, base_revision, revision, name, workspace_path, \
-                    messages_json, status, last_error, created_at_ms, updated_at_ms \
+                    imported_context_json, status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json \
              FROM plugin_drafts WHERE owner_user_id = ? ORDER BY updated_at_ms DESC, draft_id",
         )
         .bind(owner_user_id)
@@ -341,7 +346,7 @@ impl PluginRepository for SqlitePluginRepository {
     ) -> PluginRepositoryResult<Option<PluginDraftRecord>> {
         sqlx::query(
             "SELECT draft_id, owner_user_id, plugin_id, base_revision, revision, name, workspace_path, \
-                    messages_json, status, last_error, created_at_ms, updated_at_ms \
+                    imported_context_json, status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json \
              FROM plugin_drafts WHERE owner_user_id = ? AND draft_id = ?",
         )
         .bind(owner_user_id)
@@ -359,17 +364,17 @@ impl PluginRepository for SqlitePluginRepository {
     ) -> PluginRepositoryResult<PluginDraftRecord> {
         let result = sqlx::query(
             "UPDATE plugin_drafts SET plugin_id = ?, base_revision = ?, revision = revision + 1, name = ?, \
-                    workspace_path = ?, messages_json = ?, status = ?, last_error = ?, updated_at_ms = ? \
+                    workspace_path = ?, status = ?, last_error = ?, updated_at_ms = ?, verification_json = ? \
              WHERE owner_user_id = ? AND draft_id = ? AND revision = ?",
         )
         .bind(draft.plugin_id.as_ref().map(AsRef::as_ref))
         .bind(draft.base_revision.map(u64_to_i64).transpose()?)
         .bind(&draft.name)
         .bind(&draft.workspace_path)
-        .bind(canonical_json(&draft.messages)?)
         .bind(draft.status.as_str())
         .bind(&draft.last_error)
         .bind(draft.updated_at_ms)
+        .bind(canonical_json(&draft.verification)?)
         .bind(&draft.owner_user_id)
         .bind(draft.draft_id.as_ref())
         .bind(u64_to_i64(expected_revision)?)
@@ -430,7 +435,7 @@ impl PluginRepository for SqlitePluginRepository {
         let rows = sqlx::query(
             "SELECT mutation_id, owner_user_id, plugin_id, kind, phase, old_artifact_digest, \
                     new_artifact_digest, old_data_generation, new_data_generation, expected_revision, \
-                    error, created_at_ms, updated_at_ms FROM plugin_mutations ORDER BY created_at_ms",
+                    error, created_at_ms, updated_at_ms, draft_association_json FROM plugin_mutations ORDER BY created_at_ms",
         )
         .fetch_all(self.pool())
         .await?;
@@ -451,7 +456,7 @@ impl PluginRepository for SqlitePluginRepository {
     async fn commit_install(&self, commit: &InstallCommit) -> PluginRepositoryResult<PluginRecord> {
         let mut transaction = self.pool().begin().await?;
         let mutation = sqlx::query(
-            "SELECT phase, old_artifact_digest, old_data_generation FROM plugin_mutations \
+            "SELECT phase, old_artifact_digest, old_data_generation, draft_association_json FROM plugin_mutations \
              WHERE mutation_id = ? AND owner_user_id = ? AND plugin_id = ?",
         )
         .bind(commit.mutation_id.as_ref())
@@ -464,6 +469,7 @@ impl PluginRepository for SqlitePluginRepository {
         if phase != PluginMutationPhase::Prepared.as_str() {
             return Err(PluginRepositoryError::Conflict);
         }
+        let draft_association = draft_association_from_row(&mutation)?;
 
         put_artifact_tx(&mut transaction, &commit.artifact).await?;
         let current = get_plugin_tx(&mut transaction, &commit.owner_user_id, &commit.plugin_id).await?;
@@ -593,10 +599,20 @@ impl PluginRepository for SqlitePluginRepository {
         .bind(commit.mutation_id.as_ref())
         .execute(&mut *transaction)
         .await?;
+        let plugin = get_plugin_tx(&mut transaction, &commit.owner_user_id, &commit.plugin_id).await?
+            .ok_or_else(|| PluginRepositoryError::InvalidData("committed Plugin disappeared".into()))?;
+        if let Some(draft) = draft_association {
+            let updated = sqlx::query(
+                "UPDATE plugin_drafts SET plugin_id=?,base_revision=?,revision=revision+1,name=?,updated_at_ms=MAX(updated_at_ms,?) WHERE owner_user_id=? AND draft_id=? AND revision=? AND ((? IS NULL AND plugin_id IS NULL AND base_revision IS NULL) OR (plugin_id=? AND base_revision=?))"
+            ).bind(plugin.plugin_id.as_ref()).bind(u64_to_i64(plugin.revision)?)
+                .bind(&plugin.name).bind(commit.now_ms).bind(&commit.owner_user_id).bind(draft.draft_id.as_ref())
+                .bind(u64_to_i64(draft.expected_revision)?).bind(commit.expected_revision.map(u64_to_i64).transpose()?)
+                .bind(plugin.plugin_id.as_ref()).bind(commit.expected_revision.map(u64_to_i64).transpose()?)
+                .execute(&mut *transaction).await?;
+            if updated.rows_affected() != 1 { return Err(PluginRepositoryError::Conflict); }
+        }
         transaction.commit().await?;
-        self.get_plugin(&commit.owner_user_id, &commit.plugin_id)
-            .await?
-            .ok_or_else(|| PluginRepositoryError::InvalidData("committed Plugin disappeared".into()))
+        Ok(plugin)
     }
 
     async fn rollback_install(
@@ -610,7 +626,7 @@ impl PluginRepository for SqlitePluginRepository {
         let mutation = sqlx::query(
             "SELECT phase, kind, old_artifact_digest, old_data_generation, expected_revision, \
                     old_previous_artifact_digest, old_previous_data_generation, old_config_json, \
-                    old_credential_bindings_json, old_grants_json \
+                    old_credential_bindings_json, old_grants_json, draft_association_json \
              FROM plugin_mutations WHERE mutation_id = ? AND owner_user_id = ? AND plugin_id = ?",
         )
         .bind(mutation_id.as_ref())
@@ -621,6 +637,7 @@ impl PluginRepository for SqlitePluginRepository {
         .ok_or(PluginRepositoryError::NotFound)?;
         let phase: String = mutation.try_get("phase")?;
         let kind: String = mutation.try_get("kind")?;
+        let draft_association = draft_association_from_row(&mutation)?;
         if !matches!(
             phase.as_str(),
             "committed" | "rolling_back" | "failed"
@@ -761,6 +778,15 @@ impl PluginRepository for SqlitePluginRepository {
             .bind(grant.updated_at_ms)
             .execute(&mut *transaction)
             .await?;
+        }
+        if let Some(draft) = draft_association {
+            let restored = get_plugin_tx(&mut transaction, owner_user_id, plugin_id).await?
+                .ok_or(PluginRepositoryError::NotFound)?;
+            sqlx::query(
+                "UPDATE plugin_drafts SET base_revision=?,revision=revision+1,updated_at_ms=MAX(updated_at_ms,?) WHERE owner_user_id=? AND draft_id=? AND plugin_id=? AND base_revision=?"
+            ).bind(u64_to_i64(restored.revision)?).bind(now_ms).bind(owner_user_id)
+                .bind(draft.draft_id.as_ref()).bind(plugin_id.as_ref()).bind(committed_revision)
+                .execute(&mut *transaction).await?;
         }
         sqlx::query("DELETE FROM plugin_mutations WHERE mutation_id = ?")
             .bind(mutation_id.as_ref())
@@ -1209,7 +1235,6 @@ fn artifact_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<Sto
 fn draft_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<PluginDraftRecord> {
     let status = match row.try_get::<String, _>("status")?.as_str() {
         "ready" => PluginDraftStatus::Ready,
-        "generating" => PluginDraftStatus::Generating,
         "failed" => PluginDraftStatus::Failed,
         other => return Err(PluginRepositoryError::InvalidData(format!("invalid Draft status {other}"))),
     };
@@ -1224,8 +1249,13 @@ fn draft_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<Plugin
             .transpose()?,
         name: row.try_get("name")?,
         workspace_path: row.try_get("workspace_path")?,
-        messages: serde_json::from_str::<Vec<PluginDraftMessage>>(
-            &row.try_get::<String, _>("messages_json")?,
+        source_conversation_id: row.try_get("source_conversation_id")?,
+        source_message_id: row.try_get("source_message_id")?,
+        source_operation_key: row.try_get("source_operation_key")?,
+        source_request_digest: row.try_get("source_request_digest")?,
+        verification: serde_json::from_str(&row.try_get::<String, _>("verification_json")?).map_err(|error| PluginRepositoryError::InvalidData(error.to_string()))?,
+        imported_context: serde_json::from_str(
+            &row.try_get::<String, _>("imported_context_json")?,
         )
         .map_err(|error| PluginRepositoryError::InvalidData(error.to_string()))?,
         status,
@@ -1265,6 +1295,7 @@ fn mutation_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<Plu
             .try_get::<Option<i64>, _>("expected_revision")?
             .map(|value| nonnegative_u64(value, "plugin_mutations.expected_revision"))
             .transpose()?,
+        draft_association: draft_association_from_row(&row)?,
         error: row.try_get("error")?,
         created_at_ms: row.try_get("created_at_ms")?,
         updated_at_ms: row.try_get("updated_at_ms")?,
@@ -1418,8 +1449,8 @@ async fn insert_mutation_tx(
          (mutation_id, owner_user_id, plugin_id, kind, phase, old_artifact_digest, new_artifact_digest, \
           old_data_generation, old_previous_artifact_digest, old_previous_data_generation, \
           old_config_json, old_credential_bindings_json, old_grants_json, new_data_generation, \
-          expected_revision, error, created_at_ms, updated_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          expected_revision, error, created_at_ms, updated_at_ms, draft_association_json) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(mutation.mutation_id.as_ref())
     .bind(&mutation.owner_user_id)
@@ -1451,9 +1482,16 @@ async fn insert_mutation_tx(
     .bind(&mutation.error)
     .bind(mutation.created_at_ms)
     .bind(mutation.updated_at_ms)
+    .bind(mutation.draft_association.as_ref().map(canonical_json).transpose()?)
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+fn draft_association_from_row(row: &sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<Option<DraftInstallAssociation>> {
+    row.try_get::<Option<String>, _>("draft_association_json")?
+        .map(|json| serde_json::from_str(&json).map_err(|error| PluginRepositoryError::InvalidData(error.to_string())))
+        .transpose()
 }
 
 async fn mutation_rollback_snapshot_tx(

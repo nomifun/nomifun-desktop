@@ -119,7 +119,9 @@ async fn drain(registry: &InMemoryAgentRuntimeSessions) -> Result<(), String> {
             async move {
                 // This uses the existing per-Session gate and exact-slot teardown.
                 // Failed exits retain the slot and its workspace lease in quarantine.
-                registry.terminate_owned_runtime(&id, None).await
+                let result=registry.terminate_owned_runtime(&id,None).await;
+                if result.is_err() {tracing::warn!(conversation_id=%id,stage="owned_runtime_teardown","Agent runtime shutdown did not prove cleanup; exact owner and quarantine retained");}
+                result
             }
         })
         .buffer_unordered(16);

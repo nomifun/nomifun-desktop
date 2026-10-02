@@ -5,7 +5,7 @@
     "database_schema_digest": "0c86f69ea70c977c41d0bf0b7dc98d14ee2d1a7a0b0f896af3734a6c4c657ab7",
     "rust_contract_schema_digest": "2890728d4a364da53e15cc736bfaa3fed1f1dc4d396e0fc696e7cd9b03f7dd74",
     "package_schema_digest": "cb03f0e6ae6e74d1736879253ae9c7145d67116ed5464f346ef5435ea62ea687",
-    "official_preset_seed_manifest_digest": "5a75dfd27297c91f1c27dc94014f83cd67bac504bc002db978befbf4bfc64e4b",
+    "official_preset_seed_manifest_digest": "efc0b11b67187f53c6091080554607d897762ef364fef1336368827a08008b1d",
     "canonical_api_inventory_digest": "e3079ba597a2248631538342d78812738e2fc7a940f414d9cbe15c0023ee17b9",
     "session_event_registry_digest": "5b2ff8d966d0b30b7d9a83d13435423e785a5b69fd051aaaad7c6fe14833ba22",
     "error_registry_digest": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c",
@@ -15,5 +15,5 @@
     "platform_validation_contract_digest": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
     "confirmed_decision_contract_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848"
   },
-  "payload_digest": "bf4be67800f2c1d90ab78a19b06385436f04149a10a3d0246d43bd7bdc4644a2"
+  "payload_digest": "c3178210ab3fe410ffd6929acea9a07dcc9809bec1a924c11aaf1fdda768d65c"
 }
