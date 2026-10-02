@@ -382,6 +382,24 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 外证据2026-10-03/macos/history-report-bootstrap保留全部首次失败/HTTP/UI/数据库，
   不以exit0关闭原任务或Keychain物理风险，不改Windows结果。
 
+#### B09 新游标版本观察与公开载体 v2（2026-10-03）
+
+- clean `033677469` 正式同 Session 只补报告，3 请求/3 步骤/44 新 events；三条末
+  completion_tokens 均 4096，reasoning 16130/15325/15365B、public/tool 均 0，未调用
+  LOAD。因此报告仍 FAIL/0；本轮不证明也不否定游标修正的实际采用，不重复原文件/helper。
+- 正常 Cmd-Q0/166.761秒、无 expiry/TERM/KILL；闭库五表1172/1/1/4/14同源/ok，
+  原1128 events及14 effects保持，原 failed不改；App/fixture/relay关闭。观察器首次
+  sqlite输出 ENOBUFS 保留，仅提高外部读取buffer后续读同一实例，未重发任务或扩大产品预算。
+- 新交付持久化为 plain_zh_v2/plain_en_v2：已知 search/Git 包装字段及状态说明中文化，
+  实际路径/query/snippet/patch/hash、0/false/空集合保留，未知字段完整回落 JSON；旧 v1/None
+  不变，冷读回放和精确匹配仍按记录版本。修复 v2 原文大小写 Skill 标记被 renderer 提前
+  删除的问题；只转义标记开头而非 JSON 结构括号，逆解值不变，process/read/fallback 同覆盖。
+- Runtime291/291、现有 renderer parser 实际调用及独立只读复核通过；这是确定性修后结果，
+  v2 尚无正式 UI/模型采用证据，不以它关闭自由报告语言或原 B。A13原完整 N1继续复用，
+  N3、真实 Keychain/物理 native 清理失败仍 OPEN。下一 B 样本的隔离 Session 思考深度已
+  请求用户选择；未收到前不在未改 Auto 条件下继续付费循环，4096/上下文/权限上限不变。
+- 完整证据外置 `2026-10-03/macos/history-cursor-live/`，首败不覆盖，Windows结果未改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
