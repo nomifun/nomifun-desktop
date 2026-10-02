@@ -429,6 +429,12 @@
   编译错误另存后按已有ManagedEffect修正。Schema/提示/报告接受/prune源字节不变，零模型/UI。
   证据2026-10-02/macos/historical-file-page；A11原FAIL、漏搜索/英文/完整A/B/C/N3及Windows不覆盖。
 
+- **2026-10-02 MAC-A-12 C06-14 formalN1**：源685e672a2/正式Tauri/StepFun原任务，四个后续
+  task请求均有精确97-byte历史四行/epoch2/eligiblefalse，旧ID不入current enum；未达到report。
+  整组FAIL：16请求/5压缩/一伪摘要拒绝，literal sed错误→deferred Bun/重复观察、cap暂停；
+  观察者漏及时UI结束，native480秒TERM0仍expired，未假报取消或Cmd-Q通过。491rows/raw参数/
+  原件/Git及WAL-aware只读库保持，证据2026-10-02/macos/mac-a-file-page-recheck；不覆盖A/B/C/N3。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
