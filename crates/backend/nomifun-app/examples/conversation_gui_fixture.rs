@@ -1,5 +1,6 @@
 //! Deterministic acceptance through the real desktop, Runtime, tools and history.
-//! cargo run -p nomifun-app --example conversation_gui_fixture -- <new-data-dir> [--creative-failure|--creative-submit-failure|--creative-retry-ack-loss]
+//! Modes include --creative-failure, --creative-submit-failure,
+//! --creative-retry-ack-loss, --shutdown-wait and --crash-tree.
 //! Launch NomiFun with that NOMIFUN_DATA_DIR; send a normal request, inspect the
 //! live journal, POST /finish to release the final response, then reload. Send
 //! "格式异常" in a second turn to exercise split pseudo-tool-call rejection.
@@ -20,6 +21,8 @@ struct Fixture {
     creative_submit_failure: bool,
     creative_retry_ack_loss: bool,
     shutdown_wait: bool,
+    crash_tree: bool,
+    tree_script: std::sync::OnceLock<PathBuf>,
     waiting_streams: AtomicUsize,
     finish: Semaphore,
     stop: CancellationToken,
@@ -41,7 +44,14 @@ fn frame(delta: Value, finish: Option<&str>) -> String {
 }
 
 async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> axum::response::Response {
-    fixture.calls.fetch_add(1, Ordering::SeqCst);
+    let call = fixture.calls.fetch_add(1, Ordering::SeqCst);
+    if fixture.crash_tree && call >= 2 {
+        // Cold recovery may resume this same accepted Turn. Keep its inference
+        // observable while preventing the fixture from proposing another tree.
+        return axum::response::Response::builder().status(400)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({"error":{"message":"CRASH_RECOVERY_OBSERVATION_ONLY","type":"invalid_request_error"}}).to_string())).unwrap();
+    }
     if fixture.creative_retry_ack_loss {
         let stream = futures_util::stream::unfold((fixture, 0_u8), |(fixture, phase)| async move {
             match phase {
@@ -101,12 +111,14 @@ async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> 
         .is_some_and(|message| message["content"].to_string().contains("格式异常"));
     let has_tool = messages.iter().rev().take_while(|message| message["role"] != "user")
         .any(|message| message["role"] == "tool");
-    if fixture.shutdown_wait && has_tool {
+    if fixture.shutdown_wait && (has_tool || (fixture.crash_tree && call == 1)) {
         fixture.waiting_streams.fetch_add(1, Ordering::SeqCst);
         let stream = futures_util::stream::unfold((WaitingStream(fixture),0_u8), |(guard,phase)| async move {
             match phase {
-                0 => Some((Ok::<_,std::io::Error>(frame(json!({"role":"assistant",
-                    "content":"检查文件已经写入，正在等待后续检查。"}),None)),(guard,1))),
+                0 => {
+                    let content = if guard.0.crash_tree { "原进程已启动，正在等待故障测试控制。" } else { "检查文件已经写入，正在等待后续检查。" };
+                    Some((Ok::<_,std::io::Error>(frame(json!({"role":"assistant","content":content}),None)),(guard,1)))
+                },
                 1 => {
                     let current = Arc::clone(&guard.0);
                     tokio::select! {
@@ -126,7 +138,15 @@ async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> 
             .header("content-type","text/event-stream")
             .body(axum::body::Body::from_stream(stream)).unwrap();
     }
-    let mut frames = if malformed {
+    let mut frames = if fixture.crash_tree {
+        vec![
+            frame(json!({"role":"assistant","content":"正在启动隔离守候进程。"}), None),
+            frame(json!({"tool_calls":[{"index":0,"id":"crash-tree-start","type":"function","function":{
+                "name":"start_process","arguments":json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"wait_ms":500,"timeout_ms":30000}).to_string()
+            }}]}), None),
+            frame(json!({}), Some("tool_calls")),
+        ]
+    } else if malformed {
         vec![
             frame(json!({"role":"assistant","content":"正在准备文件。 <to"}), None),
             frame(json!({"content":"ol_call>\n<fun"}), None),
@@ -182,7 +202,8 @@ async fn main() -> anyhow::Result<()> {
     let creative_failure = mode.as_deref() == Some("--creative-failure");
     let creative_submit_failure = mode.as_deref() == Some("--creative-submit-failure");
     let creative_retry_ack_loss = mode.as_deref() == Some("--creative-retry-ack-loss");
-    let shutdown_wait = mode.as_deref() == Some("--shutdown-wait");
+    let crash_tree = mode.as_deref() == Some("--crash-tree");
+    let shutdown_wait = mode.as_deref() == Some("--shutdown-wait") || crash_tree;
     anyhow::ensure!(mode.is_none() || creative_failure || creative_submit_failure || creative_retry_ack_loss || shutdown_wait, "unsupported fixture mode");
     std::fs::create_dir(&root)?;
     let fixture = Arc::new(Fixture {
@@ -191,6 +212,8 @@ async fn main() -> anyhow::Result<()> {
         creative_submit_failure,
         creative_retry_ack_loss,
         shutdown_wait,
+        crash_tree,
+        tree_script: std::sync::OnceLock::new(),
         waiting_streams: AtomicUsize::new(0),
         finish: Semaphore::new(0),
         stop: CancellationToken::new(),
@@ -201,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/finish", post(|State(f): State<Arc<Fixture>>| async move { f.finish.add_permits(1); "released" }))
         .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst),
             "creative_failure":f.creative_failure,"creative_submit_failure":f.creative_submit_failure,"creative_retry_ack_loss":f.creative_retry_ack_loss,"shutdown_wait":f.shutdown_wait,
-            "waiting_streams":f.waiting_streams.load(Ordering::SeqCst)})) }))
+            "crash_tree":f.crash_tree,"waiting_streams":f.waiting_streams.load(Ordering::SeqCst)})) }))
         .route("/shutdown", post(|State(f): State<Arc<Fixture>>| async move { f.stop.cancel(); "stopped" }))
         .with_state(fixture.clone());
     let stop = fixture.stop.clone();
@@ -231,9 +254,37 @@ async fn main() -> anyhow::Result<()> {
             let editor = api(&app,"/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":"会话内容回归","model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"journal-fixture"}})).await?;
             let preset = editor["preset"]["preset_id"].as_str().ok_or_else(||anyhow::anyhow!("preset missing"))?;
             let mut draft = editor["draft"].clone();
-            draft["document"]["enabled_capabilities"] = json!([{"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"]}]);
+            draft["document"]["enabled_capabilities"] = if crash_tree {
+                json!([
+                    {"capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/start"]},
+                    {"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read"]}
+                ])
+            } else { json!([{"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"]}]) };
             api(&app,&format!("/api/agent-presets/{preset}/revisions"),json!({"expected_current_revision":draft["current_revision"],"draft":draft,"reason":"real desktop conversation regression fixture"})).await?;
-            let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"会话内容回归 · 正常与异常","resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}],"model":{"provider_id":provider,"model":"journal-fixture"}})).await?;
+            let mut resources = vec![json!({"resource_kind":"workspace","resource_id":"default-workspace"})];
+            if crash_tree { resources.push(json!({"resource_kind":"process_session","resource_id":"managed-process-session"})); }
+            let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"会话内容回归 · 正常与异常","resource_selections":resources,"model":{"provider_id":provider,"model":"journal-fixture"}})).await?;
+            if crash_tree {
+                let workspace = root.parent().unwrap().join("work/conversations").join(session["agent_session_id"].as_str().unwrap());
+                std::fs::create_dir_all(&workspace)?;
+                std::fs::write(workspace.join("tree.mjs"), r#"const file = import.meta.path;
+const hold = () => setInterval(() => {}, 1000);
+if (process.argv[2] === 'grandchild') { hold(); }
+else if (process.argv[2] === 'child') {
+  const grandchild = Bun.spawn([process.execPath, file, 'grandchild'], {stdin:'ignore',stdout:'ignore',stderr:'ignore'});
+  process.stdout.write(JSON.stringify({child:process.pid,grandchild:grandchild.pid})+'\n');
+  hold();
+} else {
+  const child = Bun.spawn([process.execPath, file, 'child'], {stdin:'ignore',stdout:'pipe',stderr:'ignore'});
+  const reader = child.stdout.getReader(); let bytes = '';
+  while (!bytes.includes('\n')) { const part=await reader.read(); if(part.done)throw new Error('child exited before readiness'); bytes+=new TextDecoder().decode(part.value); }
+  const descendants=JSON.parse(bytes.split('\n')[0]);
+  process.stdout.write('CRASH_TREE_READY '+JSON.stringify({parent:process.pid,...descendants})+'\n');
+  hold();
+}
+"#)?;
+                fixture.tree_script.set(workspace.join("tree.mjs")).map_err(|_|anyhow::anyhow!("tree script already prepared"))?;
+            }
             Ok::<_,anyhow::Error>(json!({"session_id":session["agent_session_id"].clone()}))
         }
     }.await;
@@ -243,7 +294,7 @@ async fn main() -> anyhow::Result<()> {
     println!("CONVERSATION_GUI_FIXTURE_READY {}",json!({
         "data_dir":root,"control":format!("http://{address}"),
         "session_id":prepared.get("session_id"),"canvas_id":prepared.get("canvas_id"),
-        "creative_failure":creative_failure,"creative_submit_failure":creative_submit_failure,"creative_retry_ack_loss":creative_retry_ack_loss,"shutdown_wait":shutdown_wait
+        "creative_failure":creative_failure,"creative_submit_failure":creative_submit_failure,"creative_retry_ack_loss":creative_retry_ack_loss,"shutdown_wait":shutdown_wait,"crash_tree":crash_tree
     }));
     fixture.stop.cancelled().await;
     Ok(())
@@ -257,7 +308,7 @@ mod tests {
     async fn creative_submit_failure_is_one_http_rejection_not_a_success_stream() {
         let fixture = Arc::new(Fixture {
             calls: AtomicUsize::new(0), creative_failure: false, creative_submit_failure: true, creative_retry_ack_loss: false,
-            shutdown_wait: false, waiting_streams: AtomicUsize::new(0),
+            shutdown_wait: false, crash_tree: false, tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
             finish: Semaphore::new(0), stop: CancellationToken::new(),
         });
         let response = model(State(fixture.clone()), Json(json!({"messages":[]}))).await;
