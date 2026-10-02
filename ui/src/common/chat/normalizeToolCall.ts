@@ -25,6 +25,8 @@ export interface NormalizedToolCall {
   commandExitCode?: number;
   /** The local process owner proved that the requested executable did not start. */
   commandNotStarted?: boolean;
+  /** A native deadline result with proven cleanup; the source error status remains intact. */
+  commandTimedOut?: boolean;
   /** Exact local Runtime result whose data was intentionally withheld at a documented bound. */
   boundedResult?: NormalizedToolBoundedResult;
   /** Tool was not executed because an earlier call in the same assistant turn failed. */
@@ -187,6 +189,23 @@ const getNativeCommandExitCode = (name: unknown, status: unknown, output: unknow
   }
 };
 
+const isCleanNativeTimeout = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error' || !nativeProcessToolNames.has(toDisplayText(name).trim())) return false;
+  try {
+    const receipt = JSON.parse(toDisplayText(output).trim());
+    return receipt?.state === 'timed_out' && receipt.success === false
+      && receipt.exit_code == null && receipt.signal == null
+      && typeof receipt.process_id === 'string' && receipt.process_id.length > 0 && receipt.process_id.length <= 128
+      && typeof receipt.output?.text === 'string'
+      && receipt.cleanup?.reaped === true
+      && Array.isArray(receipt.cleanup.errors) && receipt.cleanup.errors.length === 0
+      && ['interrupt_attempted', 'terminate_attempted', 'force_kill_attempted']
+        .every((field) => typeof receipt.cleanup[field] === 'boolean');
+  } catch {
+    return false;
+  }
+};
+
 const directProbeToolTitles = new Set(['read', 'glob', 'grep', 'search', 'find']);
 
 const isExplicitProbeMiss = (name: unknown, output: unknown): boolean => {
@@ -331,6 +350,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
   const processReferenceNotExecuted = isProcessReferenceNotExecuted(name, status, output);
   const commandExitCode = getNativeCommandExitCode(name, status, output);
   const commandNotStarted = isNativeCommandNotStarted(name, status, output);
+  const commandTimedOut = isCleanNativeTimeout(name, status, output);
   const nonFatalFailure = searchContextWithheld
     || (status === 'error' && commandExitCode !== undefined && commandExitCode !== 0)
     || isOrdinaryShellExit(name, status, output)
@@ -349,6 +369,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     ...(nonFatalFailure ? { nonFatalFailure: true } : {}),
     ...(commandExitCode !== undefined ? { commandExitCode } : {}),
     ...(commandNotStarted ? { commandNotStarted: true } : {}),
+    ...(commandTimedOut ? { commandTimedOut: true } : {}),
     description: description ? formatValue(description) : undefined,
     input: displayInput,
     output:
