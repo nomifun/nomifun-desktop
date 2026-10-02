@@ -3215,3 +3215,8 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 一次正式COD C、22步/八压缩，同Turn纠正、来源各一次、无自cancel/重启；Stop前真实父子存活，canonical cancelled后CIM约385ms均消失，419样本/心跳/host cleanup/后续零派发，取得live Stop N1。W247首败不覆盖，完整C仍不代判PASS。
 - 原20/24及三拒绝保持：write未派发、两引用拒绝，实际写/读各一次但参数漏末LF，真实17bytes不符合18byte要求；缺LF的provider/codec归因未验，不补写洗绿。冷读全部DB/磁盘不变无复活，原6/8及视觉停止提示分开保存，错误文件不被恢复或隐藏。
 - 外部2026-10-02/windows/w248-mainline-live-progress保存首红/中间红/七项/正式父子停止/原参数/DB/事件/审计/冷读；仅闭此直接等待/停止根因，C字节/引用、A/B与必要N3仍开放，共享未达。
+
+### macOS C03 主链补缺口与末LF归因（2026-10-02）
+
+- 正式Tauri/StepFun、源e2f7e47ca，原C任务/16-call预算：13请求/两压缩，READY→同Turn纠正→20-byte写/回读/中文说明→后续poll→实际live Stop，父子消失/cleanup证明及冷读四表/磁盘不变为本机N1。四次预检拒绝保留；准备公开报告和W248新review分支未覆盖，原C02冷KILL未修，不代判完整C/N3或Windows结果。
+- B09零调用复用定位：末LF要求在原接受输入及写前provider请求仍保留；三次原始响应SSE的content已缺末LF，canonical参数逐项相同。因此本样本不支持codec/文件owner裁剪归因，也不自动补LF洗绿；不外推为全部平台/供应商原因。证据外部2026-10-02/macos/mac-c-live-progress，首败及完整轨迹不入Git。
