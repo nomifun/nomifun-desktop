@@ -3706,3 +3706,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：Agent超时/非零/反例/副作用gate/patch/终态资格8项通过；native期限首红15保留，修后16保留超时前文件效果且无伪interrupt错误；pipe Job父子5秒、显式不支持、ConPTY中断/父子reap及真实信号错误保护3项通过，共12项不同定向，fmt配置/diff通过。
 - 未覆盖：修后正式Tauri/N3、READY历史资格/计划后终态引用、内部警告语言、完整A/B/C及共享门槛；源码修晚于本次binary，原报告拒绝/清理errors不改PASS，不增加长期/发布矩阵。
 - 证据：仓库外2026-10-02/windows/w226-process-timeout-live，01构建、02原DB/事件/参数/独立audit、03UI、CIM witness、04/05/15首次失败及06～19修后；Git只留相关源码、最小回归和短进度。
+
+### W227 干净timeout与直接报告正式GEN N1（2026-10-02；基线49a777d16）
+
+- Case/子断言：C05/C06/C07/C08、PROC期限/清理及A05/A08/A11/A13/A17/A19；原六秒诊断、正式Tauri/StepFun、新workspace/profile、同隔离data/work。共享trait变更触发所需desktop依赖重编译2m07，不重复测试全仓。
+- 正式GEN 5步/0压缩completed：start一次、poll0→25两次、READY父子各一次、timed_out/reaped；interrupt_attempted=false、terminate=true、errors=[]、cleanup.elapsed_ms=187。独立CIM18样本证明同一父子存活关系及消失/心跳不再变化、原件/旧事件保持，无外部kill。
+- report一次首发接受，无update_plan/参数拒绝/新副作用；原超时1/1计数保留。这是W226清理选择和optional plan直接收尾的正式GEN N1，不将W226两拒绝/unsupported interrupt错误重写成成功。
+- 原复制oracle12/13保留：最后一项限定旧回答“没有 exit_code”的确切文字，新回答为“未报告退出码0或具体信号值”，另存04审计说明。动作/终态正确，但退出码/信号无值的说明间接，READY不可当前验证的警告仍出现“可用证据”等内部措辞；整个体验不记PASS。
+- 未覆盖：首发/干净清理N3/COD、READY历史回执资格、公开语言及完整A/B/C/共享门槛。本批无新源码、无需重跑已过的定向检查，正式样本与旧首败分开。
+- 证据：仓库外2026-10-02/windows/w227-timeout-cleanup-recheck，01构建、02完整事件/DB/原参数/独立audit、03正式UI、process witness及04审计复核；Git仅短进度。
