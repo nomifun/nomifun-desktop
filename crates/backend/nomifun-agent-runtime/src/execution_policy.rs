@@ -101,6 +101,20 @@ pub(crate) fn settled_nonzero_process(binding: &AgentToolBinding, result: &Agent
                     errors.as_array().is_some_and(Vec::is_empty)))
 }
 
+/// A known reaped timeout is reportable as that terminal observation. This
+/// does not certify the original command's goal or authorize another effect.
+pub(crate) fn settled_reportable_process(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
+    settled_nonzero_process(binding, result)
+        || (binding.capability_id.as_ref() == "workspace.process"
+            && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+                value["state"] == "timed_out"
+                    && value["success"] == false
+                    && value.get("exit_code").is_none_or(serde_json::Value::is_null)
+                    && value.pointer("/cleanup/reaped") == Some(&serde_json::json!(true))
+                    && value.pointer("/cleanup/errors").is_none_or(|errors|
+                        errors.as_array().is_some_and(Vec::is_empty))))
+}
+
 /// A trusted owner fact that the named control was rejected before native I/O.
 /// This says nothing about whether another, already started process is alive.
 pub(crate) fn process_operation_not_applied(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
@@ -159,6 +173,22 @@ mod tests {
     use nomifun_chat_model_broker::ChatToolDefinition;
     use nomifun_engine_core::{EngineEffectClass, EngineToolBinding};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn reportable_timeout_requires_known_timeout_and_proven_cleanup() {
+        let process=binding("workspace.process","workspace.process/poll");
+        let known=serde_json::json!({"state":"timed_out","success":false,"exit_code":null,
+            "cleanup":{"reaped":true,"errors":[]}});
+        let result=|value:serde_json::Value|crate::AgentToolResult::text("timeout".into(),value.to_string(),true);
+        assert!(settled_reportable_process(&process,&result(known.clone())));
+        for (pointer,value) in [("/state",serde_json::json!("lost")),("/state",serde_json::json!("not_started")),
+            ("/cleanup/reaped",serde_json::json!(false)),("/cleanup/errors",serde_json::json!(["still-running"])),
+            ("/exit_code",serde_json::json!(0)),("/success",serde_json::json!(true))] {
+            let mut invalid=known.clone();*invalid.pointer_mut(pointer).unwrap()=value;
+            assert!(!settled_reportable_process(&process,&result(invalid)),"{pointer} must not open report-only failure closure");
+        }
+        assert!(!settled_reportable_process(&binding("workspace.files","workspace.files/read"),&result(known)));
+    }
 
     #[test]
     fn reportable_nonzero_excludes_lost_signalled_or_unreaped_processes() {

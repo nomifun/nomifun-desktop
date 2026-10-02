@@ -3568,6 +3568,10 @@ impl Drop for WindowsOwner {
 
 #[async_trait]
 impl PlatformProcess for WindowsOwner {
+    fn supports_interrupt(&self) -> bool {
+        self.pseudoconsole.is_some()
+    }
+
     fn pid(&self) -> u32 {
         self.pid
     }

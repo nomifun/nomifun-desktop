@@ -1544,7 +1544,10 @@ async fn stop_session(
         }
         StopStart::Leader => {
             let driver_session = session.clone();
-            let budget = StopBudget::new(request_started_at, stages, &session.policy);
+            let supported_stages = stages.iter().copied().filter(|stage|
+                !matches!(stage, SignalStage::Interrupt) || session.process.supports_interrupt())
+                .collect::<Vec<_>>();
+            let budget = StopBudget::new(request_started_at, &supported_stages, &session.policy);
             let monitor_session = session.clone();
             tokio::spawn(async move {
                 let worker = tokio::spawn(async move {

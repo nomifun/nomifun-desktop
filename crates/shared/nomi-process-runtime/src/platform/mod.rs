@@ -33,6 +33,9 @@ pub(crate) struct ExitFact {
 #[async_trait]
 pub(crate) trait PlatformProcess: Send + Sync {
     fn pid(&self) -> u32;
+    /// Cleanup may skip an unavailable graceful stage; explicit interrupt
+    /// requests still use interrupt() and retain its real error.
+    fn supports_interrupt(&self) -> bool { true }
     async fn write(&self, bytes: &[u8]) -> io::Result<()>;
     async fn close_stdin(&self) -> io::Result<()>;
     async fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {

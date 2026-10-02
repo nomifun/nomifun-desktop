@@ -696,6 +696,7 @@ async fn conpty_cancellation_reaps_the_leader_and_grandchild_job() {
         panic!("ConPTY Job cancellation should be Cancelled, got {outcome:?}");
     };
     assert!(cleanup.reaped);
+    assert!(cleanup.interrupt_attempted,"ConPTY retains its real VT interrupt contract");
 
     leader
         .wait_terminated(Duration::from_secs(2), "ConPTY leader")
