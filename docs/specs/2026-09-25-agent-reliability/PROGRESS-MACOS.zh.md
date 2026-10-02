@@ -27,7 +27,7 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-10 空公开stop纠正真实N1，原动作未被关；后续重复观察/两测试未执行/本地cap取消仍FAIL，完整A/N3未达 |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-11 六命令各一次、两测试exit0/1、41秒completed；两搜索未执行、cwd/原文交付缺失及英文仍FAIL，完整A/N3未达 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-08 原文件任务报告形态N1，公开交付/整体超时仍FAIL；B07联合未close/EOF/交付，03 EOF/04 Stop各N1，完整链/N3仍开放 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
@@ -1744,3 +1744,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 首红保留，修后completion **40/40**；旧wire仅替换该字符串的模拟tools50,892→50,030
   （约1.7%），非新的provider/UI结果，不宣称重复根因全解。原A10整组FAIL及完整A/B/C/N3、
   公开语言/旧MM仍开放。证据`2026-10-02/macos/completion-prompt-footprint/`；Windows不代判。
+
+- **MAC-A-11 合并减重后的正式原任务**（2026-10-02）：源`11b7d0164`/新正式Tauri制品/
+  新隔离COD Session，原任务/7文件/断言与1task/16requests含摘要/4096/360秒/native480秒保持。
+  实际 **7请求/2压缩/338events**，UI41秒completed/headready；九组raw/canonical参数全同。
+  pwd/ls/Git status/diff/两指定Bun各一次，exit **0/0/0/0/0/1**、全部reaped，未重做或宽测试。
+- 整组仍 **FAIL**：两搜索从未派发；最终漏cwd和头尾原文且英文。最后请求仍有完整输入/四项/
+  语言规则；四条supported共引input_0并非语义完整证明。第二压缩后旧文件原文不在最终请求，
+  已展示history工具但未调用；不能归为全部要求丢失或猜测性修复。未再付费重跑/扩大预算。
+- Cmd-Q前完成UI/展开进度截图AX保存，native0/156.81秒/无expiry/TERM/KILL/CEF清理错误；
+  fixture200/0、App/helper/listener无。writer/WAL/shm无后只读另存338-row完整库同/ok，原件/
+  Git/sentinel保持；具体tool row展开未截图，dev updater warning保留、不当命令故障。
+  证据`2026-10-02/macos/mac-a-completion-copy-recheck/`；只新增完整任务反例和命令N1事实，
+  完整A/B/C/N3及公开交付仍未结案，Windows原结果不改。本批仅短进度、无猜测性源码修改。
