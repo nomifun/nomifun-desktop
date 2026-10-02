@@ -4059,3 +4059,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 实际retry正式N1：debug既有注入只匹配新夹具生成的精确key，真实鉴权提交成功后丢一次返回；UI出现“提交结果尚未确认”和实际retry按钮。正式点击后两次submit均200，仍仅原一个Turn/operation/key、本地模型仅1、0effects；释放原响应后30events/completed，pending清除、正式UI完整回复、空画布保持。PID70280用户Quit实际exit0；新PID46044同data/work、新profile冷读原画布，原30events/四表逐行hash及回复保持、无retry/重发/复活，本地调用仍1；用户Quit实际exit0，最终自有进程/监听全部消失，fixture正常shutdown/exit0。
 - 首错与边界：夹具构建未完成时误启动旧helper，unsupported mode/exit1，发生在模型/产品启动前，原样保留后增加外部runner产物hash门禁；一次输入几何失败/错误前景截图与用户输入检测另留档，错误截图排除。未修改产品源码；付费/真实StepFun请求0，本地模型共2。仅关闭上述隔离negative子断言N1，不关闭原Windows旧MM/N3/全MM、真实供应商生成、W250/W249/W240、复杂任务、引用反馈采用或其余平台/发布认证。
 - 证据外部2026-10-02/windows/w260-creative-adoption：构建/34回归/边界、原首错、三个GUI身份/UI/原生退出、真实点击的两submit日志、原DB/事件/完整表hash及review.json。当前无Cargo、测试GUI、fixture或其监听遗留。下一步真实模型统一使用用户指定StepFun Coding Plan / step-3.7-flash；跨盘/真实UNC缺隔离夹具保持未验，全面目标继续。
+
+### W261 精确引用反馈真实模型采用尝试（2026-10-02；未验证/生成首败保留）
+
+- Case/子断言：C05/C06/C07/C08、CTRL-006/007与A01/A05/A09/A13/A17/A19；目标为W249中间新增来源引用的真实拒绝→按参数位置纠正，尚未取得该断言。源/产物复用W260，正式Coding UI、独立新data/work/profile、已有加密StepFun Coding Plan / step-3.7-flash。所选连接在内存重加密导入，未复制旧DB/身份；实际loopback请求/SSE不记录认证头。
+- 第一载体未达：两次实际HTTP200，初始工具表无update_plan，ToolSearch仅一次返回无匹配；模型如实说明不可用，未启动进程/副作用。源码configure_tools仅在adaptive.task_ledger激活后暴露控制，夹具错误要求首次调用未暴露控制；不归因供应商漏工具，也不扩产品工具表。修正载体为先执行实际已暴露进程动作，第一原记录保留，同PID/同Session未重启。
+- 修正后的正式首败：start/poll各一次，真实READY_CITATION/cursor15；模型未收到追加输入便自行cancel一次、172ms/reaped/errors空并report收尾，违背保持运行/不自取消要求。操作者观察到READY后未在模型结束前提交steering，新增input1/目标引用拒绝均未发生；原生cancel参数与canonical一致，旧StepFun拒绝/旧Windows LF的HTTP仍未恢复。report披露引用测试unverified，所谓按回合终止规则取消的解释与实际请求08的明确等待/不取消notice矛盾。该notice原文、进程身份及游标都在真实wire中，不能归为W247已修的宿主强制cancel或丢失回执，也不把canonical completed计成任务PASS。
+- 核对：合计9真实请求/SSE全部完成、5组原生调用参数与canonical逐项相同；工作区两文件完整bytes/hash/集合保持，helper实际PID76260消失，凭据审计70份文本制品0命中。无新明确产品根因/源码修复，不再同根因付费循环；精确引用反馈采用、原W250/W249/W240及复杂任务仍开放。
+- 夹具/观察首错：初始化已有无关local provider，导入旧整数PK导致冲突，三次模型前失败/rollback保留，外部import改为目标生成内部PK且保留provider UUID/model/role。一次SSE choices=[]观察器IndexError、错误前景截图、目录弹窗控件缓存缺失/人工目录选择单列；后续优先自行操作，真正不可达入口保留未验继续其他项。15分钟GUI观察超时后核对同PID39400/启动UTC并续观察，未重启；两Turn均终态/helper已清理后才核对身份清理空闲GUI和forwarder，未计正式Quit。全部自有PID/监听无遗留。
+- 证据外部2026-10-02/windows/w261-citation-adoption：正式初始化/连接导入与首错、两载体原提示/实际DB/UI、9份新真实wire、review.json/secret-audit/最终清理。Git仅简短失败与边界；全面目标保持active，下一步继续Windows生命周期及其他可执行平台/共享余项，未验证项不计PASS。

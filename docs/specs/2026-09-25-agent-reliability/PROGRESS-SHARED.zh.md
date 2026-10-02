@@ -97,6 +97,12 @@ Turn/operation一个，冷读四表整行hash及模型计数保持。三个GUI�
 最终后代/监听清理；原夹具/观察器首错单列。无新产品源码，原旧MM及生成/平台/发布余项保持，
 不把隔离negative N1计为真实StepFun生成或全MM通过，详见Windows页W260。
 
+W261尝试W249精确引用反馈的真实StepFun采用，未达目标：初始控制工具按现有adaptive合同未
+暴露，错误的“先update_plan”载体两请求无进程后保留；修正前提后，原生模型仍在追加输入前
+自行cancel/收尾，未形成input1或目标拒绝。9个新真实请求/完整SSE、5组参数与canonical相同，
+实际请求明确保存等待/不取消notice、process ID/cursor，工作区保持、helper清理。无新产品修复，
+新生成首败及操作者未及时提交steering的边界保留，不覆盖W249采用或旧缺证；全面目标仍active。
+
 ### C04-01 / C05-04 精确末尾 LF 与模型参数（2026-10-01，macOS MAC-B-01；MAC-B-02 正式修后仍失败）
 
 - 正式 COD/StepFun，16 requests / 531 events / 一轮压缩，文件创建/精确 patch/copy/move/read/
