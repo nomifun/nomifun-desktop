@@ -435,6 +435,13 @@
   观察者漏及时UI结束，native480秒TERM0仍expired，未假报取消或Cmd-Q通过。491rows/raw参数/
   原件/Git及WAL-aware只读库保持，证据2026-10-02/macos/mac-a-file-page-recheck；不覆盖A/B/C/N3。
 
+- **2026-10-02 MAC-B-09 完整B仍FAIL**：源7033e254e/正式Tauri/StepFun，提前24-call整链预算，
+  锁屏run零请求、人工解锁后新run；24请求/5压缩/546events/17参数全同。模型先patch后create，
+  缺guard/漏FILE末尾LF，后续实际patch/cp产物31非32；未到两helper/EOF/父子cancel/report。
+  四原件保持，首败/拒执行不吞；观察者超时TERM0仍失败、终态UI缺失，不伪造取消/完成。
+  WAL-aware完整只读库保持，证据2026-10-02/macos/mac-b-mainline-recheck；不加额/重跑或猜修，
+  转C主线，旧Mac/Windows操作子链及完整B/N3缺口原样保留。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
