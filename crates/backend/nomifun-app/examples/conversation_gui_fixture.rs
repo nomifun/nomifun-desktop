@@ -1,6 +1,6 @@
 //! Deterministic acceptance through the real desktop, Runtime, tools and history.
 //! Modes include --creative-failure, --creative-submit-failure,
-//! --creative-retry-ack-loss, --shutdown-wait and --crash-tree.
+//! --creative-retry-ack-loss, --shutdown-wait, --crash-tree and --lease-retirement.
 //! Launch NomiFun with that NOMIFUN_DATA_DIR; send a normal request, inspect the
 //! live journal, POST /finish to release the final response, then reload. Send
 //! "格式异常" in a second turn to exercise split pseudo-tool-call rejection.
@@ -22,6 +22,7 @@ struct Fixture {
     creative_retry_ack_loss: bool,
     shutdown_wait: bool,
     crash_tree: bool,
+    process_timeout_ms: u64,
     tree_script: std::sync::OnceLock<PathBuf>,
     waiting_streams: AtomicUsize,
     finish: Semaphore,
@@ -142,7 +143,7 @@ async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> 
         vec![
             frame(json!({"role":"assistant","content":"正在启动隔离守候进程。"}), None),
             frame(json!({"tool_calls":[{"index":0,"id":"crash-tree-start","type":"function","function":{
-                "name":"start_process","arguments":json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"wait_ms":500,"timeout_ms":30000}).to_string()
+                "name":"start_process","arguments":json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"wait_ms":500,"timeout_ms":fixture.process_timeout_ms}).to_string()
             }}]}), None),
             frame(json!({}), Some("tool_calls")),
         ]
@@ -202,7 +203,9 @@ async fn main() -> anyhow::Result<()> {
     let creative_failure = mode.as_deref() == Some("--creative-failure");
     let creative_submit_failure = mode.as_deref() == Some("--creative-submit-failure");
     let creative_retry_ack_loss = mode.as_deref() == Some("--creative-retry-ack-loss");
-    let crash_tree = mode.as_deref() == Some("--crash-tree");
+    let lease_retirement = mode.as_deref() == Some("--lease-retirement");
+    let crash_tree = mode.as_deref() == Some("--crash-tree") || lease_retirement;
+    let process_timeout_ms = if lease_retirement { 1000 } else { 30000 };
     let shutdown_wait = mode.as_deref() == Some("--shutdown-wait") || crash_tree;
     anyhow::ensure!(mode.is_none() || creative_failure || creative_submit_failure || creative_retry_ack_loss || shutdown_wait, "unsupported fixture mode");
     std::fs::create_dir(&root)?;
@@ -213,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         creative_retry_ack_loss,
         shutdown_wait,
         crash_tree,
+        process_timeout_ms,
         tree_script: std::sync::OnceLock::new(),
         waiting_streams: AtomicUsize::new(0),
         finish: Semaphore::new(0),
@@ -224,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/finish", post(|State(f): State<Arc<Fixture>>| async move { f.finish.add_permits(1); "released" }))
         .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst),
             "creative_failure":f.creative_failure,"creative_submit_failure":f.creative_submit_failure,"creative_retry_ack_loss":f.creative_retry_ack_loss,"shutdown_wait":f.shutdown_wait,
-            "crash_tree":f.crash_tree,"waiting_streams":f.waiting_streams.load(Ordering::SeqCst)})) }))
+            "crash_tree":f.crash_tree,"process_timeout_ms":f.process_timeout_ms,"waiting_streams":f.waiting_streams.load(Ordering::SeqCst)})) }))
         .route("/shutdown", post(|State(f): State<Arc<Fixture>>| async move { f.stop.cancel(); "stopped" }))
         .with_state(fixture.clone());
     let stop = fixture.stop.clone();
@@ -294,7 +298,7 @@ else if (process.argv[2] === 'child') {
     println!("CONVERSATION_GUI_FIXTURE_READY {}",json!({
         "data_dir":root,"control":format!("http://{address}"),
         "session_id":prepared.get("session_id"),"canvas_id":prepared.get("canvas_id"),
-        "creative_failure":creative_failure,"creative_submit_failure":creative_submit_failure,"creative_retry_ack_loss":creative_retry_ack_loss,"shutdown_wait":shutdown_wait,"crash_tree":crash_tree
+        "creative_failure":creative_failure,"creative_submit_failure":creative_submit_failure,"creative_retry_ack_loss":creative_retry_ack_loss,"shutdown_wait":shutdown_wait,"crash_tree":crash_tree,"process_timeout_ms":process_timeout_ms
     }));
     fixture.stop.cancelled().await;
     Ok(())
@@ -308,7 +312,7 @@ mod tests {
     async fn creative_submit_failure_is_one_http_rejection_not_a_success_stream() {
         let fixture = Arc::new(Fixture {
             calls: AtomicUsize::new(0), creative_failure: false, creative_submit_failure: true, creative_retry_ack_loss: false,
-            shutdown_wait: false, crash_tree: false, tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
+            shutdown_wait: false, crash_tree: false, process_timeout_ms: 30000, tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
             finish: Semaphore::new(0), stop: CancellationToken::new(),
         });
         let response = model(State(fixture.clone()), Json(json!({"messages":[]}))).await;
