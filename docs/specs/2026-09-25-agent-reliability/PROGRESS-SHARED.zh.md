@@ -3051,3 +3051,9 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 无法适配的摘要记录REPLACEMENT_CONTEXT_BUDGET拒绝，整个prepare只允许一次同来源/无工具/更短请求；仍不适配明确失败并保留原input。冻结输出/上下文/actual-usage余量、accepted input及原纠正/分片预算保持，未裁剪摘要或结果来制造通过。
 - 新三项及旧fixed-prefix/usage/硬token/typed恢复/mandatory/协议/输出边界共11项不同检查通过，首红/修后与fmt配置/diff分日志。两次不适配记录两条拒绝、零ContextCompacted、原input逐字保持；此为组件恢复合同，W232正式失败与重做、A/B/C/N3/共享门槛继续保留。
 - 仓库外2026-10-02/windows/w233-summary-fit-recovery保存全日志；本批无新付费模型、命令或正式构建，Git仅相关代码、三项最小回归和短进度。
+
+### W234 完成操作后的有界摘要拒绝（2026-10-02，正式FAIL）
+
+- W233正式Windows COD原综合A，8步/六次成功压缩，cwd/list/完整读/两单文件搜索/Git status/diff各一次，两Bun依序start→poll exit0/1，四进程reaped，无重做、参数拒绝或原件/Git/旧事件变化。原操作13/15保留；两项失败为未到report及未completed，最终六项交付缺失。
+- W233新分支实际触发：两条REPLACEMENT_CONTEXT_BUDGET拒绝后failed，替换83,993 bytes/27,998估算tokens仍大于27,876余量；一次纠正上限和原context保护生效，但未恢复任务。真实1/1业务非零与NomiFun预算失败分开，未Stop/Retry或继续付费重跑。
+- 仅新增不重做的操作子样本及二次拒绝合同实证，不能关闭完整A/N3或共享门槛。下一步缩减重复完成说明造成的固定上下文开销，保留证据规则、用户输入及冻结预算；仓库外2026-10-02/windows/w234-summary-fit-live保存全证据。
