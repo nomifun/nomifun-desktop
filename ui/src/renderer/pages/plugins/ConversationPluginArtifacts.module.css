@@ -1,0 +1,9 @@
+.list { display: flex; flex-direction: column; gap: 12px; padding: 12px 0; max-height: 52vh; overflow: auto; }
+.card { border: 1px solid var(--color-border-2); border-radius: 10px; padding: 12px; background: var(--color-bg-2); }
+.header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.header strong { flex: 1; min-width: 0; }
+.preview { margin-top: 10px; min-height: 240px; }
+.details { margin-top: 8px; color: var(--color-text-2); }
+.details pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; }
+.reply { display: grid; gap: 8px; margin-top: 12px; }

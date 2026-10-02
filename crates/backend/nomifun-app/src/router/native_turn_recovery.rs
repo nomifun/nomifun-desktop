@@ -104,7 +104,7 @@ impl NomiCoreSessionOwner {
         if facts.session.owner_ref.principal_kind != "user" { return Err(AppError::Conflict("unsupported recovery principal".into())); }
         let projection = self.canonical_conversation_projection(&owner_id, session).await?
             .ok_or_else(|| AppError::NotFound("recovery Session missing".into()))?;
-        let (options, _) = runtime_options_from_session(&owner_id, projection, None)?;
+        let options = self.runtime_options_for_projection(&owner_id, session, projection).await?;
         let binding = self.official_runtime.get().ok_or_else(|| AppError::Conflict("recovery Runtime not installed".into()))?.binding()?;
         let delivery = SendMessageData { content, msg_id: root.to_owned(), source_message_id: Some(root.to_owned()), files, inject_skills, origin };
         let admitted = engines.read_turn_receipt(&options, &binding, &facts.session.agent_binding.resolved_snapshot_ref, &delivery).await?;
@@ -112,6 +112,15 @@ impl NomiCoreSessionOwner {
         // process cannot publish a spurious error over the winner's stream.
         let journal = engines.open_journal(&admitted, tokio_util::sync::CancellationToken::new()).await?;
         let generation = journal.generation();
+        let pause=facts.events.iter().rev().find(|event|event.kind.0=="turn/paused" && event.correlation_id.as_ref()==operation.as_ref())
+            .and_then(|event|facts.event_payloads.get(event.event_id.as_ref())).map(|payload|&payload["pause"]);
+        if pause.is_some_and(|pause|pause["reason"]=="PLUGIN_CURRENT_CONVERSATION_PENDING") {
+            if pause.is_none_or(|pause|pause["cleanup_proven"]!=json!(true)) {
+                return Err(AppError::Conflict("plugin tool refresh requires proven cleanup".into()));
+            }
+            self.runtime_sessions.terminate_and_wait_result(session.as_ref(),None).await?;
+            engines.retire_plugin_view_after_pause(&admitted).await?;
+        }
         let cancellation = tokio_util::sync::CancellationToken::new();
         let runtime = match self.runtime_sessions.get_or_create_runtime_for_turn(session.as_ref(), generation, cancellation.clone(), options).await {
             Ok(runtime) => runtime,

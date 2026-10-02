@@ -7,5 +7,5 @@ test('ordinary Chat stays separate from Plugin preview and App surfaces', () => 
   expect(source).not.toContain('PluginSurfacePanel');
   expect(source).not.toContain('pluginPlatform.surface');
   expect(source).not.toContain('pluginPreview');
-  expect(source).not.toContain('new URLSearchParams(location.search)');
+  expect(source).toContain('requiredModules: pluginIntentToken');
 });

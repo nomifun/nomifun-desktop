@@ -26,12 +26,11 @@ describe('Unified Plugin UI model', () => {
     expect(pluginShape(plugin({ has_service: true }))).toBe('mixed');
     const entries = pluginLibraryEntries([plugin()], [
       { draft_id: 'draft-ready', revision: 1, display_name: 'Ready', description: '', status: 'ready', updated_at_ms: 30 },
-      { draft_id: 'draft-generating', revision: 2, display_name: 'Generating', description: '', status: 'generating', updated_at_ms: 40 },
       { draft_id: 'draft-failed', revision: 3, display_name: 'Failed', description: '', status: 'failed', updated_at_ms: 50 },
     ]);
-    expect(entries.map((entry) => entry.kind)).toEqual(['draft', 'draft', 'draft', 'plugin']);
+    expect(entries.map((entry) => entry.kind)).toEqual(['draft', 'draft', 'plugin']);
     expect(entries.filter((entry) => entry.kind === 'draft').map((entry) => entry.draft.status))
-      .toEqual(['failed', 'generating', 'ready']);
+      .toEqual(['failed', 'ready']);
   });
 
   test('derives user-facing views from the existing lifecycle state only', () => {

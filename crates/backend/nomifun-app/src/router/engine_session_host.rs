@@ -137,6 +137,95 @@ impl EngineSessionHost {
             .ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))
     }
 
+    /// A final model proposal is not proof of a Plugin delivery. Resolve the
+    /// accepted user obligation and the current installed Artifact from owners.
+    pub(super) async fn plugin_delivery_pending(
+        &self, receipt: &EngineTurnReceipt,
+    ) -> Result<Option<&'static str>, AppError> {
+        if !receipt.belongs_to(&self.source) {
+            return Err(AppError::Conflict("delivery receipt belongs to another Host".into()));
+        }
+        let requirement = receipt.request_payload().get("plugin_delivery").filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value::<nomifun_api_types::PluginDeliveryRequirement>(value.clone()))
+            .transpose().map_err(|error| AppError::Conflict(error.to_string()))?;
+        let draft_id = requirement.as_ref().and_then(|value| value.draft_id.as_deref());
+        let owner = &receipt.session().principal().principal_id;
+        let conversation = &receipt.session().session().conversation_id;
+        let rows: Vec<(Option<String>, String, Option<String>, Option<bool>, Option<i64>, Option<i64>)> =
+            sqlx::query_as(
+                "SELECT d.source_message_id, d.verification_json, p.active_artifact_digest, p.enabled, p.trashed_at_ms, p.revision FROM plugin_drafts d LEFT JOIN plugins p ON p.plugin_id = d.plugin_id AND p.owner_user_id = d.owner_user_id WHERE d.owner_user_id = ? AND d.source_conversation_id = ? AND ((? IS NOT NULL AND d.draft_id = ?) OR (? IS NULL AND (json_extract(d.verification_json, '$.task_message_id') = ? OR (? = 1 AND d.source_message_id = ?))))"
+            ).bind(owner).bind(conversation).bind(draft_id).bind(draft_id).bind(draft_id)
+                .bind(receipt.root_message_id()).bind(requirement.is_some()).bind(receipt.root_message_id()).fetch_all(&self.pool).await
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+        if rows.is_empty() && requirement.is_none() { return Ok(None); }
+        if rows.len() < requirement.as_ref().map_or(1, |value| usize::from(value.expected_count)) {
+            return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+        }
+        let mut declared_outputs:Option<serde_json::Value>=None;
+        let mut delivered_outputs=std::collections::BTreeSet::new();
+        for (source_message, raw, artifact, enabled, trash, revision) in rows {
+            let report: serde_json::Value = serde_json::from_str(&raw).map_err(|error| AppError::Internal(error.to_string()))?;
+            if report["task_message_id"].as_str() != Some(receipt.root_message_id())
+                && source_message.as_deref() != Some(receipt.root_message_id()) {
+                return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+            }
+            // An untouched baseline is not an output. Every edited draft must
+            // first acquire an immutable plan, enforced by the module Host.
+            if report["plan"].is_null() { continue; }
+            if nomifun_plugin_development::validate_plan(&report["plan"]).is_err() {
+                return Ok(Some("PLUGIN_VERIFICATION_REQUIRED"));
+            }
+            if declared_outputs.as_ref().is_some_and(|outputs|outputs!=&report["plan"]["outputs"])
+                || !delivered_outputs.insert(report["plan"]["output_key"].as_str().expect("validated").to_owned()) {
+                return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+            }
+            declared_outputs=Some(report["plan"]["outputs"].clone());
+            if report["approval"]["approved"] == serde_json::json!(false)
+                && !report["approval"]["confirmation"].is_null() {
+                return Ok(Some("PLUGIN_AUTHORIZATION_REQUIRED"));
+            }
+            let Some(cases) = report["cases"].as_object() else { return Ok(Some("PLUGIN_VERIFICATION_REQUIRED")); };
+            if cases.is_empty() || cases.values().any(|case| case["passed"] != serde_json::json!(true))
+                || !nomifun_plugin_development::plan_evidence_complete(&report)
+                || report["structure_passed"] != serde_json::json!(true)
+                || report["runtime_ready"] != serde_json::json!(true)
+                || (report["has_ui"] == serde_json::json!(true) && report["ui_ready"] != serde_json::json!(true))
+                || report["acceptance"].as_object().is_some_and(|expected|
+                    expected.keys().any(|key| cases.get(key).is_none_or(|case| case["passed"] != serde_json::json!(true)))) {
+                return Ok(Some("PLUGIN_VERIFICATION_REQUIRED"));
+            }
+            if super::plugin_authoring::verification_context(&self.pool,&report["execution"]["credential_bindings"])
+                .await.ok().as_ref() != Some(&report["context"]) {
+                return Ok(Some("PLUGIN_VERIFICATION_REQUIRED"));
+            }
+            let context_digest=nomifun_agent_contracts::digest_payload(&report["context"])
+                .map_err(|error|AppError::Internal(error.to_string()))?;
+            if enabled != Some(true) || trash.is_some() || artifact.is_none()
+                || report["artifact_digest"].as_str() != artifact.as_deref()
+                || report["delivery"]["artifact_digest"].as_str() != artifact.as_deref()
+                || report["delivery"]["plugin_revision"].as_i64() != revision
+                || report["installed_observation"]["artifact_digest"].as_str() != artifact.as_deref()
+                || report["installed_observation"]["plugin_revision"].as_i64() != revision
+                || report["installed_observation"]["context_digest"].as_str() != Some(context_digest.as_ref())
+                || report["delivery"]["context_digest"].as_str() != Some(context_digest.as_ref())
+                || report["installed_observation"]["observed_at_ms"].as_i64().is_none_or(|time| time <= 0)
+                || (report["has_ui"] == serde_json::json!(true)
+                    && report["installed_observation"]["ui_ready"] != serde_json::json!(true))
+                || report["delivery"]["installed_at_ms"].as_i64().is_none_or(|time| time <= 0) {
+                return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+            }
+            if !super::plugin_authoring::current_conversation_consumed(&self.pool,conversation,receipt.operation_id(),&report).await? {
+                return Ok(Some("PLUGIN_CURRENT_CONVERSATION_PENDING"));
+            }
+        }
+        if delivered_outputs.len()<requirement.as_ref().map_or(1,|value|usize::from(value.expected_count))
+            || declared_outputs.as_ref().is_none_or(|outputs|outputs.as_array().expect("validated").iter()
+                .any(|output|!delivered_outputs.contains(output["key"].as_str().expect("validated")))) {
+            return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+        }
+        Ok(None)
+    }
+
     /// Exact revision-selected Skill bytes, with inventory/hash verification.
     /// This supplies data only; each engine owns its context/media policy.
     /// No library path, activation, frontmatter execution or latest-version lookup.
@@ -200,6 +289,21 @@ impl EngineSessionHost {
             ));
         }
         super::engine_model_facts::load(&self.pool, session).await
+    }
+
+    /// Rebuild only the Plugin consumer view after its proven safe pause.
+    pub(super) async fn retire_plugin_view_after_pause(&self, receipt:&EngineTurnReceipt) -> Result<(),AppError> {
+        if !receipt.belongs_to(&self.source) { return Err(AppError::Conflict("plugin view belongs to another Host".into())); }
+        let id=&receipt.session().session().conversation_id;
+        let context=self.kernel_sessions.lock().map_err(|_|AppError::Conflict("Engine resource handles poisoned".into()))?
+            .get(id).and_then(Weak::upgrade);
+        if let Some(context)=context {
+            if !context.matches(receipt.session()) { return Err(AppError::Conflict("plugin view binding changed".into())); }
+            context.cleanup_session().await?;
+            let mut sessions=self.kernel_sessions.lock().map_err(|_|AppError::Conflict("Engine resource handles poisoned".into()))?;
+            if sessions.get(id).and_then(Weak::upgrade).is_some_and(|current|Arc::ptr_eq(&current,&context)) { sessions.remove(id); }
+        }
+        Ok(())
     }
 
     /// Read the latest canonical cross-Agent handoff for the exact current

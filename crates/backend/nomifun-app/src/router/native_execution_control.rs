@@ -83,7 +83,7 @@ pub(super) async fn reconcile(
     Ok(Json(ApiResponse::ok(ack)))
 }
 
-pub(super) async fn resume(
+pub(in crate::router) async fn resume(
     State(state): State<NomiCoreAgentApiState>, Extension(owner): Extension<AuthenticatedOwner>,
     Path(id): Path<String>, Json(request): Json<NativeResumeRequest>,
 ) -> Result<Json<ApiResponse<nomifun_agent_session::NativeResumeReceipt>>, NomiCoreApiError> {
@@ -124,6 +124,13 @@ impl NomiCoreSessionOwner {
             || saved.revision != request.expected_checkpoint_revision || saved.digest != request.expected_checkpoint_digest
             || pause.revision != request.expected_pause_revision {
             return Err(reject("pause/checkpoint/owner changed"));
+        }
+        if pause.reason=="PLUGIN_CURRENT_CONVERSATION_PENDING" {
+            let linked:bool=sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM conversation_execution_links link JOIN agent_executions e ON e.execution_id=link.execution_id WHERE link.conversation_id=? AND link.relation='lead' AND link.active=1 AND e.user_id=? AND e.deleted_at IS NULL AND e.status NOT IN ('completed','completed_with_failures','failed','cancelled'))"
+            ).bind(session.as_ref()).bind(&owner.principal_id).fetch_one(&self.pool).await
+                .map_err(|error|AppError::Internal(error.to_string()))?;
+            if linked { return Err(reject("finish the linked AgentExecution before rebuilding this conversation's Plugin tools")); }
         }
         if pause.reason.contains("NO_PROGRESS") && !request.budget.retry_stall_guards {
             return Err(reject("the owner must explicitly acknowledge retrying the stalled execution"));

@@ -196,6 +196,7 @@ nomifun-agent-domain-wave5.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-js-runtime.workspace = true
 nomifun-plugin-platform.workspace = true
+nomifun-plugin-development.workspace = true
 walkdir.workspace = true
 nomifun-chat-model-broker.workspace = true
 nomifun-agent-session.workspace = true

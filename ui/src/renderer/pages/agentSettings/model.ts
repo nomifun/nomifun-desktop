@@ -136,6 +136,7 @@ export const MODULE_I18N_KEYS: Readonly<Record<string, string>> = {
   'agent.collaboration': 'agentCollaboration',
   'agent.tool-discovery': 'toolDiscovery',
   'model.management': 'modelManagement',
+  'plugin.development': 'pluginDevelopment',
   'automation.schedule': 'automationSchedule',
   browser: 'browser',
   'channel.messaging': 'channelMessaging',

@@ -339,9 +339,11 @@ const NomiSendBox: React.FC<{
         input,
         files,
         initialOnly = false,
+        pluginDelivery,
       }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
         Partial<Pick<ConversationCommandQueueItem, 'id'>> & {
           initialOnly?: boolean;
+          pluginDelivery?: import('@/common/types/pluginDevelopment').PluginDeliveryRequirement;
         },
       execution?: ConversationCommandQueueExecution,
       deferLocalTurnUntilFresh = execution !== undefined
@@ -374,6 +376,7 @@ const NomiSendBox: React.FC<{
           files,
           idempotency_key: id,
           initial_only: initialOnly,
+          plugin_delivery: pluginDelivery,
         });
         if (execution && !execution.isCurrent()) return;
         msg_id = res.msg_id;
@@ -498,10 +501,10 @@ const NomiSendBox: React.FC<{
           releaseInitialMessageDelivery(storageKey);
           return;
         }
-        const { input, files, idempotency_key } = initialMessage;
+        const { input, files, idempotency_key, plugin_delivery } = initialMessage;
         attemptedIdempotencyKey = idempotency_key;
         await executeCommand(
-          { id: idempotency_key, input, files, initialOnly: true },
+          { id: idempotency_key, input, files, initialOnly: true, pluginDelivery: plugin_delivery },
           undefined,
           true
         );

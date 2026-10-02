@@ -9,6 +9,26 @@
     "packages": [
       {
         "package": {
+          "id": "nomifun.plugin-development",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.plugin-development"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "plugin.development"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
           "id": "nomifun.model-management",
           "version": "1.0.0"
         },
@@ -573,5 +593,5 @@
       }
     ]
   },
-  "payload_digest": "e60788f69124a4bd867ef6f48d5cf574a5989d9f5dbd2aff4fd9cb686180c384"
+  "payload_digest": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43"
 }

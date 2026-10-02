@@ -5,10 +5,13 @@ import type {
 } from '@/common/types/agentPlatform';
 import { capabilityReferenceKey, placeCapability } from './model';
 import { moduleIsAvailable, type ModuleReference } from './capabilityGroups';
+import { PLUGIN_CREATE_ACTIONS, PLUGIN_DEVELOPMENT_MODULE } from '@/common/types/pluginDevelopment';
 
 const defaultActions = (module: CapabilityModuleCatalogItem): string[] =>
   module.actions
-    .filter((action) => ['pure', 'read_local', 'read_sensitive'].includes(action.effect_class))
+    .filter((action) => ['pure', 'read_local', 'read_sensitive'].includes(action.effect_class)
+      || (String(module.module.id) === PLUGIN_DEVELOPMENT_MODULE
+        && PLUGIN_CREATE_ACTIONS.includes(action.action_id)))
     .map((action) => action.action_id)
     .sort((left, right) => left.localeCompare(right));
 

@@ -25,6 +25,8 @@ import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPre
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSWRConfig } from 'swr';
 import { useTranslation } from 'react-i18next';
+import { useAuth } from '@/renderer/hooks/context/AuthContext';
+import { AgentEditorDrafts } from './agentEditorDrafts';
 
 type Selection =
   | { kind: 'template'; template: OfficialPresetTemplate }
@@ -66,6 +68,8 @@ export const upsertPresetSummary = (
 
 export function useAgentSettingsController() {
   const { t } = useTranslation();
+  const { user } = useAuth();
+  const editingDrafts = useMemo(() => user ? new AgentEditorDrafts(user.id) : null, [user?.id]);
   const { mutate } = useSWRConfig();
   const [library, setLibrary] = useState<AgentPresetLibraryResponse | null>(null);
   const [catalog, setCatalog] = useState<AgentCatalogResponse>(emptyCatalog);
@@ -126,7 +130,10 @@ export function useAgentSettingsController() {
           );
           if (currentPreset) return { kind: 'preset', preset: currentPreset };
         }
-        const firstTemplate = nextLibrary.official_templates[0];
+        const remembered = editingDrafts?.readSelection();
+        const firstTemplate = (remembered?.kind === 'template'
+          ? nextLibrary.official_templates.find(template => template.template_key === remembered.template_key)
+          : undefined) ?? nextLibrary.official_templates[0];
         return firstTemplate ? { kind: 'template', template: firstTemplate } : null;
       });
     } catch (loadError) {
@@ -134,7 +141,7 @@ export function useAgentSettingsController() {
     } finally {
       setLoading(false);
     }
-  }, [mutate, reportError]);
+  }, [mutate, reportError, editingDrafts]);
 
   useEffect(() => {
     void load();
@@ -157,12 +164,14 @@ export function useAgentSettingsController() {
   }, [mutate]);
 
   const openTemplate = useCallback((template: OfficialPresetTemplate) => {
+    editingDrafts?.rememberSelection({ kind: 'template', template_key: template.template_key });
     setSelection({ kind: 'template', template });
     clearEditorState();
     setError(null);
-  }, [clearEditorState]);
+  }, [clearEditorState, editingDrafts]);
 
   const applyEditor = useCallback((response: AgentPresetEditorResponse) => {
+    editingDrafts?.rememberSelection({ kind: 'preset', preset_id: response.preset.preset_id });
     const nextDraft = cloneDraft(response.draft);
     setEditor({
       ...response,
@@ -174,7 +183,7 @@ export function useAgentSettingsController() {
     setDraftState(nextDraft);
     setSavedDraft(response.revision ? cloneDraft(nextDraft) : null);
     setSelection({ kind: 'preset', preset: response.preset });
-  }, []);
+  }, [editingDrafts]);
 
   const openPreset = useCallback(
     async (preset: AgentPresetSummary, returned?: Extract<AgentEditorReturn, { kind: 'preset' }>['draft']) => {
@@ -186,6 +195,7 @@ export function useAgentSettingsController() {
           preset_id: preset.preset_id,
         });
         applyEditor(response);
+        returned ??= editingDrafts?.readPreset(preset.preset_id);
         if (returned?.preset_id === response.draft.preset_id &&
             JSON.stringify(returned.current_revision) === JSON.stringify(response.draft.current_revision)) {
           setDraftState({ ...response.draft, ...returned, document: {
@@ -194,6 +204,7 @@ export function useAgentSettingsController() {
             chat_route_records: response.draft.document.chat_route_records,
           } });
         } else if (returned) {
+          editingDrafts?.removePreset(preset.preset_id);
           setError(t('agentSettings.workbench.returnChanged'));
         }
       } catch (openError) {
@@ -203,7 +214,7 @@ export function useAgentSettingsController() {
         setBusyAction(null);
       }
     },
-    [applyEditor, reportError, t]
+    [applyEditor, reportError, t, editingDrafts]
   );
 
   const createPreset = useCallback(
@@ -288,9 +299,10 @@ export function useAgentSettingsController() {
   }, [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError, t]);
 
   const discardChanges = useCallback(() => {
+    if (draft) editingDrafts?.removePreset(draft.preset_id);
     if (savedDraft) setDraftState(cloneDraft(savedDraft));
     else if (editor) setDraftState(cloneDraft(editor.draft));
-  }, [savedDraft, editor]);
+  }, [savedDraft, editor, draft?.preset_id, editingDrafts]);
 
   const deletePreset = useCallback(
     async (preset: AgentPresetSummary) => {
@@ -299,6 +311,7 @@ export function useAgentSettingsController() {
       setError(null);
       try {
         await agentPlatform.deletePreset.invoke({ preset_id: preset.preset_id });
+        editingDrafts?.removePreset(preset.preset_id);
 
         if (
           selection?.kind === 'preset' &&
@@ -315,12 +328,13 @@ export function useAgentSettingsController() {
         setBusyAction(null);
       }
     },
-    [clearEditorState, refreshPresetLibraries, reportError, selection]
+    [clearEditorState, refreshPresetLibraries, reportError, selection, editingDrafts]
   );
 
   const setDraft = useCallback((next: AgentPresetDraft) => {
+    editingDrafts?.writePreset(next);
     setDraftState(next);
-  }, []);
+  }, [editingDrafts]);
 
   const saveRevision = useCallback(async () => {
     if (!draft) return null;
@@ -334,6 +348,7 @@ export function useAgentSettingsController() {
           draft,
         },
       });
+      editingDrafts?.removePreset(draft.preset_id);
       const nextDraft: AgentPresetDraft = {
         ...draft,
         document: draft.document,
@@ -364,7 +379,7 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [draft, publishPresetSummary, refreshPresetLibraries, reportError, t]);
+  }, [draft, publishPresetSummary, refreshPresetLibraries, reportError, t, editingDrafts]);
 
   const dirty = useMemo(
     () => (draft ? isDraftDirty(savedDraft, draft) : false),
@@ -372,6 +387,7 @@ export function useAgentSettingsController() {
   );
 
   return {
+    editingDrafts,
     library,
     catalog,
     selection,

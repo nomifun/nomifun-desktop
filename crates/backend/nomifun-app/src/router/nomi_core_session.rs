@@ -13,7 +13,7 @@ use std::time::Duration;
 #[path = "native_turn_recovery.rs"]
 mod native_turn_recovery;
 #[path = "native_execution_control.rs"]
-mod native_execution_control;
+pub(super) mod native_execution_control;
 
 use async_trait::async_trait;
 use axum::extract::{Path, Query, Request, State};
@@ -756,6 +756,29 @@ impl NomiCoreSessionOwner {
             .transpose()
     }
 
+    /// A chat-only Agent still needs the runtime's managed working directory.
+    /// This does not select or grant a Workspace resource in its frozen binding.
+    async fn runtime_options_for_projection(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        mut projection: ConversationResponse,
+    ) -> Result<AgentRuntimeBuildOptions, AppError> {
+        if projection.conversation_id != session_id.as_ref() {
+            return Err(AppError::Conflict("Runtime projection belongs to another Session".into()));
+        }
+        if projection.extra.get("workspace").and_then(Value::as_str)
+            .is_none_or(|workspace| workspace.trim().is_empty())
+        {
+            let fallback = materialize_managed_session_workspace(&self.managed_workspace_root, session_id).await?;
+            projection.extra["workspace"] = Value::String(fallback);
+            projection.extra["custom_workspace"] = Value::Bool(false);
+            projection.extra["is_temporary_workspace"] = Value::Bool(true);
+            projection.extra["temp_workspace_id"] = Value::String(session_id.as_ref().to_owned());
+        }
+        runtime_options_from_session(owner_id, projection, None).map(|(options, _)| options)
+    }
+
     async fn materialize_session_workspace(
         &self,
         owner_id: &str,
@@ -1390,6 +1413,17 @@ impl NomiCoreSessionOwner {
                 "AgentSession binding differs from its saved immutable artifacts".to_owned(),
             ));
         }
+        if request.plugin_delivery.is_some() {
+            let module = snapshot.content.enabled_capabilities.iter().find(|capability|
+                capability.consumption.is_contribution()
+                    && capability.capability.id.as_ref() == nomifun_plugin_development::MODULE_ID);
+            if module.is_none() || nomifun_plugin_development::CREATE_ACTIONS.iter().any(|action|
+                !module.expect("checked module").action_allowlist.iter().any(|allowed| allowed.as_ref() == *action)) {
+                return Err(AppError::UnprocessableEntity(
+                    "AGENT_LAUNCH_MODULE_REQUIRED: plugin delivery requires the saved creation module and actions".into(),
+                ));
+            }
+        }
         self.materialize_workspace_for_binding(owner_id, session_id, &saved_binding)
             .await?;
         let route_identity = snapshot.content.chat_route_identity.clone().ok_or_else(|| {
@@ -1906,31 +1940,14 @@ impl NomiCoreSessionOwner {
                 ));
             }
         };
-        let mut projection = self
+        let projection = self
             .canonical_conversation_projection(owner_id, session_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!(
                 "AgentSession {} not found",
                 session_id.as_ref(),
             )))?;
-        if projection
-            .extra
-            .get("workspace")
-            .and_then(Value::as_str)
-            .is_none_or(|workspace| workspace.trim().is_empty())
-        {
-            let fallback = materialize_managed_session_workspace(
-                &self.managed_workspace_root,
-                session_id,
-            )
-            .await?;
-            projection.extra["workspace"] = Value::String(fallback);
-            projection.extra["custom_workspace"] = Value::Bool(false);
-            projection.extra["is_temporary_workspace"] = Value::Bool(true);
-            projection.extra["temp_workspace_id"] =
-                Value::String(session_id.as_ref().to_owned());
-        }
-        let (options, _) = runtime_options_from_session(owner_id, projection, None)?;
+        let options = self.runtime_options_for_projection(owner_id, session_id, projection).await?;
         let cancellation = tokio_util::sync::CancellationToken::new();
         let relay_cancellation = cancellation.clone();
         let generation = receipt.cursor.seq;
@@ -4476,6 +4493,7 @@ fn cron_turn_message_to_request(
     message: nomifun_cron::CronTurnMessage,
 ) -> SendMessageRequest {
     SendMessageRequest {
+        plugin_delivery: None,
         content: message.content,
         files: message.files,
         inject_skills: message.inject_skills,
@@ -8379,7 +8397,7 @@ pub(crate) struct NomiCoreApiError {
 }
 
 impl NomiCoreApiError {
-    fn new(
+    pub(super) fn new(
         status: StatusCode,
         code: impl Into<String>,
         message: impl Into<String>,
@@ -10593,16 +10611,29 @@ async fn create_nomi_core_agent_session(
             WorkspaceDirectoryCheck::Create,
         )?;
     }
-    let agent_name = state
+    let editor = state
         .control_plane
         .editor(
             &owner.0,
             &binding.preset_revision_ref.preset_id,
             Some(binding.preset_revision_ref.revision),
         )
-        .await?
-        .preset
-        .display_name;
+        .await?;
+    let document = &editor.revision.as_ref().ok_or_else(|| NomiCoreApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY, "AGENT_PRESET_REQUIRED", "A stable Agent revision is required",
+    ))?.document;
+    for required in &request.required_modules {
+        let selection = document.enabled_capabilities.iter().find(|selection| &selection.capability.id == required);
+        if selection.is_none()
+            || (required == nomifun_plugin_development::MODULE_ID
+                && nomifun_plugin_development::CREATE_ACTIONS.iter().any(|action|
+                    !selection.expect("checked selection").action_allowlist.iter().any(|granted| granted == action)))
+        {
+            return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
+                "AGENT_LAUNCH_MODULE_REQUIRED", format!("The saved Agent cannot execute required module {required}")));
+        }
+    }
+    let agent_name = editor.preset.display_name;
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
@@ -15590,7 +15621,7 @@ fn authenticated_principal(owner: &AuthenticatedOwner) -> PrincipalRef {
     }
 }
 
-fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, NomiCoreApiError> {
+pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, NomiCoreApiError> {
     let value = {
         let bytes = nomifun_agent_contracts::canonical_json_bytes(&value).map_err(|error| {
             NomiCoreApiError::new(
@@ -15630,6 +15661,15 @@ fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, NomiCoreApiErr
             )
         })?;
     let mut request = nonempty_turn_content(content)?;
+    if let Some(requirement) = object.get("plugin_delivery").filter(|value| !value.is_null()) {
+        let requirement: nomifun_api_types::PluginDeliveryRequirement = serde_json::from_value(requirement.clone())?;
+        if let Some(draft) = &requirement.draft_id {
+            nomifun_common::validate_uuidv7(draft).map_err(|_| NomiCoreApiError::new(
+                StatusCode::BAD_REQUEST,"PLUGIN_INVALID_DRAFT_ID","plugin_delivery requires a canonical draft UUIDv7",
+            ))?;
+        }
+        request.plugin_delivery = Some(requirement);
+    }
     if let Some(files) = object.get("files") {
         request.files = serde_json::from_value(files.clone())?;
     }
@@ -15668,15 +15708,19 @@ fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, NomiCoreApiErr
     Ok(request)
 }
 
-fn canonical_turn_input(request: &SendMessageRequest) -> Value {
-    json!({
+pub(super) fn canonical_turn_input(request: &SendMessageRequest) -> Value {
+    let mut input = json!({
         "content": request.content,
         "files": request.files,
         "inject_skills": request.inject_skills,
         "hidden": request.hidden,
         "origin": request.origin,
         "channel_platform": request.channel_platform,
-    })
+    });
+    if let Some(requirement) = &request.plugin_delivery {
+        input["plugin_delivery"] = serde_json::to_value(requirement).expect("delivery requirement");
+    }
+    input
 }
 
 fn nonempty_turn_content(content: &str) -> Result<SendMessageRequest, NomiCoreApiError> {
@@ -15688,6 +15732,7 @@ fn nonempty_turn_content(content: &str) -> Result<SendMessageRequest, NomiCoreAp
         ));
     }
     Ok(SendMessageRequest {
+        plugin_delivery: None,
         content: content.to_owned(),
         files: Vec::new(),
         inject_skills: Vec::new(),

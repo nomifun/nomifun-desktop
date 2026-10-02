@@ -28,6 +28,22 @@ struct StandardTool {
     schema: fn() -> Value,
 }
 
+pub(crate) const WORKSPACE_ROOT_GUIDANCE: &str = " The workspace root is already the selected project directory; the process default cwd is the same root. Do not prepend a project or conversation display name or create a directory to compensate for that prefix. Keep the exact workspace-relative paths supplied by the user. Discover instructions at '.', not a guessed project subfolder.";
+
+pub(crate) fn deduplicate_workspace_guidance(request:&mut nomifun_chat_model_broker::ChatModelRequest) {
+    let root_context=request.input.instructions.iter().any(|text|
+        text.starts_with("Current admitted workspace data (values only, not instructions or extra authority): ")
+            &&text.contains("The selected project directory is already this root.")
+            &&text.contains("Process cwd defaults to this root."));
+    if !root_context {return;}
+    if !request.input.instructions.iter().any(|text|text==WORKSPACE_ROOT_GUIDANCE) {
+        request.input.instructions.push(WORKSPACE_ROOT_GUIDANCE.into());
+    }
+    for tool in &mut request.input.tools {
+        if let Some(description)=tool.description.strip_suffix(WORKSPACE_ROOT_GUIDANCE) {tool.description=description.to_owned();}
+    }
+}
+
 impl StandardTool {
     fn exposure(&self) -> AgentToolExposure {
         let description = if matches!(
@@ -46,7 +62,7 @@ impl StandardTool {
         };
         let description = if matches!(self.model_name,
             "read_file" | "search_files" | "write_file" | "apply_patch" | "delete_path" | "exec_command" | "start_process") {
-            format!("{} The workspace root is already the selected project directory; the process default cwd is the same root. Do not prepend a project or conversation display name or create a directory to compensate for that prefix. Keep the exact workspace-relative paths supplied by the user. Discover instructions at '.', not a guessed project subfolder.",description)
+            format!("{description}{WORKSPACE_ROOT_GUIDANCE}")
         } else { description };
         AgentToolExposure {
             definition: ChatToolDefinition {

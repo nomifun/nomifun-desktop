@@ -50,7 +50,6 @@ const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
 const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
 const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
 const PluginRunPage = React.lazy(() => import('@renderer/pages/plugins/PluginRunPage'));
-const PluginCreatorPage = React.lazy(() => import('@renderer/pages/plugins/PluginCreatorPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -205,8 +204,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
             {/* One Plugin library, creator, and App/detail surface. */}
-            <Route path='/plugins/new' element={withRouteFallback(PluginCreatorPage)} />
-            <Route path='/plugins/create/:draftId' element={withRouteFallback(PluginCreatorPage)} />
             <Route path='/plugins/run/:id' element={withRouteFallback(PluginRunPage)} />
           </Route>
         </Route>

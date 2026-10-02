@@ -6173,6 +6173,7 @@ dependencies = [
  "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-office",
+ "nomifun-plugin-development",
  "nomifun-plugin-platform",
  "nomifun-public",
  "nomifun-realtime",
@@ -6866,6 +6867,18 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "nomifun-plugin-development"
+version = "0.7.6"
+dependencies = [
+ "async-trait",
+ "jsonschema",
+ "nomifun-agent-contracts",
+ "nomifun-agent-domain-support",
+ "nomifun-agent-kernel",
+ "serde_json",
 ]
 
 [[package]]
