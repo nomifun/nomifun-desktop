@@ -9,7 +9,7 @@
 | 场景 | 入口与候选证据 | 当前状态 |
 | --- | --- | --- |
 | A 观察、只读、小测试 | W236正式COD恢复完成并交付六项具体结果，四项历史/未复核披露、测试精确poll引用；W237位置反馈已修 | 重复Git/三次报告拒绝/英文警告仍为FAIL；首发N3/GEN完整A待验 |
-| B 文件、进程、停止 | W209文件链三例各31/31；W194输入/EOF；W196 Stop5秒N1；W227干净timeout/W229 READY引用N1；W230分类冷读12/12 | 文件链N3已验；进程首发N3/COD、公开语言/等待播报及完整B衔接仍缺 |
+| B 文件、进程、停止 | W209文件链N3；W238正式GEN文件→18-byte输入/EOF→父子取消已执行，原件/进程清理正确 | W238最后read/report前预算failed；完整交付、N3/COD及公开语言仍缺 |
 | C 连续、纠正、恢复 | W182取消冷读；W223六压缩保留原输入/回执且无重做，组件修复与反例已有 | 压缩局部实证不能代替完整C；追加纠正→压缩→取消→重启链待补 |
 
 关键bad-case/正向任务取N3，GEN/COD各有正式执行；不同角色不机械重复所有底层断言。
@@ -3807,3 +3807,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 验证：参数预检8/8、正常同步5f639b7d8后的completion40/40及健康报告纠正不重做/重复拒绝上限两项，共50项不同检查通过；位置精确、原report不变及private字段不泄漏，首红/修后、fmt配置/diff分日志。加强既有回归，不新建同构测试。
 - 未覆盖：正式Tauri/StepFun采用新项号/路径/用户语言，原Git重复根因、完整A首发/N3/GEN、B/C及共享门槛。说明/定位数据不是模型行为PASS；W236三拒绝、四英文警告及整体FAIL保留。
 - 证据：仓库外2026-10-02/windows/w237-explicit-criterion-locations，01首红、02预检修后、03同步completion与两项闭环检查、04/05配置/diff；Git仅两位置字段/说明、既有回归断言和短进度。
+
+### W238 完整B文件与进程衔接（2026-10-02；基线35806c910，正式FAIL）
+
+- Case/子断言：完整B、C04/C05/C06/C07/C08、PROC-027/030/033/036与A05/A08/A09/A10/A13/A15/A17/A19；正式Tauri/StepFun/GEN，独立workspace/profile、已有隔离data/work，构建26.04秒。
+- 文件链按序写18-byte三行LF无BOM、read真实digest、只改第二行、原生cmd copy/move一次及精确del一次；源文件删除、终版/echo输入字节均alpha/值=2/omega及一个末LF，保护四文件hash全同。合法cmd /d /c未被当作PowerShell语法失败；未列目录、探程序、读helper或执行测试。
+- echo一次start→READY→一次input18 bytes/append_newline=false→close→poll退出0/reaped；STDIN_EOF的18-byte/hex在close回执，下一poll cursor119正确，零工具结果错误。hold一次start/两READY→同process_id cancel一次，cancelled/reaped/errors=[]、182ms；独立CIM50样本证明同一父子亲缘及消失/心跳停止，无外部kill。
+- 16步/九压缩后回合自行failed：两条REPLACEMENT_CONTEXT_BUDGET拒绝，最后84,385 bytes/28,129估算tokens超过27,885余量244；最后moved-file read/report未到达，UI“应用处理失败”，未取消回合或Retry。原操作成功不代替最后交付，完整B仍FAIL。
+- 原audit20/28不改：copy/delete两项只识别PowerShell，echo两项忽略stdin/close的output游标及EOF位置；另审精确cmd参数/结果和完整交互/磁盘回执均正确。真正的final read、report、canonical completed与全顺序缺口保留。00夹具源生成嵌套引号首错独立记录，发生在模型/应用前，不混成产品失败。
+- 未覆盖：完整B交付/修后预算、N3/COD、其他停止/timeout连续首发、完整C及共享门槛。下一步只减掉模型context重复空metadata，不放宽硬限、证据、参数或源任务；无新源码/重复组件测试。
+- 证据：仓库外2026-10-02/windows/w238-combined-b，00夹具错误、01构建、02-first-fail原DB/事件/参数/20-28 audit及精确复核、03失败UI、独立process witness；Git仅短进度。
