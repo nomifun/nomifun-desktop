@@ -26,6 +26,14 @@ use super::engine_tool_host::{EngineToolHost, EngineToolObservationPolicy};
 
 type Completion = Shared<BoxFuture<'static, Result<(), String>>>;
 
+fn completed_failure(done:&Option<Completion>)->bool {
+    done.as_ref().and_then(|done|done.peek()).is_some_and(Result::is_err)
+}
+
+fn retry_settlement(done:&Option<Completion>,release_started:bool)->bool {
+    !release_started&&completed_failure(done)
+}
+
 #[derive(Default)]
 struct CapabilityContext {
     initial: Option<String>,
@@ -112,6 +120,7 @@ struct State {
     tools: Option<Arc<EngineToolHost>>,
     turn: Option<Turn>,
     release: Option<Completion>,
+    kernel_release_started: bool,
 }
 
 /// One production resource context per live registered Session runtime.
@@ -1213,6 +1222,11 @@ impl EngineKernelSession {
         })
         .await;
         let hosted = guard_effect_settlement(|| self.ensure_hosted_effects_settled()).await;
+        for (stage,failed) in [("admission",admission.is_err()),("process_owner",processes.is_err()),
+            ("tool_tasks",tasks.is_err()),("resource_tasks",resource_tasks.is_err()),("git_owner",git.is_err()),
+            ("mcp_owner",mcp.is_err()),("hosted_receipts",hosted.is_err())] {
+            if failed {tracing::warn!(stage,session_id=self.session_id.as_ref(),"owned resource cleanup remains unproven");}
+        }
         admission?;
         #[cfg(feature = "browser-use")]
         browser_cancel?;
@@ -1244,6 +1258,13 @@ impl EngineKernelSession {
             if turn.root != root_message_id {
                 return Err(failure("cleanup targets a different accepted root"));
             }
+            // A finished failed waiter is not a successful cleanup witness.
+            // Keep the same root/tools fenced and retry only owned settlement;
+            // pending/successful flights stay single-flight and cached.
+            if retry_settlement(&turn.cleanup,state.release.is_some()) {
+                state.turn.as_mut().expect("same turn retained under lock").cleanup=None;
+            }
+            let turn=state.turn.as_ref().expect("same turn retained under lock");
             if let Some(done) = &turn.cleanup {
                 done.clone()
             } else {
@@ -1283,14 +1304,15 @@ impl EngineKernelSession {
         Ok(())
     }
 
-    /// Final release cannot be mistaken for a fresh successful release after
-    /// a consumed handle or a timed-out waiter. All callers reuse the result.
+    /// Pending/success reuse the exact flight. A completed pre-release
+    /// failure may retry owned settlement; consumed Kernel release never does.
     pub async fn cleanup_session(self: &Arc<Self>) -> Result<(), AppError> {
         let done = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| failure("resource state poisoned"))?;
+            if retry_settlement(&state.release,state.kernel_release_started) {state.release=None;}
             if let Some(done) = &state.release {
                 done.clone()
             } else {
@@ -1320,9 +1342,13 @@ impl EngineKernelSession {
                         Some(frozen) => frozen.close().map_err(|error| error.to_string()),
                         None => Ok(()),
                     };
-                    prior?;
+                    // The new exact-owner settlement supersedes a completed
+                    // old failure, never a pending flight or failed new proof.
+                    // Preserve the old error in its original caller/journal.
+                    if prior.is_err() {tracing::warn!(stage="prior_turn_settlement","prior resource cleanup failed; current owned settlement must independently prove shutdown");}
                     settled?;
                     robot_closed?;
+                    owner.state.lock().map_err(|_|"resource state poisoned".to_owned())?.kernel_release_started=true;
                     owner
                         .kernel
                         .release_resources(&ScopeKey::from(format!(
@@ -1352,6 +1378,20 @@ impl EngineKernelSession {
 mod workspace_module_tests {
     use super::*;
     use nomifun_common::AgentToolPolicy;
+
+    #[tokio::test]
+    async fn completed_cleanup_failure_can_retry_but_pending_and_success_stay_shared() {
+        let pending=futures_util::future::pending::<Result<(),String>>().boxed().shared();
+        assert!(!completed_failure(&Some(pending)));
+        let success=futures_util::future::ready(Ok::<(),String>(())).boxed().shared();
+        success.clone().await.unwrap();assert!(!completed_failure(&Some(success)));
+        let failed=futures_util::future::ready(Err::<(),String>("first owner cleanup unproven".into())).boxed().shared();
+        assert!(failed.clone().await.is_err());assert!(completed_failure(&Some(failed.clone())));
+        assert!(retry_settlement(&Some(failed.clone()),false));
+        assert!(!retry_settlement(&Some(failed),true),"consumed release cannot retry");
+        let retry=futures_util::future::ready(Ok::<(),String>(())).boxed().shared();
+        retry.clone().await.unwrap();assert!(!completed_failure(&Some(retry)));
+    }
 
     fn constraints(tool_scope: AgentToolPolicy) -> ExecutionConstraints {
         ExecutionConstraints {
