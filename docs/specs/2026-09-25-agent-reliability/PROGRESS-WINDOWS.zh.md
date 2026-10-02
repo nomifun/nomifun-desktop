@@ -3838,3 +3838,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原audit23/28保留：来源摘要缺失、两write、未首report/未completed/整序未关闭为真实FAIL。UI取消前历史/最后残留“Private reasoning omitted from replay”占位文本，归合并展示余项；不为说明单开批次。未取得报告不能代判预算完全修复或B结案。
 - 未覆盖：来源保护修复、完整B/N3/COD及最终报告/公开语言；下一主线为C连续→纠正→压缩→停止→冷读，不对同一未改B根因重复付费。本批无新产品源码/组件测试，原W238失败保留。
 - 证据：仓库外2026-10-02/windows/w240-mainline-b-closeout，01构建、02-first-unprotected-write原首败、03-cancelled完整DB/事件/23-28 audit/原两write及独立物理复核、04正式取消UI、process witness；Git仅短进度。
+
+### W241 主线C连续、纠正与冷读（2026-10-02；基线67617e1cf，FAIL）
+
+- Case/子断言：完整C、C05/C06/C07/C08与A05/A06/A09/A10/A12/A13/A17/A19；正式Tauri/StepFun/COD，新workspace/profile，复用hash核对一致的现有正式构建，无重复编译。
+- 首败：用户明确只启动一次helper、完整来源读取不重做，实际start三次/cancel两次、两份来源各读三次。追加纠正通过正式“立刻发送”进入同一回合，原turn/steer-accepted保留；不是新回合，也没有操作者Stop/Retry。
+- 27步/15次实际压缩后自行failed：纠正写入被重规划门禁阻止，四次update_plan被逐字来源校验拒绝。其中“再回读该结果一次核对”多加了原输入没有的“核对”，重复原错未恢复；纠正文件和被禁止的初稿均未生成。保留原audit10/21及另审same-turn steering事实，不改历史失败。
+- 保护文件全部hash不变、当前父子PID均消失、宿主清理事件存在；70条进程见证不能代判三次启动的全部亲缘。正式Stop环节因回合提前失败未到达，不能把failed计成cancelled。
+- 零模型冷启动后agent_events/turns/sessions全行数/hash及全部夹具文件保持，全部Turn仍终态，无复活/新执行。但实时UI曾展示的纠正气泡在冷读会话不可见，canonical仍有纠正；记录为恢复展示缺陷，冷读完整性不计PASS。
+- 未覆盖：C正确执行/实际Stop/完整冷读展示/N3，A报告纠正与重复观察，B摘要保护与最终交付，共享门槛仍未达。不付费重复未修根因；下一步合并定位这些主线阻断，不开说明微调批次。
+- 证据：仓库外2026-10-02/windows/w241-mainline-c，02纠正前、04/05失败原事件/参数/DB/audit、06实时UI/冷读前全表基线、07正式冷启动、08冷读UI、09全表/磁盘/当前PID复核；本批Git仅短进度。
