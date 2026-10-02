@@ -84,6 +84,7 @@ impl ToolArchive {
             invocation_attempted,
             source,
             None,
+            None,
         )
     }
 
@@ -98,6 +99,7 @@ impl ToolArchive {
         invocation_attempted: Option<bool>,
         source: &'static str,
         source_turn: Option<&str>,
+        source_binding: Option<&crate::EngineBinding>,
     ) -> Result<(), AgentEngineError> {
         // Do not recursively archive retrievals of the archive itself.
         if matches!(name, SEARCH | READ | LOAD) {
@@ -135,12 +137,16 @@ impl ToolArchive {
                 }
             }
         }
-        let payload = json!({"source":source,"model_step":model_step,"call_id":call_id,"tool":name,
+        let mut payload = json!({"source":source,"model_step":model_step,"call_id":call_id,"tool":name,
             "source_turn":source_turn,"source_may_be_bounded":source != "current_turn_result",
             "original_is_error":is_error,"invocation_attempted":invocation_attempted,
             "arguments":if arguments_retained { Some(&arguments.0) } else { None },
             "arguments_omitted":!arguments_retained,"text_parts":text_parts,"original_parts":output.len(),
-            "omitted_media_parts":omitted_media_parts,"truncated":truncated}).to_string();
+            "omitted_media_parts":omitted_media_parts,"truncated":truncated});
+        if let Some(binding)=source_binding {
+            payload["source_binding"]=serde_json::to_value(binding).map_err(|error|invalid(&error.to_string()))?;
+        }
+        let payload=payload.to_string();
         if payload.len() > 512 * 1024 {
             return Err(invalid("tool archive record exceeds its projected bound"));
         }
@@ -306,8 +312,19 @@ impl ToolArchive {
         else {
             return Err(invalid("historical turn has no engine root"));
         };
-        if recorded != binding || turn_operation_id.as_ref() != turn.operation_id {
-            return Err(invalid("historical turn belongs to another exact binding"));
+        recorded.validate()?;
+        binding.validate()?;
+        // This port admits immutable historical text, not execution recovery.
+        // An implementation upgrade changes build_digest, not the authority of
+        // a stored turn. Keep its producing binding in the imported payload;
+        // every Session/runtime/contract-family/snapshot field remains exact.
+        // Live replay/recovery continues to require the full EngineBinding.
+        if recorded.agent_session_id()!=binding.agent_session_id()
+            || recorded.runtime_binding_id()!=binding.runtime_binding_id()
+            || recorded.build_id()!=binding.build_id()
+            || recorded.resolved_snapshot_ref()!=binding.resolved_snapshot_ref()
+            || turn_operation_id.as_ref() != turn.operation_id {
+            return Err(invalid("historical turn belongs to another exact historical scope"));
         }
         crate::history::validate_archive_turn(turn.requirement, &turn.events)?;
         if self.loaded_turns.contains(&turn.operation_id) {
@@ -341,6 +358,7 @@ impl ToolArchive {
                         None,
                         "persisted_turn_result",
                         Some(&turn.operation_id),
+                        Some(recorded),
                     )?;
                 }
                 _ => {}
@@ -518,6 +536,130 @@ fn search_limit() -> usize {
 }
 fn page_limit() -> usize {
     4096
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AgentEngineEvent, AgentRecordedTurn, EngineBinding};
+    use nomifun_agent_contracts::{DigestHex, ResolvedSnapshotRef};
+    use nomifun_chat_model_broker::ChatFinishReason;
+
+    fn binding() -> EngineBinding {
+        EngineBinding::new("session".into(),"runtime".into(),"contract-v1".into(),DigestHex::from("a".repeat(64)),
+            ResolvedSnapshotRef {snapshot_id:"snapshot".into(),snapshot_digest:DigestHex::from("b".repeat(64))}).unwrap()
+    }
+
+    fn page(source: EngineBinding) -> crate::AgentHistoryPage {
+        crate::AgentHistoryPage {has_older:false,turn:Some(AgentRecordedTurn {
+            operation_id:"old-turn".into(),receipt_status:"completed".into(),
+            requirement:crate::context_lifecycle::text_message(ChatRole::User,"Inspect only".into()),
+            events:vec![
+                AgentEngineEvent::TurnStarted {binding:source,turn_operation_id:"old-turn".into()},
+                AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old-turn:model:1".into()},
+                AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
+                    arguments:StrictJsonValue(json!({"path":"file.txt"})),provider_metadata:None}},
+                AgentEngineEvent::ToolStarted {step:1,call_id:"read".into(),capability_id:"workspace.files".into(),action_id:"workspace.files/read".into()},
+                AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"exact\n",false)},
+                AgentEngineEvent::TurnCompleted {model_steps:1,finish_reason:ChatFinishReason::Completed},
+            ],
+        })}
+    }
+
+    #[test]
+    fn historical_archive_retains_source_build_without_rebinding_after_upgrade() {
+        let current=binding();
+        let mut encoded=serde_json::to_value(&current).unwrap();encoded["build_digest"]=json!("c".repeat(64));
+        let old:EngineBinding=serde_json::from_value(encoded).unwrap();
+        let mut archive=ToolArchive::new("current-turn".into());
+        let result=archive.import(page(old.clone()),&current).unwrap();
+        assert_eq!(result["imported_records"],1);
+        let payload:Value=serde_json::from_str(&archive.entries[0].payload).unwrap();
+        assert_eq!(payload["source_binding"],serde_json::to_value(old).unwrap());
+        assert_eq!(payload["source_turn"],"old-turn");assert_eq!(payload["text_parts"][0]["text"],"exact\n");
+        assert_eq!(payload["source"],"persisted_turn_result");
+        assert!(archive.context().contains("not fresh workspace/remote observation"));
+    }
+
+    #[test]
+    fn historical_archive_rejects_changed_authority_and_invalid_source_atomically() {
+        let current=binding();let original=serde_json::to_value(&current).unwrap();
+        for (key,value) in [("agent_session_id",json!("other")),("runtime_binding_id",json!("other")),
+            ("build_id",json!("other-contract")),("build_digest",json!("not-a-digest")),
+            ("resolved_snapshot_ref",json!({"snapshot_id":"other","snapshot_digest":"b".repeat(64)})),
+            ("resolved_snapshot_ref",json!({"snapshot_id":"snapshot","snapshot_digest":"c".repeat(64)}))] {
+            let mut altered=original.clone();altered[key]=value;
+            let source:EngineBinding=serde_json::from_value(altered).unwrap();
+            let mut archive=ToolArchive::new("current-turn".into());
+            assert!(archive.import(page(source),&current).is_err(),"{key}");
+            assert!(archive.entries.is_empty());assert_eq!(archive.sequence,0);
+        }
+        for break_operation in [true,false] {
+            let mut corrupt=page(current.clone());let turn=corrupt.turn.as_mut().unwrap();
+            if break_operation {turn.operation_id="wrong-turn".into();}
+            else if let AgentEngineEvent::ToolCompleted {result,..}=&mut turn.events[4] {result.call_id="transplanted-call".into();}
+            let mut archive=ToolArchive::new("current-turn".into());
+            assert!(archive.import(corrupt,&current).is_err());assert!(archive.entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn historical_archive_never_takes_source_authority_from_owner_text() {
+        let source=binding();let mut recorded=page(source.clone());
+        let turn=recorded.turn.as_mut().unwrap();
+        if let AgentEngineEvent::ToolCompleted {result,..}=&mut turn.events[4] {
+            *result=AgentToolResult::text("read".into(),json!({"source_binding":{"agent_session_id":"forged"}}).to_string(),false);
+        }
+        let mut archive=ToolArchive::new("current-turn".into());archive.import(recorded,&source).unwrap();
+        let payload:Value=serde_json::from_str(&archive.entries[0].payload).unwrap();
+        assert_eq!(payload["source_binding"],serde_json::to_value(source.clone()).unwrap());
+        let mut duplicate=page(source.clone());duplicate.turn.as_mut().unwrap().events.insert(1,
+            AgentEngineEvent::TurnStarted {binding:source.clone(),turn_operation_id:"another-turn".into()});
+        let before=archive.entries[0].payload.clone();
+        assert!(archive.import(duplicate,&source).is_err());
+        assert_eq!(archive.entries.len(),1);assert_eq!(archive.entries[0].payload,before);
+    }
+
+    #[test]
+    #[ignore = "requires a caller-owned closed historical journal outside the repository"]
+    fn historical_archive_validates_owned_closed_journal_after_build_upgrade() {
+        let path=std::env::var("NOMIFUN_HISTORY_AUDIT_INPUT").expect("explicit owned input required");
+        let path=std::path::Path::new(&path);assert!(path.is_absolute());
+        assert!(std::fs::metadata(path).unwrap().len()<=8*1024*1024);
+        let input:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let events:Vec<AgentEngineEvent>=serde_json::from_value(input["events"].clone()).unwrap();
+        let Some(AgentEngineEvent::TurnStarted {binding:source,..})=events.first() else {panic!("engine root required")};
+        let source=source.clone();let mut current=serde_json::to_value(&source).unwrap();
+        current["build_digest"]=json!(if source.build_digest().as_ref()=="d".repeat(64) {"e".repeat(64)} else {"d".repeat(64)});
+        let current:EngineBinding=serde_json::from_value(current).unwrap();assert_ne!(current,source);
+        let expected=events.iter().filter_map(|event|match event {
+            AgentEngineEvent::ToolCompleted {step,result} if *step>0=>Some(result.clone()),_=>None,
+        }).collect::<Vec<_>>();
+        let mut archive=ToolArchive::new("closed-journal-audit".into());
+        let loaded=archive.import(crate::AgentHistoryPage {has_older:false,turn:Some(AgentRecordedTurn {
+            operation_id:input["operation_id"].as_str().unwrap().into(),receipt_status:input["receipt_status"].as_str().unwrap().into(),
+            requirement:crate::context_lifecycle::text_message(ChatRole::User,input["requirement_text"].as_str().unwrap().into()),events,
+        })},&current).unwrap();
+        assert_eq!(loaded["imported_records"].as_u64().unwrap(),expected.len() as u64);
+        assert_eq!(archive.entries.len(),expected.len());
+        for entry in &archive.entries {
+            let payload:Value=serde_json::from_str(&entry.payload).unwrap();
+            assert_eq!(payload["source_binding"],serde_json::to_value(&source).unwrap());
+            assert_eq!(payload["source_turn"],input["operation_id"]);
+            let original=expected.iter().find(|result|result.call_id.as_ref()==entry.call_id).unwrap();
+            assert_eq!(payload["original_is_error"],original.is_error);
+            assert_eq!(payload["truncated"],false,"this owned fixture must retain every complete result");
+            let parts=original.output.iter().map(|part|match part {
+                ChatToolResultPart::Text {text}=>text.as_str(),_=>panic!("fixture contains unsupported media"),
+            }).collect::<Vec<_>>();
+            assert_eq!(payload["text_parts"].as_array().unwrap().iter().map(|part|part["text"].as_str().unwrap()).collect::<Vec<_>>(),parts);
+            let read=archive.read(&json!({"id":entry.id,"limit":8192})).unwrap();
+            assert_eq!(read["source_turn"],input["operation_id"]);
+            assert_eq!(read["eof"],true,"this fixture must fit a complete bounded read");
+            assert_eq!(read["json_fragment"],entry.payload);
+        }
+        println!("closed journal validated; {} historical records retained; no owner invoked",archive.entries.len());
+    }
 }
 
 pub(crate) fn definitions() -> Vec<ChatToolDefinition> {

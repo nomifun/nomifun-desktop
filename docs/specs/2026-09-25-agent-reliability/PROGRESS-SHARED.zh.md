@@ -3538,3 +3538,24 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   marker开头，覆盖结构化、process/read、未知fallback，数组结构和JSON逆解实际值保持。
   Runtime291/291、实际renderer parser及只读复核通过；新v2尚未formal，不代验Windows，
   不将原B、自由语言或真实Keychain物理失败改PASS。证据外置history-cursor-live。
+
+### macOS 历史数据跨实现升级读取（2026-10-03）
+
+- 原B与补报告 Session/runtime/build_id/snapshot 全同，但实现 digest 改变使 archive 全
+  binding Eq 必然拒绝旧结果。data-only import 现仅允许有效不同 digest，原 source_binding
+  与 source_turn进入payload/hash；其余身份、完整codec、原子导入保持。执行恢复的全Eq不改，
+  不刷新证据/重放/增权。宿主native/message游标均不得越过固定accepted-root。
+- Runtime294通过/1默认ignored；另显式对原B只读634事件/33完整结果正文、失败标记、来源
+  与READ回放验证通过，owner/model0。App history5/5及独立复核通过，首次失败另存外证据。
+  正式B模型采用未验，不改Windows，证据外置history-cursor-live；Mac锁定不阻断确定性修复。
+
+### macOS 清理前置的 Robot 任务归属（2026-10-03）
+
+- abort accept-loop不能证明detached source/session/嵌套语音任务或Agent bridge结束。现保留
+  current/retired Gateway及全部本地worker completion，封准入、取消后join；5秒超时/丢waiter
+  留原凭据，panic/poison不转成功，业务失败不等同清理失败。ASR及已接受dispatch停止fence补齐。
+- 生产host把Robot/SSH join放在Browser之前，未知则保留Browser/DB；仍需独立Agent runtime
+  关闭证明，不把本地Robot完成当canonical进程、远端模型或物理设备已清理。
+- Robot153、App bridge2、Robot失败隔离1、既有Agent失败隔离/重试1及独立复核通过；首次
+  App测试编译错误与修后各自外置history-cursor-live。未有真实Keychain/CEF物理live，风险OPEN，
+  Windows新共享关闭顺序/Robot改动未代验，未改已有Windows记录。

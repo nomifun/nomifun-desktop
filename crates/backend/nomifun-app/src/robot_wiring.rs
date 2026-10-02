@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
+use futures_util::{FutureExt, future::{BoxFuture, Shared}};
 use nomifun_api_types::SendMessageRequest;
 #[cfg(test)]
 use nomifun_api_types::AgentErrorOwnership;
@@ -105,8 +106,85 @@ pub struct RobotServices {
     /// Live view of the LAN listener. `desktop.rs` projects its `WebUiStatus`
     /// into this; nothing else may write it.
     pub endpoint_tx: watch::Sender<LanEndpointSnapshot>,
-    /// Set once, during router assembly.
-    gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Current and replaced gateways retain their own complete task witnesses.
+    gateways: Mutex<GatewayOwners>,
+    bridge_workers: Arc<RobotBridgeWorkers>,
+}
+
+#[derive(Default)]
+struct GatewayOwners {
+    active: Option<Arc<nomifun_robot::RobotGateway>>,
+    retired: Vec<Arc<nomifun_robot::RobotGateway>>,
+    closing: bool,
+}
+
+type BridgeCompletion = Shared<BoxFuture<'static, Result<(), String>>>;
+struct BridgeWorker {
+    cancellation: tokio_util::sync::CancellationToken,
+    completion: BridgeCompletion,
+}
+#[derive(Default)]
+struct BridgeState {
+    workers: HashMap<String, Arc<BridgeWorker>>,
+    closing: bool,
+    errors: Vec<String>,
+}
+#[derive(Default)]
+struct RobotBridgeWorkers(Mutex<BridgeState>);
+
+impl RobotBridgeWorkers {
+    fn spawn<F, Fut>(&self, key: String, work: F) -> anyhow::Result<()>
+    where F: FnOnce(tokio_util::sync::CancellationToken) -> Fut,
+        Fut: std::future::Future<Output=()> + Send + 'static,
+    {
+        let mut state = self.0.lock().map_err(|_| anyhow::anyhow!("Robot dispatcher inventory poisoned"))?;
+        reap_bridge_workers(&mut state);
+        if state.closing || !state.errors.is_empty() { anyhow::bail!("Robot dispatcher admission is closed or unproven"); }
+        if state.workers.len() >= 64 { anyhow::bail!("device utterance queue is full"); }
+        if state.workers.contains_key(&key) { anyhow::bail!("this device utterance is already queued"); }
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(work(cancellation.clone()));
+        let completion = async move { task.await.map_err(|error| format!("Robot dispatcher worker ended abnormally: {error}")) }.boxed().shared();
+        state.workers.insert(key, Arc::new(BridgeWorker { cancellation, completion }));
+        Ok(())
+    }
+
+    fn cancel(&self, key: &str) -> anyhow::Result<()> {
+        let state = self.0.lock().map_err(|_| anyhow::anyhow!("Robot dispatcher inventory poisoned"))?;
+        if let Some(worker) = state.workers.get(key) { worker.cancellation.cancel(); }
+        Ok(()) // Request only. The retained completion is the local join proof.
+    }
+
+    fn request_shutdown(&self) -> anyhow::Result<()> {
+        let mut state = self.0.lock().map_err(|_| anyhow::anyhow!("Robot dispatcher inventory poisoned"))?;
+        state.closing = true;
+        for worker in state.workers.values() { worker.cancellation.cancel(); }
+        Ok(())
+    }
+
+    async fn shutdown_and_wait(&self) -> anyhow::Result<()> {
+        self.request_shutdown()?;
+        loop {
+            let workers = {
+                let mut state = self.0.lock().map_err(|_| anyhow::anyhow!("Robot dispatcher inventory poisoned"))?;
+                reap_bridge_workers(&mut state);
+                if state.workers.is_empty() {
+                    return if state.errors.is_empty() { Ok(()) } else { Err(anyhow::anyhow!(state.errors.join("; "))) };
+                }
+                state.workers.values().cloned().collect::<Vec<_>>()
+            };
+            for worker in workers { let _ = worker.completion.clone().await; }
+        }
+    }
+}
+
+fn reap_bridge_workers(state: &mut BridgeState) {
+    let BridgeState { workers, errors, .. } = state;
+    workers.retain(|_, worker| match worker.completion.clone().now_or_never() {
+        None => true,
+        Some(Ok(())) => false,
+        Some(Err(error)) => { errors.push(error); false }
+    });
 }
 
 impl RobotServices {
@@ -160,35 +238,58 @@ impl RobotServices {
             advertiser,
             speech,
             endpoint_tx,
-            gateway_task: Mutex::new(None),
+            gateways: Mutex::new(GatewayOwners::default()),
+            bridge_workers: Arc::new(RobotBridgeWorkers::default()),
         })
     }
 
-    /// Record the gateway's accept loop so shutdown can stop it. Replacing an
-    /// existing handle aborts the old loop: two accept loops on one registry
-    /// would race for the same device.
-    pub fn set_gateway_task(&self, task: tokio::task::JoinHandle<()>) {
-        if let Some(previous) = self
-            .gateway_task
-            .lock()
-            .expect("robot gateway task lock poisoned")
-            .replace(task)
-        {
-            previous.abort();
+    /// A replacement never discards the prior gateway's cleanup witness.
+    pub fn set_gateway(&self, gateway: Arc<nomifun_robot::RobotGateway>) {
+        let mut owners = self.gateways.lock().expect("robot gateway owner lock poisoned");
+        if let Some(previous) = owners.active.replace(gateway.clone()) {
+            previous.request_shutdown();
+            owners.retired.push(previous);
+        }
+        if owners.closing { gateway.request_shutdown(); }
+    }
+
+    /// Request only. Storage/host shutdown must await shutdown_and_wait.
+    pub fn shutdown(&self) {
+        if let Err(error) = self.bridge_workers.request_shutdown() {
+            tracing::error!(%error, "Robot dispatcher shutdown is unproven");
+        }
+        let mut owners = self.gateways.lock().expect("robot gateway owner lock poisoned");
+        owners.closing = true;
+        for gateway in owners.active.iter().chain(owners.retired.iter()) {
+            gateway.request_shutdown();
         }
     }
 
-    /// Stop the accept loop. Sessions are owned by their own tasks and end when
-    /// their sockets close with the listener.
-    pub fn shutdown(&self) {
-        if let Some(task) = self
-            .gateway_task
-            .lock()
-            .expect("robot gateway task lock poisoned")
-            .take()
-        {
-            task.abort();
-        }
+    /// Join every current/replaced owner within one wait budget. A timeout or
+    /// dropped waiter retains all owners and their immutable terminal result.
+    pub async fn shutdown_and_wait(&self) -> anyhow::Result<()> {
+        self.bridge_workers.request_shutdown()?;
+        let gateways = {
+            let mut owners = self.gateways.lock().map_err(|_| anyhow::anyhow!("Robot gateway owner lock poisoned"))?;
+            owners.closing = true;
+            owners.active.iter().chain(owners.retired.iter()).cloned().collect::<Vec<_>>()
+        };
+        for gateway in &gateways { gateway.request_shutdown(); }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut errors = Vec::new();
+            for gateway in gateways {
+                if let Err(error) = gateway.shutdown_and_wait().await { errors.push(error); }
+            }
+            if let Err(error) = self.bridge_workers.shutdown_and_wait().await { errors.push(error.to_string()); }
+            if errors.is_empty() { Ok(()) } else { Err(anyhow::anyhow!(errors.join("; "))) }
+        }).await.map_err(|_| anyhow::anyhow!("Robot gateway cleanup is still pending after 5 seconds"))?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_bridge_panic_for_test(&self) -> anyhow::Result<()> {
+        self.bridge_workers.spawn("controlled-cleanup-failure".into(), |_| async {
+            panic!("controlled Robot bridge cleanup failure")
+        })
     }
 }
 
@@ -330,7 +431,7 @@ pub(crate) struct AppRobotBackend {
     pub companions: Arc<nomifun_companion::CompanionService>,
     pub owner_user_id: Arc<str>,
     pub registry: Arc<RobotRegistry>,
-    pending: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    bridge_workers: Arc<RobotBridgeWorkers>,
     queues: Arc<Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
 
@@ -459,13 +560,14 @@ impl AppRobotBackend {
                 hidden: false, origin: Some("robot".to_owned()), channel_platform: Some("robot".to_owned()),
             };
             let delivery = tokio::select! {
-                result = self.sessions.send_session_message_idempotent(
-                    &self.owner_user_id, &request.conversation_id, &key, message,
-                ) => result,
+                biased;
                 _ = cancelled.cancelled() => {
                     self.sessions.cancel_session(&self.owner_user_id, &request.conversation_id).await?;
                     return Ok(());
-                }
+                },
+                result = self.sessions.send_session_message_idempotent(
+                    &self.owner_user_id, &request.conversation_id, &key, message,
+                ) => result,
             };
             let mut delivery = match delivery {
                 Ok(delivery) => delivery,
@@ -549,30 +651,21 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
 
     async fn dispatch(&self, request: nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
         let key = robot_turn_idempotency_key(&request);
-        let cancelled = tokio_util::sync::CancellationToken::new();
-        {
-            let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if pending.len() >= 64 { anyhow::bail!("device utterance queue is full"); }
-            if pending.contains_key(&key) { anyhow::bail!("this device utterance is already queued"); }
-            pending.insert(key.clone(), cancelled.clone());
-        }
         let (tx, rx) = mpsc::channel(64);
         let backend = self.clone();
-        tokio::spawn(async move {
+        self.bridge_workers.spawn(key, move |cancelled| async move {
             if let Err(error) = backend.run_device_turn(&request, cancelled, tx.clone()).await {
                 let _ = tx.send(robot_stream_failure(error.to_string())).await;
             }
-            backend.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
-        });
+            // A business/provider failure remains in the voice result; only
+            // abnormal task completion makes the local shutdown proof fail.
+        })?;
         Ok(rx)
     }
 
     async fn cancel(&self, request: &nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<()> {
         let key = robot_turn_idempotency_key(request);
-        if let Some(token) = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
-            token.cancel();
-        }
-        Ok(())
+        self.bridge_workers.cancel(&key)
     }
 
     async fn vad_tuning(&self, companion_id: &str) -> VadTuning {
@@ -846,7 +939,7 @@ pub(crate) fn mount(
         companions,
         owner_user_id,
         registry: robot.registry.clone(),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        bridge_workers: robot.bridge_workers.clone(),
         queues: Arc::new(Mutex::new(HashMap::new())),
     });
     #[cfg(test)]
@@ -863,7 +956,8 @@ pub(crate) fn mount(
             tools: robot.tools.clone(),
         },
     ));
-    robot.set_gateway_task(tokio::spawn(gateway.serve(vec![source])));
+    robot.set_gateway(gateway.clone());
+    gateway.start(vec![source]);
 
     RobotFaces {
         device: nomifun_robot::routes::device_router(nomifun_robot::routes::RobotDeviceState {
@@ -885,6 +979,49 @@ pub(crate) fn mount(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn bridge_shutdown_keeps_worker_owned_after_waiter_drop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped { fn drop(&mut self) { self.0.store(true, Ordering::Release); } }
+        let workers = Arc::new(RobotBridgeWorkers::default());
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        workers.spawn("same-request".into(), {
+            let cancelled = cancelled.clone(); let release = release.clone(); let dropped = dropped.clone();
+            move |token| async move {
+                let _guard = Dropped(dropped);
+                token.cancelled().await;
+                cancelled.notify_one();
+                release.acquire().await.unwrap().forget();
+            }
+        }).unwrap();
+        let owner = workers.clone();
+        let waiter = tokio::spawn(async move { owner.shutdown_and_wait().await });
+        cancelled.notified().await;
+        waiter.abort(); let _ = waiter.await;
+        assert!(!dropped.load(Ordering::Acquire));
+        assert!(workers.spawn("no-late-admission".into(), |_| async {}).is_err());
+        release.add_permits(1);
+        workers.shutdown_and_wait().await.unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        workers.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bridge_shutdown_retains_panic_but_not_business_failure() {
+        let workers = RobotBridgeWorkers::default();
+        workers.spawn("completed-failed-voice-result".into(), |_| async {
+            let business_result: anyhow::Result<()> = Err(anyhow::anyhow!("controlled provider failure"));
+            assert!(business_result.is_err()); // The worker nevertheless finished normally.
+        }).unwrap();
+        workers.shutdown_and_wait().await.unwrap();
+        let workers = RobotBridgeWorkers::default();
+        workers.spawn("panic".into(), |_| async { panic!("controlled Robot bridge panic") }).unwrap();
+        assert!(workers.shutdown_and_wait().await.is_err());
+        assert!(workers.shutdown_and_wait().await.is_err());
+    }
     use super::*;
 
 

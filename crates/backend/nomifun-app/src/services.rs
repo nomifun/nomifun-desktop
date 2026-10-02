@@ -1333,23 +1333,32 @@ impl AppServices {
             Err(_) => errors.push("terminal cleanup timed out after 5 seconds".to_owned()),
         }
 
-        // Retain native cleanup authority when an Agent may still submit work.
-        // A later shutdown retries the same quarantined runtime; it cannot reopen.
-        if runtimes_stopped {
-            if let Err(error) = self.shutdown_browser_platform().await {
-                errors.push(format!("browser/gateway cleanup failed: {error:#}"));
-            }
-        }
+        // Join non-Browser producers before native CEF can occupy the main
+        // thread. Unknown producer cleanup cannot authorize physical teardown.
+        let mut producers_stopped = true;
         if let Some(robot) = &self.robot {
-            robot.shutdown();
+            if let Err(error) = robot.shutdown_and_wait().await {
+                errors.push(format!("Robot task cleanup failed: {error:#}"));
+                producers_stopped = false;
+            }
         }
         match tokio::time::timeout(Duration::from_secs(5), self.ssh_pool.shutdown_all()).await {
             Ok(report) if report.lost == 0 => {}
-            Ok(report) => errors.push(format!(
-                "{} SSH link(s) were released without proof the remote shell stopped",
-                report.lost
-            )),
-            Err(_) => errors.push("SSH cleanup timed out after 5 seconds".to_owned()),
+            Ok(report) => {
+                producers_stopped = false;
+                errors.push(format!("{} SSH link(s) were released without proof the remote shell stopped",report.lost));
+            }
+            Err(_) => {
+                producers_stopped = false;
+                errors.push("SSH cleanup timed out after 5 seconds".to_owned());
+            }
+        }
+        // Retain native cleanup authority when an Agent or producer may still
+        // submit work. A later shutdown joins the same quarantined owners.
+        if runtimes_stopped && producers_stopped {
+            if let Err(error) = self.shutdown_browser_platform().await {
+                errors.push(format!("browser/gateway cleanup failed: {error:#}"));
+            }
         }
 
         // Channel/terminal/browser shutdown hooks are not expected to publish
@@ -2636,6 +2645,33 @@ mod tests {
         services.shutdown_nomi_core_host().await.unwrap();
         assert_eq!(browser_shutdowns.load(Ordering::Acquire),1);
         assert!(services.database.pool().is_closed());
+    }
+
+    #[tokio::test]
+    async fn failed_robot_shutdown_keeps_browser_and_database_quarantined() {
+        let db=nomifun_db::init_database_memory().await.unwrap();
+        let root=tempfile::tempdir().unwrap();
+        let mut services=AppServices::from_config(db,&test_config(root.path())).await.unwrap();
+        let robot=services.robot.as_ref().expect("isolated Robot owner").clone();
+        robot.inject_bridge_panic_for_test().unwrap();
+        assert!(robot.shutdown_and_wait().await.is_err());
+        let calls=Arc::new(AtomicUsize::new(0));let counter=calls.clone();
+        let original=services.browser_platform_shutdown.clone();
+        services.browser_platform_shutdown=BrowserPlatformShutdown::from_steps(Some(BrowserShutdownStep::new("Robot cleanup order",move || {
+            let original=original.clone();let counter=counter.clone();
+            async move {counter.fetch_add(1,Ordering::AcqRel);original.shutdown().await.map_err(|error|error.to_string())}
+        })));
+        for _ in 0..2 {
+            let failure=services.shutdown_nomi_core_host().await.unwrap_err();
+            assert!(failure.to_string().contains("Robot task cleanup failed"));
+            assert_eq!(calls.load(Ordering::Acquire),0);
+            sqlx::query("SELECT 1").execute(services.database.pool()).await.unwrap();
+        }
+        // Explicit fixture teardown after all controlled workers have joined;
+        // do not erase the failed owner or claim host shutdown succeeded.
+        services.shutdown_browser_platform().await.unwrap();
+        services.companion_service.close_storage().await;
+        services.database.close().await;
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ use tokio::time::{Duration, interval};
 
 use crate::audio::OpusStreamEncoder;
 use crate::link::{AcceptedLink, Frame, RobotLinkSink};
+use crate::lifecycle::{OwnedTask, OwnedTasks, TaskScope};
 use crate::pipeline::{
     DownlinkPacer, SentenceSplitter, UplinkOutcome, UplinkPipeline, encode_for_downlink,
     sanitize_for_display, sanitize_for_speech,
@@ -389,14 +390,18 @@ async fn start_turn(
     pacer: &Arc<DownlinkPacer>,
     writer: &Writer,
     turn_tx: &mpsc::Sender<(String, TurnOutcome)>,
-    turn_task: &mut Option<tokio::task::JoinHandle<()>>,
+    turn_task: &mut Option<OwnedTask>,
     active_request: &mut Option<RobotTurnRequest>,
     robot_id: &str,
     companion_id: &str,
     conversation_id: &str,
     session_id: &str,
     text: &str,
+    tasks: &TaskScope,
+    stopped: &tokio::sync::watch::Receiver<bool>,
+    cleanup_errors: &mut Vec<String>,
 ) {
+    if *stopped.borrow() { return; }
     let request = RobotTurnRequest {
         robot_id: robot_id.to_owned(), companion_id: companion_id.to_owned(),
         conversation_id: conversation_id.to_owned(), connection_id: session_id.to_owned(),
@@ -423,6 +428,17 @@ async fn start_turn(
             return;
         }
     };
+    // Dispatch may have admitted a canonical Turn before stop. Keep that
+    // future's result, then cancel the exact admitted request; dropping it or
+    // starting the speech projection would lose its ownership boundary.
+    if *stopped.borrow() {
+        if let Some(request) = active_request.take()
+            && let Err(error) = deps.dispatcher.cancel(&request).await
+        {
+            cleanup_errors.push(format!("Robot admitted turn cancellation failed: {error}"));
+        }
+        return;
+    }
     let ctx = SpeechContext {
         robot_id: robot_id.to_owned(),
         companion_id: companion_id.to_owned(),
@@ -436,7 +452,7 @@ async fn start_turn(
         turn_tx.clone(),
     );
     let registry = deps.registry.clone();
-    *turn_task = Some(tokio::spawn(async move {
+    *turn_task = Some(tasks.spawn(async move {
         let watch = async {
             loop {
                 if !registry.connection_matches(&ctx.robot_id, &session_id).await
@@ -460,23 +476,41 @@ async fn start_turn(
 
 /// Run one robot session to completion. Returns when the inbound stream ends.
 pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let tasks = Arc::new(OwnedTasks::default());
+    if let Err(error) = run_session_owned(link, deps, stopped, tasks.clone()).await {
+        tasks.record_error(error);
+    }
+    if let Err(error) = tasks.abort_and_join().await { tracing::error!(%error, "robot session stopped uncleanly"); }
+}
+
+pub(crate) async fn run_session_owned(
+    link: AcceptedLink,
+    deps: SessionDeps,
+    mut stopped: tokio::sync::watch::Receiver<bool>,
+    owned: Arc<OwnedTasks>,
+) -> Result<(), String> {
     let AcceptedLink {
         identity,
         sink,
         mut stream,
     } = link;
     let robot_id = identity.robot_id.clone();    let (writer, writer_task) = Writer::spawn(sink);
+    let writer_task = owned.track(writer_task);
+    let tasks = TaskScope::new(owned);
+    let mut cleanup_errors = Vec::new();
 
     let mut session_id: Option<String> = None;
     let mut companion_id: Option<String> = None;
     let mut uplink: Option<UplinkPipeline> = None;
     let mut mcp: Option<Arc<crate::mcp_bridge::RobotMcpClient>> = None;
-    let mut discovery_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut discovery_task: Option<OwnedTask> = None;
     let mut conversation_id: Option<String> = None;
     let (pacer, pacer_task) = DownlinkPacer::spawn(writer.tx.clone());
+    let pacer_task = tasks.track(pacer_task);
     let pacer = Arc::new(pacer);
     let (turn_tx, mut turn_rx) = mpsc::channel::<(String, TurnOutcome)>(4);
-    let mut turn_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut turn_task: Option<OwnedTask> = None;
     let mut active_request: Option<RobotTurnRequest> = None;
     let mut active_playback: Option<String> = None;
     let mut playback: Option<mpsc::Receiver<crate::registry::RobotPlaybackCommand>> = None;
@@ -485,6 +519,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
     ping.tick().await; // the first tick is immediate; skip it
 
     loop {
+        if *stopped.borrow_and_update() { break; }
         if let Some(sid) = session_id.as_deref()
             && !deps.registry.connection_matches(&robot_id, sid).await { break; }
         if active_request.is_none() && turn_task.is_none()
@@ -494,13 +529,18 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
             && let Some(text) = utterance_queue.pop_front()
         {
             start_turn(&deps, &pacer, &writer, &turn_tx, &mut turn_task, &mut active_request,
-                &robot_id, bound, conversation, sid, &text).await;
+                &robot_id, bound, conversation, sid, &text, &tasks, &stopped, &mut cleanup_errors).await;
         }
         // Set by whichever branch decided the user stopped talking; handled at
         // the end of the iteration so the read loop stays one flat match.
         let mut utterance: Option<Vec<u8>> = None;
 
         tokio::select! {
+            biased;
+            changed = stopped.changed() => {
+                if changed.is_err() { cleanup_errors.push("Robot session stop channel was lost".into()); }
+                break;
+            }
             command = async {
                 match playback.as_mut() { Some(receiver) => receiver.recv().await, None => std::future::pending().await }
             } => {
@@ -531,7 +571,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                 );
                 deps.status.publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(&bound), RobotPhase::Speaking, now_ms()).await;
                 let _ = command.accepted.send(Ok(()));
-                turn_task = Some(tokio::spawn(async move {
+                turn_task = Some(tasks.spawn(async move {
                     let generation = pacer.generation();
                     let watch = async {
                         loop {
@@ -570,7 +610,9 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                 }
                 active_request = None;
                 active_playback = None;
-                turn_task = None;
+                if let Some(task) = turn_task.take() {
+                    if let Err(error) = task.join().await { cleanup_errors.push(error); }
+                }
                 let Some(failure) = outcome.failed else {
                     if let Some(bound) = &companion_id {
                         deps.status.publish_for_connection(&deps.registry, &robot_id, session_id.as_deref(), Some(bound), RobotPhase::Idle, now_ms()).await;
@@ -666,7 +708,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                     let device_token = identity.device_token.clone();
                                     let discovering = robot_id.clone();
                                     let tool_registry = deps.tools.clone();
-                                    discovery_task = Some(tokio::spawn(async move {
+                                    discovery_task = Some(tasks.spawn(async move {
                                         let url = vision_base
                                             .map(|base| format!("{base}{}", crate::endpoint::VISION_PATH));
                                         if let Err(error) =
@@ -725,6 +767,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                 active_playback = None;
                                 if let Some(task) = turn_task.take() {
                                     task.abort();
+                                    if let Err(error) = task.join().await { cleanup_errors.push(error); }
                                 }
                                 if let Some(pipeline) = uplink.as_mut() {
                                     pipeline.abort();
@@ -734,6 +777,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                                     && let Err(error) = deps.dispatcher.cancel(&request).await
                                 {
                                     tracing::warn!(%robot_id, %error, "robot: turn cancel failed");
+                                    cleanup_errors.push(format!("Robot turn cancellation failed: {error}"));
                                 }
                                 if let Some(sid) = &session_id {
                                     writer.send_json(&ServerMessage::TtsStop { session_id: sid.clone() }).await;
@@ -783,8 +827,9 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                 robot_id: robot_id.clone(),
                 companion_id: bound.clone(),
             };
-            let transcript = match deps.speech.transcribe(&ctx, wav).await {
-                Ok(text) => text,
+            let transcript = match transcribe_until_stopped(deps.speech.as_ref(), &ctx, wav, &mut stopped).await {
+                Ok(Some(text)) => text,
+                Ok(None) => break,
                 Err(error) => {
                     tracing::warn!(%robot_id, %error, "robot: ASR failed");
                     if !deps.registry.connection_matches(&robot_id, &sid).await { continue; }
@@ -799,6 +844,7 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
                     continue;
                 }
             };
+            if *stopped.borrow() { break; }
             if !deps.registry.connection_matches(&robot_id, &sid).await { continue; }
             if transcript.trim().is_empty() {
                 // An empty round: hand the device straight back to listening
@@ -846,11 +892,18 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
     // close and finish.
     if let Some(task) = turn_task.take() {
         task.abort();
-        let _ = task.await;
+        if let Err(error) = task.join().await { cleanup_errors.push(error); }
+    }
+    if *stopped.borrow() {
+        if let Some(request) = active_request.take()
+            && let Err(error) = deps.dispatcher.cancel(&request).await
+        {
+            cleanup_errors.push(format!("Robot active turn cancellation failed: {error}"));
+        }
     }
     if let Some(task) = discovery_task.take() {
         task.abort();
-        let _ = task.await;
+        if let Err(error) = task.join().await { cleanup_errors.push(error); }
     }
     if let Some(sid) = session_id.as_deref() {
         deps.registry.disconnect(&robot_id, sid).await;
@@ -859,12 +912,34 @@ pub async fn run_session(link: AcceptedLink, deps: SessionDeps) {
     drop(mcp);
     pacer.flush();
     pacer_task.abort();
-    let _ = pacer_task.await;
+    if let Err(error) = pacer_task.join().await { cleanup_errors.push(error); }
+    // Includes old/replaced turns and discovery tasks, not only the latest.
+    if let Err(error) = tasks.abort_and_join().await { cleanup_errors.push(error); }
     drop(pacer);
     deps.status.mark_offline_if_disconnected(&deps.registry, &robot_id, now_ms()).await;
     drop(writer);
-    let _ = writer_task.await;
+    if let Err(error) = writer_task.join().await { cleanup_errors.push(error); }
     tracing::info!(%robot_id, "robot: session ended");
+    if cleanup_errors.is_empty() { Ok(()) } else { Err(cleanup_errors.join("; ")) }
+}
+
+async fn transcribe_until_stopped(
+    speech: &dyn SpeechServices,
+    context: &SpeechContext,
+    wav: Vec<u8>,
+    stopped: &mut tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<Option<String>> {
+    if *stopped.borrow() { return Ok(None); }
+    tokio::select! {
+        biased;
+        result = async {
+            loop {
+                if *stopped.borrow_and_update() { return Ok::<(), anyhow::Error>(()); }
+                stopped.changed().await.map_err(|_| anyhow::anyhow!("Robot ASR stop channel was lost"))?;
+            }
+        } => { result?; Ok(None) }
+        result = speech.transcribe(context, wav) => result.map(Some),
+    }
 }
 
 #[cfg(test)]
@@ -879,6 +954,96 @@ mod tests {
     use crate::services::mock::{MockDispatcher, MockSpeech};
     use nomifun_api_types::WebSocketMessage;
     use nomifun_realtime::UserEventSink;
+
+    struct HeldTranscribe {
+        entered: Arc<tokio::sync::Notify>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl SpeechServices for HeldTranscribe {
+        async fn transcribe(&self, _: &SpeechContext, _: Vec<u8>) -> anyhow::Result<String> {
+            struct Guard(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Guard { fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Release); } }
+            let _guard = Guard(self.dropped.clone());
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+        async fn synthesize(&self, _: &SpeechContext, _: &str) -> anyhow::Result<crate::audio::AudioBuffer> { anyhow::bail!("unused fixture") }
+        async fn explain_image(&self, _: &SpeechContext, _: Vec<u8>, _: &str) -> anyhow::Result<String> { anyhow::bail!("unused fixture") }
+    }
+
+    #[tokio::test]
+    async fn host_stop_cancels_held_asr_without_late_transcript() {
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let speech = HeldTranscribe { entered: entered.clone(), dropped: dropped.clone() };
+        let task = tokio::spawn(async move {
+            transcribe_until_stopped(&speech, &SpeechContext { robot_id: "fixture".into(), companion_id: "fixture".into() }, vec![], &mut stopped).await
+        });
+        entered.notified().await;
+        stop.send_replace(true);
+        assert_eq!(task.await.unwrap().unwrap(), None);
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    struct HeldDispatch {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+        accepted: Mutex<Vec<RobotTurnRequest>>,
+        cancelled: Mutex<Vec<RobotTurnRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl CompanionTurnDispatcher for HeldDispatch {
+        async fn ensure_companion_session(&self, _: &str) -> anyhow::Result<String> { Ok("conversation".into()) }
+        async fn dispatch(&self, request: RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
+            self.accepted.lock().unwrap().push(request);
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            Ok(mpsc::channel(1).1)
+        }
+        async fn cancel(&self, request: &RobotTurnRequest) -> anyhow::Result<()> { self.cancelled.lock().unwrap().push(request.clone()); Ok(()) }
+        async fn vad_tuning(&self, _: &str) -> crate::vad::VadTuning { Default::default() }
+        async fn vad_engine(&self, _: &str) -> String { crate::vad::DEFAULT_VAD_ENGINE.into() }
+    }
+
+    #[tokio::test]
+    async fn host_stop_joins_dispatch_result_then_cancels_exact_request_without_projection() {
+        let (mut harness, _link, _tx, written, _directory) = harness(true).await;
+        let dispatcher = Arc::new(HeldDispatch {
+            entered: Arc::new(tokio::sync::Notify::new()), release: Arc::new(tokio::sync::Semaphore::new(0)),
+            accepted: Default::default(), cancelled: Default::default(),
+        });
+        harness.deps.dispatcher = dispatcher.clone();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let owned = Arc::new(OwnedTasks::default());
+        let cleanup = owned.clone();
+        let task = tokio::spawn(async move {
+            let tasks = TaskScope::new(owned.clone());
+            let (writer, writer_task) = Writer::spawn(Box::new(RecordingSink(written)));
+            owned.track(writer_task);
+            let (pacer, pacer_task) = DownlinkPacer::spawn(writer.tx.clone());
+            tasks.track(pacer_task);
+            let (turn_tx, _turn_rx) = mpsc::channel(1);
+            let mut active = None; let mut turn = None; let mut errors = Vec::new();
+            start_turn(&harness.deps, &Arc::new(pacer), &writer, &turn_tx, &mut turn, &mut active,
+                "robot", "companion", "conversation", "connection", "utterance", &tasks, &stopped, &mut errors).await;
+            assert!(turn.is_none() && active.is_none());
+            assert!(errors.is_empty());
+        });
+        dispatcher.entered.notified().await;
+        stop.send_replace(true);
+        assert!(!task.is_finished(), "submitted dispatch is still owned until it returns");
+        dispatcher.release.add_permits(1);
+        task.await.unwrap();
+        let accepted = dispatcher.accepted.lock().unwrap();
+        let cancelled = dispatcher.cancelled.lock().unwrap();
+        assert_eq!(accepted.len(), 1); assert_eq!(cancelled.len(), 1);
+        assert_eq!(accepted[0].request_id, cancelled[0].request_id);
+        assert_eq!(accepted[0].connection_id, cancelled[0].connection_id);
+        drop(accepted); drop(cancelled);
+        cleanup.abort_and_join().await.unwrap();
+    }
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
