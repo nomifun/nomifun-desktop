@@ -3679,3 +3679,12 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   canonical closed source与完整codec；default不启用，authoritative拒绝不cursor绕过。
   共享8页/5秒及journal预算不增，取消直传。Runtime304/1ignored、host定向1通过；
   正式修后仍待验，Windows未代判。外证据step5-b09-settled，原失败/数据不改写。
+
+### 有界历史投影优先操作结果（2026-10-03，macOS正式残余）
+
+- 正文正式采用恢复file字节/hash/顺序，但64KiB先被planning参数占满，仅23/33、后段
+  结果未入请求；模型stdin计数字符错误，完整报告仍FAIL。原数据/效果保持，模型owner0。
+- 原预算内stable优先操作记录；标原插入index/非执行时序，原payload不改，selected/
+  included错误计数和omitted IDs明确。stdin proposal的UTF-8+显式LF机械计数为derived/
+  非owner-byte receipt，不能绕过before_tool或冒称实际写入。七项定向回归通过/1ignored，
+  正式修后待验，Windows未代判。外证据step5-b09-body。
