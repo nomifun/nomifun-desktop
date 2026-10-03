@@ -3599,3 +3599,7 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   激活后替换真实archive状态，无port不宣称可用、不新增自动请求或输出/上下文额度。
 - 两首红后Runtime296通过、显式原B634events/33逐项原正文/error/source_binding完整回归
   通过；修后正式模型未验，Windows未代判。原B公开漏项仍OPEN，外证据history-upgrade-report。
+- 随后Mac正式`30c274dee`修后采用检查仍FAIL：旧回复作用域标签进入摘要、当前reader说明/
+  LOAD schema进入主请求，2请求/1主步仍没有历史查询，重复错误缺失结论。不归为包错版/
+  schema不可见，也不由Turn completed关闭语义缺口；停止同机制付费循环。无新效果、五表
+  封存/正常退出通过；证据history-scope-recheck，完整原B和公开质量保持OPEN，Windows未代验。
