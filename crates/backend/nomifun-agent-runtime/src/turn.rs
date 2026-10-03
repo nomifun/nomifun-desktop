@@ -2178,6 +2178,14 @@ fn synchronize_adaptive_context(
             name: crate::planning::TOOL_NAME.into(),
         };
     }
+    if !adaptive.tool_history() {
+        if request.input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD) {
+            upsert_instruction(&mut request.input.instructions,&mut slots.tool_history,
+                crate::tool_archive::BOOTSTRAP_CONTEXT.to_owned());
+        } else if let Some(slot)=slots.tool_history {
+            request.input.instructions[slot].clear();
+        }
+    }
     Ok(())
 }
 
@@ -3404,9 +3412,30 @@ mod tests {
         assert_eq!(history.0.load(Ordering::SeqCst),1);assert_eq!(owner.0.load(Ordering::SeqCst),0);
         let requests=model.requests.lock().unwrap();
         assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+        assert!(requests[0].input.instructions.iter().any(|text|text==crate::tool_archive::BOOTSTRAP_CONTEXT),
+            "a new reader must advertise its scope before the first lookup, not inherit an old lookup failure");
+        assert!(crate::tool_archive::BOOTSTRAP_CONTEXT.len()<=1024);
         assert!(requests[1].input.tools.iter().any(|tool|tool.name==crate::tool_archive::READ));
         assert!(requests[1].input.tools.iter().any(|tool|tool.name==crate::tool_archive::SEARCH));
         assert!(!requests[1].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME||tool.name==crate::completion::TOOL_NAME));
+        assert!(!requests[1].input.instructions.iter().any(|text|text==crate::tool_archive::BOOTSTRAP_CONTEXT),
+            "the active archive replaces the bootstrap instead of keeping contradictory state");
+    }
+
+    #[tokio::test]
+    async fn history_bootstrap_notice_requires_the_current_authenticated_reader() {
+        #[derive(Default)] struct NeverOwner;
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,_:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                panic!("plain reply cannot execute an owner")
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![text_step("No lookup requested.")])});
+        open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0)).await.unwrap();
+        let requests=model.requests.lock().unwrap();
+        assert!(!requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
+        assert!(!requests[0].input.instructions.iter().any(|text|text==crate::tool_archive::BOOTSTRAP_CONTEXT));
     }
 
     #[tokio::test]

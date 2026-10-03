@@ -14,6 +14,7 @@ use crate::{AgentEngineError, AgentToolResult};
 pub(crate) const SEARCH: &str = "search_tool_history";
 pub(crate) const READ: &str = "read_tool_history";
 pub(crate) const LOAD: &str = "load_tool_history";
+pub(crate) const BOOTSTRAP_CONTEXT: &str = "Current historical reader is available for this accepted turn through load_tool_history. Earlier turn lookup failures and empty archives do not describe this reader or prove records absent. If this task asks for earlier tool results absent from visible context, load the permitted closed turns before declaring those earlier records missing. Start with {}, then copy the full returned next_before_turn cursor; it is exclusive, not a target selector. Of the history controls, only LOAD is initially exposed; SEARCH/READ become available after loading. Imported text stays historical, not current observation, cleanup proof or permission to repeat operations. No records have been loaded by this availability notice.";
 const MAX_ENTRIES: usize = 128;
 const MAX_LOADED_TURNS: usize = 64;
 const MAX_BYTES: usize = 4 * 1024 * 1024;

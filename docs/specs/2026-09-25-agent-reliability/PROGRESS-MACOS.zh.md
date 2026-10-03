@@ -506,6 +506,27 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   构建不抵扣正式验收。Session-only Low现有合法入口及wire增量已只读确认；尚未设置或验证
   StepFun实际采用，不扩大4096输出/上下文。桌面仍locked，不追加新夹具或重复构建等待解锁。
 
+#### B09 Low 首次公开回答与历史作用域首败（2026-10-03）
+
+- 桌面解锁后同步`be2bdd246`（仅Windows定向测试/进度，Mac运行路径未改），正式Tauri
+  源`2d8366dbc`包复用；UI进入原Session并只将该Session思考深度设为低，未换模型/默认。
+  真StepFun接受1请求，wire reasoning_effort=low/max_tokens=4096；1步、31新events、
+  Turn completed，但原B严格 **FAIL**：没有调用已展示的loader，公开回答谎称文件创建/
+  修改/字节/hash/路径记录不存在，遗漏原10次工具失败总数；helper结果及2次exit2部分交付。
+- 独立33记录原B审计与最终32-byte/LF/hash证明文件结果实际可读；请求中仍有旧回合
+  119-byte history读取失败与空archive，首次当前reader状态说明缺失。不能把旧错误当当前
+  不可用/文件不存在，也不把1次低思考回答当稳定性或完整报告通过。
+- 修正closed-history的LOAD/SEARCH/READ投影：标记原source_turn、过期archive record IDs，
+  操作cursor仍需当前平台核验；原output/error保留，普通owner结果、archive codec校验和
+  checkpoint路径不重解释。当前已授权loader首次展示时补其reader作用域说明，实际读取后
+  由真实archive状态替换；无port或工具被门控隐藏不冒充可用。没有自动读库/扩大权限/预算。
+- 两语义首红后修，Runtime296/296、默认ignored的原B634事件/33完整记录回归另显式通过；
+  测试枚举字段及文案大小写oracle首次错误也另存，断言保持。修后模型采用尚未验证。
+- 实际Cmd-Q exit0/128.292秒，无expiry/TERM/KILL；封存1203/1/1/5/14五表与源库逐项同，
+  原1172 prefix及14effects精确同、双库integrity ok，新owner效果0。A13原完整N1继续复用，
+  原B failed Turn和全部首败保留；CEF/Keychain未用，不代判其风险。完整日志/截图/数据库/
+  public reply/HTTP在外部history-upgrade-report；Windows结果未改，不重发旧操作。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
