@@ -468,6 +468,17 @@ pub(crate) async fn run_turn(
         dropped_history_messages: diagnostics.dropped_history_messages,
         warnings: diagnostics.warnings,
     }).await?;
+    if let Some(archive) = &tool_archive
+        && let Some(data) = archive.reference_data_message(context_budget.max_context_bytes)
+    {
+        let position = model_request.input.messages.len().saturating_sub(1);
+        model_request.input.messages.insert(position, data);
+        if crate::stream_limits::serialized_size(&model_request.input, context_budget.max_context_bytes).is_err()
+            || model_request.input.messages.len() > context_budget.max_history_messages.saturating_add(1)
+        {
+            model_request.input.messages.remove(position);
+        }
+    }
     }
 
     let mut output_text = String::new();
@@ -3479,12 +3490,17 @@ mod tests {
         let port=Arc::new(History::default());let mut sample=request();
         sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
             "只依据历史工具记录补报告。operation_id:turn:user:msg:session:old，不重发原操作。".into());
+        let accepted_reference_input = sample.input.messages[0].clone();
         open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
             AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0).with_history_port(port.clone())).await.unwrap();
         assert_eq!(port.0.load(Ordering::SeqCst),1,"the explicit source must be resolved before the model can claim it missing");
         let requests=model.requests.lock().unwrap();
         assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::SEARCH));
         assert!(!requests[0].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME));
+        let first = serde_json::to_string(&requests[0].input.messages).unwrap();
+        assert!(first.contains("第二行 after"), "explicitly requested original body must reach the first request without requiring a guessed READ");
+        assert!(first.contains("quoted_explicit_turn_archive_data"));
+        assert_eq!(requests[0].input.messages.last().unwrap(), &accepted_reference_input);
         assert!(serde_json::to_string(&requests[1].input.messages).unwrap().contains("第二行 after"));
     }
 

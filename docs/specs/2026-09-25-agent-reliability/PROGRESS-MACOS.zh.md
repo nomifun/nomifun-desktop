@@ -638,6 +638,23 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   checkpoint权限，不改旧日志；真正不兼容恢复报本地SessionConfigurationChanged。
   三项定向回归通过，正式修后待验。证据step5-b09-closure/run-004-report及run-001-build。
 
+#### 明确引用旧回合的正文投递（2026-10-03）
+
+- 结清状态修后正式Step5已到达：1请求/1步、无本次摘要、1M/4096/low实际成立，正常
+  Cmd-Q48.716秒/无信号，1327events/9Turns/14effects封存、1295前缀/8旧Turn/效果同。
+  报告仍false filemissing，未记PASS；原诊断audit的7→8及host AGENTS加载计数oracle
+  另修v2，不覆盖v1、不忽略真实模型owner。新模型owner0、host指令读取2单列。
+- 实际request01只有旧seq1262摘要和进程receipt投影；before/after正文、SHA、33/32与
+  stdin13均未入模型，archive33只是metadata。现在仅当前User明确引用的已验目标正文
+  以quoted Assistant/Text数据、原binding/error/截断标记进入首请求，不进System、不改
+  acceptedInput/TaskLedger、不授予fresh/recovery权限。整条消息<=64KiB且必须满足原
+  context byte/message预算，超限保留分页入口，不宣称完整；原output/token预算不变。
+- 官方history port复用原owner/fixed accepted-root、clear/Agent floor及完整codec，
+  精确装载一个已关闭matching Turn，避免旧8页窗口拿不到明确目标；default能力关闭
+  仍walk。共享8页/5秒/8MiB journal不增，authoritative拒绝/错目标不fallback、取消直传。
+  Runtime304通过/1外部输入ignored、host固定root/floor/terminal1通过；夹具首编错误
+  外留。正式正文采用待验，Windows未代判。证据step5-b09-settled/run-002-live及run-001-build。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

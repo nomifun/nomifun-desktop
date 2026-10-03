@@ -3668,3 +3668,14 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   default v2且host证明仅模型变化时返回default；pending/legacy/预算超出/错源/无证明
   仍拒绝，不迁移checkpoint或恢复权限。真正不兼容恢复为SessionConfigurationChanged。
   三项定向回归通过；修后正式待验，Windows未代判。外证据step5-b09-closure。
+
+### 明确旧回合引用的正文数据投递（2026-10-03，macOS正式缺口）
+
+- Step5真实1请求仍错误文件缺失；实际输入继承旧seq1262摘要，仅helper receipt正文，
+  file before/after/SHA/33/32及stdin13均缺。archive33 metadata不是33全文已送模型。
+- 明确当前User同Session引用才投递已验证目标的quoted Assistant/Text正文；原binding/
+  error/截断保留，非System/acceptedInput/当前证据或恢复权限。<=64KiB并复核原context
+  byte/message预算，不扩大output。官方exact reader保留fixed-root、context/Agent floor、
+  canonical closed source与完整codec；default不启用，authoritative拒绝不cursor绕过。
+  共享8页/5秒及journal预算不增，取消直传。Runtime304/1ignored、host定向1通过；
+  正式修后仍待验，Windows未代判。外证据step5-b09-settled，原失败/数据不改写。
