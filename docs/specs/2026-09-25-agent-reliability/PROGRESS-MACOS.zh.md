@@ -499,6 +499,12 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   history-upgrade-report仅准备文件，最新真实请求仍旧cursor轮的3次thinking-only。解锁
   问题内“已发送/loader已采用”的描述不符合本次新轮证据，已纠正；未重发原操作/新增请求。
   本次桌面接口仍报locked，正式B报告和CEF UI验证待手动解锁，不把这一阻断扩为确定性阻断。
+- 正式验证包已准备：Tauri debug/no-bundle源`2d8366dbc`，未改UI复用；使用既有CEF装配
+  入口更新全部5种Helper（旧history-upgrade-report包未覆盖）。Main签后hash7442854f…，
+  5Helper逐项签名/源Mach-O UUID核对、deep-strict及CEF smoke示例编译通过；完整receipt在
+  外部`guardian-formal/run-001-build/`。下一B runner已指向此包，但App/relay未启动/请求0，
+  构建不抵扣正式验收。Session-only Low现有合法入口及wire增量已只读确认；尚未设置或验证
+  StepFun实际采用，不扩大4096输出/上下文。桌面仍locked，不追加新夹具或重复构建等待解锁。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
