@@ -3614,3 +3614,7 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   原source binding与正文/error、原failed Turn保留，输出/上下文既有预算不扩。
 - 两模型前加载子断言首红后Runtime300通过、原B634events/33完整回归通过；真实模型采用/
   完整B报告及Windows新入口未验，不能以定向回归关Case。外证据history-reference-load。
+- Mac正式`ae24847f0`已实际预加载原33条/无淘汰/错误10并展示SEARCH/READ，6请求
+  （5摘要+1主步）仍零正文查询，重复错误文件缺失结论，严格Case仍FAIL。原效果/prefix与
+  五表冷封存、正常退出通过；不归为数据读不到或入口不可见，下一聚焦正文/完成路径，
+  不再同机制文案复跑。外证据history-reference-load；Windows原结果不改。
