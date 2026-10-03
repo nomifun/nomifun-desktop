@@ -62,7 +62,13 @@ pub(crate) async fn load(
             if crate::stream_limits::serialized_size(&turn.events,8*1024*1024).is_err() {break;}
             let next=turn.operation_id.clone();
             if &next==target {
-                report=archive.import_reference(crate::AgentHistoryPage {turn:Some(turn),has_older:page.has_older},binding)
+                let admitted=tokio::select! {
+                    biased;
+                    _=cancellation.cancelled()=>return Err(AgentEngineError::Cancelled),
+                    result=tokio::time::timeout_at(deadline,archive.import_scoped_reference(crate::AgentHistoryPage {turn:Some(turn),has_older:page.has_older},binding,port,causality))=>
+                        result.unwrap_or_else(|_|Err(AgentEngineError::ContextAssembly("reference lookup budget expired".into()))),
+                };
+                report=admitted
                     .unwrap_or_else(|_|json!({"source_turn":target,"status":"reference_not_admitted","current_evidence":false}));
                 break;
             }
