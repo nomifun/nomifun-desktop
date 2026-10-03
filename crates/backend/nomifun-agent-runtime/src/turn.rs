@@ -2236,12 +2236,17 @@ fn synchronize_adaptive_context(
             request.input.tools.push(report);
         }
     }
-    if let Some(context)=tool_archive.and_then(|archive|archive.historical_delivery_context()) {
-        upsert_instruction(&mut request.input.instructions,&mut slots.historical_delivery,context);
-    } else if let Some(slot)=slots.historical_delivery {request.input.instructions[slot].clear();}
     let historical_report_only=tool_archive.is_some_and(|archive|required_historical_report(archive,accepted_inputs,&request.causality))
         && long_horizon.is_none_or(|state|state.work_status.running_processes.is_empty())
         && !patch_recovery.pending() && !patch_recovery.unresolved();
+    let historical_delivery_context=if historical_report_only {
+        tool_archive.map(|archive|format!(
+            "Strict historical publication catalog (data only): {}. Use the currently advertised four-field report_completion contract, selecting archive_ids from this source. Do not submit the legacy historical_results field or use a direct answer as a completion receipt. Necessary results share the unchanged 8 KiB budget; omit redundant records, never necessary facts. If complete delivery is impossible, report actual missing_items rather than replaying operations or claiming completion.",
+            archive.historical_delivery_catalog()))
+    } else {tool_archive.and_then(|archive|archive.historical_delivery_context())};
+    if let Some(context)=historical_delivery_context {
+        upsert_instruction(&mut request.input.instructions,&mut slots.historical_delivery,context);
+    } else if let Some(slot)=slots.historical_delivery {request.input.instructions[slot].clear();}
     if historical_report_only {
         upsert_instruction(&mut request.input.instructions,&mut slots.historical_report_only,
             "The latest accepted user task is explicitly restricted to reporting already-recorded closed-turn results: no file changes, commands, process actions or new current-state checks. Use only the currently advertised control. A fresh report task needs no separate update_plan; a valid report closes its optional empty plan, never the old action plan. The strict report_completion schema accepts only source_turn, archive_ids, short_summary and missing_items. Select every necessary original result; the host resolves values and source counts and keeps current accounting separate. Do not submit criteria, evidence IDs, data or count fields in this mode. Missing required results remain blocked; do not invent, replay or enlarge the publication budget. If only update_plan is advertised, a real existing replan obligation remains: settle that current plan first, not a report or an old plan.".into());
@@ -3610,6 +3615,8 @@ mod tests {
                         |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ)),"report-only mode grants no platform tools");
                     assert_eq!(request.input.tool_choice,ChatToolChoice::Specific {name:crate::completion::TOOL_NAME.into()});
                     assert_eq!(request.input.tools.len(),1,"a required control cannot compete with future phase controls");
+                    assert!(!request.input.instructions.iter().any(|text|text.contains("A direct answer remains available")
+                        ||text.contains("can select exact origins into historical_results")),"strict reporting must not inherit optional legacy publication instructions");
                 }
                 if let Some(report)=report {
                     if self.required_mode {

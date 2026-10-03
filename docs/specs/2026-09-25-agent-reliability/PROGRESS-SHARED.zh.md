@@ -3854,3 +3854,10 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   增加非空AGENTS授权read真实接线最小首红，再沿已有context空plan规则修复；已存在plan
   或steering/recovery gate仍要求replan，规则内容/权限无变化。host2reads/modelowner0、
   strict单请求与stale-plan及Runtime323/1ignored通过；新正式待验，证据history-report-instruction-entry。
+
+- mac修后正式首请求起ONLY四字段report，初次AGENTS接线及compact原生调用实际采用；
+  6请求中后4次均validJSON但16记录超原8KiB全部拒绝，有界终态失败，未交付/表达未通过。
+  旧prefix/Turn/14effects同、无modelowner、native0/242.247秒；不扩预算或删必要值取绿。
+  后续仅离线选择/预算定位，原A/B结果与Windows边界不改，完整外证据history-report-instruction-entry。
+- 同时去除strict上下文继承的optional direct-answer/旧historical_results指示，仅替其catalog
+  说明为当前4字段合同；普通optional不变，实际请求无冲突说明回归通过，未再付费验证。

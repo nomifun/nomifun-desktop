@@ -923,6 +923,17 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   及既有patch/steering/current伪证邻近Runtime323/1ignored通过。正式采用待验，证据另记
   history-report-instruction-entry；不再靠无read authority组件冒充正式接线。
 
+- `7143c699b`/文档`91f6678e2`正式同原task：首请求起ONLY四字段report，首次AGENTS
+  接线修复实际成立；前两次普通正文，后4次validJSON真实compact调用，各选16记录超过
+  既有8KiB预算，全部明确拒绝，最终有界no-progress失败。**入口/四字段采用成立，完整
+  交付和表达仍FAIL**，不提高预算/删必要事实或把missing洗空。6请求/6步、1877events/
+  21Turns/14effects，1798前缀/20旧Turn同、无新owner；Cmd-Q0/242.247秒无expiry/信号。
+  源备五表同/ok，完整trace/公开参数/UI/失败观察器独立在history-report-instruction-entry。
+  后续先离线确认完整选择预算与必要来源，不再同根因付费循环；A/B既有结果、Keychain不重验。
+- strict catalog仍沿optional旧说明说direct answer可完成及historical_results，和4字段选面
+  矛盾；只在strict上下文按当前合同生成catalog说明，普通optional路径不变。增加实际首
+  请求无旧说明断言并通过同控制回归；此文案接线未新增正式模型复跑，不以它关闭预算/表达。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
