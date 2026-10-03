@@ -266,6 +266,7 @@ impl ChatModelBroker {
         };
         let adapters = self.adapters.clone();
         let credential_store = Arc::clone(&self.credential_store);
+        let route_resolver = Arc::clone(&self.route_resolver);
         let retry_policy = self.retry_policy;
         let capability_observer = Arc::clone(&self.capability_observer);
         let (sender, receiver) = mpsc::channel(BROKER_STREAM_CAPACITY);
@@ -280,6 +281,7 @@ impl ChatModelBroker {
                     request,
                     routes,
                     adapters,
+                    route_resolver,
                     credential_store,
                     retry_policy,
                     capability_observer,
@@ -313,6 +315,7 @@ async fn run_broker(
     request: crate::contracts::ChatModelRequest,
     routes: Vec<ResolvedChatRoute>,
     adapters: BTreeMap<ChatProtocol, Arc<dyn ChatProtocolAdapter>>,
+    route_resolver: Arc<dyn ChatRouteResolver>,
     credential_store: Arc<dyn ProviderCredentialStore>,
     retry_policy: BrokerRetryPolicy,
     capability_observer: Arc<dyn ChatCapabilityObserver>,
@@ -349,6 +352,7 @@ async fn run_broker(
                 .expect("validated protocol adapter")
                 .as_ref(),
             credential_store.as_ref(),
+            route_resolver.as_ref(),
             route_attempt,
             total_attempt,
             &sender,
@@ -414,10 +418,27 @@ async fn run_attempt(
     route: &ResolvedChatRoute,
     adapter: &dyn ChatProtocolAdapter,
     credential_store: &dyn ProviderCredentialStore,
+    route_resolver: &dyn ChatRouteResolver,
     route_attempt: u8,
     total_attempt: u8,
     sender: &mpsc::Sender<Result<BrokerEventEnvelope, ChatModelError>>,
 ) -> AttemptOutcome {
+    let configured_output = match route_resolver.output_limit_for_route(route).await {
+        Ok(value) => value,
+        Err(error) => return AttemptOutcome::failed(error.with_route(route.model_route_id.clone())),
+    };
+    if configured_output == Some(0) {
+        return AttemptOutcome::failed(ChatModelError::invalid_request("attempted model output ceiling must be positive"));
+    }
+    // Start from the canonical caller request each time. A primary model's
+    // bound is not a caller preference and must not constrain a later model.
+    let mut attempted_request = request.clone();
+    attempted_request.input.max_output_tokens = match (request.input.max_output_tokens, configured_output) {
+        (Some(caller), Some(configured)) => Some(caller.min(configured)),
+        (caller, None) => caller,
+        (None, configured) => configured,
+    };
+    let request = &attempted_request;
     let target = CredentialTarget::for_route(route);
     let credential = match credential_store
         .lease(&route.credential_ref, &target)

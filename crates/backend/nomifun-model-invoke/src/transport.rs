@@ -609,6 +609,8 @@ mod tests {
         for body in [
             br#"{"error":{"code":"invalid_request_error","param":"tools","message":"tools are unsupported"}}"#.as_slice(),
             br#"{"error":{"code":"unsupported_parameter","param":"temperature"}}"#.as_slice(),
+            br#"{"error":{"code":"unsupported_value","param":"reasoning_effort"}}"#.as_slice(),
+            br#"{"error":{"code":"unsupported_value","param":"thinking"}}"#.as_slice(),
             br#"{"message":"streaming not supported"}"#.as_slice(),
             b"not json".as_slice(),
         ] {

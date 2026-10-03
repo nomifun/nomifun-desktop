@@ -54,6 +54,7 @@ import {
   resolveModelInputChange,
   requiresCrossOriginConsent,
   resolvedCapabilityUrl,
+  isValidModelTokenLimit,
   rootMatchesShape,
   withProviderParamVoice,
   withProviderParamChainRounds,
@@ -79,6 +80,8 @@ export interface ModelCatalogSuggestion {
   traits: ModelTrait[];
   /** Window the provider's own catalog declares, when it declares one. */
   contextLimit?: number;
+  outputLimit?: number;
+  contextLimitKind?: 'input_only' | 'combined';
 }
 
 export interface ModelDefinitionEditorProps {
@@ -117,6 +120,7 @@ const callConfigIntentForError = (code: CapabilityValidationError): CallConfigIn
     case 'connection_missing':
       return 'connection';
     case 'output_ceiling_required':
+    case 'invalid_token_limit':
       return 'limits';
     case 'protocol_required':
     case 'protocol_not_registered':
@@ -584,6 +588,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               tasks: profile.tasks,
               traits: profile.traits,
               ...(profile.contextLimit === undefined ? {} : { contextLimit: profile.contextLimit }),
+              ...(profile.outputLimit === undefined ? {} : { outputLimit: profile.outputLimit }),
+              ...(profile.contextLimitKind === undefined ? {} : { contextLimitKind: profile.contextLimitKind }),
             },
             task
           )
@@ -1003,7 +1009,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         const outputLimitRequired = descriptor?.requires_output_ceiling ?? false;
         const outputLimitMissing =
           outputLimitRequired &&
-          !(typeof capability.outputLimit === 'number' && capability.outputLimit > 0);
+          !isValidModelTokenLimit(capability.outputLimit);
         const recommendedConnection = descriptor?.default_connections.find(
           (connection) => (connection.connection_role ?? 'default') === selectedRole
         );
@@ -1333,7 +1339,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     />
                     <div className='text-11px leading-4 text-t-tertiary'>
                       {t('settings.modelAdvanced.contextLimitCompactHint', {
-                        defaultValue: '未设置时使用运行时默认预算；请按模型实际窗口填写。',
+                        defaultValue: '未填写不覆盖模型上下文。仅采用供应商明确提供的窗口；未知时请按模型文档填写，安全预算独立。',
                       })}
                     </div>
                   </div>
@@ -2136,7 +2142,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 {outputLimitMissing && (
                   <div className='text-11px text-danger-6' role='alert' data-output-limit-required>
                     {t('settings.outputLimitRequired', {
-                      defaultValue: 'This protocol requires an explicit max output token value.',
+                      defaultValue: 'This protocol requires a numeric max output value. No provider/model recommendation is available; enter the documented value instead of guessing.',
                     })}
                   </div>
                 )}
@@ -2309,7 +2315,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               <div className={`text-11px ${providerParamsValid ? 'text-t-tertiary' : 'text-danger-6'}`}>
                 {providerParamsValid
                   ? t('settings.modelAdvanced.providerParamsOnly', {
-                      defaultValue: '只填写供应商原始参数；协议、URL 和 endpoint 由上方结构化字段管理。',
+                      defaultValue: '只填写供应商原始参数；切换协议会保留自定义值，不兼容的参数需要明确修正。URL 和凭据边界独立管理。',
                     })
                   : t('settings.modelAdvanced.invalidParamsJson', {
                       defaultValue: '必须是合法的 JSON 对象。',

@@ -26,7 +26,6 @@ use nomifun_model_invoke::ModelInvokeService;
 use crate::control_steps::first_json_object;
 use crate::event_publisher::{AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase};
 
-const PLAN_MAX_TOKENS: u32 = 8192;
 const FALLBACK_TITLE_LEN: usize = 60;
 const PLAN_FALLBACK_NOTICE: &str = "\n\n⚠️ 自动拆解没有返回有效计划，已回退为一个可执行步骤。";
 
@@ -218,7 +217,6 @@ impl LlmPlanProducer {
         participants: &[ExecutionParticipant],
         system: &str,
         user: String,
-        max_tokens: u32,
         sink: Option<&LeadThinkingSink>,
     ) -> Result<String, AppError> {
         let lead = pick_lead(participants).ok_or_else(|| {
@@ -238,7 +236,7 @@ impl LlmPlanProducer {
             &config,
             system,
             vec![user_message(user)],
-            max_tokens,
+            None,
             |kind, delta| {
                 if let Some(sink) = sink {
                     sink(kind.into(), delta);
@@ -269,7 +267,6 @@ impl PlanProducer for LlmPlanProducer {
                 participants,
                 PLAN_SYSTEM,
                 build_plan_user_prompt(goal, participants, &descriptions),
-                PLAN_MAX_TOKENS,
                 sink,
             )
             .await?;
@@ -294,7 +291,6 @@ impl PlanProducer for LlmPlanProducer {
                 &current.participants,
                 ADJUST_SYSTEM,
                 build_adjust_user_prompt(intent, current),
-                PLAN_MAX_TOKENS,
                 sink,
             )
             .await?;

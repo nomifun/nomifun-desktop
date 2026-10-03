@@ -306,7 +306,7 @@ pub(crate) async fn run_turn(
         event_sink.save_checkpoint(initial).await?;
     }
     event_sink.emit(AgentEngineEvent::ExecutionBudgetPrepared {
-        context_window_tokens: request.model_budget.context_window_tokens,
+        context_window_tokens: request.model_budget.context_window_tokens.unwrap_or(0),
         max_output_tokens: request.model_budget.max_output_tokens,
         max_model_steps: total_model_limit,
     }).await?;
@@ -3358,6 +3358,31 @@ mod tests {
         assert_eq!(&sample.input.instructions[..preserved.instructions.len()],preserved.instructions);
     }
 
+    fn configured_test_budget() -> crate::AgentModelBudget {
+        crate::AgentModelBudget::from_limits(Some(32_768), Some(4096)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn provider_default_and_large_context_do_not_compact_at_legacy_32k_or_128_messages() {
+        for context in [None, Some(1_000_000)] {
+            let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+            let mut request = request();
+            request.input.max_output_tokens = None;
+            let original = request.input.messages[0].clone();
+            request.input.messages.extend((0..256).map(|index|
+                crate::context_lifecycle::text_message(ChatRole::User, format!("{index}:{}", "history ".repeat(100)))));
+            let before = request.input.clone();
+            let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+                crate::AgentModelBudget::from_limits(context, None).unwrap(),
+                AgentContextBudget { max_context_bytes: 512 * 1024, ..Default::default() },
+            ).unwrap();
+            lifecycle.prepare(&mut request, &[original], &binding(), model.clone(), &NoopAgentEventSink,
+                CancellationToken::new()).await.unwrap();
+            assert_eq!(request.input, before, "provider-defined/1M context must keep fitting history exact");
+            assert!(model.requests.lock().unwrap().is_empty(), "no speculative summary request");
+        }
+    }
+
     fn request() -> ChatModelRequest {
         ChatModelRequest {
             contract_version: VersionString::from(
@@ -4698,7 +4723,7 @@ mod tests {
         ]);
         let before = serde_json::to_vec(&request.input).unwrap().len();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), AgentContextBudget { max_context_bytes: 256 * 1024, max_history_messages: 256 },
+            configured_test_budget(), AgentContextBudget { max_context_bytes: 256 * 1024, max_history_messages: 256 },
         ).unwrap();
         lifecycle.prepare(&mut request, &[original.clone()], &binding(), model.clone(), &NoopAgentEventSink,
             CancellationToken::new()).await.unwrap();
@@ -4756,7 +4781,7 @@ mod tests {
         let before = serde_json::to_vec(&request.input).unwrap().len();
         let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), resource,
+            configured_test_budget(), resource,
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
@@ -4817,7 +4842,7 @@ mod tests {
         let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
         let before = serde_json::to_vec(&request.input).unwrap().len();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), resource,
+            configured_test_budget(), resource,
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
@@ -4867,7 +4892,7 @@ mod tests {
         let hard_input_limit = 32768 - 4096 - 512;
         let soft_trigger = mandatory_tokens + (hard_input_limit - mandatory_tokens) / 2;
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), AgentContextBudget::default(),
+            configured_test_budget(), AgentContextBudget::default(),
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
@@ -4911,7 +4936,7 @@ mod tests {
         ));
         let before = request.input.clone();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), AgentContextBudget::default(),
+            configured_test_budget(), AgentContextBudget::default(),
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
@@ -4949,7 +4974,7 @@ mod tests {
         let before = request.input.clone();
         let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), resource,
+            configured_test_budget(), resource,
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
@@ -4980,7 +5005,7 @@ mod tests {
         request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(600)));
         let before = request.input.clone();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), AgentContextBudget::default(),
+            configured_test_budget(), AgentContextBudget::default(),
         ).unwrap();
         lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage { input_tokens:500, ..Default::default() });
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
@@ -5019,7 +5044,7 @@ mod tests {
         request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(400)));
         let before = request.input.clone();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 },
+            configured_test_budget(), AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 },
         ).unwrap();
         let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &sink, CancellationToken::new()).await.unwrap_err();
@@ -5299,7 +5324,7 @@ mod tests {
         let original = request.input.messages[0].clone();
         let before = request.input.clone();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
+            configured_test_budget(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
         ).unwrap();
         let rejection = ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::PromptTooLong,
             "typed provider rejection", nomifun_chat_model_broker::ChatRetryDirective::Never);
@@ -5320,7 +5345,7 @@ mod tests {
         request.input.max_output_tokens = Some(4096);
         let original = request.input.messages[0].clone();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
+            configured_test_budget(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
@@ -5367,7 +5392,7 @@ mod tests {
         let instructions = request.input.instructions.clone();
         let tools = request.input.tools.clone();
         let resource = AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 };
-        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(crate::AgentModelBudget::default(),resource).unwrap();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(configured_test_budget(),resource).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
             &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
         assert!(!model.requests.lock().unwrap().is_empty(), "the oversized suffix must trigger real compaction");
@@ -5453,7 +5478,7 @@ mod tests {
             }
             let before=request.input.clone();
             let resource=AgentContextBudget {max_context_bytes:64*1024,max_history_messages:4};
-            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(crate::AgentModelBudget::default(),resource).unwrap();
+            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(configured_test_budget(),resource).unwrap();
             let sink=Sink::default();
             let result=lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),
                 &sink,CancellationToken::new()).await;
@@ -5576,7 +5601,7 @@ mod tests {
             provider_round_id: None,
         }).chain([current.clone()]).collect();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), budget,
+            configured_test_budget(), budget,
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&current), &binding(),
             model.clone(), &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
@@ -5613,7 +5638,7 @@ mod tests {
             max_context_bytes: 64 * 1024,
         };
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(),
+            configured_test_budget(),
             budget,
         )
         .unwrap();
@@ -5677,7 +5702,7 @@ mod tests {
             provider_round_id: None,
         }).chain([current.clone()]).collect();
         let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
-            crate::AgentModelBudget::default(), budget,
+            configured_test_budget(), budget,
         ).unwrap();
         lifecycle.prepare(&mut request, std::slice::from_ref(&current), &binding(),
             model.clone(), &NoopAgentEventSink, CancellationToken::new()).await.unwrap();

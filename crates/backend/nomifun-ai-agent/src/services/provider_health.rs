@@ -19,23 +19,6 @@ use crate::factory::provider_config::{
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_PROMPT: &str = "Reply with exactly OK.";
 
-/// Output budget for the chat probe.
-///
-/// This used to be 16, which is plenty for a model that answers "OK" directly
-/// and never enough for a reasoning model: those spend their first output tokens
-/// on a thinking preamble and only then emit `content`. StepFun
-/// `step-3.7-flash` at 16 tokens returns `content: ""` with
-/// `finish_reason: "length"` and the whole budget in `reasoning_content`, so the
-/// probe declared a perfectly healthy provider unreachable. At 256 the same
-/// request returns `OK`/`stop`.
-///
-/// Sized so a normal reasoning preamble finishes and the probe observes real
-/// text. It is deliberately not unbounded: the ceiling still caps a runaway
-/// model, and [`probe_terminal_failure`] no longer treats hitting it as a
-/// failure, so a model that thinks for longer than this is still reported
-/// healthy.
-const PROBE_OUTPUT_CEILING: u32 = 2048;
-
 pub struct ProviderHealthCheckService {
     data_dir: PathBuf,
     /// Unified invoke layer: non-chat modality probes ride
@@ -253,7 +236,7 @@ async fn run_probe(
             &config,
             "You are a provider health probe. Reply with exactly OK and do not use tools.",
             vec![user_message(HEALTH_CHECK_PROMPT)],
-            PROBE_OUTPUT_CEILING,
+            None,
             32 * 1024,
         ),
     )
@@ -549,14 +532,6 @@ mod tests {
     use nomifun_model_invoke::{AdapterRegistry, default_adapters};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    #[test]
-    fn reasoning_probe_has_a_real_output_budget() {
-        assert!(
-            PROBE_OUTPUT_CEILING >= 512,
-            "a 16-token ceiling is what broke every reasoning model"
-        );
-    }
 
     #[test]
     fn classifies_invoke_errors_without_transport_fallbacks() {

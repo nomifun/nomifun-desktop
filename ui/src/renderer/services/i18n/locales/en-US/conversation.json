@@ -31,6 +31,8 @@
   "reasoningEffort": {
     "label": "Reasoning for this conversation",
     "auto": "Auto",
+    "none": "None",
+    "minimal": "Minimal",
     "low": "Low",
     "medium": "Medium",
     "high": "High",

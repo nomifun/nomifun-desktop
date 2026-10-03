@@ -139,6 +139,13 @@ interface FetchedModelInfo {
   tasks?: ModelTask[];
   traits?: ModelTrait[];
   context_limit?: number;
+  /** Only a provider-declared output window; never a client-generated default. */
+  output_limit?: number;
+  token_limit_sources?: {
+    context_limit?: string;
+    output_limit?: string;
+    context_limit_kind?: 'input_only' | 'combined';
+  };
 }
 
 export interface FetchModelsResponse {

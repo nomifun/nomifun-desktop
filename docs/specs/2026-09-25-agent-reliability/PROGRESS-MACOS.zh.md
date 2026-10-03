@@ -1,6 +1,25 @@
 # macOS 命令与会话可靠性进度
 
 更新：2026-10-04。本次近期四目标收尾完成；此前 Windows 结果仍只作共享历史引用，不代判。
+
+### 用户新增：全局模型配置不降能力（2026-10-04）
+
+- 只验证新增配置合同修复，不重开旧 A/B/C 或 M01～M06。macOS 26.6.2 / arm64 原生 runner。
+  根因/范围见共享页同名记录。六 Chat 协议及已注册媒体 adapter 按真实 registry 审计，
+  不猜未知模型规格，不以模型名字填数值；显式用户配置及供应商不可用错误保留。
+- 已验证目录/保存/clone、字段与思考控制、actual-attempt 输出、未知/1M 上下文、长 prompt、
+  Creation/template/one-shot、伴侣调用与 UI。组件/本地 HTTP fixture 不代判正式 Tauri UI、
+  所有供应商付费 live、Windows native 或 release；本批没有新供应商付费调用。
+- 首次运行的未知上下文比例计算溢出、旧几何夹具隐含 32K/4K、TTS 夹具丢 endpoint、
+  中途接口写入编译失败及旧库测试夹具的迁移孔洞均保留，不覆盖首红。旧几何显式配置后
+  继续原断言；旧 schema 夹具只恢复真实旧结构，不改生产权限、吞错、旧迁移 checksum。
+- 完整日志仓库外：`2026-10-04/macos/model-configuration-global/run-001/`；无凭据/数据库入 Git。
+- 最终验证：runtime 335/1 ignored、invoke 416、Broker 43、Session 80、companion 259、
+  Creation 70、catalog 59、管理保存/clone 3、DB 升级 8/schema 6、主机配置 22、
+  原四 Turn 配置切换/精确绑定 2、UI 118 全通过；另外 DTO、one-shot/template/字段编码
+  小回归通过，typecheck/桌面边界/i18n 通过。旧库夹具恢复改在单一连接上逐步核对真实
+  表/index/trigger，首 31/35 红保留、37 修后全 8 绿；不改生产迁移制造通过。
+
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
 按用户 2026-09-30 的明确目的，本轮收敛为简单系统命令、步骤衔接、过程状态和结果可信性，
 与共享计划的 C01～C08、A/B/C 三组正式会话一致。停止按 M01～M06 穷举全产品余项。

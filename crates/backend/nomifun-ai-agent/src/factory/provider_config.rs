@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use nomi_config::config::{CliArgs, Config};
+use nomi_config::compat::ProviderCompat;
+use nomi_config::config::{CliArgs, Config, ProviderType};
 use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason};
@@ -127,6 +128,7 @@ pub(crate) struct ResolvedProviderFields {
     pub provider: String,
     pub api_key: String,
     pub model: String,
+    pub output_limit: Option<u32>,
     pub base_url: Option<String>,
     pub compat_overrides: NomiCompatOverrides,
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
@@ -344,6 +346,9 @@ async fn resolve_provider_fields_at_revision(
         .as_object()
         .cloned()
         .ok_or_else(|| AppError::BadRequest("Chat capability provider_params must be a JSON object".into()))?;
+    // Host-owned context accounting metadata stays in the saved capability,
+    // but is never a provider request field.
+    provider_body.remove("_nomifun_context_limit_kind");
     let max_tokens_field = match provider_body.remove("max_tokens_field") {
         Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
             Some(value.trim().to_owned())
@@ -390,6 +395,20 @@ async fn resolve_provider_fields_at_revision(
         None => None,
     };
 
+    let output_limit = task
+        .output_limit
+        .map(|limit| {
+            u32::try_from(limit)
+                .ok()
+                .filter(|limit| *limit > 0)
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "Chat capability output_limit must be positive and fit in u32".into(),
+                    )
+                })
+        })
+        .transpose()?;
+
     let compat_overrides = NomiCompatOverrides {
         // The resolver passes Nomi a complete task endpoint.
         api_path: base_url.as_ref().map(|_| String::new()),
@@ -409,6 +428,7 @@ async fn resolve_provider_fields_at_revision(
         provider,
         api_key,
         model: task.model,
+        output_limit,
         base_url,
         compat_overrides,
         bedrock_config,
@@ -464,7 +484,7 @@ fn provider_config_from_fields(
         api_key: Some(fields.api_key),
         base_url: fields.base_url,
         model: Some(fields.model),
-        max_tokens: None,
+        max_tokens: fields.output_limit,
         max_turns: None,
         system_prompt: None,
         profile: None,
@@ -474,8 +494,23 @@ fn provider_config_from_fields(
     let mut config =
         Config::resolve(&cli_args).map_err(|e| AppError::Internal(format!("Config resolve failed: {e}")))?;
 
+    // Managed model configuration is authoritative, including absence. A
+    // local CLI/project default must not supply an unconfigured model ceiling.
+    config.output_max_tokens = fields.output_limit;
+
     // Apply bedrock and compat post-assignments
     config.bedrock = fields.bedrock_config;
+
+    // Local CLI/project compatibility tuning must not change a managed
+    // model's request. Start from protocol presets, then overlay only the
+    // controls resolved from the exact saved capability.
+    config.compat = match config.provider {
+        ProviderType::Anthropic | ProviderType::Vertex => ProviderCompat::anthropic_defaults(),
+        ProviderType::OpenAI => ProviderCompat::openai_defaults(),
+        ProviderType::OpenAIResponses => ProviderCompat::openai_responses_defaults(),
+        ProviderType::Gemini => ProviderCompat::gemini_defaults(),
+        ProviderType::Bedrock => ProviderCompat::bedrock_defaults(),
+    };
 
     if let Some(field) = fields.compat_overrides.max_tokens_field {
         config.compat.max_tokens_field = Some(field);
@@ -519,12 +554,14 @@ pub enum DeltaKind {
 ///
 /// Builds an `LlmRequest` from the given config, streams events from the
 /// provider, and concatenates `TextDelta` events until `Done` is received.
+/// An absent `max_tokens` preserves the model's configured limit or the
+/// provider default; an explicit request can only lower a configured limit.
 /// Errors from the provider or the stream are mapped to `AppError::BadGateway`.
 pub async fn one_shot_completion(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
 ) -> Result<String, AppError> {
     streaming_completion(cfg, system, messages, max_tokens, |_| {}).await
 }
@@ -540,22 +577,11 @@ pub async fn one_shot_completion_bounded(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     max_output_utf8_bytes: usize,
 ) -> Result<String, AppError> {
+    let request = completion_request(cfg, system, messages, max_tokens)?;
     let provider: Arc<dyn LlmProvider> = create_provider(cfg);
-    let request = LlmRequest {
-        model: cfg.model.clone(),
-        system: system.to_owned(),
-        messages,
-        tools: vec![],
-        max_tokens: Some(max_tokens),
-        thinking: None,
-        reasoning_effort: None,
-        // A bounded one-shot draft is never a durable agent round: it keeps no
-        // provider-side state and must not consume a round cursor.
-        retain_provider_round: false,
-    };
     let rx = provider
         .stream(&request)
         .await
@@ -570,21 +596,11 @@ pub async fn streaming_completion(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     on_delta: impl FnMut(&str) + Send,
 ) -> Result<String, AppError> {
+    let request = completion_request(cfg, system, messages, max_tokens)?;
     let provider: Arc<dyn LlmProvider> = create_provider(cfg);
-
-    let request = LlmRequest {
-        model: cfg.model.clone(),
-        system: system.to_owned(),
-        messages,
-        tools: vec![],
-        max_tokens: Some(max_tokens),
-        thinking: None,
-        reasoning_effort: None,
-        retain_provider_round: false,
-    };
 
     let rx = provider.stream(&request).await.map_err(provider_error_to_app_error)?;
 
@@ -604,25 +620,50 @@ pub async fn streaming_completion_text_or_reasoning(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     on_delta: impl FnMut(DeltaKind, &str) + Send,
 ) -> Result<String, AppError> {
+    let request = completion_request(cfg, system, messages, max_tokens)?;
     let provider: Arc<dyn LlmProvider> = create_provider(cfg);
-
-    let request = LlmRequest {
-        model: cfg.model.clone(),
-        system: system.to_owned(),
-        messages,
-        tools: vec![],
-        max_tokens: Some(max_tokens),
-        thinking: None,
-        reasoning_effort: None,
-        retain_provider_round: false,
-    };
 
     let rx = provider.stream(&request).await.map_err(provider_error_to_app_error)?;
 
     drain_text_or_reasoning(rx, on_delta).await
+}
+
+fn completion_request(
+    cfg: &Config,
+    system: &str,
+    messages: Vec<Message>,
+    requested_output_limit: Option<u32>,
+) -> Result<LlmRequest, AppError> {
+    if requested_output_limit == Some(0) || cfg.output_max_tokens == Some(0) {
+        return Err(AppError::BadRequest(
+            "Chat completion output limit must be positive".into(),
+        ));
+    }
+    let max_tokens = match (requested_output_limit, cfg.output_max_tokens) {
+        (Some(requested), Some(configured)) => Some(requested.min(configured)),
+        (Some(requested), None) => Some(requested),
+        (None, configured) => configured,
+    };
+    if max_tokens.is_none() && cfg.provider.requires_output_ceiling() {
+        return Err(AppError::BadRequest(format!(
+            "{:?} Chat protocol requires an explicit output limit; set Max output tokens on the selected model capability or supply a completion output limit",
+            cfg.provider,
+        )));
+    }
+    Ok(LlmRequest {
+        model: cfg.model.clone(),
+        system: system.to_owned(),
+        messages,
+        tools: vec![],
+        max_tokens,
+        thinking: None,
+        reasoning_effort: None,
+        // One-shot completions keep no provider-side round state.
+        retain_provider_round: false,
+    })
 }
 
 /// Convenience constructor for a user-role `Message` with a single text block.
@@ -875,6 +916,13 @@ mod provider_resolution_tests {
     }
 
     async fn resolve_case(case: ChatCase) -> ResolvedProviderFields {
+        resolve_case_with_output_limit(case, None).await
+    }
+
+    async fn resolve_case_with_output_limit(
+        case: ChatCase,
+        output_limit: Option<i64>,
+    ) -> ResolvedProviderFields {
         let db = init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_repo: Arc<dyn IProviderRepository> =
@@ -895,6 +943,7 @@ mod provider_resolution_tests {
             endpoint: case.endpoint,
             provider_params: case.provider_params,
             context_limit: Some(131_072),
+            output_limit,
             ..Default::default()
         }];
         provider_repo
@@ -943,20 +992,24 @@ mod provider_resolution_tests {
 
     #[tokio::test]
     async fn exact_openai_chat_capability_resolves_nomi_config() {
-        let fields = resolve_case(ChatCase {
-            provider_id: "0190f5fe-7c00-7a00-8000-000000000101",
-            protocol: "openai.chat_text",
-            auth_scheme: "bearer",
-            base_url: "https://transport.example/root",
-            base_url_override: Some("https://transport.example/openai-root"),
-            endpoint: Some("/custom/chat"),
-            traits: "[]",
-            credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
-            provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"ultra","temperature":0.2}"#,
-            bedrock_config: None,
-        })
+        let fields = resolve_case_with_output_limit(
+            ChatCase {
+                provider_id: "0190f5fe-7c00-7a00-8000-000000000101",
+                protocol: "openai.chat_text",
+                auth_scheme: "bearer",
+                base_url: "https://transport.example/root",
+                base_url_override: Some("https://transport.example/openai-root"),
+                endpoint: Some("/custom/chat"),
+                traits: "[]",
+                credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
+                provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"ultra","temperature":0.2,"_nomifun_context_limit_kind":"input_only","custom":{"values":[1,true,{"mode":"precise"}]}}"#,
+                bedrock_config: None,
+            },
+            Some(100_000),
+        )
         .await;
         assert_eq!(fields.provider, "openai");
+        assert_eq!(fields.output_limit, Some(100_000));
         assert_eq!(fields.api_key, "test-secret\ntest-secret-2");
         assert_eq!(fields.base_url.as_deref(), Some("https://transport.example/openai-root/custom/chat"));
         assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
@@ -966,6 +1019,15 @@ mod provider_resolution_tests {
         assert_eq!(
             fields.compat_overrides.extra_body.as_ref().unwrap()["temperature"],
             serde_json::json!(0.2)
+        );
+        assert_eq!(
+            fields.compat_overrides.extra_body.as_ref().unwrap()["custom"],
+            serde_json::json!({"values": [1, true, {"mode": "precise"}]})
+        );
+        assert!(
+            !fields.compat_overrides.extra_body.as_ref().unwrap()
+                .contains_key("_nomifun_context_limit_kind"),
+            "host context metadata must never reach the provider request body"
         );
         assert!(
             !fields
@@ -1106,6 +1168,188 @@ mod provider_resolution_tests {
             fields.compat_overrides.extra_body.as_ref().unwrap()["top_k"],
             11
         );
+    }
+}
+
+#[cfg(test)]
+mod completion_output_limit_tests {
+    use super::*;
+    use nomi_config::config::ProviderType;
+
+    fn fields(output_limit: Option<u32>) -> ResolvedProviderFields {
+        ResolvedProviderFields {
+            provider: "openai".into(),
+            api_key: "fixture-key".into(),
+            model: "fixture-model".into(),
+            output_limit,
+            base_url: Some("https://provider.example/chat".into()),
+            compat_overrides: NomiCompatOverrides::default(),
+            bedrock_config: None,
+            supports_web_search: false,
+        }
+    }
+
+    #[test]
+    fn managed_output_limit_including_absence_overrides_project_defaults() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".nomi.toml"),
+            "[default]\nprovider = \"openai\"\nmax_tokens = 64\n",
+        )
+        .unwrap();
+
+        for saved in [None, Some(100_000)] {
+            let config = provider_config_from_fields(fields(saved), workspace.path()).unwrap();
+            assert_eq!(config.output_max_tokens, saved);
+            let request = completion_request(&config, "system", vec![user_message("user")], None)
+                .unwrap();
+            assert_eq!(request.max_tokens, saved);
+            assert!(request.tools.is_empty());
+            assert!(!request.retain_provider_round);
+        }
+    }
+
+    #[test]
+    fn managed_compat_controls_including_absence_override_project_tuning() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".nomi.toml"),
+            r#"[default]
+provider = "openai"
+[providers.openai.compat]
+max_tokens_field = "local_token_limit"
+reasoning_effort = "high"
+require_reasoning_content = true
+chain_rounds = true
+supports_effort = false
+clean_orphan_tool_calls = false
+strip_patterns = ["remove_from_local"]
+api_path = "/unexpected"
+[providers.openai.compat.extra_body]
+temperature = 0.99
+[providers.openai.compat.extra_body.custom]
+mode = "local"
+"#,
+        )
+        .unwrap();
+
+        let mut saved = fields(None);
+        saved.compat_overrides.api_path = Some(String::new());
+        let config = provider_config_from_fields(saved, workspace.path()).unwrap();
+        assert_eq!(config.api_key, "fixture-key");
+        assert_eq!(config.base_url, "https://provider.example/chat");
+        assert_eq!(config.compat.api_path.as_deref(), Some(""));
+        assert_eq!(config.compat.max_tokens_field.as_deref(), Some("max_tokens"));
+        assert!(config.compat.reasoning_effort.is_none());
+        assert!(config.compat.extra_body.is_none());
+        assert!(config.compat.require_reasoning_content.is_none());
+        assert!(config.compat.chain_rounds.is_none());
+        assert!(config.compat.strip_patterns.is_none());
+        assert!(config.compat.supports_effort());
+        assert!(config.compat.clean_orphan_tool_calls());
+
+        let mut saved = fields(None);
+        saved.provider = "openai-responses".into();
+        let response_config = provider_config_from_fields(saved, workspace.path()).unwrap();
+        assert_eq!(
+            response_config.compat.api_path.as_deref(),
+            Some("/v1/responses")
+        );
+        assert_eq!(
+            response_config.compat.max_tokens_field.as_deref(),
+            Some("max_output_tokens")
+        );
+
+        let mut saved = fields(Some(100_000));
+        saved.compat_overrides = NomiCompatOverrides {
+            api_path: Some(String::new()),
+            max_tokens_field: Some("max_completion_tokens".into()),
+            reasoning_effort: Some("low".into()),
+            require_reasoning_content: Some(false),
+            chain_rounds: Some(false),
+            extra_body: Some(
+                serde_json::json!({"temperature": 0.2, "custom": {"values": [1, true]}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+            ..Default::default()
+        };
+        let config = provider_config_from_fields(saved, workspace.path()).unwrap();
+        assert_eq!(config.output_max_tokens, Some(100_000));
+        assert_eq!(config.compat.api_path.as_deref(), Some(""));
+        assert_eq!(
+            config.compat.max_tokens_field.as_deref(),
+            Some("max_completion_tokens")
+        );
+        assert_eq!(config.compat.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(config.compat.require_reasoning_content, Some(false));
+        assert_eq!(config.compat.chain_rounds, Some(false));
+        assert_eq!(
+            config.compat.extra_body.unwrap(),
+            serde_json::json!({"temperature": 0.2, "custom": {"values": [1, true]}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+    }
+
+    #[test]
+    fn completion_limit_preserves_omission_and_intersects_explicit_limits() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = provider_config_from_fields(fields(None), workspace.path()).unwrap();
+        let cases = [
+            (None, None, None),
+            (None, Some(100_000), Some(100_000)),
+            (Some(100_000), None, Some(100_000)),
+            (Some(100_000), Some(50_000), Some(50_000)),
+            (Some(32_000), Some(100_000), Some(32_000)),
+        ];
+        for (configured, requested, expected) in cases {
+            config.output_max_tokens = configured;
+            let request =
+                completion_request(&config, "system", vec![user_message("user")], requested)
+                    .unwrap();
+            assert_eq!(request.max_tokens, expected);
+        }
+    }
+
+    #[test]
+    fn required_protocols_use_explicit_limits_or_report_missing_configuration() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = provider_config_from_fields(fields(None), workspace.path()).unwrap();
+        for provider in [
+            ProviderType::Anthropic,
+            ProviderType::Bedrock,
+            ProviderType::Vertex,
+        ] {
+            config.provider = provider;
+            config.output_max_tokens = None;
+            let error = completion_request(&config, "system", vec![user_message("user")], None)
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message.contains("Max output tokens"))
+            );
+
+            let explicit =
+                completion_request(&config, "system", vec![user_message("user")], Some(512))
+                    .unwrap();
+            assert_eq!(explicit.max_tokens, Some(512));
+
+            config.output_max_tokens = Some(100_000);
+            let saved = completion_request(&config, "system", vec![user_message("user")], None)
+                .unwrap();
+            assert_eq!(saved.max_tokens, Some(100_000));
+        }
+    }
+
+    #[test]
+    fn zero_output_limits_are_rejected_before_provider_construction() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = provider_config_from_fields(fields(None), workspace.path()).unwrap();
+        assert!(completion_request(&config, "system", vec![user_message("user")], Some(0)).is_err());
+        config.output_max_tokens = Some(0);
+        assert!(completion_request(&config, "system", vec![user_message("user")], None).is_err());
     }
 }
 

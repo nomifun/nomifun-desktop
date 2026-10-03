@@ -1,6 +1,31 @@
 # 命令与会话可靠性共享进度
 
-更新：2026-10-02。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-10-04。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+
+## 2026-10-04 用户新增：全局模型配置不降能力
+
+本批不是恢复旧全产品 Case 队列。范围为当前六个 Chat 协议族、32 个媒体/语音/检索
+one-shot adapter 和一个已注册 realtime adapter 的配置→保存→切换→实际请求合同。
+
+- 默认不注入 32K 上下文或 4K 输出；未声明上下文保持未知，以真实 typed 过长拒绝恢复。
+  输出配置只作用于实际 attempt，未使用的小备用不压主模型，小主模型也不压大备用。
+- 目录声明的输出上限及字段来源贯通导入。Gemini `inputTokenLimit`、Anthropic
+  `max_input_tokens` 标为 input-only，不误扣独立输出上限；本地语义标记不发供应商。
+- 显式数值/默认、traits、推理和其他参数不被协议切换、异步目录建议或完整保存覆盖；
+  伴侣、标题、知识、health、planner、template、Creation/one-shot 不再加内部小输出常量。
+  管理配置包括缺省均优先于 `.nomi.toml`。必填输出协议缺少官方声明或显式配置则明确报错，
+  不猜 4096。模板/Wave3 不再以 32K/128K 作为平台上限。
+- 官方 `none/minimal` 与未设置严格区分；原生 thinking 保真、不可表达的控制明确失败。
+  单一 effort value 被拒不能写成整个 Reasoning 不支持。011 是新增前向迁移，旧迁移
+  校验和及用户数据库不改；旧推理值、默认、fork 与删除边界保留。
+- 长媒体 prompt 不再偷偷裁为 512 字符或改意图重试；Agnes 已选尺寸、TTS 已选 voice/format
+  不被 fallback 覆盖，OpenAI 4096 字符限制不再套给其他 TTS 供应商。
+
+官方边界参考：[OpenAI Chat](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、
+[Gemini Models](https://ai.google.dev/api/models)、[Anthropic Models](https://platform.claude.com/docs/en/api/models/retrieve)。
+已保存的旧数值来源不能证明是平台默认时不自动清除；用户明确限制仍保留。字节/历史投影/
+超时/授权保护仍是独立资源策略，不冒充模型官方规格。逐供应商 paid live、Windows native、
+release 全规格不在本批认证范围，其他平台验收历史不改。验证及证据见 macOS 本批记录。
 2026-09-30按用户明确目的收敛为[八个命令问题簇、三组正式会话](IMPLEMENTATION-PLAN.zh.md)。
 本轮处理简单命令、步骤衔接、过程状态及结果可信性；通用/编程入口各保留真实执行证据。
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。

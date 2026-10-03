@@ -379,7 +379,7 @@ impl nomifun_workshop::TemplateDraftRunner for AgentTemplateDraftRunner {
                 &config,
                 request.system_prompt,
                 vec![nomifun_ai_agent::user_message(request.user_text)],
-                nomifun_workshop::TEMPLATE_DRAFT_MAX_TOKENS,
+                None,
                 nomifun_workshop::MAX_TEMPLATE_DRAFT_RESPONSE_BYTES,
             )
             .await

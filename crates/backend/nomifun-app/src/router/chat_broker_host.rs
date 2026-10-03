@@ -636,6 +636,9 @@ impl TurnModelConfiguration {
                 provider_id: candidate.provider_id.clone(), model: candidate.model.clone(),
                 limits: super::engine_model_facts::EngineModelLimits {
                     context_tokens: positive(capability.context_limit)?, output_tokens: positive(capability.output_limit)?,
+                    context_is_input_only: serde_json::from_str::<Value>(&capability.provider_params)
+                        .map_err(|_| ProductionRepositoryError::InvalidData)?
+                        .get("_nomifun_context_limit_kind").and_then(Value::as_str) == Some("input_only"),
                     compaction_threshold_pct: threshold,
                 },
             });
@@ -1130,6 +1133,27 @@ struct ProviderAttemptTarget {
 
 #[async_trait]
 impl ProductionModelRepositoryPort for ProductionModelRepository {
+    async fn output_limit_for_route(&self, route: &ResolvedChatRoute) -> Result<Option<u32>, ProductionRepositoryError> {
+        let configured = if let Some(view) = &self.turn_configuration {
+            let saved = view.candidate(route)?;
+            saved.capabilities.iter().find(|capability| capability.task == PROVIDER_CHAT_MODEL_TASK)
+                .ok_or(ProductionRepositoryError::InvalidData)?.output_limit
+        } else {
+            if !route_config_matches(&self.pool, route).await? {
+                return Err(ProductionRepositoryError::InvalidData);
+            }
+            let row = sqlx::query("SELECT protocol, output_limit FROM provider_model_capabilities WHERE provider_id = ? AND model = ? AND task = ?")
+                .bind(route.provider_id.as_ref()).bind(&route.model).bind(PROVIDER_CHAT_MODEL_TASK)
+                .fetch_optional(&self.pool).await.map_err(|_| ProductionRepositoryError::Unavailable)?
+                .ok_or(ProductionRepositoryError::Missing)?;
+            let protocol: String = row.try_get("protocol").map_err(|_| ProductionRepositoryError::InvalidData)?;
+            if protocol != protocol_id(route.protocol) { return Err(ProductionRepositoryError::InvalidData); }
+            row.try_get::<Option<i64>, _>("output_limit").map_err(|_| ProductionRepositoryError::InvalidData)?
+        };
+        configured.map(|limit| u32::try_from(limit).ok().filter(|limit| *limit > 0)
+            .ok_or(ProductionRepositoryError::InvalidData)).transpose()
+    }
+
     async fn resolve_chat_route(
         &self,
         selection: &ChatRouteSelection,
@@ -1571,6 +1595,24 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
             request.protocol,
             target.output_limit,
         )?;
+        let configured_reasoning = match request.protocol {
+            ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => body.get("thinking")
+                .and_then(|value| value.get("type")).and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "enabled" | "adaptive")),
+            ChatProtocol::OpenaiChat => body.get("reasoning_effort").and_then(Value::as_str)
+                .is_some_and(|effort| effort != "none"),
+            ChatProtocol::OpenaiResponses => body.get("reasoning").and_then(Value::as_object)
+                .is_some_and(|reasoning| !reasoning.is_empty() && reasoning.get("effort").and_then(Value::as_str) != Some("none")),
+            ChatProtocol::Gemini => body.get("generationConfig").and_then(|value| value.get("thinkingConfig"))
+                .is_some_and(|thinking| thinking.get("thinkingLevel").is_some()
+                    || thinking.get("thinkingBudget").and_then(Value::as_i64).is_some_and(|budget| budget != 0)
+                    || thinking.get("includeThoughts").and_then(Value::as_bool) == Some(true)),
+        };
+        if configured_reasoning && !request.route_features.contains(&ChatModelFeature::Reasoning) {
+            return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+                "configured thinking requires the exact attempted route's reasoning capability",
+                ChatRetryDirective::Never));
+        }
         if !request.route_features.contains(&ChatModelFeature::Streaming) {
             configure_non_streaming_attempt(
                 request.protocol,
@@ -1685,14 +1727,23 @@ fn merge_chat_provider_params(
         .get("reasoning_effort")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let typed_openai_output = if protocol == ChatProtocol::OpenaiChat {
+        body_object.get("max_tokens").or_else(|| body_object.get("max_completion_tokens"))
+            .or_else(|| body_object.get("max_output_tokens"))
+            .or_else(|| configured.get("max_tokens_field").and_then(Value::as_str)
+                .and_then(|key| body_object.get(key.trim()))).cloned()
+    } else { None };
+    let typed_gemini_thinking = body_object.get("generationConfig").and_then(|value| value.get("thinkingConfig"));
+    let typed_gemini_level = typed_gemini_thinking.is_some_and(|value| value.get("thinkingLevel").is_some());
+    let typed_gemini_budget = typed_gemini_thinking.is_some_and(|value| value.get("thinkingBudget").is_some());
 
     for (key, value) in configured {
-        // Provider defaults may tune sampling, but cannot add model-owned
-        // messages/tools/thinking after the Broker's feature admission, or
-        // reinsert model/stream fields removed by the cloud wire encoder.
+        // Provider defaults may tune sampling/thinking; active thinking is
+        // checked against the exact route before transport. Defaults cannot
+        // replace model-owned messages/tools or reinsert cloud routing fields.
         if protocol.uses_anthropic_messages() && matches!(key.as_str(),
             "model" | "stream" | "messages" | "system" | "tools" | "tool_choice"
-            | "thinking" | "anthropic_version") {
+            | "anthropic_version") {
             continue;
         }
         if matches!(
@@ -1701,15 +1752,26 @@ fn merge_chat_provider_params(
                 | "chain_rounds"
                 | "require_reasoning_content"
                 | "reasoning_effort"
+                | "_nomifun_context_limit_kind"
         ) {
             continue;
         }
         merge_missing_json_value(body_object, key, value);
     }
+    if protocol == ChatProtocol::Gemini {
+        if let Some(thinking) = body_object.get_mut("generationConfig")
+            .and_then(|value| value.get_mut("thinkingConfig")).and_then(Value::as_object_mut) {
+            // A caller's typed control overrides the model's default mode.
+            // Level and budget are mutually exclusive provider controls.
+            if typed_gemini_level && !typed_gemini_budget { thinking.remove("thinkingBudget"); }
+            if typed_gemini_budget && !typed_gemini_level { thinking.remove("thinkingLevel"); }
+        }
+    }
 
     let configured_ceiling_key = configured
         .get("max_tokens_field")
         .and_then(Value::as_str)
+        .map(str::trim)
         .filter(|key| !key.trim().is_empty());
     let ceiling = output_limit
         .map(|limit| {
@@ -1742,17 +1804,19 @@ fn merge_chat_provider_params(
             }
         }
         ChatProtocol::OpenaiChat => {
-            if let Some(ceiling) = ceiling {
-                let key = configured_ceiling_key.unwrap_or("max_tokens");
-                for default_key in [
-                    "max_tokens",
-                    "max_completion_tokens",
-                    "max_output_tokens",
-                ] {
-                    if default_key != key {
-                        body_object.remove(default_key);
-                    }
+            let key = configured_ceiling_key.unwrap_or("max_tokens");
+            // The Broker uses a canonical output field. Selecting a vendor's
+            // wire alias changes its name, not the caller's requested amount.
+            // This mapping also applies when the model leaves its own ceiling
+            // unspecified, rather than leaking the legacy field in that case.
+            let mut requested = typed_openai_output.or_else(|| body_object.remove(key));
+            for default_key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+                if let Some(value) = body_object.remove(default_key) {
+                    if requested.is_none() { requested = Some(value); }
                 }
+            }
+            if let Some(requested) = requested { body_object.insert(key.to_owned(), requested); }
+            if let Some(ceiling) = ceiling {
                 cap_json_number(body_object, key, ceiling);
             }
         }
@@ -1764,11 +1828,24 @@ fn merge_chat_provider_params(
                 .filter(|value| *value > 0)
                 .ok_or_else(|| ChatModelError::invalid_request("Messages output ceiling must be positive"))?;
             if let Some(thinking) = body_object.get("thinking") {
-                let budget = thinking.get("budget_tokens").and_then(Value::as_u64);
-                if thinking.get("type").and_then(Value::as_str) != Some("enabled")
-                    || !budget.is_some_and(|budget| budget >= 1024 && budget < max_tokens) {
+                match thinking.get("type").and_then(Value::as_str) {
+                    Some("enabled") => {
+                        if !thinking.get("budget_tokens").and_then(Value::as_u64)
+                            .is_some_and(|budget| budget >= 1024 && budget < max_tokens) {
+                            return Err(ChatModelError::invalid_request(
+                                "Messages thinking budget must remain below the effective provider output ceiling",
+                            ));
+                        }
+                    }
+                    Some("adaptive" | "disabled") if thinking.get("budget_tokens").is_none() => {}
+                    _ => return Err(ChatModelError::invalid_request(
+                        "Messages thinking must use enabled with a valid budget, or adaptive/disabled without budget_tokens",
+                    )),
+                }
+                if matches!(thinking.get("type").and_then(Value::as_str), Some("enabled" | "adaptive"))
+                    && matches!(body_object.get("tool_choice").and_then(|choice| choice.get("type")).and_then(Value::as_str), Some("any" | "tool")) {
                     return Err(ChatModelError::invalid_request(
-                        "Messages thinking budget must remain below the effective provider output ceiling",
+                        "Messages thinking cannot force tool_choice any/tool; use auto or none",
                     ));
                 }
             }
@@ -1778,10 +1855,10 @@ fn merge_chat_provider_params(
         let supported = match protocol {
             ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses => matches!(
                 reasoning_effort.as_str(),
-                "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
             ),
             ChatProtocol::Gemini => {
-                matches!(reasoning_effort.as_str(), "low" | "medium" | "high")
+                matches!(reasoning_effort.as_str(), "minimal" | "low" | "medium" | "high")
             }
             ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => false,
         };
@@ -1809,7 +1886,7 @@ fn merge_chat_provider_params(
                     .entry("effort")
                     .or_insert_with(|| Value::String(reasoning_effort));
             }
-            ChatProtocol::Gemini => {
+            ChatProtocol::Gemini if !typed_gemini_budget => {
                 let generation = body_object
                     .entry("generationConfig".to_owned())
                     .or_insert_with(|| Value::Object(Default::default()));
@@ -1830,10 +1907,18 @@ fn merge_chat_provider_params(
                     .entry("thinkingLevel")
                     .or_insert_with(|| Value::String(reasoning_effort));
             }
+            ChatProtocol::Gemini => {},
             ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => unreachable!(
                 "unsupported reasoning protocol returned before provider default merge"
             ),
         }
+    }
+    if protocol == ChatProtocol::Gemini && body_object.get("generationConfig")
+        .and_then(|value| value.get("thinkingConfig"))
+        .is_some_and(|thinking| thinking.get("thinkingLevel").is_some() && thinking.get("thinkingBudget").is_some()) {
+        return Err(ChatModelError::invalid_request(
+            "Gemini thinkingConfig cannot combine thinkingLevel and thinkingBudget; choose one control",
+        ));
     }
     Ok(body)
 }
@@ -2352,6 +2437,7 @@ mod tests {
             &json!({
                 "max_tokens_field": "max_completion_tokens",
                 "require_reasoning_content": false,
+                "_nomifun_context_limit_kind": "input_only",
                 "temperature": 0.25
             }),
             ChatProtocol::OpenaiChat,
@@ -2363,6 +2449,76 @@ mod tests {
         assert_eq!(merged["temperature"], 0.25);
         assert!(merged.get("max_tokens_field").is_none());
         assert!(merged.get("require_reasoning_content").is_none());
+        assert!(merged.get("_nomifun_context_limit_kind").is_none());
+    }
+
+    #[test]
+    fn openai_output_field_alias_preserves_request_amount_and_optional_default() {
+        for ceiling in [None, Some(4096)] {
+            let merged = merge_chat_provider_params(
+                json!({"max_tokens":512}),
+                &json!({"max_tokens_field":" max_completion_tokens "}),
+                ChatProtocol::OpenaiChat,
+                ceiling,
+            ).unwrap();
+            assert_eq!(merged["max_completion_tokens"], 512);
+            assert!(merged.get("max_tokens").is_none());
+            assert!(merged.get(" max_completion_tokens ").is_none());
+        }
+        let capped = merge_chat_provider_params(
+            json!({"max_tokens":512}),
+            &json!({"max_tokens_field":"max_completion_tokens"}),
+            ChatProtocol::OpenaiChat,
+            Some(128),
+        ).unwrap();
+        assert_eq!(capped["max_completion_tokens"], 128);
+        let omitted = merge_chat_provider_params(
+            json!({}),
+            &json!({"max_tokens_field":"max_completion_tokens"}),
+            ChatProtocol::OpenaiChat,
+            None,
+        ).unwrap();
+        assert!(omitted.get("max_tokens").is_none());
+        assert!(omitted.get("max_completion_tokens").is_none());
+        let conflicting_default = merge_chat_provider_params(json!({"max_tokens":512}),
+            &json!({"max_tokens_field":"max_completion_tokens","max_completion_tokens":8192}),
+            ChatProtocol::OpenaiChat, None).unwrap();
+        assert_eq!(conflicting_default["max_completion_tokens"], 512);
+    }
+
+    #[test]
+    fn native_messages_thinking_defaults_survive_and_typed_budget_has_precedence() {
+        for protocol in [ChatProtocol::Anthropic, ChatProtocol::Bedrock, ChatProtocol::Vertex] {
+            let adaptive = merge_chat_provider_params(json!({"max_tokens":8192}),
+                &json!({"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"top_p":0.9}),
+                protocol, Some(8192)).unwrap();
+            assert_eq!(adaptive["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(adaptive["output_config"]["effort"], "high");
+            assert_eq!(adaptive["top_p"], 0.9);
+            let typed = merge_chat_provider_params(json!({"max_tokens":8192,"thinking":{"type":"enabled","budget_tokens":2048}}),
+                &json!({"thinking":{"type":"adaptive"}}), protocol, Some(8192)).unwrap();
+            assert_eq!(typed["thinking"], json!({"type":"enabled","budget_tokens":2048}));
+            let error = merge_chat_provider_params(json!({"max_tokens":8192}),
+                &json!({"thinking":{"type":"enabled","budget_tokens":4096}}), protocol, Some(2048)).unwrap_err();
+            assert!(error.message.contains("thinking budget"));
+            let forced_tool = merge_chat_provider_params(json!({"max_tokens":8192,"tool_choice":{"type":"any"}}),
+                &json!({"thinking":{"type":"enabled","budget_tokens":2048}}), protocol, Some(8192)).unwrap_err();
+            assert!(forced_tool.message.contains("tool_choice"));
+        }
+    }
+
+    #[test]
+    fn gemini_typed_mode_overrides_defaults_and_conflicting_saved_modes_are_rejected() {
+        let typed = merge_chat_provider_params(json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}),
+            &json!({"reasoning_effort":"high","generationConfig":{"thinkingConfig":{"thinkingLevel":"high"},"temperature":0.7}}),
+            ChatProtocol::Gemini, None).unwrap();
+        assert_eq!(typed["generationConfig"]["thinkingConfig"]["thinkingBudget"], 2048);
+        assert!(typed["generationConfig"]["thinkingConfig"].get("thinkingLevel").is_none());
+        assert_eq!(typed["generationConfig"]["temperature"], 0.7);
+        let error = merge_chat_provider_params(json!({"generationConfig":{}}),
+            &json!({"reasoning_effort":"high","generationConfig":{"thinkingConfig":{"thinkingBudget":2048}}}),
+            ChatProtocol::Gemini, None).unwrap_err();
+        assert!(error.message.contains("cannot combine"));
     }
 
     #[test]

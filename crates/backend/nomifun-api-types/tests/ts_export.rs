@@ -8,7 +8,7 @@ use nomifun_api_types::{
     KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryCapabilities, KnowledgeEntryKind,
     KnowledgeEntryOrigin, KnowledgeEntrySourceInfo, KnowledgeEntrySourceRelationship,
     KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSourceSyncStatus,
-    KnowledgeTreeAccess, ModelInfo,
+    KnowledgeTreeAccess, ModelInfo, ModelContextLimitKind, ModelTokenLimitSources,
     ModelProtocolManifestResponse, ModelTask, ModelTechnicalCapability, ModelTrait,
     PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
@@ -106,6 +106,8 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<SaveProviderModelRequest>("SaveProviderModelRequest.ts");
     export_binding_if_changed::<ProviderModelKeyRequest>("ProviderModelKeyRequest.ts");
     export_binding_if_changed::<ModelInfo>("ModelInfo.ts");
+    export_binding_if_changed::<ModelContextLimitKind>("ModelContextLimitKind.ts");
+    export_binding_if_changed::<ModelTokenLimitSources>("ModelTokenLimitSources.ts");
     export_binding_if_changed::<FetchModelsResponse>("FetchModelsResponse.ts");
     export_binding_if_changed::<ProviderConnectionInput>("ProviderConnectionInput.ts");
     export_binding_if_changed::<SaveProviderConnectionRequest>("SaveProviderConnectionRequest.ts");
@@ -191,6 +193,8 @@ fn generated_shapes_mirror_single_source_wire_contract() {
     // name the capability persists it as, so the UI can prefill one from the
     // other without a translation table. Optional in both types.
     let catalog_model = ModelInfo::export_to_string(&cfg).unwrap();
+    assert!(catalog_model.contains("output_limit?: number,"), "got: {catalog_model}");
+    assert!(catalog_model.contains("token_limit_sources?: ModelTokenLimitSources,"), "got: {catalog_model}");
     assert!(
         catalog_model.contains("context_limit?: number,"),
         "got: {catalog_model}"

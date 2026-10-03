@@ -46,6 +46,8 @@ export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolMa
 export interface ModelCapabilityDraft {
   task: ModelTask;
   traits: ModelTrait[];
+  /** UI-only ownership: catalog hints cannot undo an explicit trait edit. */
+  traitsSource?: 'user';
   /**
    * UI-only ownership for protocol-dependent fields. Runtime never sees this
    * value: it exists so an async recommendation may update its own previous
@@ -63,6 +65,9 @@ export interface ModelCapabilityDraft {
   providerParamsJson: string;
   contextLimit?: number;
   outputLimit?: number;
+  /** Includes an explicit choice to remove a limit and use provider defaults. */
+  contextLimitSource?: 'user';
+  outputLimitSource?: 'user';
   compactionThresholdPct?: number;
 }
 
@@ -83,6 +88,9 @@ export interface CatalogCapabilitySuggestion {
   traits: ModelTrait[];
   /** Context window the provider's catalog declares, when it declares one. */
   contextLimit?: number;
+  /** Output window explicitly declared by the provider, never a generic fallback. */
+  outputLimit?: number;
+  contextLimitKind?: 'input_only' | 'combined';
 }
 
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
@@ -110,6 +118,7 @@ export type CapabilityValidationError =
   | 'connection_missing'
   | 'base_url_required'
   | 'output_ceiling_required'
+  | 'invalid_token_limit'
   | 'cross_origin_consent_required'
   | 'invalid_provider_params';
 
@@ -281,6 +290,13 @@ export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[
   task: ModelTask | undefined
 ): T[] => (task ? suggestions.filter((suggestion) => suggestion.tasks.includes(task)) : []);
 
+const withDeclaredContextKind = (raw: string, kind: CatalogCapabilitySuggestion['contextLimitKind']): string => {
+  if (kind !== 'input_only' && kind !== 'combined') return raw;
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok || Object.prototype.hasOwnProperty.call(parsed.value, '_nomifun_context_limit_kind')) return raw;
+  return JSON.stringify({ ...parsed.value, _nomifun_context_limit_kind: kind }, null, 2);
+};
+
 /**
  * Adopt a catalog entry's model id, enriching the task it was chosen for.
  *
@@ -312,23 +328,36 @@ export const applyCatalogSuggestionForTask = (
       )
     : [];
   const declaredWindow =
-    declaresTask && suggestion.contextLimit && suggestion.contextLimit > 0
+    declaresTask && isValidModelTokenLimit(suggestion.contextLimit)
       ? suggestion.contextLimit
       : undefined;
+  const declaredOutput = declaresTask && isValidModelTokenLimit(suggestion.outputLimit)
+      ? suggestion.outputLimit : undefined;
   const known = definition.capabilities.some((capability) => capability.task === task);
   const selectedCapabilities = known
-    ? definition.capabilities.map((capability) =>
-        capability.task === task && declaresTask
-          ? {
+    ? definition.capabilities.map((capability) => {
+        if (capability.task !== task || !declaresTask) return capability;
+        const adoptsContext = capability.contextLimit === undefined && declaredWindow !== undefined &&
+          capability.contextLimitSource !== 'user' && capability.transportSource !== 'persisted';
+        return {
               ...capability,
-              traits,
-              contextLimit: capability.contextLimit ?? declaredWindow,
-            }
-          : capability
-      )
+              traits: capability.traitsSource === 'user' || capability.transportSource === 'persisted'
+                ? capability.traits : traits,
+              contextLimit: capability.contextLimit ?? (
+                capability.contextLimitSource === 'user' || capability.transportSource === 'persisted'
+                  ? undefined : declaredWindow),
+              outputLimit: capability.outputLimit ?? (
+                capability.outputLimitSource === 'user' || capability.transportSource === 'persisted'
+                  ? undefined : declaredOutput),
+              providerParamsJson: adoptsContext
+                ? withDeclaredContextKind(capability.providerParamsJson, suggestion.contextLimitKind)
+                : capability.providerParamsJson,
+            };
+      })
     : [
         ...definition.capabilities,
-        { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow },
+        { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow, outputLimit: declaredOutput,
+          providerParamsJson: declaredWindow === undefined ? '' : withDeclaredContextKind('', suggestion.contextLimitKind) },
       ];
   const declaresUnifiedImageTasks =
     declaresTask &&
@@ -413,7 +442,10 @@ const resetCapabilityTransport = (
   contentEndpoint: '',
   realtimeEndpoint: '',
   allowCrossOriginCredentials: false,
-  providerParamsJson: '',
+  // Parameters are authored model configuration, not credential destinations.
+  // Keep them exact; incompatible reasoning is rejected by validation instead
+  // of silently downgrading the model when its transport changes.
+  providerParamsJson: capability.providerParamsJson,
 });
 
 const TRANSPORT_DRAFT_FIELDS = new Set<keyof ModelCapabilityDraft>([
@@ -436,6 +468,9 @@ export const patchCapabilityDraft = (
   ...capability,
   ...patch,
   task: capability.task,
+  ...(Object.prototype.hasOwnProperty.call(patch, 'traits') ? { traitsSource: 'user' as const } : {}),
+  ...(Object.prototype.hasOwnProperty.call(patch, 'contextLimit') ? { contextLimitSource: 'user' as const } : {}),
+  ...(Object.prototype.hasOwnProperty.call(patch, 'outputLimit') ? { outputLimitSource: 'user' as const } : {}),
   ...(Object.keys(patch).some((key) =>
     TRANSPORT_DRAFT_FIELDS.has(key as keyof ModelCapabilityDraft)
   )
@@ -767,6 +802,10 @@ export const withProviderParamReasoningEffort = (
   return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
 };
 
+/** The wire's integer range, not a universal context/output recommendation. */
+export const isValidModelTokenLimit = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 0xffff_ffff;
+
 export const validateModelDefinition = (
   definition: ModelDefinitionDraft,
   manifests: ModelProtocolManifestMap,
@@ -799,13 +838,12 @@ export const validateModelDefinition = (
       errors.push({ task: capability.task, code: 'protocol_not_registered' });
     }
     const descriptor = protocolDescriptorForDraft(capability, manifest);
+    if ([capability.contextLimit, capability.outputLimit].some(
+      (limit) => limit !== undefined && !isValidModelTokenLimit(limit)
+    )) errors.push({ task: capability.task, code: 'invalid_token_limit' });
     if (
       descriptor?.requires_output_ceiling &&
-      !(
-        typeof capability.outputLimit === 'number' &&
-        Number.isFinite(capability.outputLimit) &&
-        capability.outputLimit > 0
-      )
+      !isValidModelTokenLimit(capability.outputLimit)
     ) {
       errors.push({ task: capability.task, code: 'output_ceiling_required' });
     }

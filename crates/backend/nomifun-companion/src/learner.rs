@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 
 use crate::collector::{LEARN_CURSOR_KEY, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
-use crate::prompt::{self, LEARN_MAX_TOKENS};
+use crate::prompt;
 use crate::registry::CompanionRegistry;
 use crate::store::{CompanionStore, MOOD_KEY, MemoryFilter};
 
@@ -80,7 +80,7 @@ pub struct CompanionLearnResult {
 /// the scheduled learning distillation calls.)
 #[async_trait::async_trait]
 pub trait CompanionCompleter: Send + Sync {
-    async fn complete(&self, provider_id: &str, model: &str, system: &str, user: &str, max_tokens: u32)
+    async fn complete(&self, provider_id: &str, model: &str, system: &str, user: &str, max_tokens: Option<u32>)
     -> Result<String, AppError>;
 }
 
@@ -110,7 +110,7 @@ impl CompanionCompleter for LiveCompanionCompleter {
         model: &str,
         system: &str,
         user: &str,
-        max_tokens: u32,
+        max_tokens: Option<u32>,
     ) -> Result<String, AppError> {
         let cfg = self.resolve(provider_id, model).await?;
         one_shot_completion(&cfg, system, vec![user_message(user)], max_tokens).await
@@ -280,7 +280,7 @@ impl Learner {
         for attempt in 0..2 {
             match self
                 .completer
-                .complete(&model.provider_id, &model.model, prompt::LEARN_SYSTEM, &user_prompt, LEARN_MAX_TOKENS)
+                .complete(&model.provider_id, &model.model, prompt::LEARN_SYSTEM, &user_prompt, None)
                 .await
             {
                 Ok(raw) => match prompt::parse_learn_output(&raw) {
@@ -429,7 +429,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompanionCompleter for CannedCompleter {
-        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
             Ok(self.0.clone())
         }
     }
@@ -443,7 +443,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompanionCompleter for RecordingCompleter {
-        async fn complete(&self, _p: &str, _m: &str, _s: &str, user: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, _s: &str, user: &str, _t: Option<u32>) -> Result<String, AppError> {
             self.prompts.lock().unwrap().push(user.to_owned());
             Ok(self.reply.clone())
         }
@@ -729,7 +729,7 @@ mod tests {
         struct ExplodingCompleter;
         #[async_trait::async_trait]
         impl CompanionCompleter for ExplodingCompleter {
-            async fn complete(&self, _: &str, _: &str, _: &str, _: &str, _: u32) -> Result<String, AppError> {
+            async fn complete(&self, _: &str, _: &str, _: &str, _: &str, _: Option<u32>) -> Result<String, AppError> {
                 panic!("the learner must not call the model for a companion that is gone");
             }
         }

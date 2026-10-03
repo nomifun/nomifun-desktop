@@ -1,7 +1,7 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
-import { afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
@@ -12,6 +12,19 @@ import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 import { parseProviderId } from '@/common/types/ids';
 import messages from '@/renderer/services/i18n/locales/zh-CN/index';
 import ChatModelSelector, { filterCompatibleChatModelGroups } from './ChatModelSelector';
+
+// This picker fixture verifies local selection, not the realtime transport.
+// Provider snapshots below are deterministic SWR fallbacks; never connect the
+// shared bridge to an absent local backend during menu interaction.
+const realWebSocket=globalThis.WebSocket;
+class PickerFixtureWebSocket extends EventTarget {
+  static CONNECTING=0;static OPEN=1;static CLOSING=2;static CLOSED=3;
+  readyState=PickerFixtureWebSocket.CONNECTING;
+  send() {}
+  close() {this.readyState=PickerFixtureWebSocket.CLOSED;}
+}
+beforeAll(()=>{globalThis.WebSocket=PickerFixtureWebSocket as unknown as typeof WebSocket;});
+afterAll(()=>{globalThis.WebSocket=realWebSocket;});
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: messages } } });
@@ -120,7 +133,7 @@ test('keeps model selection on the left and reasoning control on the right', asy
       currentModel={{ ...reasoningProvider, use_model: 'allowed-model' }}
       getAvailableModels={() => ['allowed-model']}
       onSelectModel={async (_provider, model) => { modelChanges.push(model); }}
-      reasoningEffortOptions={['low', 'medium', 'high', 'xhigh', 'max', 'ultra']}
+      reasoningEffortOptions={['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']}
       reasoningEffort={effort}
       onReasoningEffortChange={(value) => {
         changes.push(value);
@@ -142,12 +155,22 @@ test('keeps model selection on the left and reasoning control on the right', asy
     '本会话思考深度: 自动',
   ]);
   fireEvent.click(page.getByRole('button', { name: '本会话思考深度: 自动' }));
-  const max = await waitFor(() => page.getByTestId('chat-model-selector-reasoning-max'));
+  await waitFor(() => page.getByTestId('chat-model-selector-reasoning-max'));
+  fireEvent.click(page.getByTestId('chat-model-selector-reasoning-none'));
+  expect(changes).toEqual(['none']);
+  fireEvent.click(page.getByRole('button', {name:'本会话思考深度: 无思考'}));
+  fireEvent.click(await waitFor(()=>page.getByTestId('chat-model-selector-reasoning-minimal')));
+  expect(changes).toEqual(['none','minimal']);
+  fireEvent.click(page.getByRole('button', {name:'本会话思考深度: 最少'}));
+  fireEvent.click(await waitFor(()=>page.getByTestId('chat-model-selector-reasoning-auto')));
+  expect(changes).toEqual(['none','minimal',undefined]);
+  fireEvent.click(page.getByRole('button', { name: '本会话思考深度: 自动' }));
+  const max=await waitFor(()=>page.getByTestId('chat-model-selector-reasoning-max'));
   expect(page.getByTestId('chat-model-selector-reasoning-xhigh')).toBeTruthy();
   expect(page.getByTestId('chat-model-selector-reasoning-ultra')).toBeTruthy();
   expect(page.queryByTestId('nomi-model-option-allowed-model')).toBeNull();
   fireEvent.click(max);
-  expect(changes).toEqual(['max']);
+  expect(changes).toEqual(['none','minimal',undefined,'max']);
   expect(modelChanges).toEqual([]);
   expect(page.getByRole('button', { name: '对话模型' })).toBeTruthy();
   expect(page.getByRole('button', { name: '本会话思考深度: 最大' })).toBeTruthy();

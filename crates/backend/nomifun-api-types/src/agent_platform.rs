@@ -874,6 +874,8 @@ pub struct AgentSessionKnowledgeBindingDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionReasoningEffortDto {
+    None,
+    Minimal,
     Low,
     Medium,
     High,
@@ -1430,6 +1432,8 @@ mod snapshot_tests {
     #[test]
     fn session_reasoning_effort_accepts_only_the_bounded_override() {
         for (raw, expected) in [
+            ("none", SessionReasoningEffortDto::None),
+            ("minimal", SessionReasoningEffortDto::Minimal),
             ("low", SessionReasoningEffortDto::Low),
             ("medium", SessionReasoningEffortDto::Medium),
             ("high", SessionReasoningEffortDto::High),
