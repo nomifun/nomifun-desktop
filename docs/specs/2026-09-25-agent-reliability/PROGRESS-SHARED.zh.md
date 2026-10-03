@@ -3902,3 +3902,18 @@ Windows另发现完整历史增强沿用v3而改变正文，升级后合法旧v3
 新增强输出改v4，v3只接受pre/post增强两种已知精确派生，canonical旧文本不改。v4同时
 保留合法cmd脚本文本，原v3不追增字段。首红保留，历史8/strict2/相邻回放1/路由1通过，
 真实旧会话/新v4模型与UI采用仍未验，不改原复杂失败和平台边界。
+
+- 配置后warmup旧Snapshot/newproviderrevision→send新Snapshot/cache复用反例已在既有
+  router四回合集成复现，preparing无terminal首红保持。自动binding实际变化时，在已有
+  idle/writefence先prove旧runtimeclose再replace；失败保binding/quarantine，无新Turn。
+  同集成修后及unsetoutput→warmup→send actual省略max_tokens通过，正常shutdown原断言
+  保持；不放宽Snapshot/权限或吞cleanup错误。mac正式修后待验，Windows未代判。
+
+- mac`4028c917f`修后正式executionclaim/默认outputwireomit成立，33/33历史report accepted/
+  delivered/completed，首摘要超长拒绝计current1/0保持；1945/23/14旧前缀/效果同，native0。
+  原B核心来源全部精确，公开资料未丢，但表达普通叙述内部字段仍FAIL、完整UI滚动未验。
+- known历史文件read直接LF正文及已知调用/cleanup值可读；strict-only prose作为待验草稿
+  不发布第二份完成，validatedhostreport才交付，普通/optional仍原路径。新摘要内部字段
+  明示拒绝、最新User技术要求/rawsource豁免不改写。定向回归通过，新正式待验，Windows不代判。
+- 新presentation使用历史v4，旧v3回放保持；Runtime327/1ignored通过。字段词门禁仅明示
+  有限6词而非全语言完整proof，最新User出现豁免边界不外推。新正式完整UI/表达仍待验。

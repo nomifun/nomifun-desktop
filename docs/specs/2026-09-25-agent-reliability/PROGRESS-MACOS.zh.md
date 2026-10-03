@@ -973,6 +973,36 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   首403/线程sample/AX截图/exit1/首normal-seal断言红另存，失败快照独立封存，不洗exit0。
   下一步只定位此配置后pre-execution/teardown核心链，不重发或恢复旧矩阵。
 
+#### 配置保存→预热→新回合根因修复（2026-10-03）
+
+- 已复现而非推测：既有正式router四回合集成加入save→warmup→send，15秒等待后同现场
+  preparing/no terminal首红。UI保存确实bump provider revision；问题是保存后warmup仍从
+  旧canonical Snapshot固定host，send才refresh Snapshot，provider版本相等却复用旧host。
+- 仅自动模型binding实际变化的已有idle/writefence分支：先沿原registry证明旧owner关闭，
+  后replace immutablebinding、新Turn才可创建。关闭失败保旧binding/quarantine并返回错，
+  不放宽read_turn_receipt Snapshot一致性；未发现cleanup反向获取Sessionfence。
+- 同原四回合集成修后通过7.52秒；再加入unsetoutput→warmup→send通过8.07秒，actual
+  wire未带max_tokens、能力降级/思考覆盖/历史handoff及正常整宿主shutdown均原断言保持。
+  正式修后待验，证据model-config-warmup-repair，原zero-model/exit1首败不覆盖。
+
+- `52cc08bb5`/合并`4028c917f`正式修后原task：3请求/3步，实际executionclaim成立，
+  产品及upstream均省略max_tokens，首summary>512拒绝保持current1/0；后33/33选择获接受、
+  report/delivered/completed各1。1945events/23Turns/14effects、旧1880前缀/22Turn精确；
+  modelowner0/host AGENTS2，Cmd-Q0/338.905秒无expiry/信号，自有3PID/2listener消失。
+  五表source/backup同/ok，70,245B report走stored payload且canonical digest独立核对。
+- 原B全部来源/args/字节/顺序/source10含2在snapshot精确；公开7979B先段+23528Bhost段
+  均持久化，完整资料未丢。**表达仍FAIL**：模型摘要failed_commands普通叙述，前段还有
+  内部术语；known read after只escapedJSON不好读。UI截图有最新报告开头、AX漏可视正文，
+  不修不存在的UI空白；完整滚动/冷读仍待。原observer inline-null/hash未canonical首错留存。
+- 修已知read wrapper为实际LF正文，shell cmd/字面argv、nativePID/cleanup耗时/errors按
+  已有值中文显示；原snapshot/诊断不改。strict report-only prose只在live草稿/trace保留，
+  不当第二份公开完成，只有validatedreport发布；ordinary/optional回答不变。summary/missing
+  明示拒绝未由最新User要求的6个内部字段词，技术请求/原文不禁、不重写。最小回归通过，
+  新正式采用待验；不以资料齐全或completed抵扣表达/完整UI未验。
+- 新历史展示保存plain_zh/en_v4，旧v3 renderer仍原字节，确保已结清报告replay不被当前
+  展示修复改写；v4 direct文件、nativePID/清理/显式shell字段新增均只投已保存值。Runtime
+  327/1ignored通过，6词检查不作任意语言全语义认证；最新User词出现豁免的边界保持。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
