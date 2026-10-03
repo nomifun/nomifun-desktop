@@ -4218,3 +4218,17 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 显式跑既有owned-journal ignored回归首次1/1；旧3aad3949b完整payload投影36223bytes/16条通过。正常同步ad333dc76/3c41d3bf5后复用并加强新紧凑正文回归1/1：选中/完整结果正文16/16、遗漏0、serialized26986 bytes<=原64KiB；正文/错误/通过sources还原的原binding/turn及原插入顺序逐项相同，Assistant/Text/current_evidence=false/new_user_instruction=false，未寻址不投递。planning/control提议参数明确仅在投影省略，原archive精确READ仍逐字完整；不把它们计作已投递参数，不扩大预算或放宽原body断言。
 - 独立原事实核对：真实close结果仍STDIN_EOF/bytes0/hex空；echo退出和后续hold取消仍reaped，旧漏stdin/重复cursor首败不变。原DB SHA前后均2af42c806004e9148d85f268c4ce3f8e1c351b2d4e6960346edfa24e2b451777，原件只读/无重放，模型/正式UI/owner调用0；此组件数据投影不能代判真实请求包含全部正文、模型报告正确或完整B通过。
 - 制品外部`2026-10-03/windows/w277-historical-body-current`保存机械导出/来源SHA/原process事实、同一回归各源码阶段日志与独立review，不计多个独立样本。同步准备时本地reverse patch未适用、merge被正确阻止，首错另留；仅撤销自有旧测试段后正常同步，未覆盖远端。当前archive七项常规回归通过，owned历史项已另外显式跑通（默认组ignored不再记未跑）。自有Cargo已结束/无新GUI或进程，当前正文的Windows正式采用仍未验；W276推理前停滞/未证清理、生成步骤/字节/完整交付及跨盘/UNC/S3余项保持OPEN，全面目标active。
+
+### W279 全局D流ConPTY应用尺寸（2026-10-03；原生子断言通过）
+
+- WIN-010/W107实际应用尺寸缺口：全局A规则审查、B正式产物准备、C恢复载体准备独立并行，D仅拥有PTY测试与helper候选，主agent审核/应用并独占Cargo精确运行。无生产代码修改，不重跑S3/过期控制或通用EOF。
+- helper从原附属CONOUT$经GetConsoleScreenBufferInfo独立报告实际窗口/缓冲，非复述resize返回：原PID54724初始80×24，原owner resize后同PID/started_at保持、实际132×43。原raw输出/游标完整拼接至563、dropped0；ConPTY重绘旧initial行不当重启/helper重复执行。
+- 本次取消interrupt/terminate、force=false、reaped=true/errors空、cleanup1.1674505s；原OS句柄终态/shutdown exact，预热后的宿主handle数131→131。新增一个明确环境opt-in回归，首次显式1/1通过，其他八项filtered不计通过。原PID及自有Cargo已核对结束，无模型/正式UI/DB改动。
+- 制品外部`2026-10-03/windows/global-d-conpty-size`含隔离候选/基线SHA、实际native日志和范围核对。只关闭此次应用实际尺寸与同owner生命周期子断言，不计完整WIN-010、S3 ACK、完整Windows或发布认证；C成功冷续做与B正式采用仍在各自队列，W276/缺卷UNC和生成余项不改PASS。
+
+### 全局C流成功冷恢复载体准备（2026-10-03；正式恢复未验）
+
+- 与A装配审查、B产物/原件保护和D实机尺寸独立准备，仅新增conversation_gui_fixture的`--success-recovery`。唯一write returned后第二请求只SSE注释，无语义结果；旧等待流实际释放后才可arm，本地后续fresh replan/read/close/report，意外请求400且绝不再write。原模式不改，无生产恢复/lease/checkpoint/fence更改。
+- 主agent审核并跑fixture合同3/3：新mode禁止活流arm/finish释放、fresh IDs和重复写入；旧active-quit/creative拒绝两项同组保持。仅夹具合同PASS，不代判用户任务完成或成功自动恢复。
+- 正式采样仍须唯一write/实物26 bytes、最新生产checkpoint确在结算之后且tail仅下一model_step_started、pending/unknown0，以及实际lease_until+20秒装入固定120秒观察边界。条件不成立不kill；同binary/data/work、新profile、生产lease自然到期，不SQL改期限、原记录或权限。C占下一个正式UI槽，当前未启动该GUI/模型。
+- 仓库外`2026-10-03/windows/global-c-success-recovery`保留独立候选/只读采样说明和3/3日志；实际故障/自动续做/无重放及正式退出均未验。W276/S3时间盒不重开，旧强杀清理/受控隔离/正常托盘Quit直接复用，不计新增恢复Case通过。

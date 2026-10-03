@@ -504,6 +504,180 @@ async fn running_pty_supports_poll_write_resize_and_cancel() {
     assert!(cleanup.reaped);
 }
 
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "run alone to compare Windows ConPTY host handle counts"]
+async fn conpty_resize_changes_application_window_and_releases_handles() {
+    // Initialize the existing ConPTY close executor before measuring this one
+    // resize lifecycle. This warmup is not a second application-size sample.
+    let warmup = ProcessSupervisor::new(SupervisorConfig::default());
+    let warmup_handle = start_pty(&warmup, &["exit", "0"])
+        .await
+        .expect("ConPTY warmup should start");
+    let ProcessOutcome::Exited { code, cleanup, .. } =
+        wait_for_terminal(&warmup, &warmup_handle).await
+    else {
+        panic!("ConPTY warmup must exit normally");
+    };
+    assert_eq!(code, Some(0));
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty());
+    assert!(warmup.shutdown().await.is_exact());
+    drop(warmup_handle);
+    drop(warmup);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let handles_before = windows_host_handle_count();
+
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = start_pty(&supervisor, &["observe-console-size", "132", "43"])
+        .await
+        .expect("console-size observer should start in the real ConPTY");
+    let original = supervisor
+        .status(&handle.owner, &handle.session_id)
+        .await
+        .expect("original observer identity should be available");
+    let process = ExactWindowsProcess::open(original.pid)
+        .expect("retain the original observer's OS process handle");
+    let initial = format!(
+        "console-size initial pid={} window={PTY_COLS}x{PTY_ROWS} buffer=",
+        original.pid
+    );
+    let resized = format!(
+        "console-size resized pid={} window=132x43 buffer=",
+        original.pid
+    );
+    let mut cursor = OutputCursor::START;
+    let mut observed = Vec::new();
+    poll_until_windows_console_report(
+        &supervisor, &handle, original.pid, &mut cursor, &mut observed, &initial,
+    )
+    .await;
+    let initial_cursor = cursor;
+    assert!(initial_cursor > OutputCursor::START);
+    assert!(!strip_terminal_controls(&String::from_utf8_lossy(&observed))
+        .lines()
+        .any(|line| line.starts_with(&resized)));
+
+    supervisor
+        .resize(&handle.owner, &handle.session_id, 132, 43)
+        .await
+        .expect("resize must reach this same admitted ConPTY owner");
+    poll_until_windows_console_report(
+        &supervisor, &handle, original.pid, &mut cursor, &mut observed, &resized,
+    )
+    .await;
+    assert!(cursor > initial_cursor);
+    let current = supervisor
+        .status(&handle.owner, &handle.session_id)
+        .await
+        .expect("resized observer should remain registered");
+    assert_eq!(current.pid, original.pid);
+    assert_eq!(current.started_at, original.started_at);
+    assert_eq!(current.state, ProcessState::Running);
+
+    let ProcessOutcome::Cancelled { output, cleanup } = tokio::time::timeout(
+        Duration::from_secs(5),
+        supervisor.cancel(&handle.owner, &handle.session_id),
+    )
+    .await
+    .expect("console-size observer cancellation must stay bounded")
+    .expect("original ConPTY cancellation should resolve")
+    else {
+        panic!("console-size observer must have one Cancelled terminal outcome");
+    };
+    assert!(cleanup.interrupt_attempted);
+    assert!(cleanup.terminate_attempted || cleanup.force_kill_attempted);
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty(), "native cleanup failed: {cleanup:?}");
+    process.wait_terminated(Duration::from_secs(2), "console-size observer").await;
+    let PollResult::Finished(ProcessOutcome::Cancelled { output: tail, cleanup: replay_cleanup }) =
+        supervisor.poll(&handle.owner, &handle.session_id, cursor, Instant::now()).await
+            .expect("terminal cursor poll should resolve")
+    else {
+        panic!("terminal poll must preserve the original cancellation");
+    };
+    assert_eq!(cleanup, replay_cleanup);
+    observed.extend_from_slice(&tail.raw_bytes());
+    assert_eq!(observed, output.raw_bytes(), "cursor polling lost or repeated PTY bytes");
+    assert_eq!(tail.next_cursor, output.next_cursor);
+    assert_eq!(output.next_cursor.offset(), observed.len() as u64);
+    assert_eq!(output.dropped_bytes, 0);
+    assert!(output.chunks.iter().all(|chunk| chunk.stream == OutputStream::Pty));
+    let plain = strip_terminal_controls(&String::from_utf8_lossy(&observed));
+    // A ConPTY resize may repaint existing console text. Compare raw cursor
+    // bytes above; repainting an old line is not a repeated helper execution.
+    assert!(plain.lines().any(|line| line.starts_with(&initial)));
+    assert!(plain.lines().any(|line| line.starts_with(&resized)));
+    eprintln!("application console reports: {plain:?}; cursor={}; cleanup={cleanup:?}", output.next_cursor.offset());
+    assert!(supervisor.shutdown().await.is_exact());
+    drop(process);
+    drop(handle);
+    drop(supervisor);
+    let handles_after = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let count = windows_host_handle_count();
+            if count <= handles_before {
+                break count;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!(
+        "ConPTY handles did not return to the warmed baseline: before={handles_before}, after={}",
+        windows_host_handle_count()
+    ));
+    eprintln!("Windows host handles: before={handles_before}, after={handles_after}");
+}
+
+#[cfg(windows)]
+async fn poll_until_windows_console_report(
+    supervisor: &ProcessSupervisor,
+    handle: &nomi_process_runtime::ProcessHandle,
+    pid: u32,
+    cursor: &mut OutputCursor,
+    observed: &mut Vec<u8>,
+    expected: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let PollResult::Running { snapshot, output } = supervisor
+                .poll(&handle.owner, &handle.session_id, *cursor,
+                    Instant::now() + Duration::from_millis(25))
+                .await
+                .expect("console observer poll should resolve")
+            else {
+                panic!("console observer exited before application report {expected:?}");
+            };
+            assert_eq!(snapshot.pid, pid);
+            assert_eq!(snapshot.state, ProcessState::Running);
+            assert_eq!(output.dropped_bytes, 0);
+            assert!(output.chunks.iter().all(|chunk| chunk.stream == OutputStream::Pty));
+            let bytes = output.raw_bytes();
+            assert_eq!(output.next_cursor.offset(), cursor.offset() + bytes.len() as u64);
+            observed.extend_from_slice(&bytes);
+            *cursor = output.next_cursor;
+            if strip_terminal_controls(&String::from_utf8_lossy(observed))
+                .lines().any(|line| line.starts_with(expected))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("application console report missing: {expected:?}; raw={observed:?}"));
+}
+
+#[cfg(windows)]
+fn windows_host_handle_count() -> u32 {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut count = 0;
+    // SAFETY: the pseudo-handle belongs to this test host and count is writable.
+    assert_ne!(unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }, 0,
+        "host handle count failed: {}", std::io::Error::last_os_error());
+    count
+}
+
 #[tokio::test]
 #[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn resize_rejects_out_of_range_dimensions_without_mutating_the_session() {
