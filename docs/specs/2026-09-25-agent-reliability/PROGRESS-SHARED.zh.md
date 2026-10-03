@@ -3815,3 +3815,28 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   blocked仍允许缺项，当前证据/计数、running/pending恢复与终态input fence不变。
 - 两classifier与控制正负strict1通过，Runtime321/1ignored，正式采用待验、原表达FAIL
   不抵扣，Windows未代判；外证据history-report-entry。
+
+- `3436e40c5`/同步合并`5937b5bcd`mac正式1请求/1步Specific(update_plan)真实采用，
+  provider却返回report_completion/半截参数JSON、finish=tool_calls；精确协议拒绝且owner0，
+  pause后用户UI结束回合保留cancelled/no report。FAIL_PROVIDER_SPECIFIC_TOOL_CHOICE，不放宽
+  校验或补参数；Cmd-Q0/100.227秒无expiry/信号，1625events/17Turns/14effects及旧前缀同。
+  原表达FAIL仍开放/Windows未代判，外证据history-report-entry。
+
+- strict Specific首阶段选面仍含未来report的共享缺口已收窄为单一当次控制，下一边界
+  按原schema重建，plan→report，不接受错tool或补JSON。正负strict回归通过，修后正式
+  待验，原失败保持/Windows不代判，不立即重复同场付费请求。
+
+- `d9c2113e9`mac单一plan→单一report真实采用：4请求/4步、plan接受，report先因旧ID
+  current evidence/缺historical_results被schema拒绝，随后provider半JSON且tool_calls终止，
+  protocol pause保留，UI结束回合cancelled，无report/owner0。FAIL_NATIVE_ARGUMENT_JSON
+  AFTER_REPORT_SCHEMA_REFUSAL；1693events/18Turns/14effects及旧前缀同，Cmd-Q0/165.832秒
+  无expiry/信号，完整外证据history-report-single-control。不补JSON/放宽合同或重发洗绿。
+
+### strict历史报告的紧凑输入合同（2026-10-03，macOS参数混淆后续）
+
+- 仅严格已验历史only任务用source_turn/archive_ids/short_summary/missing_items四字段。
+  host fresh标准submission仍保原全accepted scope/current真实counts，无evidence unverified
+  不作完整proof；missingblocked，最新User撤销/多源/unknown/foreign/注入旧字段/data/预算
+  错误拒绝或退optional，一般report schema和JSON协议不变。source账本不进current证据。
+- 新2及控制1回归、Runtime323/1ignored、原634/33source黄金1通过；正式采用/表达待验，
+  原失败/Windows结果保持，外证据history-report-compact。

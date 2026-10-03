@@ -2241,19 +2241,12 @@ fn synchronize_adaptive_context(
         && !patch_recovery.pending() && !patch_recovery.unresolved();
     if historical_report_only {
         upsert_instruction(&mut request.input.instructions,&mut slots.historical_report_only,
-            "The latest accepted user task is explicitly restricted to reporting already-recorded closed-turn results: no file changes, commands, process actions or new current-state checks. Only history readers and existing plan/report controls are available. The plan covers this current report task, never the old action plan. Submit exact historical_results through report_completion so host presentation preserves original values/source counts and marks them historical. Current evidence/counts remain unchanged. Missing required results remain blocked; do not invent, replay or enlarge the publication budget.".into());
+            "The latest accepted user task is explicitly restricted to reporting already-recorded closed-turn results: no file changes, commands, process actions or new current-state checks. Only history readers and existing plan/report controls are available. The plan covers this current report task, never the old action plan. The strict report_completion schema accepts only source_turn, archive_ids, short_summary and missing_items. Select every necessary original result; the host resolves values and source counts and keeps current accounting separate. Do not submit criteria, evidence IDs, data or count fields in this mode. Missing required results remain blocked; do not invent, replay or enlarge the publication budget.".into());
         request.input.tools.retain(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
             |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ));
         if let Some(report)=request.input.tools.iter_mut().find(|tool|tool.name==crate::completion::TOOL_NAME) {
-            if report.input_schema.0["properties"].get("historical_results").is_some() {
-                // Missing historical results must still be reportable as
-                // blocked, without fabricating a selection just to close.
-                let rule=serde_json::json!({
-                    "if":{"properties":{"criteria":{"contains":{"type":"object","properties":{"disposition":{"const":"blocked"}},"required":["disposition"]}}},"required":["criteria"]},
-                    "then":{},"else":{"required":["historical_results"]}
-                });
-                let object=report.input_schema.0.as_object_mut().expect("completion schema is an object");
-                object.entry("allOf").or_insert_with(||serde_json::json!([])).as_array_mut().expect("completion allOf is an array").push(rule);
+            if let (Some(archive),Some(state))=(tool_archive,long_horizon) {
+                *report=state.completion.strict_historical_report_definition(archive);
             }
         }
         if adaptive.task_ledger() && long_horizon.is_some_and(|state|
@@ -2262,6 +2255,7 @@ fn synchronize_adaptive_context(
                 crate::planning::TOOL_NAME
             } else {crate::completion::TOOL_NAME};
             if request.input.tools.iter().any(|tool|tool.name==name) {
+                request.input.tools.retain(|tool|tool.name==name);
                 request.input.tool_choice=ChatToolChoice::Specific {name:name.into()};
             }
         }
@@ -2272,7 +2266,7 @@ fn synchronize_adaptive_context(
 fn required_historical_report(archive:&crate::tool_archive::ToolArchive,inputs:&[ChatMessage],causality:&nomifun_chat_model_broker::ChatCausality)->bool {
     let sources=crate::requirements::historical_report_only_sources(inputs,causality.agent_session_id.as_ref(),causality.turn_operation_id.as_ref());
     let catalog=archive.historical_delivery_catalog();
-    !sources.is_empty() && sources.iter().all(|source|catalog["sources"].as_array().is_some_and(|known|
+    sources.len()==1 && sources.iter().all(|source|catalog["sources"].as_array().is_some_and(|known|
         known.iter().any(|entry|entry["source_turn"]==*source)))
         && catalog["records"].as_array().is_some_and(|records|!records.is_empty())
 }
@@ -2565,9 +2559,17 @@ async fn invoke_tool_calls(
         let mut results = Vec::new();
         for call in &completed {
             let result = if completed.len() == 1 {
-                completion.submit_with_history(call, execution_plan, work_status, accepted_inputs,
+                let strict=model_request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME)
+                    .is_some_and(|tool|tool.input_schema.0["properties"].get("short_summary").is_some());
+                let normalized=if strict {
+                    completion.normalize_strict_historical_report(call,tool_archive,work_status,accepted_inputs)
+                } else {Ok(call.clone())};
+                match normalized {
+                    Ok(normalized)=>completion.submit_with_history(&normalized, execution_plan, work_status, accepted_inputs,
                     patch_recovery.pending() || patch_recovery.unresolved(),
-                    patch_recovery.unresolved_before_input(), event_sink,Some(tool_archive)).await?
+                    patch_recovery.unresolved_before_input(), event_sink,Some(tool_archive)).await?,
+                    Err(reason)=>AgentToolResult::text(call.call_id.clone(),reason,true),
+                }
             } else {
                 AgentToolResult::text(call.call_id.clone(), "No tools executed: submit report_completion alone after the plan and all observations are settled.", true)
             };
@@ -3596,14 +3598,22 @@ mod tests {
         #[async_trait] impl AgentModelPort for Model {
             async fn open_stream(&self,request:ChatModelRequest,_:CancellationToken)->Result<AgentModelStream,ChatModelError> {
                 let step=self.calls.fetch_add(1,Ordering::SeqCst);
-                let report=request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME).unwrap();
+                let report=request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME);
                 if self.required_mode {
                     assert!(request.input.tools.iter().all(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
                         |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ)),"report-only mode grants no platform tools");
                     assert_eq!(request.input.tool_choice,ChatToolChoice::Specific {name:if step==0 {crate::planning::TOOL_NAME} else {crate::completion::TOOL_NAME}.into()});
+                    assert_eq!(request.input.tools.len(),1,"a required control cannot compete with future phase controls");
                 }
-                assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"],if step>1 {1} else {0});
-                assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
+                if let Some(report)=report {
+                    if self.required_mode {
+                        assert!(report.input_schema.0["properties"].get("criteria").is_none());
+                        assert!(report.input_schema.0["properties"].get("observed_tool_error_count").is_none());
+                    } else {
+                        assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"],if step>1 {1} else {0});
+                        assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
+                    }
+                }
                 let events=if step==0 {
                     control_step("plan",crate::planning::TOOL_NAME,json!({"plan":[{"step":"整理所选历史结果","status":"in_progress"}]}))
                 } else if step>1 {
@@ -3612,8 +3622,14 @@ mod tests {
                         "a historical ID must be rejected by advertised current-evidence schema or validation before publication");
                     self.rejection_seen.store(true,Ordering::SeqCst);
                     vec![Err(ChatModelError::protocol_violation("controlled end after expected invalid evidence refusal"))]
+                } else if self.required_mode {
+                    let schema=&report.unwrap().input_schema.0;
+                    assert_eq!(schema["properties"]["source_turn"]["enum"][0],SOURCE);
+                    control_step("report",crate::completion::TOOL_NAME,json!({"source_turn":SOURCE,
+                        "archive_ids":[schema["properties"]["archive_ids"]["items"]["enum"][0].clone()],
+                        "short_summary":"已整理历史结果，未重新执行。","missing_items":[]}))
                 } else {
-                    let origin=report.input_schema.0["properties"]["historical_results"]["items"]["properties"]["origin"]["enum"][0].clone();
+                    let origin=report.unwrap().input_schema.0["properties"]["historical_results"]["items"]["properties"]["origin"]["enum"][0].clone();
                     assert_eq!(origin["source_turn"],SOURCE);
                     let criterion=if self.forge_current {json!({"disposition":"supported","rationale":"forged current claim",
                         "evidence_call_ids":[origin["archive_id"].clone()]})}

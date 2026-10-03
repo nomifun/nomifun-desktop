@@ -863,6 +863,44 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 两组classifier+既有控制正负/strict同夹具1项通过，Runtime321/1ignored。首编类型引用
   失败外留；仅新入口，原B字节/错误/原文断言不改，正式采用待验。外证据history-report-entry。
 
+- `3436e40c5`/同步合并`5937b5bcd`（含共享renderer41a689a00、重编UI/8回归/desktop边界）
+  正式同原task1请求/1步真实Specific(update_plan)，工具面仅history/plan/report；StepFun
+  返回report_completion并携带半截JSON（6213-byte参数，finish=tool_calls/DONE），Broker精确
+  选择合同在执行前拒绝，**FAIL_PROVIDER_SPECIFIC_TOOL_CHOICE**。protocol pause保留，实际
+  UI结束回合后cancelled，无report/v3/public结果；不补JSON/接受错工具或重发制造通过。
+- 正常Cmd-Q0/100.227秒，无expiry/TERM/KILL；1625events/17Turns/14effects及1593前缀/
+  16旧Turn/效果/闭库保持，modelowner0/host指令读2；表达仍未完成，原A/B事实/Keychain
+  证据不被此新失败覆盖。完整输入/公开tool参数/事件与模型trace外置，私密思考不摘抄。
+
+- 后续只修已定位的选面：strict指定plan时曾同时advertise未来report，现每阶段仅保留
+  当次Specific控制，下一边界由原configure重新装配后转report；复用原continuation gate
+  的收窄做法，不放宽Broker或改变任务。strict同夹具正负/owner0/current0回归通过，
+  修后新正式未验，原wrong-tool/半JSON失败保持；不重置失败或立即重复付费请求。
+
+- `d9c2113e9`正式同原task修后一次：首两请求工具表仅plan，首stop/no call后按原有界
+  继续，第二valid plan接受；第三/第四表仅report，单控制选面真实采用。第三validJSON却
+  使用历史ID做current evidence且缺historical_results，参数拒绝保持；第四实际6348B
+  半JSON/finish=tool_calls→protocol pause，UI结束本回合后cancelled。**FAIL_NATIVE_ARGUMENT_JSON
+  AFTER_REPORT_SCHEMA_REFUSAL**，无accepted report/交付/表达PASS，既有协议校验不放宽。
+- 4请求/4步、modelowner0/host AGENTS读2，原14effects及1625前缀/17旧Turn保持；最终
+  1693events/18Turns/14effects，Cmd-Q0/165.832秒无expiry/TERM/KILL，源备五表同/ok及
+  自有PID/listener消失。首错wire/本地schema拒绝/半JSON分别外留history-report-single-control，
+  不补参数/缩任务/再次付费重发，公开表达仍开放；原A/B事实和Keychain结论不改。
+
+#### 严格历史报告参数的两个账本分离（2026-10-03）
+
+- 上轮真实模型忽略historical_results、旧ID写supported后参数修复半JSON，失败保持。
+  只在已证明strict-only任务广告4字段source_turn/archive_ids/short_summary/missing_items，
+  模型不填criteria/current evidence/counts/data；普通report schema不变，不修JSON或吞错。
+- 最新User需仍strict同一已验source，multi-source保守optional；host fresh构造标准submission
+  当前真实work counts/无evidence的unverified，原全部accepted requirements保留。missing
+  非空生成blocked，空选择/空missing、foreign/unknown/重复/model data/旧字段/撤销均拒绝，
+  原计划/运行进程/recovery/终态fence、来源解析、8KiB/48KiB边界保持。固定unverified不是
+  语义完整性证明，独立原B oracle不改。
+- 2新schema/normalization回归及既有strict/optional控制1通过，Runtime323/1ignored，原
+  B634/33黄金1通过（全部结果/source10含2/56445B相同）。正式采用/报告完整/表达待验，
+  外证据history-report-compact，原失败与Windows结果不代判。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
