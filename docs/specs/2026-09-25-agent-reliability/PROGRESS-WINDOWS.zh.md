@@ -4177,3 +4177,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 同W269根08-control-premise保存组织前提失败：LF比较/焦点与实际文本核对通过，但发送前完整控件快照同时有“发送”和“立刻发送（插入正在生成的回复）”，控制器错误选择前者，仅形成UI排队；canonical steer-accepted=0、要求两个来源输入的前提不成立。此前“必须等待模型边界”的推断撤回；当前可证原因是选错按钮，未证产品丢失接纳输入。前向门所有请求均需接纳证据，30s后本地400暂停，当前1份原始请求保存、上游HTTP/SSE均0；未把本地失败归因供应商，也未启动第二模型试验。
 - 已将仓库外控制器限定为实际即时追加按钮，修正后的接纳/引用拒绝/采用仍未执行，不计PASS。两carrier文件集合/SHA保持，原Turn通过实际UI结束为cancelled一次。PID58636持续预持句柄证明已有原生API自然exit0、后代/监听0；不是托盘Quit，原观察器不再因10分钟到期丢句柄。forwarder按路径/启动UTC精确清理、steerer结束，37份文本凭据审计0命中。
 - 无本地生产修复；同步历史closed-turn/current-reader两个定向回归通过，原W269首败及本次组织失败保持。仅当前正式GUI控制前提变化，原W249/W250/W240、真实引用采用和全部认证仍开放；不把控制器核对算作模型修复。本项超过原时间盒，停止进一步定位/试验，完整制品保留上述同目录，全面目标active。
+
+### W273 Step5接入及精确来源反馈的真实采用（2026-10-03；机制子断言通过、严格整链FAIL）
+
+- 用户建议后复用Windows既有加密Coding Plan连接，单次无副作用工具探针HTTP200，requested/served均step-5-preview、ready=true/268tokens；不保存凭据或思考正文。隔离新库正式初始化/所选连接内存重加密，登记新模型context_limit=1000000、output_limit=4096及reasoning_effort=low，不改源连接/全局默认、进程期限或清理保护。当前a10933b1b正式desktop/helper构建通过，UI实际通用入口/模型/项目自主操作，前端e247ffd0/1280×832。
+- 正确选择实际“立刻发送（插入正在生成的回复）”，同Turn原始input0及canonical input1各一次；预算事件实为1000000/4096，非旧32k未知模型回退。7个真实HTTP200/完整SSE均Step5/low，8组原生提议参数与canonical完全相同；首个旧read_scope提议因新输入到达未派发，模型先replan再执行，a/b实际各读一次，无写/命令，集合与SHA保持。只证明预算声明与真实路由应用，不是完整1M-token负载认证。
+- 指定反馈采用已验：首次两requirement提议的第二项new_scope使用input1配input0标记整行，被正确拒绝，精确rejected_parameter_path=/requirements/1/source、source_input_index=1；下一真实调用保持input1，quote改为当前输入准确原文，原有效old_reads完整保持，plan_revision2/updated。独立review八项定向检查均成立，关闭该精准字段反馈→真实模型修正的采用缺口，W249/W250旧缺证与其他生成精度不代判。
+- 严格整链保留FAIL：首项引用虽属于input0却未用指定标记行；纠正还修改new_scope.description，非仅quote变化；模型随后调用report_completion并completed，summary却称等待用户结束。当前工具描述明确validated report为terminal，产品按真实提议执行，无已证执行层根因，不自动保留运行或更改原断言凑PASS。完整共享/Windows及原A/B/C未完成，生成遵循与报告准确性继续开放。
+- PID6504原生API自然exit0、预持OS句柄/后代监听0，非托盘点击；forwarder按原路径/启动UTC清理，steerer及Cargo结束。77份文本凭据审计0命中。完整制品外部`2026-10-03/windows/w273-step5-access`含单次访问探针、正式源/二进制身份、预算/接纳/UI、真实wire与八组对账、原拒绝/纠正及严格三项FAIL，未追加第二付费试验或源码修改。全面目标active。
