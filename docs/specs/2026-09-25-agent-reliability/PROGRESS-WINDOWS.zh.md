@@ -4247,3 +4247,9 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - A独立审查未发现新missing/contradictory装配，非修复进度；当前exact_actions文件/预声明stdin机制相对W257仍缺一次≤120秒正式采用。B历史/公开报告、C恢复和D平台分别负责独立簇，主agent唯一集成/Cargo/UI/DB写者，不将一个Case拆给多个agent。
 - D包0261d4c99和C包e8bebce49分别提交，经ba1391c7a正常合并推送。以上正式样本均冻结ba1391c7a/c9973886/f780b9a4，清理后才正常同步ae3a91c70；旧回答来源/pairing共享修复不追认为旧GUI源码或W276根因。Windows新history直接9/9、pairing timer3/3通过；App held-native barrier本机未跑，正式新源码采用未验。
 - 当前自有Cargo/GUI/夹具/后代/监听已清理；既有stdin/Stop/历史真值/Creative采用/W274活树Quit复用。旧wire缺证、LF/guard/复杂生成、Windows新正文/typed续接采用、W276/成功恢复、S3 ACK/卷UNC及其他平台余项继续OPEN；完整共享、Windows和发布认证未完成。
+
+### 全局B 中文结果尾注展示接线修复（2026-10-03；直接回归通过）
+
+- C06过程/公开结果：Runtime completion.rs plain_zh_v2生成两条固定中文失败尾注，但renderer completionOutcomeDisplayModel只识别英文，合法同Turn的exited/exit1/reaped报告投影undefined。外部B候选独立准备；A正式GUI结束/实际exit0后才应用，未改变其冻结产物。
+- 最小renderer修复加入精确中文语法及重复尾注保护，不改自由summary、canonical原文/计数、英文兼容或身份核对；同Turn真实非零/参数未执行/timeout可分类，缺失/异Turn或Session/未reaped仍只保留计数。
+- 先仅加入回归，旧实现7PASS/1FAIL（期望native_nonzero、实际undefined）正式保留；应用修复后8/8、55断言通过，bun run check:desktop-ui-boundary通过（880×600）。无额外Cargo/模型；正式新renderer尚未构建/采用，不代判W278、历史source展示、Mac自由表达或完整共享Case。仓库外`2026-10-03/windows/global-b-historical-reader`保存候选与前后日志。
