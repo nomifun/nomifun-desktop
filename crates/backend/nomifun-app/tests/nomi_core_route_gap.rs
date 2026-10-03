@@ -1910,6 +1910,13 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     ).await;
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
 
+    // The UI warms the selected Session after a model save, before accepting
+    // its next task. A warm runtime must not freeze the old canonical snapshot
+    // while remembering the new provider revision.
+    let (status,warmed)=call(router.clone(),"POST",
+        &format!("/api/agent-sessions/{session_id}/warmup"),json!({})).await;
+    assert_eq!(status,StatusCode::OK,"{warmed}");
+
     let (status, second_turn) = call(
         router.clone(),
         "POST",
@@ -2339,7 +2346,8 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     }), "{localized_history}");
 
     // Removing reasoning support must also remove the incompatible Session
-    // override, rather than keeping an unusable old wire parameter.
+    // override. Unsetting the output limit must also use provider defaults,
+    // including when the UI warms a host before the next Turn.
     let (status, downgraded_model) = call(
         router.clone(), "PUT", "/api/provider-models", json!({
             "provider_id": second_model["provider_id"],
@@ -2347,7 +2355,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
                 "model": "model-two", "enabled": true,
                 "capabilities": [{
                     "task": "chat", "traits": [],
-                    "context_limit": 1000000, "output_limit": 4096,
+                    "context_limit": 1000000,
                     "protocol": "openai.chat_text", "connection_role": "default",
                     "provider_params": {}
                 }]
@@ -2366,6 +2374,9 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
             .mark_technical_capability_unsupported(provider_id, revision, "model-two", "chat", "reasoning")
             .await.unwrap());
     }
+    let (status,warmed_default)=call(router.clone(),"POST",
+        &format!("/api/agent-sessions/{session_id}/warmup"),json!({})).await;
+    assert_eq!(status,StatusCode::OK,"{warmed_default}");
     let (status, fourth_turn) = call(
         router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"),
         json!({"idempotency_key": uuid::Uuid::now_v7().to_string(), "input": {"content": "fourth turn"}}),
@@ -2381,6 +2392,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         let requests = model_requests.lock().unwrap();
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[3]["model"], "model-two");
+        assert!(requests[3].get("max_tokens").is_none(),"provider default must reach the actual wire without a synthetic 4096 cap");
         assert!(requests[3].get("reasoning_effort").is_none(),
             "removed reasoning capability must be reflected on the next actual request");
     }

@@ -1470,6 +1470,14 @@ impl NomiCoreSessionOwner {
                         "refreshed model binding is invalid: {error}"
                     )))?;
                 if refreshed_value != session.session.agent_binding {
+                    // A view warmup may have built an idle host from the old
+                    // canonical snapshot but the already-updated provider
+                    // revision. The registry's provider cache cannot detect
+                    // this snapshot-only change. Prove that exact idle owner
+                    // closed before committing a new immutable binding.
+                    self.runtime_sessions.terminate_and_wait_result(
+                        session_id.as_ref(),Some(nomifun_common::AgentKillReason::ConfigurationChanged),
+                    ).await?;
                     self.canonical.store().replace_session_model_binding(
                         &principal, session_id, &session.session.agent_binding, refreshed_value,
                     ).await.map_err(agent_session_store_error)?;
