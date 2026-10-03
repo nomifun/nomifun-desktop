@@ -613,6 +613,70 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    async fn windows_persistent_cmd_remains_owned_and_times_out() {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let started = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"start","command":"cmd.exe","args":["/d","/k","echo CMD_KEEPER_READY"],
+            "timeout_ms":1000,"wait_ms":0
+        })), "owned-persistent-cmd").await.unwrap().0;
+        assert_eq!(started["state"], "running");
+        let mut observations = Vec::new();
+        let mut output = started["output"]["text"].as_str().unwrap().to_owned();
+        let mut cursor = started["output"]["next_cursor"].as_u64().unwrap();
+        // Unread output can complete a poll before the deadline. Advance its cursor
+        // and keep observing the same process instead of treating that as terminal.
+        let terminal = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let call_id = format!("observe-persistent-cmd-deadline-{}", observations.len());
+                let observed = scope.invoke(StrictJsonValue(serde_json::json!({
+                    "operation":"poll","process_id":started["process_id"],"cursor":cursor,"wait_ms":1000
+                })), &call_id).await.unwrap().0;
+                cursor = observed["output"]["next_cursor"].as_u64().unwrap();
+                output.push_str(observed["output"]["text"].as_str().unwrap());
+                observations.push(observed.clone());
+                if observed["state"] != "running" { break observed; }
+            }
+        }).await.expect("the original one-second deadline must reach a terminal");
+        println!("WINDOWS_CMD_OWNER_EVIDENCE {}", serde_json::json!({"kind":"persistent","started":started,"observations":observations,"terminal":terminal}));
+        assert_eq!(terminal["state"], "timed_out");
+        assert_eq!(terminal["success"], false);
+        assert_eq!(terminal["cleanup"]["reaped"], true);
+        assert!(output.contains("CMD_KEEPER_READY"));
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        drop(scope);pool.close().await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_cmd_start_background_child_is_reaped_before_success() {
+        use std::os::windows::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("child.mjs"), "await Bun.write('child.pid', String(process.pid)); setInterval(() => {}, 1000);\n").unwrap();
+        std::fs::write(root.path().join("await-child.mjs"), "const until=Date.now()+5000; while(!(await Bun.file('child.pid').exists())){if(Date.now()>until)throw new Error('no child readiness'); await Bun.sleep(10);} console.log('CMD_CHILD_READY');\n").unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let result = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"exec","command":"cmd.exe","args":["/d","/s","/c","start \"\" /b bun child.mjs & bun await-child.mjs"],"timeout_ms":10000
+        })), "cmd-background-child").await.unwrap().0;
+        assert_eq!(result["state"], "exited");
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["cleanup"]["reaped"], true);
+        assert!(result["output"]["text"].as_str().unwrap().contains("CMD_CHILD_READY"));
+        let pid: u32 = std::fs::read_to_string(root.path().join("child.pid")).unwrap().parse().unwrap();
+        let check = std::process::Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command",
+            &format!("if(Get-Process -Id {pid} -ErrorAction SilentlyContinue){{exit 1}}; exit 0")]).creation_flags(0x08000000).output().unwrap();
+        assert!(check.status.success(), "the ready background child must be gone when success is returned");
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        println!("WINDOWS_CMD_OWNER_EVIDENCE {}", serde_json::json!({"kind":"background-child","child_pid":pid,"result":result}));
+        drop(scope);pool.close().await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn windows_expired_conpty_keeps_terminal_truth_before_late_controls() {
         windows_expired_transport_keeps_terminal_truth(true).await;
     }
