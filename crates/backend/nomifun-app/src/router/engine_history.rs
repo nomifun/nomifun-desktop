@@ -56,6 +56,16 @@ fn require_prior_cursor(cursor_seq: u64, accepted_root_seq: u64) -> Result<(), A
     Ok(())
 }
 
+fn addressed_turn_eligible(event: &SessionEventRecord, fixed_root: u64, floor: u64, operation: &str) -> bool {
+    event.kind.0 == "turn/started" && event.seq > floor && event.seq < fixed_root
+        && event.correlation_id.as_ref() == operation
+}
+
+fn addressed_terminal_eligible(terminal: &SessionEventRecord, started: u64, fixed_root: u64) -> bool {
+    matches!(terminal.kind.0.as_str(), "turn/completed" | "turn/failed" | "turn/cancelled")
+        && terminal.seq > started && terminal.seq < fixed_root
+}
+
 fn native_replay_floor(
     events: &[SessionEventRecord],
     event_payloads: &BTreeMap<String, Value>,
@@ -254,6 +264,30 @@ pub(super) async fn load_before(
     limit: usize,
     before_operation: Option<&str>,
 ) -> Result<EngineHistoryWindow, AppError> {
+    load_selected(store, receipt, limit, before_operation, None).await
+}
+
+/// Exact addressed data-only history uses the same owner facts, fixed accepted
+/// root, clear-context/Agent-transition floor and complete journal decoder as
+/// the ordinary reader. It selects one eligible CLOSED Turn, not a later cursor.
+pub(super) async fn load_exact(
+    store: &AgentSessionStore,
+    receipt: &EngineTurnReceipt,
+    operation: &str,
+) -> Result<EngineHistoryWindow, AppError> {
+    if operation.is_empty() || operation.len() > 256 || operation.chars().any(char::is_control) {
+        return Err(failure("invalid exact historical Turn address"));
+    }
+    load_selected(store, receipt, 1, None, Some(operation)).await
+}
+
+async fn load_selected(
+    store: &AgentSessionStore,
+    receipt: &EngineTurnReceipt,
+    limit: usize,
+    before_operation: Option<&str>,
+    exact_operation: Option<&str>,
+) -> Result<EngineHistoryWindow, AppError> {
     if !(1..=32).contains(&limit) {
         return Err(failure("turn limit must be 1..32"));
     }
@@ -289,9 +323,13 @@ pub(super) async fn load_before(
         .iter()
         .filter(|event| {
             event.kind.0 == "turn/started" && event.seq < before_seq && event.seq > floor
+                && exact_operation.is_none_or(|operation| addressed_turn_eligible(event,current_root.seq,floor,operation))
         })
         .collect::<Vec<_>>();
     turns.sort_by_key(|event| std::cmp::Reverse(event.seq));
+    if exact_operation.is_some() && turns.len() > 1 {
+        return Err(failure("exact historical Turn address is ambiguous"));
+    }
     let mut window = EngineHistoryWindow {
         has_older: turns.len() > limit,
         turns: Vec::new(),
@@ -311,6 +349,11 @@ pub(super) async fn load_before(
                     "turn/completed" | "turn/failed" | "turn/cancelled"
                 )
         });
+        if exact_operation.is_some() && !terminal.is_some_and(|terminal|
+            addressed_terminal_eligible(terminal,turn.seq,current_root.seq))
+        {
+            return Err(failure("exact historical Turn is not canonically closed before the accepted root"));
+        }
         let receipt_status = terminal
             .map(|event| event.kind.0.trim_start_matches("turn/").to_owned())
             .unwrap_or_else(|| "running".to_owned());
@@ -406,6 +449,22 @@ mod tests {
         assert!(require_prior_cursor(10,10).is_err());
         assert!(require_prior_cursor(11,10).is_err());
         assert!(require_prior_cursor(u64::MAX,10).is_err());
+    }
+
+    #[test]
+    fn addressed_history_selects_old_exact_target_without_crossing_fixed_root_or_reset_floor() {
+        let mut turns = (1..=12).map(|seq| event(seq,"turn/started")).collect::<Vec<_>>();
+        for turn in &mut turns {turn.correlation_id = format!("turn-{seq}",seq=turn.seq).into();}
+        let selected = turns.iter().filter(|turn| addressed_turn_eligible(turn,13,0,"turn-1")).collect::<Vec<_>>();
+        assert_eq!(selected.len(),1);assert_eq!(selected[0].seq,1);
+        assert!(!addressed_turn_eligible(selected[0],13,1,"turn-1"),"clear/Agent-transition floor is still exclusive");
+        assert!(!addressed_turn_eligible(&turns[11],12,0,"turn-12"),"current accepted root cannot become history");
+        assert!(!addressed_turn_eligible(&turns[11],11,0,"turn-12"),"future Turn cannot become history");
+        assert!(!addressed_turn_eligible(&turns[0],13,0,"foreign-turn"));
+        assert!(addressed_terminal_eligible(&event(2,"turn/failed"),1,13));
+        assert!(!addressed_terminal_eligible(&event(1,"turn/completed"),1,13));
+        assert!(!addressed_terminal_eligible(&event(13,"turn/completed"),1,13));
+        assert!(!addressed_terminal_eligible(&event(2,"turn/paused"),1,13));
     }
 
     fn event(seq: u64, kind: &str) -> SessionEventRecord {

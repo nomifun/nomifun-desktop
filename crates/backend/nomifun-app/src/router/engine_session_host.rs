@@ -642,6 +642,19 @@ impl EngineSessionHost {
         .await
     }
 
+    pub(super) async fn read_history_exact(
+        &self,
+        receipt: &EngineTurnReceipt,
+        operation: &str,
+    ) -> Result<super::engine_history::EngineHistoryWindow, AppError> {
+        if !receipt.belongs_to(&self.source) {
+            return Err(AppError::Conflict("Receipt belongs to another Session host".into()));
+        }
+        let owner = self.owner.upgrade()
+            .ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))?;
+        super::engine_history::load_exact(owner.canonical().store(), receipt, operation).await
+    }
+
     pub(crate) fn new(
         owner: &Arc<NomiCoreSessionOwner>,
         control_plane: Arc<AgentControlPlane>,
