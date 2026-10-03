@@ -4201,3 +4201,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 加强两个现有Runtime原生回归，无生产修改：直接Program复制helper至中文/emoji/空格/单引号exe路径，同形cwd；原两段误编码夹具文本改为明确中文/emoji，argv含`$(exit 99)`、反引号、`| & ;`、双引号和尾反斜杠，env含字面`$env:USERPROFILE`及`$()`。helper独立回显的四个UTF-8字节长度/精确值相同，exit0、reaped/errors空及shutdown exact；不发生shell求值。
 - 显式PowerShell Shell新增真实成功/抛错管道：Single-quoted反引号与`$()`逐字输出``literal `$() piped\r\n``，exit0；ForEach-Object抛错保留PIPELINE_FAILED、exit1。原五个native/恢复/非零分支保留7/0/7/1/1；七次均reaped/errors空及shutdown exact。实际宿主PowerShell5.1.26100.8875，两个定向回归首次2/2通过，不把八进程数当八Case。
 - 基线3c4943a44加测试，测试binary SHA前缀6027B8C063E9；外部`2026-10-03/windows/w275-shell-literal-boundary`保留两份实际日志、patch/身份/独立核对。八个记录PID最终无匹配、隔离helper/cwd已随TempDir清理；模型/正式GUI0、无Cargo遗留。只补当前实机literal/显式管道子断言，不计完整WIN-008、App/Tauri实际采用、跨盘/UNC、S3交互、复杂生成或发布认证通过，全面目标active。
+
+### W276 当前共享配置修复的Windows正式采用首败（2026-10-03；未验、原实例失败退出）
+
+- C07/C08当前Turn参数/预算冻结及下一空闲Turn刷新：505ee1eb1正式desktop/helper构建通过，binary SHA前缀DF03D4978CCC、前端e247ffd0/1280×832；新库官方初始化/独立work/profile，本地响应载体替换已自然退出的初始化helper的同一loopback端口，未改连接/凭据身份。目标为同Turn UI追加输入后仍旧值、下一Turn用新值，实际两断言未到达，不计正式采用通过。
+- 两个组织首错保留：helper Cargo仍活动时过早初始化，被binary身份门禁拒绝，DB/GUI/模型未启动；首请求观察仍返回活动exec句柄时错误推进新配置。旧65536/2048/low与新1000000/4096/high均经正式PUT API保存，但不存在目标请求或预算事件，不能从全局配置落盘断言当前Turn已冻结。未复用旧DB、删除身份保护或重启原任务。
+- 原PID2668/15:07:54实例一直保留，15:09:53输入已canonical接受，运行至操作结束前仍running/5events、execution-claimed/预算/tool/effect事件0、目标模型夹具调用0；已有原始参数/DB/UI可追溯。对“warmup后同模型编辑沿用旧Snapshot”的临时公开API COD载体1/1通过，未复现本例chat.minimal；不据此修改缓存/冻结/执行层，不由其他载体绿反推正式通过。临时诊断patch/日志仅仓库外保存，定位安排已超30分钟，停止扩展，不新建批次重置。
+- 同GUI真实UI Stop后仅一次cancelled，最终6events，原初始3行及停止前5行逐字保持。随后已有原生API请求exit0，但原OS句柄实际exit1/15:29:03；日志为一个Runtime未证明shutdown、owned_runtime_teardown保留quarantine，4次有界退出重试后应用失败退出。非托盘点击、非观察器kill，不把最终PID消失计normal Quit通过；该边界原因仍未证，W274原活树托盘exit0证据不改写。
+- 外部`2026-10-03/windows/w276-turn-config-formal`保存首错、正式身份/输入/UI、两次配置保存、空目标请求事实、原及最终事件、临时反假设回归、actual exit1/清理日志及独立review。初始化helper/model夹具自然exit0，全部自有GUI/模型/Cargo/后代/监听0，付费0；当前正式配置采用、接受后推理前停滞及未证Runtime清理继续OPEN，唯一产品根因未定位，不追加模型/源码修复凑PASS，全面目标active。
+- 收尾正常快进远端6eceb3754/d99ef2149，已结算patch跨模型数据兼容及原exact来源/Session/未决状态的三个Windows回归3/3通过；本例无patch/tool事件，不据此宣布停滞已修。正式产物仍明确属于505ee1eb1，合并后未追加UI；44份外部文本的既有真实加密连接凭据审计0命中，无凭据入Git/日志/提示。Git仅本批短结算。
+- 首次push遇并行远端更新而被正常拒绝，随后正常合入eb45556ce明确寻址历史正文；Windows Runtime引用5/5及App历史固定root/范围6/6通过，实际模型采用/原复杂报告不由这些组件通过代判，未重跑本例。无force-push、共享历史改写或覆盖他人源码。
