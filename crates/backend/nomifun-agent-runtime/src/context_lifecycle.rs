@@ -70,10 +70,12 @@ impl AgentModelBudget {
             || self.max_output_tokens == 0
             || self.max_output_tokens >= self.context_window_tokens
             || self.wire_max_output_tokens==Some(0)
+            || self.wire_max_output_tokens.is_some_and(|wire| wire>self.max_output_tokens
+                || self.input_tokens().saturating_add(wire as usize).saturating_add(512)>self.context_window_tokens as usize)
             || !(50..=95).contains(&self.compaction_threshold_pct)
         {
             return Err(AgentEngineError::ContextAssembly(
-                "Nomi needs context >= 2048 tokens, a positive internal reservation below the context, a positive explicit output ceiling when set, and a 50-95% compaction threshold".into(),
+                "Nomi needs context >= 2048 tokens, a positive internal reservation below the context, an explicit output ceiling fully reserved with input and safety margin when set, and a 50-95% compaction threshold".into(),
             ));
         }
         Ok(self)
@@ -764,6 +766,25 @@ mod context_threshold_tests {
         assert_eq!(large.for_request(Some(50_000)).unwrap().wire_max_output_tokens,Some(50_000));
         assert_eq!(default.for_request(Some(50_000)).unwrap().wire_max_output_tokens,Some(50_000));
         assert!(default.for_request(Some(0)).is_err());
+    }
+
+    #[test]
+    fn explicit_output_requires_full_context_reservation() {
+        for (context, output) in [(8192, 8000), (32768, 32768), (32768, 100_000)] {
+            if let Ok(budget)=AgentModelBudget::from_limits(Some(context),Some(output)) {
+                let wire=budget.wire_max_output_tokens.unwrap() as usize;
+                assert!(budget.input_tokens()+wire+512<=context as usize,
+                    "accepted context={context}, wire={wire}, reservation={}, input={}",budget.max_output_tokens,budget.input_tokens());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_caller_output_requires_full_context_reservation() {
+        let default=AgentModelBudget::from_limits(Some(8192),None).unwrap();
+        if let Ok(budget)=default.for_request(Some(8000)) {
+            assert!(budget.input_tokens()+budget.wire_max_output_tokens.unwrap() as usize+512<=8192);
+        }
     }
 
     #[test]
