@@ -3878,3 +3878,9 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   导致default断言红保留，case明确unset再通过，caller自定义限制未抹去。
   StepFun官方Chat max_tokens默认INF已核对，实际默认wire与完整报告合并一次正式验证待验，
   外证据history-report-complete-capacity，不改Windows原生验收结果。
+
+- `dd4ee03eb`mac正式UI保存Step5output4096→默认null成功（其他配置不变）；原task一次
+  accepted/started后约3分钟无executionclaim/runtime/模型请求，UI Stop取消一次。native
+  收尾owned_runtime_teardown未证明，保护exit1/426.487秒、noexpiry/无外部信号，非CEF。
+  最终1880events/22Turn/14effects，旧prefix/效果同、双库ok；不以组件绿代判actualwire/
+  完整报告/变更后丝滑使用。新preexecution和teardown缺陷窄定位中，Windows结果不改。

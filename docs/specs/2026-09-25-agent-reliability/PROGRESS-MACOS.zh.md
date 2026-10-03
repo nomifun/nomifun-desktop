@@ -961,6 +961,18 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   4096配置，forwarder provider模式不改输出字段，actual product/upstream均断言omit。
   付费次数不限，native/清理时限保留；证据history-report-complete-capacity，Windows不代判。
 
+- `dd4ee03eb`正式Tauri/ad-hoc deep-strict/UI新构建通过。直接本机API首403无写入保持，
+  改正式UI供应商模型编辑：Step5 4096→服务商默认，保存后output null/context1M、其他
+  Step3.7显式4096未改，发送前原1877events同。旧隔离配置不是静默迁移用户设置。
+- 原task只发送一次，但仅1878useraccepted/1879turnstarted，无executionclaimed/runtime/
+  provider请求；真实等约3分钟后UI Stop一次→1880cancelled。**FAIL_AFTER_MODEL_CONFIG_SAVE
+  PRE_EXECUTION_AND_RUNTIME_TEARDOWN**，不能验wire默认或报告表达；付费请求0。
+  Cmd-Q有界exit1/426.487秒，无expiry/外部TERM/KILL，日志owned_runtime_teardown清理
+  未证明/quarantine保持，不是unused CEF/Keychain故障或正常清理PASS。源/备五表1880/1/1/
+  22/14同、双integrity ok，1877前缀/14effects保持；主/relay/fixture实际均退出。
+  首403/线程sample/AX截图/exit1/首normal-seal断言红另存，失败快照独立封存，不洗exit0。
+  下一步只定位此配置后pre-execution/teardown核心链，不重发或恢复旧矩阵。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
