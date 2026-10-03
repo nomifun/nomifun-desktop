@@ -3743,3 +3743,20 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   表达FAIL，不以机制通过关闭模型表达。Cmd-Q0/70.066秒无expiry/信号，1525events/
   14Turns/14effects与原前缀/效果/闭库同，owner0。未改根因不继续付费循环，Windows
   原结果不代判，外证据public-report-language。
+
+### closed replay模型回答不是实际结果或新报告模板（2026-10-03，macOS真实输入）
+
+- source已有33结果/10含2及语言policy，新回复仍沿用107/111旧报告行；旧plain Assistant
+  11份42278B没有与owner结果区分。仅closed typed公开文本/验证后完成文本包装低信任模型
+  回答，original_text/否定/原owner值保留；未知compaction来源null，不改User/ToolResult/
+  accepted输入、当前ledger、权限或checkpoint。现有历史controls数据仍data，不授真伪权威。
+- history9项及checkpoint/explicit引用两项通过，实际模型采用/表达待验；原失败与Windows
+  结果保持。外证据closed-assistant-provenance，不能用公开文本0的原B634 journal冒充覆盖。
+
+### pairing后台清理纳入现有宿主收尾（2026-10-03，macOS真实退出发现）
+
+- 真实Keychain堵塞时closedpool后timer仍query：App丢弃Handle、interval不接取消。仅该
+  producer接既有shutdown token和BackgroundTaskRegistry，取消停止新sweep、已发query
+  结束后join，原失败/超时语义不吞。周期与取消/在途两个小回归共3通过，App现有drain1
+  通过，修后正式待验。
+  外证据pairing-exit-owner；不把macOS出现的共享缺口当Windows已验。
