@@ -3688,3 +3688,11 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   included错误计数和omitted IDs明确。stdin proposal的UTF-8+显式LF机械计数为derived/
   非owner-byte receipt，不能绕过before_tool或冒称实际写入。七项定向回归通过/1ignored，
   正式修后待验，Windows未代判。外证据step5-b09-body。
+
+### 有界正文投影的来源去重（2026-10-03，macOS原数据先验）
+
+- 同64KiB内明确省略control proposal参数、原archive/READ不动；完整结果text/error
+  保留，来源字段无损提取sources并经record.source_identity解析，非新permission/证据。
+- 原B634events/33真实结果显式回归逐项text/error/binding同、33/33正文全部纳入且
+  omitted为空、owner0；七项archive回归通过。上轮正式仍未交付错误总数，首败保持，
+  新正式采用待验/Windows未代判，派发参数字节推导仍非owner receipt。外证据step5-b09-report。

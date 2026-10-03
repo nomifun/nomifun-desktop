@@ -257,20 +257,41 @@ impl ToolArchive {
             crate::planning::TOOL_NAME | crate::completion::TOOL_NAME));
         let limit = limit.min(64 * 1024);
         let mut records = Vec::new();
+        let mut sources = Vec::<Value>::new();
         for (index, entry) in &selected {
-            let payload: Value = serde_json::from_str(&entry.payload).ok()?;
+            let mut payload: Value = serde_json::from_str(&entry.payload).ok()?;
             let derived = original_stdin_argument_bytes(&entry.name, &payload);
-            records.push(json!({"archive_id":entry.id,"source_turn":entry.source_turn,"source_result_order_index":index,
+            let source = json!({"source_turn":payload["source_turn"],"source_binding":payload["source_binding"]});
+            let source_identity = sources.iter().position(|known|known==&source).unwrap_or_else(|| {
+                sources.push(source); sources.len()-1
+            });
+            // Lossless factoring of repeated provenance. The original archive
+            // payload remains unchanged; source_identity resolves both fields.
+            payload.as_object_mut()?.remove("source_turn");
+            payload.as_object_mut()?.remove("source_binding");
+            let control_arguments_omitted = matches!(entry.name.as_str(),
+                crate::planning::TOOL_NAME | crate::completion::TOOL_NAME);
+            if control_arguments_omitted {
+                // Preserve the complete result/error body; large historical
+                // plan proposal arguments stay available through exact READ.
+                // This is a labelled projection, never an archive rewrite.
+                payload["arguments"] = Value::Null;
+                payload["arguments_omitted"] = json!(true);
+            }
+            records.push(json!({"archive_id":entry.id,"source_turn":entry.source_turn,"source_identity":source_identity,"source_result_order_index":index,
                 "tool":entry.name,"original_is_error":entry.original_is_error,
-                "archive_truncated":entry.truncated,"derived_argument_facts":derived,"payload":payload}));
+                "archive_truncated":entry.truncated,"derived_argument_facts":derived,
+                "control_proposal_arguments_omitted_from_projection":control_arguments_omitted,"payload":payload}));
         }
         // Keep complete archive payloads only. The count and omitted IDs are
         // explicit; a smaller context never turns a missing projection into
         // a claim that the retained historical records do not exist.
         loop {
-            let value = json!({"kind":"quoted_explicit_turn_archive_data","notice":NOTICE,
+            let value = json!({"kind":"quoted_explicit_turn_archive_data","projection_schema":"factored_historical_result_text.v1","notice":NOTICE,
+                "sources":sources,"provenance":"Each record.source_identity resolves the original source_turn/source_binding in sources; factoring changes no source identity or authority.",
                 "current_evidence":false,"new_user_instruction":false,
-                "selected_archive_records":selected.len(),"included_complete_archive_records":records.len(),
+                "selected_archive_records":selected.len(),"included_complete_result_bodies":records.len(),
+                "completeness":"Complete retained result text/error/provenance for included records. Planning/control proposal arguments are explicitly omitted from this projection, not from the archive; exact READ still provides them. Archive truncation/media flags remain authoritative.",
                 "selected_source_error_records":source_error_records,
                 "included_source_error_records":records.iter().filter(|record|record["original_is_error"]==true).count(),
                 "record_order":"Operational results first, then planning/control snapshots; source_result_order_index is original archive insertion order, not proof of execution time.",
@@ -769,7 +790,7 @@ mod tests {
         let mut payload: Value = serde_json::from_str(&control.payload).unwrap();
         payload["tool"] = json!(control.name);
         payload["original_is_error"] = json!(true);
-        payload["arguments"] = json!({"large_planning_arguments":"x".repeat(4096)});
+        payload["text_parts"] = json!([{"part":0,"text":"x".repeat(4096),"original_bytes":4096,"truncated":false}]);
         control.payload = payload.to_string();
         archive.entries.push_front(control);
         archive.set_references(vec![json!({"source_turn":"old-turn"})]);
@@ -777,7 +798,7 @@ mod tests {
         let nomifun_chat_model_broker::ChatContentPart::Text { text } = &message.content[0] else { panic!("text expected") };
         let data: Value = serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
         assert_eq!(data["selected_archive_records"],2);
-        assert_eq!(data["included_complete_archive_records"],1);
+        assert_eq!(data["included_complete_result_bodies"],1);
         assert_eq!(data["selected_source_error_records"],1);
         assert_eq!(data["included_source_error_records"],0);
         assert_eq!(data["records"][0]["tool"],"read_file");
@@ -861,6 +882,24 @@ mod tests {
             assert_eq!(read["source_turn"],input["operation_id"]);
             assert_eq!(read["eof"],true,"this fixture must fit a complete bounded read");
             assert_eq!(read["json_fragment"],entry.payload);
+        }
+        archive.set_references(vec![json!({"source_turn":input["operation_id"]})]);
+        let message = archive.reference_data_message(65536).expect("owned result bodies must fit the unchanged projection cap");
+        let nomifun_chat_model_broker::ChatContentPart::Text { text } = &message.content[0] else { panic!("only data text expected") };
+        let data: Value = serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
+        assert_eq!(data["included_complete_result_bodies"].as_u64(),Some(expected.len() as u64));
+        assert!(data["omitted_archive_ids"].as_array().unwrap().is_empty());
+        for record in data["records"].as_array().unwrap() {
+            let payload = &record["payload"];
+            let original = expected.iter().find(|result|Some(result.call_id.as_ref())==payload["call_id"].as_str()).unwrap();
+            assert_eq!(data["sources"][record["source_identity"].as_u64().unwrap() as usize]["source_binding"],serde_json::to_value(&source).unwrap());
+            assert_eq!(payload["original_is_error"],original.is_error);
+            assert_eq!(payload["text_parts"].as_array().unwrap().iter().map(|part|part["text"].as_str().unwrap()).collect::<Vec<_>>(),
+                original.output.iter().map(|part| match part {ChatToolResultPart::Text {text}=>text.as_str(),_=>panic!("no fixture media")}).collect::<Vec<_>>());
+            if record["control_proposal_arguments_omitted_from_projection"]==true {
+                assert!(payload["arguments"].is_null());
+                assert_eq!(payload["arguments_omitted"],true);
+            }
         }
         println!("closed journal validated; {} historical records retained; no owner invoked",archive.entries.len());
     }
