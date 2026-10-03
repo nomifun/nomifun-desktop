@@ -609,6 +609,15 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   八种安全变更和任务删除拒绝、错Turn不能清除/复用、捕获失配不发布部分视图；已有
   四轮公开API链继续通过。无真实模型/UI样本；证据step5-b09-closure/run-001-build。
 
+#### 已用CEF的生产失败保护正式验证准备（2026-10-03）
+
+- 复用debug隔离根/精确UUID标记，新增仅host_storage_closed后的native-entry-hold：
+  实际Browser使用、guardian已确认entry、独立生产monitor已启用后让主线程不返回。
+  实际cef_shutdown尚未调用，日志明确false；不能记成Keychain/CEF内部阻塞复现。
+- 四项shutdown-state回归通过；release无入口，原30+5秒、精确Helper清理与guardian
+  Stop/join、不明证明不紧急退出的底线不变。正式normal/held各独立零模型运行待验，
+  只计划共用本轮同一个最新正式包，不重跑旧ack-loss或矩阵。外证据guardian-live-exit。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
