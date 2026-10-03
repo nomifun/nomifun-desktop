@@ -901,6 +901,43 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   B634/33黄金1通过（全部结果/source10含2/56445B相同）。正式采用/报告完整/表达待验，
   外证据history-report-compact，原失败与Windows结果不代判。
 
+- `bf8cfcb3f`正式同原任务：3请求/3步均仅update_plan Specific；首模型提出旧形状
+  report_completion，被未暴露工具守卫拒绝（本轮tool error1/command0），后两次无调用，
+  最终NOMIFUN_TASK_INCOMPLETE。**FAIL_BEFORE_COMPACT_REPORT_ADOPTION**，四字段合同未到达，
+  无报告/表达PASS，旧source10含2不变；1746events/19Turns/14effects、1693前缀和旧Turn全同。
+  Cmd-Q0/362.840秒（含解锁等待）无expiry/信号，源备五表同/ok，无新owner；完整证据外置。
+- 新定位：fresh只读报告仍强制多一轮plan，而系统说明已要求报告字段，与当次选面冲突。
+  仅fresh且无needs_replan直接广告严格report；复用原有效report自动关闭optional空plan，
+  不是自动接受模型错误或宿主生成完成。真实needs_replan仍只广告plan，patch/process/exact
+  未结算及最新输入/来源/字节预算原门禁保持。最小入口首红保留，修后strict单请求/无owner、
+  replan仍plan及optional/current伪证负向同夹具通过；Runtime323/1ignored。修后正式待验，
+  新证据history-report-direct，不重跑原A/B操作或Keychain。
+
+- `ca7682036`/同步`adccdb482`正式同原task仍FAIL：首次root AGENTS加载把不存在的
+  optional空plan标needs_replan，2个请求仍ONLYplan、无模型call，报告未采用；不把正文宣称
+  完成或组件绿代判。1798events/20Turns/14effects、1746前缀和旧Turn全同，Cmd-Q0/90.281秒
+  无expiry/信号/新owner，源备五表同/ok，首败外置history-report-direct。
+- 此初次装配缺口增加非空AGENTS真实授权read夹具，首红与live一致；改用已有空plan
+  invalidation规则：已存在plan才由context refresh抬replan，已被steering/recovery抬起的gate
+  不清除，规则完整装配/权限不变。同夹具2个host reads/模型owner0/首轮report，stale-plan
+  及既有patch/steering/current伪证邻近Runtime323/1ignored通过。正式采用待验，证据另记
+  history-report-instruction-entry；不再靠无read authority组件冒充正式接线。
+
+- `7143c699b`/文档`91f6678e2`正式同原task：首请求起ONLY四字段report，首次AGENTS
+  接线修复实际成立；前两次普通正文，后4次validJSON真实compact调用，各选16记录超过
+  既有8KiB预算，全部明确拒绝，最终有界no-progress失败。**入口/四字段采用成立，完整
+  交付和表达仍FAIL**，不提高预算/删必要事实或把missing洗空。6请求/6步、1877events/
+  21Turns/14effects，1798前缀/20旧Turn同、无新owner；Cmd-Q0/242.247秒无expiry/信号。
+  源备五表同/ok，完整trace/公开参数/UI/失败观察器独立在history-report-instruction-entry。
+  后续先离线确认完整选择预算与必要来源，不再同根因付费循环；A/B既有结果、Keychain不重验。
+- strict catalog仍沿optional旧说明说direct answer可完成及historical_results，和4字段选面
+  矛盾；只在strict上下文按当前合同生成catalog说明，普通optional路径不变。增加实际首
+  请求无旧说明断言并通过同控制回归；此文案接线未新增正式模型复跑，不以它关闭预算/表达。
+- 超预算错误原只给泛化8KiB拒绝；现完整测量最多16个既有有界projection后返回精确总字节/
+  8192限制及“未发布”，说明只删冗余、不删必要事实，缺项按当前合同blocked，禁止同选择
+  重试/裁源/重做/扩预算。总额超过仍拒绝，不改变source数据、计划或报告；精确值/无发布/
+  不改原文回归1通过，Runtime324/1ignored。修后模型恢复效果未验，不再本轮付费循环。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
