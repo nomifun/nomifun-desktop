@@ -4306,3 +4306,9 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 两包分别提交08a974eaf（显式输出完整预留）/bd8b1f580（v4、精确v3回放和cmd原文）。push正常拒绝后合入52cc08bb5/e6b9f4742；代码/文档重叠按两边语义合并，首编遗漏三个新函数参数另留，纠正后历史8/strict2通过。新增可读文件/cleanup/诊断字段仅v4，v3不追加；精确旧诊断回归另外通过，不regex改写canonical。
 - 新warmup旧Snapshot/newproviderrevision根因由共享提交明确修复：idle/write fence内先证明旧host已关闭，再替换model binding，失败保quarantine不准入。Windows既有四回合路由集成1/1通过，含实际warmup→配置刷新→默认output wire省略及正常shutdown。此为新的可区分组件证据，不用它反推W276旧唯一原因或正式问题已消失；原时间盒不自动重开。
 - 本轮无正式GUI或模型任务、真实供应商请求0，自有Cargo均结束，旧stdin/Stop/历史真值/Creative/正常及活树Quit证据复用。新v4/输出默认值正式采用、原会话准入缺证、生成/完整交付残余、W276/成功恢复及S3/卷UNC等继续OPEN；完整共享、Windows和发布认证未完成，全面目标active。
+
+### strict叙述中的真实原样来源误拒修复（2026-10-03；直接回归通过）
+
+- 479f0f7a5新词门禁按非字母分割整段，合法路径reports/reaped/result.txt会命中reaped，reports/state=ready.txt会命中state=。已解析并选择的原调用路径原样引用被拒绝，与声明保留原路径/诊断不一致；首次正向回归明确red。
+- 只在校验副本中按已选/已验archive的完整路径或明确引用的完整调用值/诊断行豁免局部span；不改模型摘要/原件/计数/资格。不能把某源词全篇放行，非源backtick/假URL/自由reaped=true仍拒绝。正负路径回归1项、既有strict来源/缺项2项通过，diff检查通过，无schema/权限/预算放宽。
+- 外部`2026-10-03/windows/global-readable-narrative-review`保存来源SHA/候选/首红/修后日志；源码在63df5779e正式GUI退出后才应用，模型与新UI采用未验，不计原复杂报告全部PASS。
