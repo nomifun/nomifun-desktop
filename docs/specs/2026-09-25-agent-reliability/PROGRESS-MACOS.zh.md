@@ -669,6 +669,18 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   七项archive/投影回归通过，1外部数据ignored；正式修后待验，不提高token/output预算。
   证据step5-b09-body/run-002-live及run-001-build；Windows结果未改。
 
+#### 原结果正文全覆盖、不扩大投递预算（2026-10-03）
+
+- 操作优先正式2请求/2步已正确恢复stdin proposal13和全部操作结果，仍因7条control
+  记录被省略而不肯报告完整原错误数10；保持FAIL。正常退出122.588秒，1417events/
+  11Turns/14effects冷封存、1373前缀/10旧Turn/效果同，新模型owner0，host指令读取2。
+- 不增加64KiB：仅在数据投影省略巨大control proposal参数并明确标记（原archive/READ
+  仍全保留），完整原结果text/error及截断/媒体语义不删。重复source_turn/source_binding
+  无损提取到sources，record.source_identity逐条解析原来源，不产生新鲜性或权限。
+  原634-event/33-result真实关闭journal显式回归已验证33/33全文能在原预算内入消息、
+  全部text/error/binding逐项一致、omitted IDs为空/owner0；定向7通过，正式修后待验。
+  参数计数仍非实际owner写入receipt。证据step5-b09-report/run-002-live及run-001-build。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
