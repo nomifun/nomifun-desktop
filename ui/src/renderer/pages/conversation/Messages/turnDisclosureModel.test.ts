@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assignTurnIdsFromUserRequests,
   buildTurnDisclosureItems,
+  collectPublicContinuationIds,
   type TurnDisclosureInputItem,
 } from './turnDisclosureModel';
 import { parseMessageId } from '@/common/types/ids';
@@ -34,6 +35,27 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
+  test('typed output continuation keeps every linked public part outside the process disclosure', () => {
+    const first=item('first','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
+    const tail=item('tail','assistant',{createdAt:3000,sourceMessageIds:[SOURCE_2],publicText:true,continuationOfMessageId:SOURCE_1});
+    const result=buildTurnDisclosureItems([item('user','user'),first,tail],{tailClosed:true});
+    expect(result.filter(entry=>entry.type==='item').map(entry=>entry.id)).toEqual(['user','first','tail']);
+    const disclosure=result.find(entry=>entry.type==='turn_disclosure');
+    expect(disclosure?.type==='turn_disclosure' ? disclosure.processItemIds : []).not.toContain('first');
+    expect([...collectPublicContinuationIds([first,tail],tail)]).toEqual(['tail','first']);
+  });
+
+  test('unlinked tool preamble, missing and foreign continuation sources are not invented final text', () => {
+    const first=item('preamble','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
+    const final=item('final','assistant',{createdAt:4000,sourceMessageIds:[SOURCE_2],publicText:true});
+    const result=buildTurnDisclosureItems([item('user','user'),first,item('tool','process',{createdAt:3000}),final],{tailClosed:true});
+    expect(result.filter(entry=>entry.type==='item').map(entry=>entry.id)).toEqual(['user','final']);
+    const linked={...final,continuationOfMessageId:SOURCE_1};
+    expect([...collectPublicContinuationIds([linked],linked)]).toEqual(['final']);
+    expect([...collectPublicContinuationIds([{...first,turnId:TURN_2},linked],linked)]).toEqual(['final']);
+    expect([...collectPublicContinuationIds([first,{...linked,terminal:true}],{...linked,terminal:true})]).toEqual([]);
+  });
+
   test('a durable cancelled summary survives reload and partial assistant text', () => {
     for (const withProcess of [false, true]) {
       const result = buildTurnDisclosureItems([

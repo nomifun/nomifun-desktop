@@ -134,6 +134,8 @@ export type IMessageText = IMessage<
     content: string;
     /** Actual message time; created_at remains the durable pagination cursor. */
     display_at_ms?: number;
+    /** Canonical typed output-limit continuation, never inferred from text. */
+    continuation_of_message_id?: MessageId;
     interaction?: {
       kind: 'robot' | 'desktop'; robot_id: string; connection_id: string; request_id: string;
       input_modality: 'speech' | 'text'; output_mode: 'spoken' | 'desktop';
@@ -341,6 +343,7 @@ export type IMessageAgentStatus = IMessage<
 
 type ResponseTextData = {
   content: unknown;
+  continuation_of_message_id?: unknown;
   replace?: boolean;
   cronMeta?: CronMessageMeta;
   knowledge_writeback?: unknown;
@@ -1044,6 +1047,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
               cronMeta: normalizeCronMessageMeta(data.cronMeta),
               ...(shouldReplace ? { replace: true } : {}),
               ...(persistedWriteback ? { knowledge_writeback: persistedWriteback } : {}),
+              ...normalizeTextContinuation(data),
               ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),
             }
           : {
@@ -1142,6 +1146,12 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     }
   }
 };
+
+export function normalizeTextContinuation(value: Record<string, unknown>): Partial<IMessageText['content']> {
+  if (typeof value.continuation_of_message_id !== 'string') return {};
+  try { return { continuation_of_message_id: parseMessageId(value.continuation_of_message_id) }; }
+  catch { return {}; }
+}
 
 const normalizeMessageStatus = (value: string | undefined): TMessage['status'] => {
   if (value === 'finish' || value === 'pending' || value === 'error' || value === 'work') return value;

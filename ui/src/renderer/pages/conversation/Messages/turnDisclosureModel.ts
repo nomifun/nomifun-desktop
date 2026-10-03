@@ -26,6 +26,8 @@ export interface TurnDisclosureInputItem {
   terminal?: boolean;
   running?: boolean;
   sourceMessageIds?: MessageId[];
+  continuationOfMessageId?: MessageId;
+  publicText?: boolean;
 }
 
 export type TurnDisclosureOutputItem =
@@ -63,6 +65,24 @@ export interface AssignTurnIdOptions {
 }
 
 const unique = <T extends string>(values: T[]): T[] => Array.from(new Set(values.filter(Boolean)));
+
+export function collectPublicContinuationIds(
+  items: TurnDisclosureInputItem[], final: TurnDisclosureInputItem | undefined
+): ReadonlySet<string> {
+  const visible = new Set<string>();
+  if (!final?.turnId || final.role !== 'assistant' || final.terminal || final.publicText !== true) return visible;
+  const bySource = new Map<MessageId, TurnDisclosureInputItem>();
+  for (const entry of items) {
+    if (entry.turnId !== final.turnId || entry.role !== 'assistant' || entry.terminal || entry.publicText !== true) continue;
+    for (const source of entry.sourceMessageIds ?? []) bySource.set(source, entry);
+  }
+  let current: TurnDisclosureInputItem | undefined = final;
+  while (current && !visible.has(current.id)) {
+    visible.add(current.id);
+    current = current.continuationOfMessageId ? bySource.get(current.continuationOfMessageId) : undefined;
+  }
+  return visible;
+}
 
 const toProcessReceipt = (entry: TurnDisclosureInputItem): TurnDisclosureOutputItem => ({
   type: 'process_receipt',
@@ -251,7 +271,8 @@ function buildSegmentOutput(
   finalAssistantForTurn?: TurnDisclosureInputItem,
   turnStartedAt?: number,
   turnEndedAt?: number,
-  resultBeforeFailure?: TurnDisclosureInputItem
+  resultBeforeFailure?: TurnDisclosureInputItem,
+  publicContinuationIds: ReadonlySet<string> = new Set()
 ): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
@@ -268,7 +289,8 @@ function buildSegmentOutput(
   const resultBeforeFailureIndex = isClosed && resultBeforeFailure
     ? segment.findIndex((entry) => entry === resultBeforeFailure)
     : -1;
-  const isVisibleAssistant = (index: number) => index === finalAssistantIndex || index === resultBeforeFailureIndex;
+  const isVisibleAssistant = (index: number) => index === finalAssistantIndex || index === resultBeforeFailureIndex
+    || (isClosed && publicContinuationIds.has(segment[index].id));
   const stateOptions = { isClosed };
 
   const processItems = segment.filter((entry, index) => {
@@ -560,6 +582,10 @@ export function buildTurnDisclosureItems(
     if (latest) resultBeforeFailureByTurn.set(item.turnId, item);
   }
 
+  const publicContinuationIds = new Map<MessageId, ReadonlySet<string>>();
+  for (const [turn, final] of finalAssistantByTurn) {
+    publicContinuationIds.set(turn, collectPublicContinuationIds(items, final));
+  }
   const flush = (fallbackClosed: boolean) => {
     if (!segment.length) return;
     const segmentTurnId = segment[0]?.turnId;
@@ -571,7 +597,8 @@ export function buildTurnDisclosureItems(
         segmentTurnId ? finalAssistantByTurn.get(segmentTurnId) : undefined,
         segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined,
         segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined,
-        segmentTurnId ? resultBeforeFailureByTurn.get(segmentTurnId) : undefined
+        segmentTurnId ? resultBeforeFailureByTurn.get(segmentTurnId) : undefined,
+        segmentTurnId ? publicContinuationIds.get(segmentTurnId) : undefined
       )
     );
     segment = [];
