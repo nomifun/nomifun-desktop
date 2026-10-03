@@ -3718,3 +3718,13 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   零模型冷读已公开首/尾正文并正常Cmd-Q0/67.485秒。原1457events/12Turns/14effects及
   源/备份五表全同、双integrity/无自有PID或listener；不证明新生成语义或流中历史刷新前
   展示。Windows仅共享代码影响，原平台结果不代判；外证据step5-b09-complete与continuation-cold。
+
+### 历史来源错误账本的集合口径（2026-10-03，macOS原B发现）
+
+- 完整33结果已投递但模型将8非exit2与2命令失败当不交集合；原typed WorkStatus
+  最后seq1015实际为工具结果失败10/命令失败2。只在validated source journal的有界
+  历史metadata保存最后typed计数及原身份，作为明确引用的quoted data，绝不替换当前
+  Turn const/work/evidence。说明工具is_error含非零命令flag，命令观察独立、可重叠不相加；
+  无status未知、省略不减ledger、不解析owner正文JSON、不硬编码个案数字。
+- archive10项及显式原B634/33 journal1项通过，原64KiB内56445bytes全部33结果与10/2
+  来源账本一致；正式采用待验，旧失败/Windows结果不代判。外证据historical-accounting。
