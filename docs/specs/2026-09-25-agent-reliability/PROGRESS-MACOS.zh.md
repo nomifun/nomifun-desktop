@@ -14,7 +14,7 @@
 | 近期目标 | 当前结果 | 保留边界 |
 | --- | --- | --- |
 | A13复杂交付 | 原完整正式N1 PASS，复用 | 不作统计稳定性/N3认证 |
-| B09字节/步骤/报告可读 | 原效果链已验；33/33结果实际入Step5；截断首段隐藏已修且正式零模型冷读PASS | 模型只报8次拒绝和2次命令失败、不合计10，严格完整报告仍FAIL |
+| B09字节/步骤/报告可读 | 原效果链已验；33/33实际入Step5；续写展示已修；修后原报告恢复N1 PASS，10含2口径正确 | 原failed Turn/全部首败不改completed；不作首发无错或N3认证 |
 | 模型/能力/上下文/推理配置变更 | 空闲公开API四轮、当前Turn一致视图、旧结清状态兼容已验；正式UI切Step5/1M/4096/low并实际请求成立 | admission→capture小竞态仍明确失败；全并发“无感”未认证 |
 | 已用CEF退出清理 | 正式正常退出及受控不返回时生产monitor非零有界退出已验 | 实际系统Keychain自然等待未再复现，不冒充根因消除 |
 
@@ -729,8 +729,40 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   投影省略/缓存重载不减少或重复原ledger。不从owner正文JSON猜计数，无硬编码10。
 - archive定向10通过/1外部输入ignored；显式原B634events/33结果回归1通过，来源/正文/
   错误全同，最后typed10/2相同，原64KiB内56445bytes/33完整/omitted0/owner0。
-  正式修后待验；外证据`2026-10-03/macos/historical-accounting/run-001-build/`。
-  原完整B报告FAIL未覆盖，Windows未代判，未改renderer或重新走查已排除的执行层字节。
+  源码`da09563a0`/同步合并`919c685bf`正式同原数据、同task修后1请求/1步报告恢复
+  **PASS_REPORT_ONLY**：8084-byte完整正文与真实UI、33/33源结果/typed10含命令2一致，
+  before33/after32/LF/hash/步骤、stdin13/EOF/父子Stop清理与原失败均保留。模型owner0/
+  host AGENTS读取2单列，不重做效果；当前计数仍0/0、不被历史10/2覆盖。
+- 正常Cmd-Q0/89.201秒，无expiry/TERM/KILL；1493events/13Turns/14effects及1457前缀/
+  12旧Turn/原效果/源备五表同、integrity ok、原PID/listener消失。单次结果不是生成统计
+  认证或把原failed Turn改completed，旧严格FAIL保留。观察器先误用全bundle路径将后来CEF
+  样本算成B残留，首错外留后限定已记录B PID/listener，不杀别人的进程、不新增模型。
+  外证据`2026-10-03/macos/historical-accounting/`，Windows未代判，无执行层字节重查。
+
+#### 旧隔离CEF缓存的真实条件样本（2026-10-03）
+
+- 同`919c685bf`正式包，新native-actions Session仅导入旧macGEN测试Default副本；146文件/
+  源与副本hash相同/History URL0，不碰用户数据、Keychain或保护，无fault变量/标记，模型0。
+- **FAIL_OBSERVER_DEADLINE**：真实CEF初始化/页面导航23.822秒并加载，但未完成独立
+  click/实际Cmd-Q即到原180秒期限，TERM/exit0在180.045秒，无KILL；不能用0作PASS。
+  Browser POST在+75.873秒，导航+106.723秒返回仍剩73.277秒；观察器未赶上45秒关闭余量。
+  native shutdown entry/return均0，不能归为实际shutdown/Keychain阻塞；不延时/不复跑。
+- 已捕获Main/fixture/8 Helper及listener消失、五表同/双integrity、绑定profile URL1/
+  Default0；WAL/shm仍在不算cold-close，未取Quit前socket快照所以guardian目录absence未验。
+  首观察与期限失败外留`keychain-source-cache/`，原normal/held保护通过仍成立，真实
+  Keychain/实际FFI阻塞退出子断言继续OPEN；Windows结果不代判。
+
+#### 公开叙述不应照抄引擎字段（2026-10-03）
+
+- 原B报告恢复已正确，但普通解释仍照抄model_step/exact_actions/failed_tools及process UUID。
+  旧policy仅禁tool-call ID/路由细节，未覆盖其他opaque句柄/规划统计术语；直接Assistant补
+  报告不走completion renderer，不能靠清洗formatter掩盖原回答或修改技术原文。
+- 共享叙述policy与原MINIMAL拼成同一instruction，默认用用户语言说动作/结果/原因/缺口，
+  原source计数含义保持；summary/rationale/label/explanation的描述引用同要求。明确请求
+  技术原文/标识时保留；stdout/文件/argv/hash/原PID不重写。无词表拒绝、权限或新增任务。
+- 真实direct request装配/原技术输出、schema叙述字段及载体反解三回归通过；原public v2两项、
+  v1精确回放一项、工具/命令精确计数两项通过。仅机制，不代判模型表达。准备随同原B
+  报告恢复任务验证一次，不另起润色任务/矩阵；证据public-report-language，正式待验。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
