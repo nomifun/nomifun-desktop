@@ -655,6 +655,20 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   Runtime304通过/1外部输入ignored、host固定root/floor/terminal1通过；夹具首编错误
   外留。正式正文采用待验，Windows未代判。证据step5-b09-settled/run-002-live及run-001-build。
 
+#### 历史操作结果优先与原参数字节事实（2026-10-03）
+
+- 正式正文版2请求/2步，文件before33/after32、完整终版/SHA及顺序已恢复，但实际64KiB
+  数据消息仅容纳23/33：大量plan参数先占空间、后段10条省略。原stdin成功回执本就没有
+  写入字节字段，模型又把UTF-8原参数算16；原工具错误总数未交付，完整B仍FAIL。
+  正常退出179.318秒，1373events/10Turns/14effects、1327前缀/9旧Turn/效果及冷库同，
+  新模型owner0，host AGENTS读取2单列，未新增当前文件检查或重放。
+- 同64KiB内stable优先平台操作结果，保留原source_result_order_index，不把投影排序
+  当执行时序；原payload/binding/error不改，selected/included错误计数分开、omitted IDs
+  与排序一致。stdin原proposal参数机械UTF-8计数另标derived、非owner-written receipt，
+  不trim/规范化/猜参数；before_tool可改真正派发参数，因此不以该计数伪造实际回执。
+  七项archive/投影回归通过，1外部数据ignored；正式修后待验，不提高token/output预算。
+  证据step5-b09-body/run-002-live及run-001-build；Windows结果未改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
