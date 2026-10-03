@@ -218,8 +218,22 @@ impl ToolArchive {
         context
     }
 
-    pub(crate) fn import_reference(&mut self,page:crate::AgentHistoryPage,binding:&crate::EngineBinding)->Result<Value,AgentEngineError> {
-        self.import(page,binding)
+    pub(crate) async fn import_scoped_reference(
+        &mut self,
+        page: crate::AgentHistoryPage,
+        binding: &crate::EngineBinding,
+        port: &dyn crate::AgentHistoryPort,
+        causality: &nomifun_chat_model_broker::ChatCausality,
+    ) -> Result<Value, AgentEngineError> {
+        let compatible = match page.turn.as_ref().and_then(|turn| turn.events.first()) {
+            Some(crate::AgentEngineEvent::TurnStarted { binding: source, .. })
+                if source.resolved_snapshot_ref() != binding.resolved_snapshot_ref() =>
+            {
+                port.model_snapshot_compatible(causality, source.resolved_snapshot_ref()).await?
+            }
+            _ => false,
+        };
+        self.import_with_model_proof(page, binding, compatible)
     }
 
     pub(crate) fn set_references(&mut self,references:Vec<Value>) {self.references=references;}
@@ -286,7 +300,14 @@ impl ToolArchive {
                     && !turn.operation_id.chars().any(char::is_control)
             })
             .map(|turn| (turn.operation_id.clone(), page.has_older));
-        let result = self.import(page, binding);
+        let result = tokio::select! {
+            biased;
+            _=cancellation.cancelled()=>return Err(AgentEngineError::Cancelled),
+            result=self.import_scoped_reference(page,binding,port,causality)=>result,
+        };
+        if matches!(&result, Err(AgentEngineError::Cancelled)) || cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
         Ok(match result {
             Ok(value) => AgentToolResult::text(call.call_id.clone(), value.to_string(), false),
             Err(_) => AgentToolResult::text(call.call_id.clone(), json!({
@@ -297,10 +318,20 @@ impl ToolArchive {
         })
     }
 
+    #[cfg(test)]
     fn import(
         &mut self,
         page: crate::AgentHistoryPage,
         binding: &crate::EngineBinding,
+    ) -> Result<Value, AgentEngineError> {
+        self.import_with_model_proof(page, binding, false)
+    }
+
+    fn import_with_model_proof(
+        &mut self,
+        page: crate::AgentHistoryPage,
+        binding: &crate::EngineBinding,
+        model_compatible: bool,
     ) -> Result<Value, AgentEngineError> {
         let Some(turn) = page.turn else {
             if page.has_older {
@@ -349,7 +380,7 @@ impl ToolArchive {
         if recorded.agent_session_id()!=binding.agent_session_id()
             || recorded.runtime_binding_id()!=binding.runtime_binding_id()
             || recorded.build_id()!=binding.build_id()
-            || recorded.resolved_snapshot_ref()!=binding.resolved_snapshot_ref()
+            || (recorded.resolved_snapshot_ref()!=binding.resolved_snapshot_ref() && !model_compatible)
             || turn_operation_id.as_ref() != turn.operation_id {
             return Err(invalid("historical turn belongs to another exact historical scope"));
         }
@@ -606,6 +637,26 @@ mod tests {
         assert_eq!(payload["source_turn"],"old-turn");assert_eq!(payload["text_parts"][0]["text"],"exact\n");
         assert_eq!(payload["source"],"persisted_turn_result");
         assert!(archive.context().contains("not fresh workspace/remote observation"));
+    }
+
+    #[test]
+    fn owner_model_snapshot_proof_preserves_source_and_cannot_cross_other_identity_fields() {
+        let current=binding();let mut encoded=serde_json::to_value(&current).unwrap();
+        encoded["resolved_snapshot_ref"]=json!({"snapshot_id":"old-model-snapshot","snapshot_digest":"c".repeat(64)});
+        let source:EngineBinding=serde_json::from_value(encoded.clone()).unwrap();
+        let mut archive=ToolArchive::new("current".into());
+        assert!(archive.import(page(source.clone()),&current).is_err());
+        let loaded=archive.import_with_model_proof(page(source.clone()),&current,true).unwrap();
+        assert_eq!(loaded["imported_records"],1);
+        let payload:Value=serde_json::from_str(&archive.entries[0].payload).unwrap();
+        assert_eq!(payload["source_binding"],serde_json::to_value(&source).unwrap());
+        assert_eq!(payload["text_parts"][0]["text"],"exact\n");
+        for (key,value) in [("agent_session_id",json!("foreign")),("runtime_binding_id",json!("other")),("build_id",json!("other-contract"))] {
+            let mut changed=encoded.clone();changed[key]=value;
+            let mut candidate=ToolArchive::new("current".into());
+            assert!(candidate.import_with_model_proof(page(serde_json::from_value(changed).unwrap()),&current,true).is_err());
+            assert!(candidate.entries.is_empty());
+        }
     }
 
     #[test]

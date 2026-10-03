@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 struct LiveFrontend {
+    model: LiveModelSpec,
     key: Zeroizing<String>,
     local_token: String,
     client: reqwest::Client,
@@ -42,6 +43,32 @@ struct LiveFrontend {
     stopped_status: AtomicUsize,
     trace_dir: PathBuf,
     trace_sequence: AtomicUsize,
+}
+
+#[derive(Clone, Copy)]
+struct LiveModelSpec {
+    name: &'static str,
+    context_limit: Option<u32>,
+}
+
+impl LiveModelSpec {
+    fn parse(name: Option<&str>) -> anyhow::Result<Self> {
+        match name {
+            None | Some("step-3.7-flash") => Ok(Self { name: "step-3.7-flash", context_limit: None }),
+            // StepFun's published 1M input window; keep this conservative
+            // decimal ceiling, and freeze output/time separately below.
+            Some("step-5-preview") => Ok(Self { name: "step-5-preview", context_limit: Some(1_000_000) }),
+            _ => anyhow::bail!("unsupported live GUI model selection"),
+        }
+    }
+
+    fn configure_capability(self, mut capability: Value) -> Value {
+        if let Some(limit) = self.context_limit {
+            capability["context_limit"] = json!(limit);
+            capability["traits"] = json!(["vision_input", "video_input"]);
+        }
+        capability
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -151,6 +178,30 @@ fn command_resource_selections(preserve_default_general: bool) -> Value {
 #[cfg(test)]
 mod live_budget_tests {
     use super::*;
+    #[test]
+    fn live_model_selection_keeps_default_and_declares_step5_without_budget_override() {
+        let default=LiveModelSpec::parse(None).unwrap();
+        assert_eq!(default.name,"step-3.7-flash");assert_eq!(default.context_limit,None);
+        let step5=LiveModelSpec::parse(Some("step-5-preview")).unwrap();
+        assert_eq!(step5.name,"step-5-preview");assert_eq!(step5.context_limit,Some(1_000_000));
+        for invalid in ["","step-5","STEP-5-PREVIEW","step-5-preview\n","provider/step-5-preview"] {
+            assert!(LiveModelSpec::parse(Some(invalid)).is_err());
+        }
+        let budget=LiveBudget::parse(Some("unlimited"),Some("4096"),Some("360")).unwrap();
+        assert_eq!(budget.output_tokens,4096);assert_eq!(budget.seconds,360);
+        let capability = step5.configure_capability(json!({
+            "task":"chat", "traits":[], "protocol":"openai.chat_text",
+            "connection_role":"default", "output_limit":4096
+        }));
+        let input: nomifun_api_types::ProviderModelCapabilityInput =
+            serde_json::from_value(capability).unwrap();
+        assert_eq!(input.context_limit, Some(1_000_000));
+        assert_eq!(input.output_limit, Some(4096));
+        assert_eq!(input.traits, vec![
+            nomifun_api_types::ModelTrait::VisionInput,
+            nomifun_api_types::ModelTrait::VideoInput,
+        ]);
+    }
     #[test]
     fn command_mode_selects_only_the_exact_official_template() {
         assert_eq!(live_command_template(Some("--live-commands")), Some("coding.codex"));
@@ -2413,7 +2464,7 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             Ok(timeout) => timeout,
             Err(status) => return status.into_response(),
         };
-        body["model"] = json!("step-3.7-flash");
+        body["model"] = json!(live.model.name);
         body["max_tokens"] = json!(live.budget.output_tokens);
         body.as_object_mut().unwrap().remove("max_completion_tokens");
         body["temperature"] = json!(0);
@@ -2755,7 +2806,8 @@ async fn main() -> anyhow::Result<()> {
             std::env::var("NOMIFUN_LIVE_GUI_OUTPUT_LIMIT").ok().as_deref(),
             std::env::var("NOMIFUN_LIVE_GUI_SECONDS").ok().as_deref(),
         )?;
-        Some(LiveFrontend { key:Zeroizing::new(key.trim().to_owned()),local_token:format!("Bearer {}",uuid::Uuid::new_v4()),
+        let model=LiveModelSpec::parse(std::env::var("NOMIFUN_LIVE_GUI_MODEL").ok().as_deref())?;
+        Some(LiveFrontend { model,key:Zeroizing::new(key.trim().to_owned()),local_token:format!("Bearer {}",uuid::Uuid::new_v4()),
             client:reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(90)).build()?,
             work,source:Mutex::new(source),served:Mutex::new(vec![]), budget, started:Mutex::new(None),
             upstream_requests:AtomicUsize::new(0),stopped_status:AtomicUsize::new(0),trace_dir,trace_sequence:AtomicUsize::new(0) })
@@ -2932,6 +2984,8 @@ async fn main() -> anyhow::Result<()> {
                 let mut status=serde_json::Map::new();
                 let sections=[
                     json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),
+                        "live_model":f.live.as_ref().map(|live|live.model.name),
+                        "live_context_limit":f.live.as_ref().and_then(|live|live.model.context_limit),
                         "upstream_requests":f.live.as_ref().map(|live| live.upstream_requests.load(Ordering::SeqCst)),
                         "live_call_limit":f.live.as_ref().map(|live|live.budget.calls),
                         "live_output_limit":f.live.as_ref().map(|live|live.budget.output_tokens),
@@ -3034,10 +3088,17 @@ async fn main() -> anyhow::Result<()> {
     let prepared = async {
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
         let model_traits = if computer_granted || computer_screen_denied || computer_pointer_input || computer_click_variants || computer_drag_cancel { json!(["vision_input"]) } else { json!([]) };
-        let provider = api(&app,"/api/providers",json!({"platform":if live_commands {"stepfun-plan"}else{"custom"},"name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":if live_commands {"step-3.7-flash"}else{"browser-gui-fixture"},"enabled":true,"capabilities":[{"task":"chat","traits":model_traits,"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
+        let model_spec=fixture.live.as_ref().map(|live|live.model);
+        let model_name=if live_commands {model_spec.expect("live command model frozen").name}else{"browser-gui-fixture"};
+        let mut chat_capability=json!({"task":"chat","traits":model_traits,"protocol":"openai.chat_text","connection_role":"default","output_limit":4096});
+        if live_commands {
+            chat_capability = model_spec.expect("live command model frozen")
+                .configure_capability(chat_capability);
+        }
+        let provider = api(&app,"/api/providers",json!({"platform":if live_commands {"stepfun-plan"}else{"custom"},"name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":model_name,"enabled":true,"capabilities":[chat_capability]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
         if live_commands {
-            let model = json!({"provider_id":provider,"model":"step-3.7-flash"});
+            let model = json!({"provider_id":provider,"model":model_name});
             let template = command_template.expect("live command mode has an exact template");
             let general = template == "assistant.general";
             let editor = api(&app,&format!("/api/agent-presets/from-template/{template}"),json!({

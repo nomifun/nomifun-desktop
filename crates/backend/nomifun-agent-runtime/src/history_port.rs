@@ -18,6 +18,16 @@ pub struct AgentHistoryPage {
 
 #[async_trait::async_trait]
 pub trait AgentHistoryPort: Send + Sync + std::fmt::Debug {
+    /// Optional owner proof for a Snapshot differing ONLY by its Chat route.
+    /// False by default; never an execution/recovery or resource-scope grant.
+    async fn model_snapshot_compatible(
+        &self,
+        _causality: &ChatCausality,
+        _source: &nomifun_agent_contracts::ResolvedSnapshotRef,
+    ) -> Result<bool, AgentEngineError> {
+        Ok(false)
+    }
+
     /// Latest historical turn before the current accepted root, or before an
     /// exact older receipt cursor. Hosts must enforce owner/Session scope,
     /// fixed root cutoff, the owner's explicit clear-context floor, contiguous

@@ -1385,9 +1385,10 @@ impl NomiCoreSessionOwner {
         &self,
         owner_id: &str,
         session_id: &AgentSessionId,
+        operation_id: &OperationId,
         request: &SendMessageRequest,
     ) -> Result<Value, AppError> {
-        let session = self
+        let mut session = self
             .canonical
             .get(
                 &PrincipalRef {
@@ -1397,14 +1398,28 @@ impl NomiCoreSessionOwner {
                 session_id,
             )
             .await?;
-        let binding = agent_binding_dto(&session.session.agent_binding)
+        let receipt = self.canonical.store().read_turn_receipt(session_id, operation_id)
+            .await.map_err(agent_session_store_error)?;
+        if let Some(started) = receipt.started_event {
+            // Exact-key redelivery belongs to the original admission, even
+            // after a model/config edit. The store still validates full input.
+            let mut input = canonical_turn_input(request);
+            if let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = started.payload {
+                if let Some(admission) = payload.0.get("admission") {
+                    input["admission"] = admission.clone();
+                }
+                return Ok(input);
+            }
+            return Err(AppError::Conflict("canonical Turn admission is unavailable".into()));
+        }
+        let mut binding = agent_binding_dto(&session.session.agent_binding)
             .map_err(|error| AppError::Conflict(error.message))?;
         let control_plane = self
             .runtime_control_plane
             .get()
             .and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| AppError::Conflict("Session control plane is unavailable".into()))?;
-        let (saved_binding, _, snapshot) = control_plane
+        let (mut saved_binding, revision, mut snapshot) = control_plane
             .saved_binding_artifacts(&UserId::from(owner_id.to_owned()), &binding)
             .await
             .map_err(control_plane_error_to_app)?;
@@ -1412,6 +1427,64 @@ impl NomiCoreSessionOwner {
             return Err(AppError::Conflict(
                 "AgentSession binding differs from its saved immutable artifacts".to_owned(),
             ));
+        }
+        if session.head.active_turn_id.is_none()
+            && session.head.status != "running"
+            && session.session.remote_binding_provenance.is_none()
+        {
+            let attempt: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM conversation_execution_links \
+                 WHERE conversation_id = ? AND relation = 'attempt')",
+            )
+            .bind(session_id.as_ref())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+            // Refresh only the selected Chat model/configuration at an idle
+            // turn boundary; all non-model Agent/resource contracts stay exact.
+            if !attempt && let Some(route) = revision.payload.chat_route_records
+                .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+            {
+                let owner = UserId::from(owner_id.to_owned());
+                let principal = PrincipalRef {
+                    principal_kind: "user".into(),
+                    principal_id: owner_id.into(),
+                };
+                let model = AgentChatModelSelectionDto {
+                    provider_id: route.primary.provider_id.clone(),
+                    model: route.primary.model.clone(),
+                };
+                let refreshed = control_plane
+                    .resolve_agent_session_model_binding(&owner, &binding, &model)
+                    .await.map_err(control_plane_error_to_app)?;
+                let clear_effort = if let Some(effort) = session.session.metadata.reasoning_effort {
+                    !binding_supports_reasoning_effort(&control_plane, &owner, &refreshed, effort).await?
+                } else {
+                    false
+                };
+                let refreshed_value: AgentBindingValue = serde_json::to_value(&refreshed)
+                    .and_then(serde_json::from_value)
+                    .map_err(|error| AppError::Conflict(format!(
+                        "refreshed model binding is invalid: {error}"
+                    )))?;
+                if refreshed_value != session.session.agent_binding {
+                    self.canonical.store().replace_session_model_binding(
+                        &principal, session_id, &session.session.agent_binding, refreshed_value,
+                    ).await.map_err(agent_session_store_error)?;
+                    if clear_effort {
+                        self.canonical.store().update_session_reasoning_effort(
+                            &principal, session_id, None,
+                        ).await.map_err(agent_session_store_error)?;
+                    }
+                    session = self.canonical.get(&principal, session_id).await?;
+                    binding = agent_binding_dto(&session.session.agent_binding)
+                        .map_err(|error| AppError::Conflict(error.message))?;
+                    let current = control_plane.saved_binding_artifacts(&owner, &binding)
+                        .await.map_err(control_plane_error_to_app)?;
+                    saved_binding = current.0;
+                    snapshot = current.2;
+                }
+            }
         }
         if request.plugin_delivery.is_some() {
             let module = snapshot.content.enabled_capabilities.iter().find(|capability|
@@ -1887,10 +1960,14 @@ impl NomiCoreSessionOwner {
     ) -> Result<IdempotentMessageDelivery, AppError> {
         let _operation_fence = self
             .session_operation_lock(session_id.as_ref())
-            .read_owned()
+            .write_owned()
             .await;
         let input = self
-            .canonical_turn_input_with_admission(owner_id, session_id, &request)
+            .canonical_turn_input_with_admission(
+                owner_id, session_id,
+                &Self::turn_operation_id(owner_id, session_id.as_ref(), idempotency_key),
+                &request,
+            )
             .await?;
         let principal = PrincipalRef {
             principal_kind: "user".to_owned(),
@@ -12673,10 +12750,17 @@ async fn saved_binding_supports_reasoning_effort(
     binding: &AgentBindingValueDto,
     effort: ReasoningEffort,
 ) -> Result<bool, NomiCoreApiError> {
-    let (_, revision, snapshot) = state
-        .control_plane
-        .saved_binding_artifacts(&owner.0, binding)
-        .await?;
+    Ok(binding_supports_reasoning_effort(&state.control_plane, &owner.0, binding, effort).await?)
+}
+
+async fn binding_supports_reasoning_effort(
+    control_plane: &AgentControlPlane,
+    owner: &UserId,
+    binding: &AgentBindingValueDto,
+    effort: ReasoningEffort,
+) -> Result<bool, AppError> {
+    let (_, revision, snapshot) = control_plane.saved_binding_artifacts(owner, binding)
+        .await.map_err(control_plane_error_to_app)?;
     let Some(identity) = snapshot.content.chat_route_identity.as_ref() else {
         return Ok(false);
     };
