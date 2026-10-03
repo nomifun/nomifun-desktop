@@ -536,6 +536,31 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   独立审计/公开回复/HTTP/UI/源码包与旧失败分开。原A N1复用、B完整报告/公开语言及真实
   Keychain仍OPEN，不代判Windows或恢复阶段全范围认证。
 
+#### B09 明确回合引用的模型前受控加载（2026-10-03）
+
+- 上次修后仍零查询，停止文案调整。当前用户输入已经给出同Session原operation ID；
+  新回合入口现解析该明确地址，通过原认证history port/固定root与clear/binding floor
+  限量追溯，仅匹配目标才导入完整校验后的文本archive。不是自动扫描全部历史、重放工具
+  或恢复原failed Turn；无引用/无port/外Session/当前回合/非法地址不启动这一路。
+- 新回合最多4引用共享8页/5秒，循环/超时/取消有边界，非目标不导入，失败不等于不存在。
+  SEARCH/READ与真正已加载archive同步，摘要不能改掉其当前record/type/error计数元数据。
+  record ID按当前archive生成，原source_binding/turn/文本/error保留，不变成当前证据或权限。
+  仅普通新回合入口，checkpoint/recovery行为未改；输出/上下文/Owner权限与历史既有上限不扩。
+- 模型前加载首红0次→修后1次，受控模型搜索取得真实文件原文、owner0/账本不激活；
+  Runtime300/300、显式原B634events/33全正文/错误/来源绑定回归通过。游标循环/8页上限/
+  5秒超时/取消与引用作用域负例通过，测试import/preview范围错误各另存，未放宽产品断言。
+- 原B完整报告与公开语言仍OPEN，修后正式StepFun尚未跑；真实Keychain也未代判。完整
+  首红/修后日志外置history-reference-load/run-001-tests，Windows结果不改、不增加大索引。
+
+- 正式源`ae24847f0`采用已验，但整组仍 **FAIL**：目标33条/无淘汰/原错误10已在模型前
+  加载，SEARCH/READ及计数进入实际主请求；6请求（5摘要+1主步）仍零正文查询，回答继续
+  错称文件记录缺失。不能把预加载成功当完整交付，或再加可用性文案碰运气；下一直接缺口
+  是正文取得/缺失判断的完成路径。原任务要求未改、旧操作不重发，source原绑定保持。
+- 正式Cmd-Q0/181.351秒/noexpiry/noTERM/noKILL，1286/1/1/7/14五表与源库全同、原1238
+  prefix及14effects精确同/双库integrity ok，新owner效果0。HTTP/公开回复/UI/数据库/
+  独立审计在外部history-reference-load/run-002-live；原A N1复用，B报告/表达及真实
+  Keychain仍OPEN，Windows未代验。修复已推送不代表语义Case关闭，保留本次新失败。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
