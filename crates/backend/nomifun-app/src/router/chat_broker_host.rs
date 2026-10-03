@@ -220,11 +220,12 @@ impl From<ChatBrokerHostError> for ProductionRepositoryError {
 #[derive(Clone)]
 pub struct ProductionProviderRepository {
     pool: SqlitePool,
+    turn_configuration: Option<TurnModelConfiguration>,
 }
 
 impl ProductionProviderRepository {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self { pool, turn_configuration: None }
     }
 }
 
@@ -234,7 +235,10 @@ impl ProductionProviderRepositoryPort for ProductionProviderRepository {
         &self,
         route: &ResolvedChatRoute,
     ) -> Result<Option<ProviderRepositoryRecord>, ProductionRepositoryError> {
-        let digest = provider_model_config_digest(&self.pool, &route.provider_id, &route.model).await?;
+        let digest = match &self.turn_configuration {
+            Some(view) => view.digest_for_route(&self.pool, route).await?,
+            None => provider_model_config_digest(&self.pool, &route.provider_id, &route.model).await?,
+        };
         if digest != route.config_revision_digest {
             // Old persisted route records used the entire provider graph. Keep
             // accepting those only when that exact legacy graph still matches.
@@ -319,11 +323,24 @@ async fn provider_config_digest_inner(
     provider_id: &ProviderIdRef,
     model: Option<&str>,
 ) -> Result<DigestHex, ProductionRepositoryError> {
+    Ok(provider_config_observation(pool, provider_id, model, None).await?.0)
+}
+
+/// A transaction observes the complete graph, not a mixture from two saves.
+/// Only inference fields are substitutable; authentication, enabled state and
+/// every transport/connection field always come from this live observation.
+async fn provider_config_observation(
+    pool: &SqlitePool,
+    provider_id: &ProviderIdRef,
+    model: Option<&str>,
+    frozen: Option<&FrozenModelConfiguration>,
+) -> Result<(DigestHex, Vec<FrozenCapabilityConfiguration>), ProductionRepositoryError> {
+    let mut observation = pool.begin().await.map_err(|_| ProductionRepositoryError::Unavailable)?;
     let provider = sqlx::query_as::<_, nomifun_db::models::Provider>(
         "SELECT * FROM providers WHERE provider_id = ?",
     )
     .bind(provider_id.as_ref())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *observation)
     .await
     .map_err(|_| ProductionRepositoryError::Unavailable)?
     .ok_or(ProductionRepositoryError::Missing)?;
@@ -334,7 +351,7 @@ async fn provider_config_digest_inner(
     .bind(provider_id.as_ref())
     .bind(model)
     .bind(model)
-    .fetch_all(pool)
+    .fetch_all(&mut *observation)
     .await
     .map_err(|_| ProductionRepositoryError::Unavailable)?;
 
@@ -346,7 +363,7 @@ async fn provider_config_digest_inner(
         .bind(provider_id.as_ref())
         .bind(model)
         .bind(model)
-        .fetch_all(pool)
+        .fetch_all(&mut *observation)
         .await
         .map_err(|_| ProductionRepositoryError::Unavailable)?;
 
@@ -354,7 +371,7 @@ async fn provider_config_digest_inner(
         "SELECT * FROM provider_connections WHERE provider_id = ? ORDER BY role ASC",
     )
     .bind(provider_id.as_ref())
-    .fetch_all(pool)
+    .fetch_all(&mut *observation)
     .await
     .map_err(|_| ProductionRepositoryError::Unavailable)?;
 
@@ -369,6 +386,22 @@ async fn provider_config_digest_inner(
             .cmp(&right.role)
             .then(left.connection_id.cmp(&right.connection_id))
     });
+    let selected = frozen.map(|value| value.route.model.as_str()).or(model);
+    let configuration = capabilities.iter()
+        .filter(|capability| selected.is_none_or(|selected| capability.model == selected))
+        .map(FrozenCapabilityConfiguration::from_row).collect();
+    if let Some(frozen) = frozen {
+        for capability in &mut capabilities {
+            if capability.model != frozen.route.model { continue; }
+            if let Some(saved) = frozen.capabilities.iter().find(|saved| saved.task == capability.task) {
+                capability.traits = saved.traits.clone();
+                capability.provider_params = saved.provider_params.clone();
+                capability.context_limit = saved.context_limit;
+                capability.output_limit = saved.output_limit;
+                capability.compaction_threshold_pct = saved.compaction_threshold_pct;
+            }
+        }
+    }
 
     #[derive(Serialize)]
     #[serde(deny_unknown_fields)]
@@ -485,9 +518,135 @@ async fn provider_config_digest_inner(
             .collect(),
     };
 
-    digest_payload(&input)
-        .map_err(|_| ProductionRepositoryError::InvalidData)
+    let digest = digest_payload(&input).map_err(|_| ProductionRepositoryError::InvalidData)?;
+    observation.commit().await.map_err(|_| ProductionRepositoryError::Unavailable)?;
+    Ok((digest, configuration))
 }
+
+#[derive(Clone)]
+struct FrozenCapabilityConfiguration {
+    model: String,
+    task: String,
+    traits: String,
+    provider_params: String,
+    context_limit: Option<i64>,
+    output_limit: Option<i64>,
+    compaction_threshold_pct: Option<i64>,
+}
+
+impl FrozenCapabilityConfiguration {
+    fn from_row(row: &nomifun_db::models::ProviderModelCapabilityRow) -> Self {
+        Self { model: row.model.clone(), task: row.task.clone(), traits: row.traits.clone(),
+            provider_params: row.provider_params.clone(), context_limit: row.context_limit,
+            output_limit: row.output_limit, compaction_threshold_pct: row.compaction_threshold_pct }
+    }
+}
+
+#[derive(Clone)]
+struct FrozenModelConfiguration {
+    route: ResolvedChatRoute,
+    legacy_provider_graph: bool,
+    capabilities: Vec<FrozenCapabilityConfiguration>,
+}
+
+struct FrozenTurnConfiguration {
+    operation: String,
+    candidates: Vec<FrozenModelConfiguration>,
+}
+
+/// Created separately for each Runtime, installed only by trusted Turn
+/// preparation and cleared at terminal. No credentials or destination are
+/// retained here. The ordinary causality gate remains invocation authority.
+#[derive(Clone, Default)]
+pub(super) struct TurnModelConfiguration(Arc<RwLock<Option<FrozenTurnConfiguration>>>);
+
+impl TurnModelConfiguration {
+    pub(super) async fn capture(
+        &self, pool: &SqlitePool, operation: &str, record: &CanonicalChatRouteRecord,
+    ) -> Result<(), ProductionRepositoryError> {
+        if record.failovers.len() > 32 { return Err(ProductionRepositoryError::InvalidData); }
+        let mut candidates = Vec::with_capacity(record.failovers.len() + 1);
+        for candidate in std::iter::once(&record.primary).chain(record.failovers.iter()) {
+            let route = convert_chat_route_candidate(candidate).map_err(ProductionRepositoryError::from)?;
+            let (digest, capabilities) = provider_config_observation(
+                pool, &route.provider_id, Some(&route.model), None,
+            ).await?;
+            let (legacy_provider_graph, capabilities) = if digest == route.config_revision_digest {
+                (false, capabilities)
+            } else {
+                let (digest, capabilities) = provider_config_observation(pool, &route.provider_id, None, None).await?;
+                if digest != route.config_revision_digest { return Err(ProductionRepositoryError::InvalidData); }
+                (true, capabilities.into_iter().filter(|saved| saved.model == route.model).collect())
+            };
+            candidates.push(FrozenModelConfiguration { route, legacy_provider_graph, capabilities });
+        }
+        let mut active = self.0.write().map_err(|_| ProductionRepositoryError::Unavailable)?;
+        if active.is_some() { return Err(ProductionRepositoryError::InvalidData); }
+        *active = Some(FrozenTurnConfiguration { operation: operation.into(), candidates });
+        Ok(())
+    }
+
+    pub(super) fn clear(&self, operation: &str) -> Result<(), ProductionRepositoryError> {
+        let mut active = self.0.write().map_err(|_| ProductionRepositoryError::Unavailable)?;
+        if active.as_ref().is_some_and(|view| view.operation != operation) {
+            return Err(ProductionRepositoryError::InvalidData);
+        }
+        *active = None;
+        Ok(())
+    }
+
+    pub(super) fn belongs_to(&self, operation: &str) -> bool {
+        self.0.read().ok().is_some_and(|view| view.as_ref().is_some_and(|view| view.operation == operation))
+    }
+
+    fn candidate(&self, route: &ResolvedChatRoute) -> Result<FrozenModelConfiguration, ProductionRepositoryError> {
+        self.0.read().map_err(|_| ProductionRepositoryError::Unavailable)?.as_ref()
+            .and_then(|view| view.candidates.iter().find(|saved|
+                saved.route.model_route_id == route.model_route_id
+                && saved.route.model_route_revision == route.model_route_revision
+                && saved.route.provider_id == route.provider_id && saved.route.model == route.model
+                && saved.route.protocol == route.protocol
+                && saved.route.connection_config_ref == route.connection_config_ref
+                && saved.route.credential_ref == route.credential_ref
+                && saved.route.config_revision_digest == route.config_revision_digest))
+            .cloned().ok_or(ProductionRepositoryError::InvalidData)
+    }
+
+    async fn digest_for_route(&self, pool: &SqlitePool, route: &ResolvedChatRoute) -> Result<DigestHex, ProductionRepositoryError> {
+        let saved = self.candidate(route)?;
+        provider_config_observation(pool, &route.provider_id,
+            (!saved.legacy_provider_graph).then_some(route.model.as_str()), Some(&saved)).await.map(|value| value.0)
+    }
+
+    pub(super) fn model_facts(
+        &self, identity: &ChatRouteSelection, record: &CanonicalChatRouteRecord,
+    ) -> Result<super::engine_model_facts::EngineRouteModelFacts, ProductionRepositoryError> {
+        record.validate_for(identity).map_err(|_| ProductionRepositoryError::InvalidData)?;
+        let mut candidates = Vec::new();
+        for candidate in std::iter::once(&record.primary).chain(record.failovers.iter()) {
+            let route = convert_chat_route_candidate(candidate).map_err(ProductionRepositoryError::from)?;
+            let saved = self.candidate(&route)?;
+            let capability = saved.capabilities.iter().find(|saved| saved.task == PROVIDER_CHAT_MODEL_TASK)
+                .ok_or(ProductionRepositoryError::InvalidData)?;
+            let positive = |value: Option<i64>| value.map(|value| u32::try_from(value).ok()
+                .filter(|value| *value > 0).ok_or(ProductionRepositoryError::InvalidData)).transpose();
+            let threshold = capability.compaction_threshold_pct.map(|value| u8::try_from(value).ok()
+                .filter(|value| (50..=95).contains(value)).ok_or(ProductionRepositoryError::InvalidData)).transpose()?;
+            candidates.push(super::engine_model_facts::EngineRouteCandidateFacts {
+                provider_id: candidate.provider_id.clone(), model: candidate.model.clone(),
+                limits: super::engine_model_facts::EngineModelLimits {
+                    context_tokens: positive(capability.context_limit)?, output_tokens: positive(capability.output_limit)?,
+                    compaction_threshold_pct: threshold,
+                },
+            });
+        }
+        Ok(super::engine_model_facts::EngineRouteModelFacts::from_candidates(identity.clone(), candidates))
+    }
+}
+
+#[cfg(test)]
+#[path = "chat_broker_turn_configuration_tests.rs"]
+mod turn_configuration_tests;
 
 #[derive(Clone, Debug)]
 struct CachedTechnicalCapabilities {
@@ -599,6 +758,7 @@ impl ModelTechnicalCapabilityCache {
 pub struct ProductionModelRepository {
     pool: SqlitePool,
     technical_capabilities: ModelTechnicalCapabilityCache,
+    turn_configuration: Option<TurnModelConfiguration>,
 }
 
 impl ProductionModelRepository {
@@ -607,6 +767,7 @@ impl ProductionModelRepository {
         Self {
             pool,
             technical_capabilities: ModelTechnicalCapabilityCache::default(),
+            turn_configuration: None,
         }
     }
 
@@ -617,6 +778,7 @@ impl ProductionModelRepository {
         Self {
             pool,
             technical_capabilities,
+            turn_configuration: None,
         }
     }
 
@@ -810,9 +972,18 @@ impl ProductionModelRepository {
         let allow_cross_origin_credentials: bool = capability
             .try_get("allow_cross_origin_credentials")
             .map_err(|_| ProductionRepositoryError::InvalidData)?;
-        let provider_params_raw: String = capability
+        let mut provider_params_raw: String = capability
             .try_get("provider_params")
             .map_err(|_| ProductionRepositoryError::InvalidData)?;
+        let mut output_limit: Option<i64> = capability.try_get("output_limit")
+            .map_err(|_| ProductionRepositoryError::InvalidData)?;
+        if let Some(view) = &self.turn_configuration {
+            let saved = view.candidate(&route)?;
+            let configuration = saved.capabilities.iter().find(|saved| saved.task == PROVIDER_CHAT_MODEL_TASK)
+                .ok_or(ProductionRepositoryError::InvalidData)?;
+            provider_params_raw = configuration.provider_params.clone();
+            output_limit = configuration.output_limit;
+        }
         let provider_params: Value = serde_json::from_str(&provider_params_raw)
             .map_err(|_| ProductionRepositoryError::InvalidData)?;
         validate_provider_params_for_protocol(
@@ -821,9 +992,6 @@ impl ProductionModelRepository {
             &provider_params,
         )
         .map_err(|_| ProductionRepositoryError::InvalidData)?;
-        let output_limit: Option<i64> = capability
-            .try_get("output_limit")
-            .map_err(|_| ProductionRepositoryError::InvalidData)?;
         if output_limit.is_some_and(|limit| limit <= 0) {
             return Err(ProductionRepositoryError::InvalidData);
         }
@@ -842,7 +1010,11 @@ impl ProductionModelRepository {
         let bedrock_config: Option<String> = provider
             .try_get("bedrock_config")
             .map_err(|_| ProductionRepositoryError::InvalidData)?;
-        if !route_config_matches(&self.pool, &route).await? {
+        let exact_config = match &self.turn_configuration {
+            Some(view) => view.digest_for_route(&self.pool, &route).await? == route.config_revision_digest,
+            None => route_config_matches(&self.pool, &route).await?,
+        };
+        if !exact_config {
             return Err(ProductionRepositoryError::InvalidData);
         }
 
@@ -1938,6 +2110,15 @@ pub struct ChatBrokerHostComposition {
 }
 
 impl ChatBrokerHostComposition {
+    pub(super) fn for_turn_configuration(&self, view: TurnModelConfiguration) -> Self {
+        let mut provider = self.provider_repository.as_ref().clone();
+        provider.turn_configuration = Some(view.clone());
+        let mut model = self.model_repository.as_ref().clone();
+        model.turn_configuration = Some(view);
+        Self { provider_repository: Arc::new(provider), model_repository: Arc::new(model),
+            connection_repository: self.connection_repository.clone(),
+            capability_observer: self.capability_observer.clone(), encryption_key: self.encryption_key }
+    }
     /// Default product route storage in the canonical main SQLite.
     pub fn for_nomi_core(pool: SqlitePool, encryption_key: [u8; 32]) -> Self {
         let technical_capabilities = ModelTechnicalCapabilityCache::default();

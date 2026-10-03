@@ -30,6 +30,9 @@ pub struct EngineRouteModelFacts {
 }
 
 impl EngineRouteModelFacts {
+    pub(super) fn from_candidates(route: ChatRouteSelection, candidates: Vec<EngineRouteCandidateFacts>) -> Self {
+        Self { route, candidates }
+    }
     pub fn route(&self) -> &ChatRouteSelection {
         &self.route
     }
