@@ -24,6 +24,8 @@ url.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 tempfile.workspace = true
+libc.workspace = true
+nomi-process-runtime.workspace = true
 
 [[bin]]
 name = "nomifun-browser-cef-helper"

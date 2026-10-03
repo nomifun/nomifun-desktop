@@ -38,6 +38,7 @@ pub struct Engine {
     contexts: Mutex<BTreeMap<uuid::Uuid, Weak<Context>>>,
     pointer_owners: Mutex<BTreeMap<isize, Weak<Page>>>,
     root: PathBuf,
+    guardian: Arc<crate::guardian_client::GuardOwner>,
 }
 
 impl Engine {
@@ -51,12 +52,16 @@ impl Engine {
         let main_bundle = paths.main_bundle.canonicalize().map_err(|_| "CEF main bundle is missing")?;
         std::fs::create_dir_all(&paths.data_root).map_err(|_| "CEF data root cannot be created")?;
         let root = paths.data_root.canonicalize().map_err(|_| "CEF data root cannot be resolved")?;
+        let main=nomi_process_runtime::probe_process_identity(std::process::id()).map_err(|error|format!("CEF main identity unavailable: {error}"))?
+            .ok_or("CEF main identity is absent")?;
+        let guardian=crate::guardian_client::GuardOwner::start(&helper,main,packaged_helper_paths(&helper)?)?;
+        let mut initialization_guard=GuardianInitializationGuard {owner:guardian.clone(),armed:true};
         let library = std::ffi::CString::new(framework.join("Chromium Embedded Framework").as_os_str().as_encoded_bytes())
             .map_err(|_| "CEF framework path is invalid")?;
         if unsafe { load_library(Some(&*library.as_ptr().cast())) } != 1 { return Err("CEF framework could not be loaded".into()); }
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
         let (ready, _) = watch::channel(false);
-        let engine = Arc::new(Self { ready, stopped: Default::default(), closing: AtomicBool::new(false), pump_generation: AtomicU64::new(0), pump_due: Mutex::new(None), pump_active: AtomicBool::new(false), pump_reentered: AtomicBool::new(false), pages: Mutex::new(BTreeMap::new()), contexts: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()), root });
+        let engine = Arc::new(Self { ready, stopped: Default::default(), closing: AtomicBool::new(false), pump_generation: AtomicU64::new(0), pump_due: Mutex::new(None), pump_active: AtomicBool::new(false), pump_reentered: AtomicBool::new(false), pages: Mutex::new(BTreeMap::new()), contexts: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()), root,guardian });
         crate::application::install(Arc::downgrade(&engine))?;
         let args = args::Args::new();
         let helper_text = crate::text::Text::new(helper.to_str().ok_or("CEF helper path must be UTF-8")?);
@@ -79,9 +84,10 @@ impl Engine {
         };
         let mut app = Application::new(engine.clone());
         if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
-            engine.stopped.finish();
+            let _=engine.stopped.begin(); // Closed admission, never cleanup success.
             return Err("CEF initialization failed".into());
         }
+        initialization_guard.armed=false;
         Ok(engine)
     }
 
@@ -291,10 +297,19 @@ impl Engine {
     }
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
+        self.shutdown_owned(false).await
+    }
+
+    pub async fn shutdown_after_storage_close(self: &Arc<Self>)->Result<(),String> {
+        self.shutdown_owned(true).await
+    }
+
+    async fn shutdown_owned(self: &Arc<Self>, host_storage_closed: bool) -> Result<(), String> {
         if self.stopped.completed() { return Ok(()); }
         if self.stopped.blocks_work() { return Err(if self.stopped.native_is_running() {
             "CEF shutdown is still in progress; completion has not been acknowledged"
-        } else {"CEF shutdown returned; completion has not been acknowledged"}.into()); }
+        } else if self.stopped.native_has_returned() {"CEF shutdown returned; completion has not been acknowledged"}
+        else {"CEF shutdown entry failed; cleanup is still unconfirmed"}.into()); }
         #[cfg(debug_assertions)]
         let shutdown_started = Instant::now();
         self.closing.store(true, Ordering::Release);
@@ -305,6 +320,7 @@ impl Engine {
         for page in pages { page.force_close().await?; }
         let (tx, rx) = oneshot::channel();
         let engine = self.clone();
+        let runtime=tokio::runtime::Handle::try_current().map_err(|_|"CEF shutdown has no retained host runtime")?;
         dispatch2::DispatchQueue::main().exec_async(move || {
             if engine.stopped.completed() { let _ = tx.send(Ok(())); return; }
             if engine.stopped.blocks_work() { let _ = tx.send(Err("CEF shutdown is still in progress; completion has not been acknowledged".into())); return; }
@@ -317,10 +333,25 @@ impl Engine {
             eprintln!("CEF_SHUTDOWN phase=context_release_begin contexts={} elapsed_ms={}", contexts.len(), shutdown_started.elapsed().as_millis());
             for context in contexts { let raw = context.raw.lock().unwrap().take(); drop(raw); }
             if !engine.stopped.begin() { let _ = tx.send(Err("CEF shutdown entry was already claimed".into())); return; }
+            let monitor_gate=Arc::new(AtomicUsize::new(0));
+            if host_storage_closed {
+                let monitored=engine.clone();let gate=monitor_gate.clone();
+                if let Err(error)=std::thread::Builder::new().name("nomifun-cef-failure-exit".into()).spawn(move || {
+                    while gate.load(Ordering::Acquire)==0 {std::thread::sleep(Duration::from_millis(5));}
+                    if gate.load(Ordering::Acquire)==1 {monitor_native_failure(monitored,runtime);}
+                }) {let _=tx.send(Err(format!("CEF independent failure monitor could not start: {error}")));return;}
+            }
+            if let Err(error)=engine.guardian.enter_native() {
+                monitor_gate.store(2,Ordering::Release);
+                let _=tx.send(Err(format!("CEF guardian did not acknowledge native entry: {error}")));return;
+            }
+            engine.stopped.mark_native_entered();
+            monitor_gate.store(1,Ordering::Release);
             #[cfg(debug_assertions)]
             eprintln!("CEF_SHUTDOWN phase=native_entry elapsed_ms={}", shutdown_started.elapsed().as_millis());
             shutdown();
             engine.stopped.mark_native_returned();
+            let returned=engine.guardian.native_returned();
             #[cfg(debug_assertions)]
             eprintln!("CEF_SHUTDOWN phase=native_return elapsed_ms={}", shutdown_started.elapsed().as_millis());
             // Exercise the real native/desktop failure path after physical
@@ -332,10 +363,14 @@ impl Engine {
                 let _ = tx.send(Err("CEF native cleanup returned but its completion acknowledgement was lost (isolated acceptance fixture)".into()));
                 return;
             }
-            engine.stopped.finish();
-            let _ = tx.send(Ok(()));
+            let _ = tx.send(returned.map(|_|()));
         });
-        rx.await.map_err(|_| "CEF shutdown acknowledgement was lost")?
+        let result=rx.await.map_err(|_|"CEF shutdown acknowledgement was lost".to_owned())?;
+        if self.stopped.native_has_returned() {
+            self.guardian.stop_and_join().await?;
+            if result.is_ok() {self.stopped.finish();}
+        }
+        result
     }
 }
 
@@ -345,6 +380,96 @@ wrap_task! { struct NativeTask { work: Arc<Mutex<Option<UiWork>>>, } impl Task {
         if let Some(work) = work { work(); }
     }
 } }
+
+fn packaged_helper_paths(generic: &std::path::Path)->Result<Vec<PathBuf>,String> {
+    let name=generic.file_name().and_then(|name|name.to_str()).ok_or("CEF helper name is invalid")?;
+    let frameworks=generic.parent().and_then(std::path::Path::parent).and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent).ok_or("CEF helper bundle layout is invalid")?;
+    [""," (GPU)"," (Renderer)"," (Plugin)"," (Alerts)"].into_iter().map(|suffix| {
+        let name=format!("{name}{suffix}");
+        frameworks.join(format!("{name}.app/Contents/MacOS/{name}")).canonicalize()
+            .map_err(|_|"CEF typed helper bundle is missing".to_owned())
+    }).collect()
+}
+
+/// This worker exists only for the host's post-storage-close entry. It never
+/// asks the occupied main queue to exit and never calls native shutdown again.
+fn monitor_native_failure(engine: Arc<Engine>, runtime: tokio::runtime::Handle) {
+    while engine.stopped.native_is_running() {
+        match engine.guardian.status() {
+            Ok(reply) if helper_cleanup_proven(&reply)
+                && reply.native_running => {
+                if !engine.stopped.native_is_running() {return;}
+                let result=runtime.block_on(async {tokio::time::timeout(Duration::from_secs(5),engine.guardian.stop_and_join()).await});
+                match result {
+                    Ok(Ok(stopped)) if helper_cleanup_proven(&stopped)
+                        && engine.stopped.native_is_running() => {
+                        eprintln!("CEF_SHUTDOWN phase=physical_timeout helpers_generation_absent=true native_completion=false exit_code=1");
+                        // All app consumers and storage were acknowledged by
+                        // the typed host entry. Exact Helpers and guardian are
+                        // now absent/joined; this remains a failed native close.
+                        unsafe {libc::_exit(1)};
+                    }
+                    Ok(Err(error))=>eprintln!("CEF guardian stop/join unproven; no emergency exit: {error}"),
+                    Err(_)=>{
+                        eprintln!("CEF guardian stop/join still pending; retained authority will be joined once more");
+                        let retry=runtime.block_on(async {tokio::time::timeout(Duration::from_secs(5),engine.guardian.stop_and_join()).await});
+                        if matches!(retry,Ok(Ok(ref stopped)) if helper_cleanup_proven(stopped)) && engine.stopped.native_is_running() {
+                            eprintln!("CEF_SHUTDOWN phase=physical_timeout late_guardian_join=true native_completion=false exit_code=1");
+                            unsafe {libc::_exit(1)};
+                        }
+                    }
+                    _=>return,
+                }
+                return;
+            }
+            Err(error)=>{
+                eprintln!("CEF guardian receipt unavailable; native failure remains unconfirmed: {error}");
+                return;
+            }
+            _=>std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn helper_cleanup_proven(reply:&crate::guardian::Reply)->bool {
+    reply.status=="ok" && reply.error.is_none() && reply.receipt.as_ref().is_some_and(|receipt| {
+        receipt.complete && receipt.generation_absence_only && receipt.registered==receipt.absent
+            && receipt.unresolved_declarations==0 && receipt.errors.is_empty()
+    })
+}
+
+struct GuardianInitializationGuard {
+    owner: Arc<crate::guardian_client::GuardOwner>,
+    armed: bool,
+}
+impl Drop for GuardianInitializationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error)=self.owner.settle_failed_initialization() {
+                eprintln!("CEF initialization failed; guardian cleanup remains owned and unconfirmed: {error}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod guardian_exit_tests {
+    use super::*;
+    #[test]
+    fn emergency_requires_complete_generation_proof_not_just_a_complete_flag() {
+        let mut reply=crate::guardian::Reply {status:"ok".into(),phase:"cleanup_complete".into(),native_running:true,
+            deadline_unix_ms:None,error:None,receipt:Some(crate::guardian::CleanupReceipt {complete:true,generation_absence_only:true,
+                registered:1,absent:1,unresolved_declarations:0,errors:vec![]})};
+        assert!(helper_cleanup_proven(&reply));
+        reply.receipt.as_mut().unwrap().absent=0;assert!(!helper_cleanup_proven(&reply));
+        reply.receipt.as_mut().unwrap().absent=1;
+        reply.receipt.as_mut().unwrap().unresolved_declarations=1;assert!(!helper_cleanup_proven(&reply));
+        reply.receipt.as_mut().unwrap().unresolved_declarations=0;
+        reply.receipt.as_mut().unwrap().errors.push("probe unavailable".into());assert!(!helper_cleanup_proven(&reply));
+        reply.receipt.as_mut().unwrap().errors.clear();reply.status="error".into();assert!(!helper_cleanup_proven(&reply));
+    }
+}
 
 pub struct Context {
     raw: Mutex<Option<RequestContext>>,
@@ -581,6 +706,21 @@ wrap_app! { struct Application { engine: Arc<Engine>, } impl App {
     fn browser_process_handler(&self) -> Option<BrowserProcessHandler> { Some(ProcessHandler::new(self.engine.clone())) }
 } }
 wrap_browser_process_handler! { struct ProcessHandler { engine: Arc<Engine>, } impl BrowserProcessHandler {
+    fn on_before_child_process_launch(&self,command_line:Option<&mut CommandLine>) {
+        let Some(command)=command_line else {return;};
+        let role=CefString::from(&command.switch_value(Some(&CefString::from("type")))).to_string();
+        match self.engine.guardian.declare(&role) {
+            Ok(nonce)=>{
+                command.append_switch_with_value(Some(&CefString::from("nomifun-cef-guardian-socket")),
+                    Some(&CefString::from(self.engine.guardian.socket_path().to_string_lossy().as_ref())));
+                command.append_switch_with_value(Some(&CefString::from("nomifun-cef-launch-nonce")),Some(&CefString::from(nonce.as_str())));
+            }
+            Err(error)=>{
+                eprintln!("CEF helper launch registration not admitted: {error}");
+                command.append_switch(Some(&CefString::from("nomifun-cef-registration-rejected")));
+            }
+        }
+    }
     fn on_context_initialized(&self) { self.engine.ready.send_replace(true); }
     fn on_schedule_message_pump_work(&self, delay_ms: i64) { self.engine.schedule(delay_ms); }
 } }

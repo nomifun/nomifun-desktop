@@ -252,6 +252,8 @@ fn main() {
         Ok(())
     }).build(tauri::generate_context!()).expect("Tauri CEF fixture setup");
     // Tao's NSApplication subclass now exists, but its run loop has not started.
+    let runtime=tauri::async_runtime::handle();
+    let _runtime=runtime.inner().enter();
     match Engine::initialize(paths) {
         Ok(engine) => { let _ = engine_slot.set(engine); }
         Err(error) => {

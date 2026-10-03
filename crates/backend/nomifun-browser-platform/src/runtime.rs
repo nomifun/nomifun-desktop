@@ -636,6 +636,13 @@ pub trait BrowserRuntimeFactory: Send + Sync {
     async fn shutdown(&self) -> Result<(), WorkspaceError> {
         Ok(())
     }
+
+    /// Trusted host entry after its actual storage-close barrier. It is not a
+    /// model capability or permission grant. Only an explicitly storage-
+    /// independent factory may use it to arm bounded native failure handling.
+    async fn shutdown_after_storage_close(&self) -> Result<(), WorkspaceError> {
+        self.shutdown().await
+    }
 }
 
 #[async_trait]

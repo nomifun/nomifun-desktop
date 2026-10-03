@@ -78,9 +78,11 @@ pub(crate) struct DeferredEngine {
 }
 impl DeferredEngine {
     pub(crate) async fn get(self: &Arc<Self>, app: &tauri::AppHandle) -> Result<Arc<Engine>, String> {
+        let runtime=tokio::runtime::Handle::try_current().map_err(|_|"CEF guardian requires the retained host runtime")?;
         if self.initialization.begin()? {
             let owner = self.clone();
             if let Err(error) = app.run_on_main_thread(move || {
+                let _runtime=runtime.enter();
                 if owner.initialization.closing() {
                     owner.initialization.finish(Ok(None));
                     return;
@@ -108,6 +110,12 @@ impl DeferredEngine {
             eprintln!("CEF_HOST phase=unused_closed");
             Ok(())
         }
+    }
+
+    pub(crate) async fn shutdown_after_storage_close(&self) -> Result<(), String> {
+        if let Some(engine)=self.initialization.close().await? {
+            engine.shutdown_after_storage_close().await
+        } else {Ok(())}
     }
 }
 

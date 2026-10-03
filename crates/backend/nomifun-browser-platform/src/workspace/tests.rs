@@ -16,6 +16,8 @@ struct Factory {
     fail_shutdown_once: AtomicBool,
     shutdown: Option<Arc<DelayedShutdown>>,
     clear: Option<Arc<DelayedClear>>,
+    storage_independent: bool,
+    after_storage_calls: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -42,6 +44,10 @@ struct Runtime {
 
 #[async_trait]
 impl BrowserRuntimeFactory for Factory {
+    fn supports_storage_independent_shutdown(&self)->bool {self.storage_independent}
+    async fn shutdown_after_storage_close(&self)->Result<(),WorkspaceError> {
+        self.after_storage_calls.fetch_add(1,Ordering::SeqCst);self.shutdown().await
+    }
     async fn create(
         &self,
         request: CreateBrowserRuntime,
@@ -869,6 +875,33 @@ async fn failed_native_shutdown_allows_explicit_retry_without_reopening_resource
     service.shutdown().await.unwrap();
     service.close_native_runtime().await.unwrap();
     assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn storage_qualified_shutdown_requires_opt_in_and_cannot_upgrade_an_existing_flight() {
+    let default=Arc::new(Factory::default());let ordinary=service(default.clone(),&["managed"]);
+    ordinary.close_resources().await.unwrap();
+    assert_eq!(ordinary.close_native_runtime_after_storage_close().await,Err(WorkspaceError::UnsupportedAction));
+    assert_eq!(default.shutdowns.load(Ordering::SeqCst),0);
+    let held=Arc::new(DelayedShutdown::default());
+    let factory=Arc::new(Factory {storage_independent:true,shutdown:Some(held.clone()),..Default::default()});
+    let service=Arc::new(service(factory.clone(),&["managed"]));service.close_resources().await.unwrap();
+    let first=tokio::spawn({let service=service.clone();async move {service.close_native_runtime().await}});
+    held.started.notified().await;first.abort();let _=first.await;
+    assert_eq!(service.close_native_runtime_after_storage_close().await,Err(WorkspaceError::NativeCommandFailed));
+    assert_eq!(factory.after_storage_calls.load(Ordering::SeqCst),0);
+    held.release.notify_one();service.close_native_runtime().await.unwrap();
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst),1);
+}
+
+#[tokio::test]
+async fn storage_qualified_shutdown_uses_the_distinct_host_entry_once() {
+    let factory=Arc::new(Factory {storage_independent:true,..Default::default()});
+    let service=service(factory.clone(),&["managed"]);service.close_resources().await.unwrap();
+    service.close_native_runtime_after_storage_close().await.unwrap();
+    service.close_native_runtime_after_storage_close().await.unwrap();
+    assert_eq!(factory.after_storage_calls.load(Ordering::SeqCst),1);
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst),1);
 }
 
 #[tokio::test(start_paused = true)]

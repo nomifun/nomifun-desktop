@@ -479,6 +479,7 @@ struct ServiceLifecycle {
     resources_closed: bool,
     native_shutdown: Option<tokio::task::JoinHandle<Result<(), WorkspaceError>>>,
     native_closed: bool,
+    native_after_storage: bool,
 }
 
 impl BrowserResourceService {
@@ -793,6 +794,17 @@ impl BrowserResourceService {
     /// The stored worker survives a dropped caller; retries join that same
     /// physical shutdown, and an acknowledged success is never re-entered.
     pub async fn close_native_runtime(&self) -> Result<(), WorkspaceError> {
+        self.close_native_runtime_inner(false).await
+    }
+
+    /// Used only after the host has joined consumers and acknowledged storage
+    /// closure. Ordinary resource callers cannot upgrade an existing flight.
+    pub async fn close_native_runtime_after_storage_close(&self) -> Result<(), WorkspaceError> {
+        if !self.supports_storage_independent_shutdown() {return Err(WorkspaceError::UnsupportedAction);}
+        self.close_native_runtime_inner(true).await
+    }
+
+    async fn close_native_runtime_inner(&self, after_storage: bool) -> Result<(), WorkspaceError> {
         let mut lifecycle = self.lifecycle.lock().await;
         if !lifecycle.resources_closed {
             return Err(WorkspaceError::NativeCommandFailed);
@@ -802,8 +814,13 @@ impl BrowserResourceService {
         }
         if lifecycle.native_shutdown.is_none() {
             let factory = self.factory.clone();
+            lifecycle.native_after_storage=after_storage;
             lifecycle.native_shutdown =
-                Some(tokio::spawn(async move { factory.shutdown().await }));
+                Some(tokio::spawn(async move {
+                    if after_storage {factory.shutdown_after_storage_close().await} else {factory.shutdown().await}
+                }));
+        } else if after_storage && !lifecycle.native_after_storage {
+            return Err(WorkspaceError::NativeCommandFailed);
         }
         let result = lifecycle
             .native_shutdown

@@ -1250,6 +1250,14 @@ impl AppServices {
         Ok(())
     }
 
+    async fn shutdown_browser_native_after_storage_close(&self) -> anyhow::Result<()> {
+        #[cfg(feature="browser-use")]
+        if let Some(resources)=&self.browser_resources {
+            resources.close_native_runtime_after_storage_close().await.map_err(|error|anyhow::anyhow!("managed Browser native shutdown failed after storage close: {error}"))?;
+        }
+        Ok(())
+    }
+
     fn browser_native_can_close_after_storage(&self) -> bool {
         #[cfg(feature="browser-use")]
         {self.browser_resources.as_ref().is_some_and(|resources|resources.supports_storage_independent_shutdown())}
@@ -1270,7 +1278,7 @@ impl AppServices {
             }
             stage.storage_closed=true;
         }
-        if stage.native_after_storage {self.shutdown_browser_native_runtime().await?;}
+        if stage.native_after_storage {self.shutdown_browser_native_after_storage_close().await?;}
         stage.complete=true;
         Ok(())
     }
