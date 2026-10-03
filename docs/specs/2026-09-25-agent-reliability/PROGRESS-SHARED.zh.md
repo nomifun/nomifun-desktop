@@ -3788,3 +3788,8 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   fence及完整当前任务覆盖保持。未知诊断保留，v1/v2旧字节不改，公开8KiB与快照48KiB不增。
 - Runtime319/1ignored、原B634/33黄金1及可选控制正负路径通过，原direct答复仍可用。
   正式采用/表达待验，旧FAIL及Windows结果保持，外证据historical-public-delivery。
+
+- `577ad3f44`/同步合并`88eeff987`mac正式原B同task1请求/1步，plan/report和33历史
+  selector实际入请求，但模型仍直接回答，结构交付NOT_SELECTED/公开表达FAIL；事实与
+  原10含2保持。Cmd-Q0/96.832秒，无expiry/信号，1593events/16Turns/14effects及旧前缀/
+  效果/闭库保持，owner0。不强制control或改task伪造通过、不重复同根因；Windows未代判。

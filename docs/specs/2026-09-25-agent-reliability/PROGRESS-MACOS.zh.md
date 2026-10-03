@@ -840,7 +840,15 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - Runtime319通过/1外部input ignored；显式原B634/33 archive黄金1通过、旧64KiB全部入。
   可选控制正负两轮证明owner0/当前0、历史10/2单独呈现、伪当前evidence拒绝；原直接
   历史答复仍可用。首编类型引用/夹具错误和旧无plan广告断言首败外留，修后合同另记。
-  正式采用及原B完整事实/表达仍待验；外证据historical-public-delivery，Windows未代判。
+  初版正式采用待验状态保留，下方另记修后结果；外证据historical-public-delivery，Windows未代判。
+
+- `577ad3f44`/同步合并`88eeff987`正式同原B task一次：实际Step5请求展示plan/report及
+  33历史selectors、current0/schema不混来源；1请求/1步仍直接回答，未选择historical_results/
+  report_completion。新8244-byte报告事实/10含2保持，内部字段仍在，**表达FAIL/结构交付
+  NOT_SELECTED**，不强制选择或修改任务来回填通过，后续同根因不重发。
+- 正常Cmd-Q0/96.832秒，无expiry/TERM/KILL；1593events/16Turns/14effects及1557前缀/
+  15旧Turn/原效果/闭库保持，owner0/host指令读2。原可选接口的模型采用不能由组件或
+  schema已广告代判；公开表达目标仍开放，A13/B09结果正确性与真实Keychain证据继续复用。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
