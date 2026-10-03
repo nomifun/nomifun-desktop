@@ -1013,7 +1013,7 @@ mod tests {
         let report = crate::AgentCompletionReport { plan_revision:1, observation_revision:1,
             input_revision:1, workspace_epoch:0, summary:"Known diagnostic result.".into(),
             criteria:vec![], observed_tool_error_count:1, observed_command_failure_count:2,
-            requirements:vec![], delivery_items:vec![], public_format:None };
+            requirements:vec![], delivery_items:vec![], public_format:None,historical_results:vec![] };
         let events = |delivery: String| vec![
             AgentEngineEvent::TurnStarted { binding:binding(), turn_operation_id:OperationId::from("turn") },
             AgentEngineEvent::ModelStepStarted { step:1, operation_id:OperationId::from("turn:model:1") },
@@ -1043,6 +1043,16 @@ mod tests {
             assert!(replay_closed_turn(&mut history, requirement(), &events(delivery)).is_err());
             assert_eq!(history, before, "invalid delivery must not partly alter model history");
         }
+        let mut historical=report.clone();historical.public_format=Some("plain_zh_v3".into());
+        historical.historical_results=vec![crate::AgentHistoricalDeliveryResult {
+            origin:crate::AgentHistoricalDeliveryOrigin {source_turn:"older-source".into(),archive_id:"a".repeat(64)},label:"原文件".into(),
+            data:Some(serde_json::json!({"text_parts":[{"text":"原文\n","truncated":false}],"current_evidence":false}))}];
+        let delivery=historical.delivery_text();let mut journal=events(delivery.clone());
+        if let AgentEngineEvent::CompletionReported {report}=&mut journal[3] {*report=historical;}
+        let mut history=Vec::new();replay_closed_turn(&mut history,requirement(),&journal).unwrap();
+        let ChatContentPart::Text {text}=&history.last().unwrap().content[0] else {panic!("public delivery")};
+        let data:serde_json::Value=serde_json::from_str(text.strip_prefix(HISTORICAL_ASSISTANT_PREFIX).unwrap()).unwrap();
+        assert_eq!(data["original_text"],delivery,"v3 uses its durable resolved snapshot, not a new archive lookup");
     }
 
     #[test]
