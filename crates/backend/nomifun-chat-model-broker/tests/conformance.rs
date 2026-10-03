@@ -946,6 +946,28 @@ fn gemini_tool_result_without_matching_call_fails_closed() {
 }
 
 #[test]
+fn provider_output_default_omits_optional_wire_fields_and_required_protocols_fail_before_transport() {
+    for adapter in adapters(&transport_map([])) {
+        let protocol=adapter.protocol();let route=route(protocol,"output-default",1);
+        let lease=CredentialLease::new(route.credential_ref.clone(),CredentialTarget::for_route(&route),"fixture-handle");
+        let mut request=basic_request(&route);request.input.max_output_tokens=None;
+        if matches!(protocol,ChatProtocol::Anthropic|ChatProtocol::Bedrock|ChatProtocol::Vertex) {
+            let error=adapter.encode_request(&request,&route,&lease).unwrap_err();
+            assert_eq!(error.code,ChatModelErrorCode::InvalidRequest);
+            assert!(error.message.contains("explicit output token ceiling"));
+        } else {
+            let body=adapter.encode_request(&request,&route,&lease).unwrap().body;
+            assert!(body.get("max_tokens").is_none()&&body.get("max_output_tokens").is_none());
+            assert!(body["generationConfig"].get("maxOutputTokens").is_none());
+        }
+        request.input.max_output_tokens=Some(100_000);
+        let body=adapter.encode_request(&request,&route,&lease).unwrap().body;
+        let value=match protocol {ChatProtocol::OpenaiResponses=>&body["max_output_tokens"],ChatProtocol::Gemini=>&body["generationConfig"]["maxOutputTokens"],_=>&body["max_tokens"]};
+        assert_eq!(value.as_u64(),Some(100_000));
+    }
+}
+
+#[test]
 fn parallel_tool_delivery_preference_is_optional_and_uses_each_protocol_control() {
     for adapter in adapters(&transport_map([])) {
         let protocol = adapter.protocol();

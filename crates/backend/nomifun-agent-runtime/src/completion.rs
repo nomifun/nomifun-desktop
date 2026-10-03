@@ -13,6 +13,10 @@ use crate::{
 };
 
 pub(crate) const TOOL_NAME: &str = "report_completion";
+// Host-resolved observations are not model-generated argument text. Keep them
+// inside the existing native envelope, not the obsolete 8 KiB summary budget.
+pub(crate) const MAX_HISTORICAL_DELIVERY_BYTES:usize=nomifun_agent_contracts::MAX_NATIVE_EXECUTION_CHECKPOINT_BYTES;
+pub(crate) const MAX_HISTORICAL_DELIVERY_RESULTS:usize=128;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -433,7 +437,7 @@ impl CompletionTracker {
                 "required":["source_turn","archive_ids","short_summary","missing_items"],"allOf":per_source,
                 "properties":{
                     "source_turn":{"type":"string","enum":sources},
-                    "archive_ids":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","enum":ids},
+                    "archive_ids":{"type":"array","maxItems":MAX_HISTORICAL_DELIVERY_RESULTS,"uniqueItems":true,"items":{"type":"string","enum":ids},
                         "description":"Exact advertised archive IDs from that source. Empty is allowed only with explicit missing_items. Current evidence IDs are not accepted."},
                     "short_summary":{"type":"string","minLength":1,"maxLength":512,
                         "description":"Brief public outcome; do not duplicate original results or internal schemas. PUBLIC_RESULT_LANGUAGE applies."},
@@ -450,7 +454,7 @@ impl CompletionTracker {
         let submission:StrictHistoricalReportSubmission=serde_json::from_value(call.arguments.0.clone())
             .map_err(|error|format!("Invalid strict historical report: {error}"))?;
         if submission.short_summary.trim().is_empty()||submission.short_summary.chars().count()>512
-            || submission.archive_ids.len()>16||submission.missing_items.len()>16
+            || submission.archive_ids.len()>MAX_HISTORICAL_DELIVERY_RESULTS||submission.missing_items.len()>16
             || submission.missing_items.iter().any(|item|item.trim().is_empty()||item.chars().count()>64)
             || (submission.archive_ids.is_empty()&&submission.missing_items.is_empty()) {
             return Err("Strict historical report needs bounded exact selections or explicit missing results".into());
@@ -495,10 +499,10 @@ impl CompletionTracker {
         &self,items:&mut [AgentHistoricalDeliveryResult],archive:Option<&crate::tool_archive::ToolArchive>,existing_bytes:usize,
     )->Result<(),String> {
         if items.is_empty() {return Ok(());}
-        if items.len()>16 {return Err("Historical publication accepts at most sixteen selected results".into());}
+        if items.len()>MAX_HISTORICAL_DELIVERY_RESULTS {return Err("Historical publication exceeds the retained archive record capacity".into());}
         let archive=archive.ok_or("Historical publication has no current validated history reader")?;
         let mut seen=BTreeSet::new();let mut total=existing_bytes;let mut sources=BTreeSet::new();
-        for item in items {
+        for item in items.iter_mut() {
             if item.data.is_some() || item.label.trim().is_empty() || item.label.chars().count()>256
                 || !seen.insert((item.origin.source_turn.clone(),item.origin.archive_id.clone())) {
                 return Err("Historical publication accepts distinct advertised origins and a short label, never model-supplied data".into());
@@ -512,13 +516,16 @@ impl CompletionTracker {
                 "archive_truncated":data["archive_truncated"],"source_may_be_bounded":data["source_may_be_bounded"],
                 "omitted_media_parts":data["omitted_media_parts"],"derived_argument_facts":data["derived_argument_facts"]});
             if sources.insert(item.origin.source_turn.clone()) {projection["source_work_status"]=data["source_work_status"].clone();}
-            total=total.saturating_add(crate::stream_limits::serialized_size(&projection,8192)
-                .map_err(|_|"Selected historical result exceeds the existing 8 KiB delivery budget")?);
+            total=total.saturating_add(crate::stream_limits::serialized_size(&projection,MAX_HISTORICAL_DELIVERY_BYTES)
+                .map_err(|_|"Selected historical result exceeds the native publication envelope")?);
             item.data=Some(data);
         }
-        if total>8192 {
-            return Err(format!("Selected historical results require {total} serialized bytes; the existing delivery budget is 8192 bytes. No report was published. Select fewer redundant records without dropping necessary facts, or disclose unavailable requested results as blocked using the advertised contract (missing_items in strict mode). Do not resubmit the same selection, clip source values, rerun operations or enlarge the budget."));
+        if total>MAX_HISTORICAL_DELIVERY_BYTES {
+            return Err(format!("Selected historical results require {total} serialized bytes; the native publication envelope is {MAX_HISTORICAL_DELIVERY_BYTES} bytes. No report was published. Preserve necessary facts; disclose unavailable requested results as blocked using the advertised contract (missing_items in strict mode). Do not resubmit the same selection, clip source values or rerun operations."));
         }
+        items.sort_by(|left,right|left.origin.source_turn.cmp(&right.origin.source_turn)
+            .then_with(||left.data.as_ref().and_then(|data|data["result_order"].as_u64())
+                .cmp(&right.data.as_ref().and_then(|data|data["result_order"].as_u64()))));
         Ok(())
     }
 
@@ -531,11 +538,11 @@ impl CompletionTracker {
         let origins=records.iter().filter_map(|record|record.get("origin").cloned()).collect::<Vec<_>>();
         if origins.is_empty() {return;}
         tool.input_schema.0["properties"]["historical_results"]=serde_json::json!({
-            "type":"array","minItems":1,"maxItems":16,"items":{
+            "type":"array","minItems":1,"maxItems":MAX_HISTORICAL_DELIVERY_RESULTS,"items":{
                 "type":"object","additionalProperties":false,"required":["origin","label"],
                 "properties":{"origin":{"enum":origins},"label":{"type":"string","minLength":1,"maxLength":256,
                     "description":"Short heading in the user's language; host publishes exact historical values and source counts, not current evidence."}}
-            },"description":"Optional exact selections from the explicitly addressed closed-source archive. This is historical publication, never a supported current-state criterion or current counts. Select every requested necessary value; retain missing work as blocked. No model-supplied data; existing 8 KiB total publication budget."});
+            },"description":"Optional exact selections from the explicitly addressed closed-source archive. This is historical publication, never a supported current-state criterion or current counts. Select every requested necessary value; retain missing work as blocked. No model-supplied data. Host-resolved results use the native publication envelope, separate from model argument limits."});
     }
 
     fn delivery_results(&self) -> BTreeMap<String, serde_json::Value> {
@@ -1333,16 +1340,16 @@ impl CompletionTracker {
                 crate::stream_limits::serialized_size(data,8192).map(|bytes|total.saturating_add(bytes)))
             .map_err(|_|"Current and historical results share the existing 8 KiB delivery budget")?;
         self.resolve_historical_results(&mut submission.historical_results,archive,current_delivery_bytes)?;
-        crate::stream_limits::serialized_size(&submission.historical_results,48*1024)
+        crate::stream_limits::serialized_size(&submission.historical_results,MAX_HISTORICAL_DELIVERY_BYTES)
             .map_err(|_|"Resolved historical provenance exceeds the existing completion snapshot bound")?;
         if !submission.historical_results.is_empty() {
             let chinese=submission.summary.chars().any(|c|matches!(c as u32,0x3400..=0x9fff));
             let published=submission.historical_results.iter().try_fold(0usize,|total,result| {
                 let text=format!("{}\n{}",result.label,historical_public_result(result.data.as_ref().unwrap(),chinese));
-                crate::stream_limits::serialized_size(&text,8192).map(|bytes|total.saturating_add(bytes))
+                crate::stream_limits::serialized_size(&text,MAX_HISTORICAL_DELIVERY_BYTES).map(|bytes|total.saturating_add(bytes))
             }).map_err(|_|"Historical rendered output exceeds the existing delivery bound")?;
-            if published.saturating_add(current_delivery_bytes)>8192 {
-                return Err("Historical and current rendered results exceed the existing 8 KiB delivery bound".into());
+            if published.saturating_add(current_delivery_bytes)>MAX_HISTORICAL_DELIVERY_BYTES {
+                return Err("Historical and current rendered results exceed the native publication envelope".into());
             }
         }
         // Presentation fallback only: this does not interpret user intent or
@@ -1554,11 +1561,11 @@ mod tests {
             "archive_truncated":data["archive_truncated"],"source_may_be_bounded":data["source_may_be_bounded"],
             "omitted_media_parts":data["omitted_media_parts"],"derived_argument_facts":data["derived_argument_facts"],
             "source_work_status":data["source_work_status"]});
-        let bytes=crate::stream_limits::serialized_size(&projection,8192).unwrap();
+        let bytes=crate::stream_limits::serialized_size(&projection,MAX_HISTORICAL_DELIVERY_BYTES).unwrap();
         let mut overflow=vec![make()];
-        let error=tracker.resolve_historical_results(&mut overflow,Some(&archive),8192).unwrap_err();
-        assert!(error.contains(&format!("require {} serialized bytes",8192+bytes)));
-        assert!(error.contains("budget is 8192 bytes")&&error.contains("No report was published"));
+        let error=tracker.resolve_historical_results(&mut overflow,Some(&archive),MAX_HISTORICAL_DELIVERY_BYTES).unwrap_err();
+        assert!(error.contains(&format!("require {} serialized bytes",MAX_HISTORICAL_DELIVERY_BYTES+bytes)));
+        assert!(error.contains(&format!("envelope is {MAX_HISTORICAL_DELIVERY_BYTES} bytes"))&&error.contains("No report was published"));
         assert!(tracker.report.is_none());
         assert_eq!(overflow[0].data,selected[0].data,"budget refusal never clips or alters source values");
     }
@@ -1617,6 +1624,18 @@ mod tests {
         let raw="{\"future_field\":\"exact_actions\",\"text\":\"你好\\n\"}";
         let rendered=historical_public_result(&serde_json::json!({"text_parts":[{"text":raw}],"original_is_error":true}),true);
         assert!(rendered.contains("原始诊断"));assert!(rendered.contains(raw),"unknown diagnostics remain exact, not scrubbed to pass language checks");
+    }
+    #[test]
+    fn historical_publication_preserves_submitted_file_bytes_and_literal_invocation_context() {
+        let content="第一行 MAC-B\n第二行 before\n";
+        let file=historical_public_result(&serde_json::json!({"tool":"write_file","result_order":10,
+            "original_arguments":{"path":"临时 结果.txt","content":content},"text_parts":[]}),true);
+        assert!(file.contains(content)&&file.contains("临时 结果.txt")&&file.contains("记录顺序：11"));
+        assert!(file.contains("是否实际写入以随后结果为准"));
+        let command=historical_public_result(&serde_json::json!({"tool":"exec_command","result_order":12,
+            "original_arguments":{"command":"cp","args":["--","临时 结果.txt","副本 结果.txt"],"cwd":"/work"},"text_parts":[]}),true);
+        assert!(command.contains("cp")&&command.contains("临时 结果.txt")&&command.contains("副本 结果.txt")&&command.contains("/work"));
+        assert!(command.contains("不代表成功"));
     }
     #[test]
     fn public_result_language_schema_references_cover_narrative_fields_without_new_assertions() {
@@ -3975,6 +3994,28 @@ fn public_structured_result(data:&serde_json::Value,chinese:bool)->Option<String
 
 fn historical_public_result(data:&serde_json::Value,chinese:bool)->String {
     let mut output=String::new();
+    if let Some(order)=data["result_order"].as_u64() {
+        output.push_str(&if chinese {format!("原回合记录顺序：{}。\n",order+1)} else {format!("Original record order: {}.\n",order+1)});
+    }
+    let arguments=&data["original_arguments"];
+    match data["tool"].as_str() {
+        Some("write_file")=>{
+            if let Some(path)=arguments["path"].as_str() {output.push_str(&format!("{}：{}\n",if chinese {"写入目标"} else {"Write target"},public_owner_text_versioned(path,true)));}
+            if let Some(content)=arguments["content"].as_str() {
+                output.push_str(if chinese {"当时提交的文件内容（原文；是否实际写入以随后结果为准）：\n"} else {"Original submitted file contents (the following result determines whether the write ran):\n"});
+                output.push_str(&public_owner_text_versioned(content,true));output.push('\n');
+            }
+        }
+        Some("exec_command"|"start_process")=>{
+            let invocation=serde_json::json!({
+                if chinese {"命令或程序"} else {"Command or program"}:arguments["command"],
+                if chinese {"字面参数"} else {"Literal arguments"}:arguments["args"],
+                if chinese {"工作目录"} else {"Working directory"}:arguments["cwd"]});
+            output.push_str(if chinese {"当时提交的调用（不代表成功；结果如下）：\n"} else {"Original submitted invocation (not a success claim; result follows):\n"});
+            output.push_str(&public_owner_text_versioned(&invocation.to_string(),true));output.push('\n');
+        }
+        _=>{}
+    }
     if data["archive_truncated"]==true || data["source_may_be_bounded"]==true || data["omitted_media_parts"].as_u64().unwrap_or(0)>0 {
         output.push_str(if chinese {"该历史记录可能有截断或未保留的媒体；不能据此声称原结果完整。\n"}
             else {"This historical record may be bounded or omit media; it does not prove a complete original output.\n"});

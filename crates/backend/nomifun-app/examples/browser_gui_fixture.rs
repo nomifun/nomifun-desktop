@@ -74,7 +74,7 @@ impl LiveModelSpec {
 #[derive(Clone, Copy)]
 struct LiveBudget {
     calls: Option<usize>,
-    output_tokens: u64,
+    output_tokens: Option<u64>,
     seconds: u64,
 }
 
@@ -86,12 +86,12 @@ impl LiveBudget {
     ) -> anyhow::Result<Self> {
         let budget = Self {
             calls: match calls { Some("unlimited") => None, _ => Some(calls.unwrap_or("32").parse()?) },
-            output_tokens: tokens.unwrap_or("4096").parse()?,
+            output_tokens: match tokens {Some("provider")=>None,_=>Some(tokens.unwrap_or("4096").parse()?)},
             seconds: seconds.unwrap_or("1800").parse()?,
         };
         anyhow::ensure!(
             budget.calls.is_none_or(|calls| (1..=32).contains(&calls))
-                && (128..=4096).contains(&budget.output_tokens)
+                && budget.output_tokens.is_none_or(|tokens|(128..=4096).contains(&tokens))
                 && (1..=1800).contains(&budget.seconds),
             "live GUI budget outside bounded acceptance range"
         );
@@ -188,7 +188,7 @@ mod live_budget_tests {
             assert!(LiveModelSpec::parse(Some(invalid)).is_err());
         }
         let budget=LiveBudget::parse(Some("unlimited"),Some("4096"),Some("360")).unwrap();
-        assert_eq!(budget.output_tokens,4096);assert_eq!(budget.seconds,360);
+        assert_eq!(budget.output_tokens,Some(4096));assert_eq!(budget.seconds,360);
         let capability = step5.configure_capability(json!({
             "task":"chat", "traits":[], "protocol":"openai.chat_text",
             "connection_role":"default", "output_limit":4096
@@ -244,7 +244,7 @@ mod live_budget_tests {
         let budget = LiveBudget::parse(Some("6"), Some("1024"), Some("180")).unwrap();
         assert_eq!(
             (budget.calls, budget.output_tokens, budget.seconds),
-            (Some(6), 1024, 180)
+            (Some(6), Some(1024), 180)
         );
         for values in [
             ("0", "1024", "180"),
@@ -293,6 +293,11 @@ mod live_budget_tests {
         assert!(budget.reserve(&started,&calls,&stopped,now+Duration::from_secs(360)).is_err());
         assert!(LiveBudget::parse(Some("unlimited"),Some("4097"),Some("360")).is_err());
         assert!(LiveBudget::parse(Some("unlimited"),Some("4096"),Some("1801")).is_err());
+    }
+    #[test]
+    fn provider_output_default_is_explicit_and_keeps_only_the_time_boundary() {
+        let budget=LiveBudget::parse(Some("unlimited"),Some("provider"),Some("360")).unwrap();
+        assert_eq!(budget.calls,None);assert_eq!(budget.output_tokens,None);assert_eq!(budget.seconds,360);
     }
 
     #[test]
@@ -2465,8 +2470,10 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             Err(status) => return status.into_response(),
         };
         body["model"] = json!(live.model.name);
-        body["max_tokens"] = json!(live.budget.output_tokens);
-        body.as_object_mut().unwrap().remove("max_completion_tokens");
+        if let Some(tokens)=live.budget.output_tokens {
+            body["max_tokens"] = json!(tokens);
+            body.as_object_mut().unwrap().remove("max_completion_tokens");
+        }
         body["temperature"] = json!(0);
         body["stream"] = json!(true);
         let number = live.trace_sequence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -3094,6 +3101,10 @@ async fn main() -> anyhow::Result<()> {
         if live_commands {
             chat_capability = model_spec.expect("live command model frozen")
                 .configure_capability(chat_capability);
+            match fixture.live.as_ref().expect("live budget frozen").budget.output_tokens {
+                Some(tokens)=>chat_capability["output_limit"]=json!(tokens),
+                None=>{chat_capability.as_object_mut().unwrap().remove("output_limit");},
+            }
         }
         let provider = api(&app,"/api/providers",json!({"platform":if live_commands {"stepfun-plan"}else{"custom"},"name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":model_name,"enabled":true,"capabilities":[chat_capability]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
