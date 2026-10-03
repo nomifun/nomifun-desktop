@@ -304,6 +304,7 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "1"
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 
 [dev-dependencies]
 chromiumoxide.workspace = true

@@ -4154,3 +4154,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 新增两项App原生回归：`cmd /d /k`保持running、原1000ms截止后timed_out/success=false/reaped=true，游标0→18→65、清理141ms；`cmd /c start "" /b`后台Bun先写实际PID并由第二进程确认就绪，返回exit0/reaped时独立OS查询证明子进程已消失。范围内断言通过；既有pipe/ConPTY两项同组通过，标准token测试本次ignored，不重复记PASS。
 - 两次测试首败保留：先将有新输出的poll误当终态，再在补正循环中重复operation ID被正确拒绝；最终只修观察游标/调用ID，原截止时间和终态/清理断言不放宽。01/02日志均3通过、1失败、1ignored；03仅重跑纠正后的持久命令1通过。后台子进程独立查询隐藏窗口，无付费模型/正式UI。
 - 原生证据基线b63c51a10；正常同步远端083ac0531的Browser storage-close入口后，受影响的Browser屏障两项及App存储关闭后重试一项通过，不代判新的Windows正式UI采用。制品外部`2026-10-03/windows/w270-cmd-owner-boundary`保存首败、完成参数/回执、原生结果及同步检查。该项原定位已超30分钟时间盒，停止扩展，只完成已有测试纠错与提交收尾，不另开批次重置。完整WIN-009 policy拒绝、脱离变体、正式UI及WIN-011全边界仍未验；历史生成失败、引用采用、sleep/wake、第二卷/真实UNC与发布认证继续开放。已受管PID和自有Cargo/GUI均无遗留。
+
+### W271 混合代码页的真实supervisor及App回执（2026-10-03；WIN-012接合子断言）
+
+- W263库级raw/decoder证据复用，本批仅补真实受管reader→终态冻结→工具回执缺口。只读GetACP=936，不更改宿主设置；真实Bun双pipe分别写ACP936中文5bytes和UTF-8中文/emoji16bytes，DBCS/emoji跨实际read分段。两项opt-in回归显式执行均通过，其他代码页不计PASS；无产品根因或生产代码修改。
+- Runtime回归覆盖21/8bytes两种保留合同：真实stdout读取完成才放行stderr，逐stream原始字节完全匹配，总cursor21；小ring精确丢13bytes、文本仍正确，空终态快照保持mixed/decode_errors=1及原保留/丢失计数。诊断1为预期ACP fallback；两个原PID23072/54628均以预持OS句柄确认exit0/reaped，shutdown精确。
+- App原生exec实得21bytes/mixed/完整中文及emoji，当前cursor21空poll仍保持原终态和全部元数据；scope quiescent/cleanup通过。新增仅测试及Windows测试所需Globalization feature，未修改renderer；无正式UI/模型/SSE，不代判模型报告或完整WIN-012/全部平台认证。制品外部`2026-10-03/windows/w271-mixed-stream-supervisor`保存原始回执/分流bytes、终态及构建结果，自有Cargo/GUI/原writer均无遗留。
+- 当前computer-use应用/窗口两次清单均没有托盘目标；活动托盘Quit仍待人工可用条件，尚未准备新实例，不复用旧PID或改产品入口。W249/W250旧wire缺证、W240提议偏差、精确引用真实采用及原复杂交付继续开放，全面目标active。
+- WIN-015仅完成只读夹具预检：宿主支持S3、当前交流电且AC允许wake timer，绝对时间timer/resume=true实际arm成功/last_error=0，随即cancel并close。原token的SeShutdownPrivilege存在但Disabled；实际系统sleep/wake尚未执行，不计Case通过，不改电源/安全设置。预检JSON随同制品保存，后续仍需实际电源周期及同一owner/句柄的终态证据。

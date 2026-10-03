@@ -613,6 +613,45 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    #[ignore = "requires the unchanged Windows ACP 936 fixture and Bun"]
+    async fn windows_mixed_code_page_output_keeps_frozen_tool_metadata() {
+        // SAFETY: GetACP only reads the host's current ANSI code page.
+        assert_eq!(unsafe { windows_sys::Win32::Globalization::GetACP() }, 936);
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let script = "process.stdout.write(Buffer.from([0xd6,0xd0,0xce,0xc4,10])); await Bun.sleep(40); const e=Buffer.from('UTF8:中文🙂\\n'); process.stderr.write(e.subarray(0,12)); await Bun.sleep(40); process.stderr.write(e.subarray(12));";
+        let result = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"exec", "command":"bun", "args":["-e",script], "timeout_ms":5000
+        })), "mixed-code-page-exec").await.unwrap().0;
+        assert_eq!(result["state"], "exited");
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["success"], true);
+        assert_eq!(result["cleanup"]["reaped"], true);
+        assert_eq!(result["output"]["source_encoding"], "mixed");
+        assert_eq!(result["output"]["decode_errors"], 1);
+        assert_eq!(result["output"]["next_cursor"], 21);
+        assert_eq!(result["output"]["retained_bytes"], 21);
+        assert_eq!(result["output"]["dropped_bytes"], 0);
+        let text = result["output"]["text"].as_str().unwrap();
+        assert!(text.contains("中文\n") && text.contains("UTF8:中文🙂\n"));
+        assert_eq!(text.len(), "中文\nUTF8:中文🙂\n".len());
+        let empty = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"poll", "process_id":result["process_id"], "cursor":21, "wait_ms":0
+        })), "mixed-code-page-frozen-poll").await.unwrap().0;
+        assert_eq!(empty["state"], result["state"]);
+        assert_eq!(empty["output"]["text"], "");
+        for field in ["source_encoding", "decode_errors", "next_cursor", "retained_bytes", "dropped_bytes"] {
+            assert_eq!(empty["output"][field], result["output"][field], "frozen {field}");
+        }
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        println!("WINDOWS_MIXED_TOOL_EVIDENCE {}", serde_json::json!({"result":result,"empty":empty}));
+        drop(scope); pool.close().await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn windows_persistent_cmd_remains_owned_and_times_out() {
         let root = tempfile::tempdir().unwrap();
         let (journal, pool) = super::super::engine_journal::test_fixture().await;
