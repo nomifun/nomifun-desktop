@@ -3899,3 +3899,12 @@ completed Turn已保留并纠正，未重启/重发；实际API exit0/进程监�
   idle/writefence先prove旧runtimeclose再replace；失败保binding/quarantine，无新Turn。
   同集成修后及unsetoutput→warmup→send actual省略max_tokens通过，正常shutdown原断言
   保持；不放宽Snapshot/权限或吞cleanup错误。mac正式修后待验，Windows未代判。
+
+- mac`4028c917f`修后正式executionclaim/默认outputwireomit成立，33/33历史report accepted/
+  delivered/completed，首摘要超长拒绝计current1/0保持；1945/23/14旧前缀/效果同，native0。
+  原B核心来源全部精确，公开资料未丢，但表达普通叙述内部字段仍FAIL、完整UI滚动未验。
+- known历史文件read直接LF正文及已知调用/cleanup值可读；strict-only prose作为待验草稿
+  不发布第二份完成，validatedhostreport才交付，普通/optional仍原路径。新摘要内部字段
+  明示拒绝、最新User技术要求/rawsource豁免不改写。定向回归通过，新正式待验，Windows不代判。
+- 新presentation使用历史v4，旧v3回放保持；Runtime327/1ignored通过。字段词门禁仅明示
+  有限6词而非全语言完整proof，最新User出现豁免边界不外推。新正式完整UI/表达仍待验。

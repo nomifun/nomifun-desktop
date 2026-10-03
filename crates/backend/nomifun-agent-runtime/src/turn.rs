@@ -719,6 +719,8 @@ pub(crate) async fn run_turn(
                 model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
         }
         model_steps = model_steps.saturating_add(1);
+        let strict_publication=model_request.input.tools.len()==1&&model_request.input.tools[0].name==crate::completion::TOOL_NAME
+            && model_request.input.tools[0].input_schema.0["properties"].get("short_summary").is_some();
         let model_operation_id =
             OperationId::from(format!("{}:model:{}", turn_operation_id.as_ref(), model_steps));
         model_request.causality.operation_id = model_operation_id.clone();
@@ -858,11 +860,13 @@ pub(crate) async fn run_turn(
                     if protocol_violation { continue; }
                     let visible = public_output.push(&text);
                     if !visible.text.is_empty() {
-                        output_text.push_str(&visible.text);
                         step.append_text(&visible.text);
-                        event_sink.emit(AgentEngineEvent::OutputTextDelta {
-                            step: model_steps, text: visible.text,
-                        }).await?;
+                        if !strict_publication {
+                            output_text.push_str(&visible.text);
+                            event_sink.emit(AgentEngineEvent::OutputTextDelta {
+                                step: model_steps, text: visible.text,
+                            }).await?;
+                        }
                     }
                     if visible.invalid_tool_call {
                         protocol_violation = true;
@@ -980,11 +984,13 @@ pub(crate) async fn run_turn(
                     }
                     let remaining = public_output.finish();
                     if !protocol_violation && !remaining.is_empty() {
-                        output_text.push_str(&remaining);
                         step.append_text(&remaining);
-                        event_sink.emit(AgentEngineEvent::OutputTextDelta {
-                            step: model_steps, text: remaining,
-                        }).await?;
+                        if !strict_publication {
+                            output_text.push_str(&remaining);
+                            event_sink.emit(AgentEngineEvent::OutputTextDelta {
+                                step: model_steps, text: remaining,
+                            }).await?;
+                        }
                     }
                     if saw_terminal {
                         return fail_turn(
@@ -3627,7 +3633,7 @@ mod tests {
                         assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
                     }
                 }
-                let events=if self.required_mode {
+                let mut events=if self.required_mode {
                     let schema=&report.expect("strict historical publication must be available at entry").input_schema.0;
                     assert_eq!(schema["properties"]["source_turn"]["enum"][0],SOURCE);
                     control_step("report",crate::completion::TOOL_NAME,json!({"source_turn":SOURCE,
@@ -3652,6 +3658,9 @@ mod tests {
                         "observed_tool_error_count":0,"observed_command_failure_count":0,
                         "historical_results":[{"origin":origin,"label":"原文件内容"}]}))
                 };
+                if self.required_mode {
+                    events.insert(0,Ok(ChatModelEvent::OutputTextDelta {text:"DRAFT_ONLY failed_commands=2; this prose is not an accepted report.".into()}));
+                }
                 Ok(Box::pin(stream::iter(events)))
             }
         }
@@ -3688,6 +3697,7 @@ mod tests {
             AgentTurnRequest::new(strict.clone(),instruction_plan,principal(),0).with_history_port(Arc::new(History))).await.unwrap();
         assert!(matches!(published.terminal,AgentTurnTerminal::Completed {..}));
         assert!(published.output_text.contains("第一行 MAC-B\n第二行 after\n"));assert_eq!(required.calls.load(Ordering::SeqCst),1);
+        assert!(!published.output_text.contains("DRAFT_ONLY")&&!published.output_text.contains("failed_commands"),"strict mode publishes the validated report, not an unchecked second answer");
         assert_eq!(instructions.0.load(Ordering::SeqCst),2,"root instructions are loaded before the single model round");
         // A fresh report closes an optional empty plan, but must not override
         // a real replan obligation from the current turn.
