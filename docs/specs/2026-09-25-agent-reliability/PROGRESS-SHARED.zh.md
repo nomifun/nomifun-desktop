@@ -3840,3 +3840,8 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   错误拒绝或退optional，一般report schema和JSON协议不变。source账本不进current证据。
 - 新2及控制1回归、Runtime323/1ignored、原634/33source黄金1通过；正式采用/表达待验，
   原失败/Windows结果保持，外证据history-report-compact。
+
+Windows独立发现strict宿主语言与持久化格式判据不一致：旧中文输入会使英文实际摘要的label/
+rationale变中文。仅将宿主字段语言对齐最终摘要（含既有missing文字）的格式判据，摘要/缺项
+原字节、最新来源、当前计数及权限不改；首次red及缺项分支red保留，strict2项+路由1项通过。
+真实模型采用未由该组件代判，详见Windows页宿主语言修复及原会话未准入记录。
