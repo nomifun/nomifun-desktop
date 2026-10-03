@@ -3841,6 +3841,15 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - 新2及控制1回归、Runtime323/1ignored、原634/33source黄金1通过；正式采用/表达待验，
   原失败/Windows结果保持，外证据history-report-compact。
 
+Windows独立发现strict宿主语言与持久化格式判据不一致：旧中文输入会使英文实际摘要的label/
+rationale变中文。仅将宿主字段语言对齐最终摘要（含既有missing文字）的格式判据，摘要/缺项
+原字节、最新来源、当前计数及权限不改；首次red及缺项分支red保留，strict2项+路由1项通过。
+真实模型采用未由该组件代判，详见Windows页宿主语言修复及原会话未准入记录。
+
+Windows原W250三项历史请求尝试沿用原模型/原data/work；UI点击后无新接受/Turn/模型请求，
+原943events/763前缀/4Turns/8effects/9文件保持，提交HTTP缺证、原因未证。原观察器误读旧
+completed Turn已保留并纠正，未重启/重发；实际API exit0/进程监听清理，正式采用仍OPEN。
+
 - mac正式紧凑合同尚未到达：3个ONLY update_plan请求，模型先提出未暴露旧report后无调用，
   守卫拒绝保持，最终任务未完成，当前1/0与source10含2分开。原前缀/19Turn/14effects不改，
   native正常0；不把组件通过或未采用记公开报告PASS。
