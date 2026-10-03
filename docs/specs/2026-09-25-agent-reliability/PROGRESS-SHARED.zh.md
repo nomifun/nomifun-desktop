@@ -6,7 +6,7 @@
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
 核心共同链路达标后单独通知，再补其中尚缺的Windows命令/native断言，不以全产品发布认证阻断收尾。
 
-### 后续全面目标的当前缺口（2026-10-03；W273～W275）
+### 后续全面目标的当前缺口（2026-10-03；整体A/B/C/D并行结算）
 
 原六簇中两项指定采用缺口已有正式证据：W273实际Step5按`/requirements/1/source`拒绝反馈
 纠正input1引用；W274人工托盘Quit真实运行中的Turn和三层树，实际exit0/取消一次/reaped162ms，
@@ -18,9 +18,12 @@
 | 步骤遵循 | W250漏stdin/重复cursor0；已保留摘要cursor25/input待办，历史请求工具表和拒绝HTTP/SSE无法恢复，唯一根因未证；不靠新正向短链抹除 |
 | 精确参数 | W249原参数与实物17 bytes缺LF、历史Windows SSE缺；W240模型未提议用户要求的来源SHA guard；没有已证执行层根因，不自动补字节或强制改通用schema |
 | 复杂交付与报告 | 原复杂任务漏项/稳定性未关闭；W273仍错用指定引用行、连带改description、completed却报告等待用户，原生提议与canonical相同，保留生成/报告残余 |
-| Windows完整专项边界 | W268强杀清理/受控冷隔离、W270 cmd owner、W271代码页、W272一次真实S3的deadline/lease归约、W274活树Quit及W275实机复杂路径/literal argv/显式管道可复用；S3交互ACK首败未解释，第二卷/真实UNC夹具缺、成功自动恢复/OS重启及各专项其余边界未验 |
+| 新历史正文的Windows实际采用 | W277原W250正文组件成立；W278旧Session选择Step5被409非模型合同变更门禁拒绝，正式模型请求0，未送新输入/未重放。共享新来源标记及公开表达修复的Mac证据不代判Windows；typed续接实际UI仍未验 |
+| Windows生命周期与成功恢复 | W276推理前停滞、未证Runtime收尾及实际exit1未解释，原盒关闭；C新载体合同3/3，唯一正式样本因自然lease与固定120秒不相容拒绝故障注入，未冷续做。实际暂停后取消/API exit0不代判成功恢复 |
+| Windows完整专项边界 | W268强杀清理/受控冷隔离、W270 cmd owner、W271代码页、W272一次真实S3的deadline/lease归约、W274活树Quit及W275实机复杂路径/literal argv/显式管道可复用；W279实际ConPTY尺寸80×24→132×43及清理已验。S3交互ACK首败未解释，第二卷/真实UNC夹具缺、OS重启及各专项其余边界未验 |
 
-表中四簇不是四个Case或新的全量队列，未验证项不计PASS。Creative Windows暂停/retry/冷读
+表中六簇不是六个Case或新的全量队列，分到A/B/C/D四条工作流并行调查，现场资源统一串行。
+未验证项不计PASS。Creative Windows暂停/retry/冷读
 直接复用W260；完整共享、Windows认证及发布矩阵仍未完成。下方W258交付表和阶段总结是原
 有限交付的历史基线，不由本次子断言改成全面目标complete。
 
@@ -28,6 +31,11 @@ W276补当前共享配置修复的Windows正式采用未达：同实例输入已
 两个执行组织首错保留；UI Stop取消一次，原生API退出实际exit1且Runtime清理未证明，最终
 后代/监听清空。临时公开API载体未复现，未改生产代码；新停滞/清理原因与正式采用保持OPEN，
 不改原W274活树托盘exit0，也不把某个组件或其他载体的通过当本例PASS，详见Windows页W276。
+
+本次独立包提交0261d4c99（D尺寸）/e8bebce49（C载体），经ba1391c7a正常合并推送；
+A1无新投递根因，纯审查不计修复。B/C GUI与夹具均已自然exit0，后代/监听0，StepFun新请求0。
+清理后同步ae3a91c70的旧回答来源/pairing收尾，Windows直接history9/9、pairing timer3/3通过；各正式采用
+仍按上表保留，不把同步或组件数计整体闭环，详细首败与覆盖边界见Windows页W278/C结算。
 
 W277在Windows显式使用原W250关闭制品核对最新正文投影：16条结果正文/原binding/turn/error/
 顺序完整，原DB SHA保持、EOF仍0，紧凑消息26986bytes且不扩大64KiB上限；control提议参数
