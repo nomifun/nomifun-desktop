@@ -3893,3 +3893,7 @@ completed Turn已保留并纠正，未重启/重发；实际API exit0/进程监�
   收尾owned_runtime_teardown未证明，保护exit1/426.487秒、noexpiry/无外部信号，非CEF。
   最终1880events/22Turn/14effects，旧prefix/效果同、双库ok；不以组件绿代判actualwire/
   完整报告/变更后丝滑使用。新preexecution和teardown缺陷窄定位中，Windows结果不改。
+
+Windows发现显式wire ceiling与内部预留不一致：context8192/output8000原被接受，实际只
+预留7168，输入/输出/安全量合计超过context。from_limits和caller override首红均保留，
+现拒绝不能完整预留的配置，不改wire值、不合成4096；邻近6回归通过，不归因或重开W276。
