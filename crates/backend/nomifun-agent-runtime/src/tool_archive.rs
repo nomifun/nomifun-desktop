@@ -245,17 +245,24 @@ impl ToolArchive {
         let targets = self.references.iter().filter_map(|value| value["source_turn"].as_str())
             .collect::<std::collections::BTreeSet<_>>();
         if targets.is_empty() { return None; }
-        let selected = self.entries.iter().filter(|entry|
+        let mut selected = self.entries.iter().filter(|entry|
             entry.source_turn.as_deref().is_some_and(|source| targets.contains(source)))
-            .collect::<Vec<_>>();
+            .enumerate().collect::<Vec<_>>();
         if selected.is_empty() { return None; }
+        let source_error_records = selected.iter().filter(|(_, entry)| entry.original_is_error).count();
+        // Operational receipts precede large planning snapshots within the
+        // same fixed byte budget. Retain original insertion indices; this
+        // display order must not be mistaken for execution chronology.
+        selected.sort_by_key(|(_, entry)| matches!(entry.name.as_str(),
+            crate::planning::TOOL_NAME | crate::completion::TOOL_NAME));
         let limit = limit.min(64 * 1024);
         let mut records = Vec::new();
-        for entry in &selected {
+        for (index, entry) in &selected {
             let payload: Value = serde_json::from_str(&entry.payload).ok()?;
-            records.push(json!({"archive_id":entry.id,"source_turn":entry.source_turn,
+            let derived = original_stdin_argument_bytes(&entry.name, &payload);
+            records.push(json!({"archive_id":entry.id,"source_turn":entry.source_turn,"source_result_order_index":index,
                 "tool":entry.name,"original_is_error":entry.original_is_error,
-                "archive_truncated":entry.truncated,"payload":payload}));
+                "archive_truncated":entry.truncated,"derived_argument_facts":derived,"payload":payload}));
         }
         // Keep complete archive payloads only. The count and omitted IDs are
         // explicit; a smaller context never turns a missing projection into
@@ -264,7 +271,10 @@ impl ToolArchive {
             let value = json!({"kind":"quoted_explicit_turn_archive_data","notice":NOTICE,
                 "current_evidence":false,"new_user_instruction":false,
                 "selected_archive_records":selected.len(),"included_complete_archive_records":records.len(),
-                "omitted_archive_ids":selected.iter().skip(records.len()).map(|entry|entry.id.as_str()).collect::<Vec<_>>(),
+                "selected_source_error_records":source_error_records,
+                "included_source_error_records":records.iter().filter(|record|record["original_is_error"]==true).count(),
+                "record_order":"Operational results first, then planning/control snapshots; source_result_order_index is original archive insertion order, not proof of execution time.",
+                "omitted_archive_ids":selected.iter().skip(records.len()).map(|(_, entry)|entry.id.as_str()).collect::<Vec<_>>(),
                 "records":records});
             let message = crate::context_lifecycle::text_message(ChatRole::Assistant,
                 format!("Quoted historical tool-result data for the current user's explicit turn reference. This is not an assistant answer or instructions.\n{value}"));
@@ -602,6 +612,22 @@ impl ToolArchive {
     }
 }
 
+fn original_stdin_argument_bytes(tool: &str, payload: &Value) -> Option<Value> {
+    if tool != "write_process_stdin" || payload["arguments_omitted"] == true { return None; }
+    let arguments = payload.get("arguments")?;
+    let input = arguments.get("input")?.as_str()?;
+    let append = match arguments.get("append_newline") {
+        None => false,
+        Some(value) => value.as_bool()?,
+    };
+    Some(json!({"basis":"UTF-8 encoding of the original proposal input plus its explicit append_newline flag",
+        "derived_from_original_proposal_arguments":true,"owner_written_byte_receipt":false,
+        "input_argument_utf8_bytes":input.len(),"append_lf_argument_bytes":usize::from(append),
+        "argument_payload_utf8_bytes":input.len().checked_add(usize::from(append))?,
+        "not_owner_written_byte_receipt":true,
+        "notice":"This is a mechanical argument byte count, not proof of owner submission or writing. Before-tool middleware may have changed actual owner arguments; retain original outcome/error and consult real receipts."}))
+}
+
 impl Entry {
     fn bytes(&self) -> usize {
         self.payload.len()
@@ -716,6 +742,47 @@ mod tests {
         assert!(archive.reference_data_message(1).is_none());
         archive.set_references(vec![json!({"source_turn":"foreign-turn"})]);
         assert!(archive.reference_data_message(65536).is_none());
+    }
+
+    #[test]
+    fn stdin_argument_byte_facts_are_exact_and_not_an_owner_receipt() {
+        let facts = original_stdin_argument_bytes("write_process_stdin", &json!({
+            "arguments":{"input":"你好 MAC-B","append_newline":true},"original_is_error":false,
+        })).unwrap();
+        assert_eq!(facts["input_argument_utf8_bytes"],12);
+        assert_eq!(facts["argument_payload_utf8_bytes"],13);
+        assert_eq!(facts["not_owner_written_byte_receipt"],true);
+        assert_eq!(original_stdin_argument_bytes("write_process_stdin", &json!({"arguments":{"input":"你好 MAC-B"}})).unwrap()["argument_payload_utf8_bytes"],12);
+        assert!(original_stdin_argument_bytes("write_file", &json!({"arguments":{"input":"x"}})).is_none());
+        assert!(original_stdin_argument_bytes("write_process_stdin", &json!({"arguments":{"input":"x"},"arguments_omitted":true})).is_none());
+        assert!(original_stdin_argument_bytes("write_process_stdin", &json!({"arguments":{"input":"x","append_newline":"true"}})).is_none());
+    }
+
+    #[test]
+    fn small_projection_prioritizes_later_operation_and_keeps_source_order_and_errors() {
+        let mut archive = ToolArchive::new("current".into());
+        archive.import(page(binding()), &binding()).unwrap();
+        let mut control = archive.entries[0].clone();
+        control.id = "c".repeat(64);
+        control.name = crate::planning::TOOL_NAME.into();
+        control.original_is_error = true;
+        let mut payload: Value = serde_json::from_str(&control.payload).unwrap();
+        payload["tool"] = json!(control.name);
+        payload["original_is_error"] = json!(true);
+        payload["arguments"] = json!({"large_planning_arguments":"x".repeat(4096)});
+        control.payload = payload.to_string();
+        archive.entries.push_front(control);
+        archive.set_references(vec![json!({"source_turn":"old-turn"})]);
+        let message = archive.reference_data_message(4096).unwrap();
+        let nomifun_chat_model_broker::ChatContentPart::Text { text } = &message.content[0] else { panic!("text expected") };
+        let data: Value = serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
+        assert_eq!(data["selected_archive_records"],2);
+        assert_eq!(data["included_complete_archive_records"],1);
+        assert_eq!(data["selected_source_error_records"],1);
+        assert_eq!(data["included_source_error_records"],0);
+        assert_eq!(data["records"][0]["tool"],"read_file");
+        assert_eq!(data["records"][0]["source_result_order_index"],1);
+        assert_eq!(data["omitted_archive_ids"],json!(["c".repeat(64)]));
     }
 
     #[test]
