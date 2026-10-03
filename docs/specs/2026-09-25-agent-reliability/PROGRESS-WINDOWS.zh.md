@@ -4185,3 +4185,19 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 指定反馈采用已验：首次两requirement提议的第二项new_scope使用input1配input0标记整行，被正确拒绝，精确rejected_parameter_path=/requirements/1/source、source_input_index=1；下一真实调用保持input1，quote改为当前输入准确原文，原有效old_reads完整保持，plan_revision2/updated。独立review八项定向检查均成立，关闭该精准字段反馈→真实模型修正的采用缺口，W249/W250旧缺证与其他生成精度不代判。
 - 严格整链保留FAIL：首项引用虽属于input0却未用指定标记行；纠正还修改new_scope.description，非仅quote变化；模型随后调用report_completion并completed，summary却称等待用户结束。当前工具描述明确validated report为terminal，产品按真实提议执行，无已证执行层根因，不自动保留运行或更改原断言凑PASS。完整共享/Windows及原A/B/C未完成，生成遵循与报告准确性继续开放。
 - PID6504原生API自然exit0、预持OS句柄/后代监听0，非托盘点击；forwarder按原路径/启动UTC清理，steerer及Cargo结束。77份文本凭据审计0命中。完整制品外部`2026-10-03/windows/w273-step5-access`含单次访问探针、正式源/二进制身份、预算/接纳/UI、真实wire与八组对账、原拒绝/纠正及严格三项FAIL，未追加第二付费试验或源码修改。全面目标active。
+
+### W274 真实运行中人工托盘Quit（2026-10-03；退出入口N1通过）
+
+- PROC-040/LIFE-029、Windows活动Turn退出：首例PID17940实际人工托盘exit0，但冷读证明14:03:32已因第二模型请求120秒超时暂停，早于14:05:21退出；三层树也已到原30秒期限。该例只证明暂停后Quit，不计运行中树清理通过，原前提失败完整保留。
+- 只修正式测试夹具：新增`--active-quit`，单次本地SSE完整返回受管`exec_command`/600000ms，执行期间没有第二悬挂模型流；后续调用明确400禁止替换树。原`--crash-tree`/lease期限不改，退出入口/执行层无生产修改。针对夹具一项回归1/1、helper构建通过（SHA前缀736D8E145E85）；复用a10933b1b正式desktop/SHA7E9231B394AD、前端e247ffd0/1280×832，后续本地差异仅夹具/文档。
+- 第二新库/隔离work/profile PID64760、14:19:47启动；退出前实际UI一条运行中命令，canonical Turn running/pause0/tool_started1/tool_finished0，独立OS快照证明78632→75392→8076三层树及原路径/出生UTC。用户实际选托盘Quit，原持有OS句柄记录14:23:12.158实际exit0，没有原生API退出、窗口关闭或观察器kill。
+- 同Turn仅一次cancelled，无paused/completed；原exec回执cancelled/success=false、reaped=true/errors空、清理162ms，非退出失败。模型调用仍1/等待流0、付费0，原初始事件及活动前缀逐行保持、915 bytes脚本/SHA不变，后代/监听0；fixture自然exit0。独立限定核对16/16，原通用review未计算的false占位另由`verified-live-review.json`明确解释，不改首例失败。独立核对脚本首次误读output层级失败保留，纠正观察器后读取同一库，无任务重跑。
+- 完整制品外部`2026-10-03/windows/w274-active-tray-quit`含两例原UI/DB、前提失败、人工确认、实际退出码/进程身份及冷核对。关闭当前正式运行中托盘入口和活树清理缺口，复用W264真实写锁失败exit1；不代判其他退出故障分支、OS重启、完整WIN平台/共享生成/发布认证。所有自有GUI/helper/树/Cargo已结束，全面目标仍active。
+- 正常合入远端386ba1e08/3f144f2c3/506ac463d，合并39f795f05；Windows配置冻结/下一Turn刷新/实时安全检查3/3、实际路由模型切换集成1/1、闭Turn引用导入1/1通过，没有重跑其他已验链。该同步不把a109正式样本身份改成合并后产物，也不代判新的配置切换正式UI或macOS退出专项。65份外部文本凭据审计0命中，后续本地测试日志未使用真实供应商凭据。
+
+### W275 Windows literal argv与真实PowerShell管道（2026-10-03；原生子断言）
+
+- WIN-002/008相关：文件尾点/保留名/ADS/普通workspace拒绝UNC、大小写、ACL/共享锁已有W01-B/W03/W34/W35/W36原生或正式证据，执行层未变，直接复用。第二卷/真实授权UNC仍缺夹具；本批不重跑文件链/权限矩阵。
+- 加强两个现有Runtime原生回归，无生产修改：直接Program复制helper至中文/emoji/空格/单引号exe路径，同形cwd；原两段误编码夹具文本改为明确中文/emoji，argv含`$(exit 99)`、反引号、`| & ;`、双引号和尾反斜杠，env含字面`$env:USERPROFILE`及`$()`。helper独立回显的四个UTF-8字节长度/精确值相同，exit0、reaped/errors空及shutdown exact；不发生shell求值。
+- 显式PowerShell Shell新增真实成功/抛错管道：Single-quoted反引号与`$()`逐字输出``literal `$() piped\r\n``，exit0；ForEach-Object抛错保留PIPELINE_FAILED、exit1。原五个native/恢复/非零分支保留7/0/7/1/1；七次均reaped/errors空及shutdown exact。实际宿主PowerShell5.1.26100.8875，两个定向回归首次2/2通过，不把八进程数当八Case。
+- 基线3c4943a44加测试，测试binary SHA前缀6027B8C063E9；外部`2026-10-03/windows/w275-shell-literal-boundary`保留两份实际日志、patch/身份/独立核对。八个记录PID最终无匹配、隔离helper/cwd已随TempDir清理；模型/正式GUI0、无Cargo遗留。只补当前实机literal/显式管道子断言，不计完整WIN-008、App/Tauri实际采用、跨盘/UNC、S3交互、复杂生成或发布认证通过，全面目标active。

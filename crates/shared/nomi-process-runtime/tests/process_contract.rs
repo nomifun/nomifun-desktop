@@ -1148,16 +1148,17 @@ async fn windows_leader_exit_waits_for_job_descendant_cleanup_before_success() {
 #[tokio::test]
 async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
     let directory = tempfile::tempdir().expect("temporary working directory should be created");
-    let cwd = directory
-        .path()
-        .canonicalize()
-        .expect("temporary working directory should canonicalize");
-    let first = OsString::from("涓枃 spaced \\");
+    let cwd = directory.path().join("中文🙂 workspace 'quoted'");
+    fs::create_dir(&cwd).expect("complex working directory");
+    let cwd = cwd.canonicalize().expect("temporary working directory should canonicalize");
+    let executable = cwd.join("工具🙂 helper 'quoted'.exe");
+    fs::copy(helper_binary(), &executable).expect("copy native helper into the complex path");
+    let first = OsString::from("中文🙂 spaced $(exit 99) | & ; `tick` \\");
     let second = OsString::from(r#"quote " and trailing \\"#);
     let env_key = OsString::from("NOMIFUN_WINDOWS_ENV_CASE");
-    let env_value = OsString::from("鍊?value");
+    let env_value = OsString::from("值🙂 'quoted' $env:USERPROFILE $(exit 99)");
     let mut process = request(
-        helper_binary(),
+        executable,
         [
             OsString::from("print-args-env-cwd"),
             first.clone(),
@@ -1178,10 +1179,12 @@ async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
         .await
         .expect("complex Windows argv/env/cwd helper should start");
     let outcome = wait_for_terminal(&supervisor, &handle).await;
-    let ProcessOutcome::Exited { code, output, .. } = outcome else {
+    let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
         panic!("complex Windows argv/env/cwd helper should exit, got {outcome:?}");
     };
     assert_eq!(code, Some(0));
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty());
     let expected = [first, second, env_value, cwd.into_os_string()]
         .into_iter()
         .map(|field| {
@@ -1190,6 +1193,8 @@ async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
         })
         .collect::<String>();
     assert_eq!(output.text(), expected);
+    println!("WINDOWS_LITERAL_ARGV_EVIDENCE pid={} output={:?} cleanup={cleanup:?}", handle.pid, output.text());
+    assert!(supervisor.shutdown().await.is_exact());
 }
 
 #[cfg(windows)]
@@ -1286,6 +1291,8 @@ async fn windows_powershell_preserves_final_native_and_pipeline_status() {
         ("Write-Output before; cmd /c exit 7", 7),
         ("Get-DefinitelyMissingNomifunCommand", 1),
         ("Write-Error bad -ErrorAction Continue", 1),
+        ("'literal `$()' | ForEach-Object { Write-Output ($_ + ' piped') }", 0),
+        ("Write-Output before | ForEach-Object { throw 'PIPELINE_FAILED' }", 1),
     ] {
         let mut process = request(helper_binary(), Vec::<OsString>::new());
         process.command = CommandSpec::Shell {
@@ -1298,10 +1305,20 @@ async fn windows_powershell_preserves_final_native_and_pipeline_status() {
             .await
             .unwrap_or_else(|error| panic!("PowerShell script failed to start: {script}: {error}"));
         let outcome = wait_for_terminal(&supervisor, &handle).await;
-        let ProcessOutcome::Exited { code, .. } = outcome else {
+        let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
             panic!("PowerShell script should exit: {script}: {outcome:?}");
         };
         assert_eq!(code, Some(expected), "PowerShell script: {script}");
+        assert!(cleanup.reaped);
+        assert!(cleanup.errors.is_empty());
+        if script.starts_with("'literal") {
+            assert_eq!(output.text(), "literal `$() piped\r\n");
+        }
+        if script.contains("PIPELINE_FAILED") {
+            assert!(output.text().contains("PIPELINE_FAILED"), "pipeline failure must remain observable");
+        }
+        println!("WINDOWS_POWERSHELL_STATUS_EVIDENCE pid={} script={script:?} code={code:?} output={:?} cleanup={cleanup:?}", handle.pid, output.text());
+        assert!(supervisor.shutdown().await.is_exact());
     }
 }
 

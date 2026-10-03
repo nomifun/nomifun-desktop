@@ -1,6 +1,7 @@
 //! Deterministic acceptance through the real desktop, Runtime, tools and history.
 //! Modes include --creative-failure, --creative-submit-failure,
-//! --creative-retry-ack-loss, --shutdown-wait, --crash-tree and --lease-retirement.
+//! --creative-retry-ack-loss, --shutdown-wait, --crash-tree, --lease-retirement
+//! and --active-quit (one long owned exec, no pending model request).
 //! Launch NomiFun with that NOMIFUN_DATA_DIR; send a normal request, inspect the
 //! live journal, POST /finish to release the final response, then reload. Send
 //! "格式异常" in a second turn to exercise split pseudo-tool-call rejection.
@@ -46,6 +47,13 @@ fn frame(delta: Value, finish: Option<&str>) -> String {
 
 async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> axum::response::Response {
     let call = fixture.calls.fetch_add(1, Ordering::SeqCst);
+    let active_quit = fixture.crash_tree && fixture.process_timeout_ms == 600000;
+    if active_quit && call >= 1 {
+        return axum::response::Response::builder().status(400)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{\"error\":{\"message\":\"ACTIVE_QUIT_SINGLE_EXEC_ONLY\"}}"))
+            .unwrap();
+    }
     if fixture.crash_tree && call >= 2 {
         // Cold recovery may resume this same accepted Turn. Keep its inference
         // observable while preventing the fixture from proposing another tree.
@@ -143,7 +151,12 @@ async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> 
         vec![
             frame(json!({"role":"assistant","content":"正在启动隔离守候进程。"}), None),
             frame(json!({"tool_calls":[{"index":0,"id":"crash-tree-start","type":"function","function":{
-                "name":"start_process","arguments":json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"wait_ms":500,"timeout_ms":fixture.process_timeout_ms}).to_string()
+                "name":if active_quit { "exec_command" } else { "start_process" },
+                "arguments":if active_quit {
+                    json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"timeout_ms":600000}).to_string()
+                } else {
+                    json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"wait_ms":500,"timeout_ms":fixture.process_timeout_ms}).to_string()
+                }
             }}]}), None),
             frame(json!({}), Some("tool_calls")),
         ]
@@ -204,8 +217,9 @@ async fn main() -> anyhow::Result<()> {
     let creative_submit_failure = mode.as_deref() == Some("--creative-submit-failure");
     let creative_retry_ack_loss = mode.as_deref() == Some("--creative-retry-ack-loss");
     let lease_retirement = mode.as_deref() == Some("--lease-retirement");
-    let crash_tree = mode.as_deref() == Some("--crash-tree") || lease_retirement;
-    let process_timeout_ms = if lease_retirement { 1000 } else { 30000 };
+    let active_quit = mode.as_deref() == Some("--active-quit");
+    let crash_tree = mode.as_deref() == Some("--crash-tree") || lease_retirement || active_quit;
+    let process_timeout_ms = if active_quit { 600000 } else if lease_retirement { 1000 } else { 30000 };
     let shutdown_wait = mode.as_deref() == Some("--shutdown-wait") || crash_tree;
     anyhow::ensure!(mode.is_none() || creative_failure || creative_submit_failure || creative_retry_ack_loss || shutdown_wait, "unsupported fixture mode");
     std::fs::create_dir(&root)?;
@@ -260,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
             let mut draft = editor["draft"].clone();
             draft["document"]["enabled_capabilities"] = if crash_tree {
                 json!([
-                    {"capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/start"]},
+                    {"capability":{"id":"workspace.process"},"action_allowlist":if active_quit {json!(["workspace.process/exec"])} else {json!(["workspace.process/start"])}},
                     {"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read"]}
                 ])
             } else { json!([{"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"]}]) };
@@ -307,6 +321,34 @@ else if (process.argv[2] === 'child') {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn active_quit_uses_one_owned_exec_without_a_waiting_model_stream() {
+        let fixture = Arc::new(Fixture {
+            calls: AtomicUsize::new(0), creative_failure: false,
+            creative_submit_failure: false, creative_retry_ack_loss: false,
+            shutdown_wait: true, crash_tree: true, process_timeout_ms: 600000,
+            tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
+            finish: Semaphore::new(0), stop: CancellationToken::new(),
+        });
+        fixture.tree_script.set(PathBuf::from("isolated-tree.mjs")).unwrap();
+        let response = model(State(fixture.clone()), Json(json!({"messages":[]}))).await;
+        assert_eq!(response.status(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        let frames: Vec<Value> = text.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|line| serde_json::from_str(line).ok()).collect();
+        let function = &frames.iter().find(|frame| frame["choices"][0]["delta"]["tool_calls"].is_array()).unwrap()
+            ["choices"][0]["delta"]["tool_calls"][0]["function"];
+        assert_eq!(function["name"], "exec_command");
+        let arguments: Value = serde_json::from_str(function["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["timeout_ms"], 600000);
+        assert!(arguments.get("wait_ms").is_none());
+        assert!(text.contains("[DONE]"));
+        assert_eq!(fixture.waiting_streams.load(Ordering::SeqCst), 0);
+        assert_eq!(model(State(fixture), Json(json!({"messages":[]}))).await.status(), 400,
+            "a completed exec must not be replaced or restarted by the fixture");
+    }
 
     #[tokio::test]
     async fn creative_submit_failure_is_one_http_rejection_not_a_success_stream() {
