@@ -24,6 +24,10 @@ Coding Plan / step-3.7-flash、step-5-preview按需使用，复用加密连接�
 | C Windows生命周期与恢复 | 独立负责人准备兼容checkpoint成功自动冷续做载体；同binary/data/work、新profile、生产lease，原write一次，fresh回读/完成 | e8bebce49载体合同3/3；唯一正式样本未满足lease+20秒≤固定120秒，未kill/arm/冷启，暂停后取消/API exit0。成功恢复未验；W276超盒等待新可区分证据，不通过新样本重置 |
 | D Windows环境原生边界 | 独立负责人覆盖跨盘/UNC、S3及ConPTY等剩余原生边界，不重复C恢复 | W279实际80×24→132×43及同owner清理1/1已验。其余已验路径/ACL/锁/argv/编码复用；真实第二卷/授权UNC缺夹具，S3 ACK盒已关闭，OS reboot全机独占且前提未就绪 |
 
+B后续严格报告宿主语言一致性已修并由直接回归验证（068a5bac8）；原会话沿用旧模型的
+正式请求没有新增准入/模型，提交HTTP缺证，未再发送，真实采用仍未达。新direct-report/
+initial-AGENTS/context/budget反馈共享源码已正常同步，Windows组件不代判正式采用。
+
 恢复包归C唯一负责，D不再同时设计或执行恢复样本。各流没有可执行证据时交付明确等待条件，
 不为占满并发槽增加相邻Case、同构测试或重复说明。未验、生成失败、缺证和已验证分别保留。
 并行同步到77052e342的typed输出续接可见性属于B的新共享采用候选；其直接组件/必要正式证据
