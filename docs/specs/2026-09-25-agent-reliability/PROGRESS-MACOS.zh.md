@@ -938,6 +938,41 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   重试/裁源/重做/扩预算。总额超过仍拒绝，不改变source数据、计划或报告；精确值/无发布/
   不改原文回归1通过，Runtime324/1ignored。修后模型恢复效果未验，不再本轮付费循环。
 
+#### 完整交付容量与模型默认输出（2026-10-03，按用户新要求）
+
+- 用户明确以最终完整为准，不再将测试报告8KiB/16选择当不可变门槛。host历史正文/快照
+  对齐已有native256KiB envelope、最多128 retained记录；小48KiB模型参数与权限/source/
+  current证据/错误/缺项gate不变，仍低于实际事件1MiB hard ceiling，不宣称无限单事件。
+  保留旧超预算首败；宿主按原source顺序显示，已知write原内容/命令字面argv另作历史提交
+  数据展示，不推断执行成功或stdin实际owner回执。未知原诊断不改写。
+- 原634events/33results黄金完整normalization→submit→snapshot→render→deserialize通过：
+  33/33、69,250B snapshot、22,661B中文正文、每条原文/顺序/source binding精确，source10含2
+  与current0/0分开；首fixture未标loaded导致零catalog首错保留，修fixture显式admission，
+  production来源gate未放宽。Runtime327/1ignored通过，正式UI/模型采用仍待验。
+- 官方StepFun Chat max_tokens可省略/default INF（服务商决定、总上下文约束）已查，
+  现在wire Option与context预留分离；无显式limit不发送4096，显式100K不被16K/ctx÷8
+  抹小，caller更小limit/zero拒绝/一致Turn配置保持。route事实1、新runtime1通过。
+  UI不再把required协议识别当4096官方推荐，显式custom在切协议保留；未知required仍
+  明确缺配置，不猜模型推荐。UI17/boundary1973/i18n7511通过，fixture10通过。
+  actual model request defaultNone/显式100K均已断言；explicit输出完整预留上下文，不用
+  internal16K预留挤掉100K。首次请求夹具自带100被正确保留，改新case明确未设置后通过，
+  首错日志保留；不是删除或抹掉真实用户限制。
+- 下一正式样本使用原完整报告任务、原隔离Session；只经公开API清除该测试Step5旧显式
+  4096配置，forwarder provider模式不改输出字段，actual product/upstream均断言omit。
+  付费次数不限，native/清理时限保留；证据history-report-complete-capacity，Windows不代判。
+
+- `dd4ee03eb`正式Tauri/ad-hoc deep-strict/UI新构建通过。直接本机API首403无写入保持，
+  改正式UI供应商模型编辑：Step5 4096→服务商默认，保存后output null/context1M、其他
+  Step3.7显式4096未改，发送前原1877events同。旧隔离配置不是静默迁移用户设置。
+- 原task只发送一次，但仅1878useraccepted/1879turnstarted，无executionclaimed/runtime/
+  provider请求；真实等约3分钟后UI Stop一次→1880cancelled。**FAIL_AFTER_MODEL_CONFIG_SAVE
+  PRE_EXECUTION_AND_RUNTIME_TEARDOWN**，不能验wire默认或报告表达；付费请求0。
+  Cmd-Q有界exit1/426.487秒，无expiry/外部TERM/KILL，日志owned_runtime_teardown清理
+  未证明/quarantine保持，不是unused CEF/Keychain故障或正常清理PASS。源/备五表1880/1/1/
+  22/14同、双integrity ok，1877前缀/14effects保持；主/relay/fixture实际均退出。
+  首403/线程sample/AX截图/exit1/首normal-seal断言红另存，失败快照独立封存，不洗exit0。
+  下一步只定位此配置后pre-execution/teardown核心链，不重发或恢复旧矩阵。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
