@@ -11,7 +11,8 @@ A审查无新投递根因。两正式GUI及夹具自然exit0/后代监听0；API
 [共享当前缺口](PROGRESS-SHARED.zh.md)和[Windows阶段结算](PROGRESS-WINDOWS.zh.md)。
 
 后续整体并行实际修复41a689a00：中文固定结果尾注的renderer接线，旧红回归保留、修后8/8及
-desktop boundary通过；正式新UI未验。A唯一真实Step5当前规则样本14请求/14参数全同，模型
+desktop boundary通过；5937b5bcd正式Tauri中文非零分类子断言随后通过，首次载体前提失败
+保留，其他分类新UI及历史模型采用未验。A唯一真实Step5当前规则样本14请求/14参数全同，模型
 承诺漏guard/LF，整链FAIL保留且不再循环；实际API退出0/进程监听清理，非托盘。C/D载体只存
 候选，不记恢复或UI通过。新共享历史公开来源组件在Windows18+owned1通过，正式采用未验；
 整体六簇继续开放，阶段修复与原失败分开结算。
