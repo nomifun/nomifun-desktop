@@ -67,6 +67,26 @@ pub struct AgentCompletionReport {
     /// reports so their exact immutable delivery remains reproducible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_format: Option<String>,
+    /// Historical publication data only; never current observations or authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub historical_results: Vec<AgentHistoricalDeliveryResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHistoricalDeliveryOrigin {
+    pub source_turn: String,
+    pub archive_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHistoricalDeliveryResult {
+    pub origin: AgentHistoricalDeliveryOrigin,
+    /// A short user-facing heading; actual values are resolved by the host.
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +354,8 @@ struct Submission {
     observed_command_failure_count: Option<u32>,
     #[serde(default)]
     delivery_items: Vec<AgentDeliveryItem>,
+    #[serde(default)]
+    historical_results: Vec<AgentHistoricalDeliveryResult>,
 }
 
 pub(crate) fn definition() -> ChatToolDefinition {
@@ -383,6 +405,51 @@ fn public_narrative_description(description:&str)->String {
 }
 
 impl CompletionTracker {
+    fn resolve_historical_results(
+        &self,items:&mut [AgentHistoricalDeliveryResult],archive:Option<&crate::tool_archive::ToolArchive>,existing_bytes:usize,
+    )->Result<(),String> {
+        if items.is_empty() {return Ok(());}
+        if items.len()>16 {return Err("Historical publication accepts at most sixteen selected results".into());}
+        let archive=archive.ok_or("Historical publication has no current validated history reader")?;
+        let mut seen=BTreeSet::new();let mut total=existing_bytes;let mut sources=BTreeSet::new();
+        for item in items {
+            if item.data.is_some() || item.label.trim().is_empty() || item.label.chars().count()>256
+                || !seen.insert((item.origin.source_turn.clone(),item.origin.archive_id.clone())) {
+                return Err("Historical publication accepts distinct advertised origins and a short label, never model-supplied data".into());
+            }
+            let resolved=archive.resolve_historical_delivery(&item.origin).map_err(|error|error.to_string())?;
+            let data=serde_json::to_value(resolved).map_err(|error|error.to_string())?;
+            // Budget the exact published value and flags. Provenance and
+            // proposal arguments stay intact in the durable snapshot; they
+            // are not copied repeatedly into the public value projection.
+            let mut projection=serde_json::json!({"text_parts":data["text_parts"],"original_is_error":data["original_is_error"],
+                "archive_truncated":data["archive_truncated"],"source_may_be_bounded":data["source_may_be_bounded"],
+                "omitted_media_parts":data["omitted_media_parts"],"derived_argument_facts":data["derived_argument_facts"]});
+            if sources.insert(item.origin.source_turn.clone()) {projection["source_work_status"]=data["source_work_status"].clone();}
+            total=total.saturating_add(crate::stream_limits::serialized_size(&projection,8192)
+                .map_err(|_|"Selected historical result exceeds the existing 8 KiB delivery budget")?);
+            if total>8192 {return Err("Selected historical results exceed the existing 8 KiB delivery budget".into());}
+            item.data=Some(data);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_historical_delivery_schema(
+        &self,tool:&mut ChatToolDefinition,archive:&crate::tool_archive::ToolArchive,
+    ) {
+        let catalog=archive.historical_delivery_catalog();
+        let Some(records)=catalog.get("records").and_then(serde_json::Value::as_array) else {return;};
+        if records.is_empty() {return;}
+        let origins=records.iter().filter_map(|record|record.get("origin").cloned()).collect::<Vec<_>>();
+        if origins.is_empty() {return;}
+        tool.input_schema.0["properties"]["historical_results"]=serde_json::json!({
+            "type":"array","minItems":1,"maxItems":16,"items":{
+                "type":"object","additionalProperties":false,"required":["origin","label"],
+                "properties":{"origin":{"enum":origins},"label":{"type":"string","minLength":1,"maxLength":256,
+                    "description":"Short heading in the user's language; host publishes exact historical values and source counts, not current evidence."}}
+            },"description":"Optional exact selections from the explicitly addressed closed-source archive. This is historical publication, never a supported current-state criterion or current counts. Select every requested necessary value; retain missing work as blocked. No model-supplied data; existing 8 KiB total publication budget."});
+    }
+
     fn delivery_results(&self) -> BTreeMap<String, serde_json::Value> {
         let mut results = BTreeMap::new();
         for observation in self.observations.iter().filter(|item| item.invocation_attempted) {
@@ -962,6 +1029,14 @@ impl CompletionTracker {
         unresolved_before_input: Option<usize>,
         sink: &dyn AgentEventSink,
     ) -> Result<AgentToolResult, AgentEngineError> {
+        self.submit_with_history(call,plan,work,inputs,unresolved_patch,unresolved_before_input,sink,None).await
+    }
+
+    pub(crate) async fn submit_with_history(
+        &mut self,call:&ChatToolCall,plan:&mut AgentPlan,work:&AgentWorkStatus,inputs:&[ChatMessage],
+        unresolved_patch:bool,unresolved_before_input:Option<usize>,sink:&dyn AgentEventSink,
+        archive:Option<&crate::tool_archive::ToolArchive>,
+    )->Result<AgentToolResult,AgentEngineError> {
         // A rejected replacement must not leave an old successful report as
         // an accidental fallback after the model was told its account failed.
         self.report = None;
@@ -992,7 +1067,7 @@ impl CompletionTracker {
                     .ok_or_else(|| invalid("plan revision counter exhausted"))?;
             }
         }
-        let checked = self.check(call, &closing, work, inputs);
+        let checked = self.check_with_history(call, &closing, work, inputs,archive);
         let report = match checked {
             Ok(report) => report,
             Err(reason) => return Ok(AgentToolResult::text(call.call_id.clone(), reason, true)),
@@ -1011,7 +1086,7 @@ impl CompletionTracker {
             *plan = closing;
         }
         self.delivery_review.account_repair = false;
-        let candidate = report.delivery_items.is_empty() && !report.is_blocked() && self.delivery_review.begin(inputs,
+        let candidate = report.delivery_items.is_empty() && report.historical_results.is_empty() && !report.is_blocked() && self.delivery_review.begin(inputs,
             self.observations.iter().filter(|item| item.invocation_attempted).count());
         if candidate {
             sink.emit(AgentEngineEvent::CompletionCandidateRecorded { report: report.clone() }).await?;
@@ -1031,13 +1106,10 @@ impl CompletionTracker {
         ))
     }
 
-    fn check(
-        &self,
-        call: &ChatToolCall,
-        plan: &AgentPlan,
-        work: &AgentWorkStatus,
-        inputs: &[ChatMessage],
-    ) -> Result<AgentCompletionReport, String> {
+    fn check_with_history(
+        &self,call:&ChatToolCall,plan:&AgentPlan,work:&AgentWorkStatus,inputs:&[ChatMessage],
+        archive:Option<&crate::tool_archive::ToolArchive>,
+    )->Result<AgentCompletionReport,String> {
         crate::stream_limits::serialized_size(&call.arguments, 48 * 1024)
             .map_err(|_| "Completion report exceeds the 48 KiB serialized budget".to_owned())?;
         if plan.revision == 0 || plan.needs_replan {
@@ -1158,11 +1230,40 @@ impl CompletionTracker {
                 serde_json::to_string(&missing).unwrap_or_default()));
         }
         self.resolve_delivery(&mut submission.delivery_items, inputs, &submission.criteria)?;
+        if !submission.historical_results.is_empty() {
+            let Some(current)=inputs.last() else {return Err("Historical publication has no accepted current input".into());};
+            if current.role!=nomifun_chat_model_broker::ChatRole::User || submission.historical_results.iter()
+                .any(|item| {
+                    let fields=item.origin.source_turn.split(':').collect::<Vec<_>>();
+                    fields.len()!=5 || !crate::history_reference::addressed(current,fields[3],"").contains(&item.origin.source_turn)
+                }) {
+                return Err("Historical publication requires its exact source in the latest accepted user input; old references cannot override a later input".into());
+            }
+        }
+        let current_delivery_bytes=submission.delivery_items.iter().flat_map(|item|&item.results)
+            .filter_map(|result|result.data.as_ref()).try_fold(0usize,|total,data|
+                crate::stream_limits::serialized_size(data,8192).map(|bytes|total.saturating_add(bytes)))
+            .map_err(|_|"Current and historical results share the existing 8 KiB delivery budget")?;
+        self.resolve_historical_results(&mut submission.historical_results,archive,current_delivery_bytes)?;
+        crate::stream_limits::serialized_size(&submission.historical_results,48*1024)
+            .map_err(|_|"Resolved historical provenance exceeds the existing completion snapshot bound")?;
+        if !submission.historical_results.is_empty() {
+            let chinese=submission.summary.chars().any(|c|matches!(c as u32,0x3400..=0x9fff));
+            let published=submission.historical_results.iter().try_fold(0usize,|total,result| {
+                let text=format!("{}\n{}",result.label,historical_public_result(result.data.as_ref().unwrap(),chinese));
+                crate::stream_limits::serialized_size(&text,8192).map(|bytes|total.saturating_add(bytes))
+            }).map_err(|_|"Historical rendered output exceeds the existing delivery bound")?;
+            if published.saturating_add(current_delivery_bytes)>8192 {
+                return Err("Historical and current rendered results exceed the existing 8 KiB delivery bound".into());
+            }
+        }
         // Presentation fallback only: this does not interpret user intent or
         // translate arbitrary owner text. Persist it before moving the summary.
-        let public_format = if submission.summary.chars().any(|c| matches!(c as u32, 0x3400..=0x9fff)) {
-            "plain_zh_v2"
-        } else { "plain_en_v2" };
+        let chinese=submission.summary.chars().any(|c| matches!(c as u32, 0x3400..=0x9fff));
+        let public_format = match (chinese,submission.historical_results.is_empty()) {
+            (true,true)=>"plain_zh_v2",(false,true)=>"plain_en_v2",
+            (true,false)=>"plain_zh_v3",(false,false)=>"plain_en_v3",
+        };
         Ok(AgentCompletionReport {
             plan_revision: plan.revision,
             observation_revision: self.revision,
@@ -1175,6 +1276,7 @@ impl CompletionTracker {
             requirements: plan.requirements.clone(),
             delivery_items: submission.delivery_items,
             public_format: Some(public_format.into()),
+            historical_results: submission.historical_results,
         })
     }
 
@@ -1304,6 +1406,42 @@ fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn historical_v3_publication_preserves_exact_values_and_separate_source_counts() {
+        let exact="READY MAC-B\nECHO 你好 MAC-B\nEOF MAC-B\n";
+        let original=serde_json::json!({"process_id":"old-process","state":"exited","exit_code":0,
+            "output":{"text":exact,"dropped_bytes":0,"decode_errors":0},"cleanup":{"reaped":true}}).to_string();
+        let data=serde_json::json!({"text_parts":[{"text":original,"truncated":false}],"original_is_error":false,
+            "source_work_status":{"failed_tools":10,"failed_commands":2},"current_evidence":false});
+        let mut report:AgentCompletionReport=serde_json::from_value(serde_json::json!({
+            "plan_revision":1,"observation_revision":0,"input_revision":1,"workspace_epoch":0,
+            "summary":"已整理原回合的记录，未重新执行。","criteria":[],"public_format":"plain_zh_v3",
+            "historical_results":[{"origin":{"source_turn":"turn:user:msg:session:old","archive_id":"a".repeat(64)},
+                "label":"第一个辅助进程","data":data}]})).unwrap();
+        let delivery=report.delivery_text();
+        assert!(delivery.contains(exact));assert!(delivery.contains("原回合未成功的工具结果：10 次"));
+        assert!(delivery.contains("命令失败观察：2 次"));assert!(delivery.contains("状态：已退出"));
+        assert!(!delivery.contains("process_id")&&!delivery.contains("failed_tools"));
+        assert_eq!(report.observed_tool_error_count,0);assert_eq!(report.observed_command_failure_count,0);
+        assert!(report.matches_delivery(&delivery));assert!(!report.matches_delivery(&report.summary));
+        let serialized=serde_json::to_vec(&report).unwrap();
+        let restored:AgentCompletionReport=serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(restored.delivery_text(),delivery,"durable v3 publication does not reread an expired archive");
+        report.historical_results.clear();report.public_format=Some("plain_zh_v2".into());
+        assert_eq!(report.delivery_text(),report.summary,"old formats are unaffected by empty optional historical data");
+    }
+
+    #[test]
+    fn historical_publication_never_accepts_model_data_without_a_validated_reader() {
+        let tracker=CompletionTracker::default();
+        let mut result=vec![AgentHistoricalDeliveryResult {origin:AgentHistoricalDeliveryOrigin {
+            source_turn:"turn:user:msg:session:old".into(),archive_id:"a".repeat(64)},label:"历史结果".into(),data:None}];
+        assert!(tracker.resolve_historical_results(&mut result,None,0).is_err());
+        assert!(result[0].data.is_none());
+        let raw="{\"future_field\":\"exact_actions\",\"text\":\"你好\\n\"}";
+        let rendered=historical_public_result(&serde_json::json!({"text_parts":[{"text":raw}],"original_is_error":true}),true);
+        assert!(rendered.contains("原始诊断"));assert!(rendered.contains(raw),"unknown diagnostics remain exact, not scrubbed to pass language checks");
+    }
     #[test]
     fn public_result_language_schema_references_cover_narrative_fields_without_new_assertions() {
         let tracker=CompletionTracker::default();
@@ -1515,7 +1653,7 @@ mod tests {
         tracker.resolve_delivery(&mut valid,&inputs,&[criterion]).unwrap();
         let report=AgentCompletionReport {plan_revision:1,observation_revision:0,input_revision:1,workspace_epoch:0,
             summary:"只读检查完成。".into(),criteria:vec![],observed_tool_error_count:0,observed_command_failure_count:0,
-            requirements:vec![],delivery_items:valid,public_format:None};
+            requirements:vec![],delivery_items:valid,public_format:None,historical_results:vec![]};
         let text=report.delivery_text();
         assert!(text.contains("/实际 工作目录\n")&&text.contains(exact));
         assert!(!report.matches_delivery(&report.summary),"new reports cannot replay the old summary-only format");
@@ -3659,9 +3797,78 @@ fn public_structured_result(data:&serde_json::Value,chinese:bool)->Option<String
     Some(format!("\n```json\n{encoded}\n```\n"))
 }
 
+fn historical_public_result(data:&serde_json::Value,chinese:bool)->String {
+    let mut output=String::new();
+    if data["archive_truncated"]==true || data["source_may_be_bounded"]==true || data["omitted_media_parts"].as_u64().unwrap_or(0)>0 {
+        output.push_str(if chinese {"该历史记录可能有截断或未保留的媒体；不能据此声称原结果完整。\n"}
+            else {"This historical record may be bounded or omit media; it does not prove a complete original output.\n"});
+    }
+    if data["original_is_error"]==true {
+        output.push_str(if chinese {"该次调用未成功；以下保留当时的结果和诊断。\n"}
+            else {"This call was unsuccessful. Its observed result and diagnostic follow.\n"});
+    }
+    let parts=data["text_parts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    for part in parts {
+        let Some(text)=part["text"].as_str() else {continue};
+        if let Ok(value)=serde_json::from_str::<serde_json::Value>(text) {
+            if value["output"]["text"].is_string() && value["state"].is_string() {
+                output.push_str(&plain_public_result_versioned(&serde_json::json!({"observed_output":value,"exit_code":value["exit_code"]}),chinese,true));
+                if let Some(reaped)=value["cleanup"]["reaped"].as_bool() {
+                    output.push_str(&if chinese {format!("\n进程清理已确认：{}。",if reaped {"是"} else {"否"})}
+                        else {format!("\nProcess cleanup confirmed: {reaped}. ")});
+                }
+            } else if value["observed_text"]["content"].is_string() || value["file_exists"]==false {
+                output.push_str(&plain_public_result_versioned(&value,chinese,true));
+            } else if let Some(rendered)=public_structured_result(&value,chinese) {output.push_str(&rendered);}
+            else if value["bytes_written"].is_number() || value["bytes_after"].is_number() {
+                // Known file owner wrapper fields only. Never infer success,
+                // current state or missing bytes from a model-authored note.
+                for (key,zh,en) in [("bytes_written","写入字节数","Written bytes"),("bytes_before","修改前字节数","Bytes before"),
+                    ("bytes_after","修改后字节数","Bytes after"),("sha256","SHA-256","SHA-256"),("written_sha256","写后 SHA-256","Written SHA-256"),
+                    ("line_count","行数","Lines"),("hunks_applied","已应用修改块","Applied hunks")] {
+                    if !value[key].is_null() {output.push_str(&format!("{}：{}\n",if chinese {zh} else {en},value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
+                }
+                output.push_str(if chinese {"\n原始结果（历史原文，未改写）：\n"} else {"\nOriginal result (unchanged historical text):\n"});
+                output.push_str(&public_owner_text_versioned(text,true));
+            } else {
+                output.push_str(if chinese {"原始诊断（历史原文，未改写）：\n"} else {"Original historical diagnostic (unchanged):\n"});
+                output.push_str(&public_owner_text_versioned(text,true));
+            }
+        } else {output.push_str(&public_owner_text_versioned(text,true));}
+        if part["truncated"]==true {output.push_str(if chinese {"\n本片段已截断。"} else {"\nThis part is truncated."});}
+        output.push('\n');
+    }
+    if let Some(facts)=data.get("derived_argument_facts").filter(|value|!value.is_null()) {
+        if let Some(bytes)=facts["argument_payload_utf8_bytes"].as_u64() {
+            output.push_str(&if chinese {format!("\n原输入参数按 UTF-8 加显式换行计算为 {bytes} 字节；这是参数推导，不是独立的实际写入回执。")}
+                else {format!("\nOriginal input arguments encode {bytes} UTF-8 bytes including the explicit newline; this is a derivation, not an independent write receipt.")});
+        }
+    }
+    output
+}
+
 impl AgentCompletionReport {
     pub(crate) fn delivery_text(&self) -> String {
         let mut delivery = self.summary.clone();
+        if !self.historical_results.is_empty() {
+            let chinese=self.public_format.as_deref()==Some("plain_zh_v3");
+            delivery.push_str(if chinese {"\n\n以下为所选历史回合的记录，未重新执行，也不代表当前状态核验。"}
+                else {"\n\nSelected historical observations follow. They were not reexecuted and do not verify current state."});
+            let mut sources=BTreeSet::new();
+            for (index,result) in self.historical_results.iter().enumerate() {
+                let Some(data)=&result.data else {continue};
+                if sources.insert(result.origin.source_turn.as_str()) {
+                    if let Some(counts)=data.get("source_work_status").filter(|value|!value.is_null()) {
+                        if let (Some(tools),Some(commands))=(counts["failed_tools"].as_u64(),counts["failed_commands"].as_u64()) {
+                            delivery.push_str(&if chinese {format!("\n原回合未成功的工具结果：{tools} 次；命令失败观察：{commands} 次。两种统计可能重叠，不相加。")}
+                                else {format!("\nHistorical unsuccessful tool results: {tools}; failed command observations: {commands}. These counts may overlap and are not added.")});
+                        }
+                    }
+                }
+                delivery.push_str(&format!("\n\n{}. {}\n",index+1,result.label));
+                delivery.push_str(&historical_public_result(data,chinese));
+            }
+        }
         for item in &self.delivery_items {
             if !item.explanation.is_empty() { delivery.push_str(&format!("\n\n{}", item.explanation)); }
             for result in &item.results {
@@ -3709,7 +3916,7 @@ impl AgentCompletionReport {
     pub(crate) fn matches_delivery(&self, text: &str) -> bool {
         let current = self.delivery_text();
         if text == current || text == format!("\n\n{current}") { return true; }
-        if !self.delivery_items.is_empty() || self.public_format.is_some() { return false; }
+        if !self.delivery_items.is_empty() || !self.historical_results.is_empty() || self.public_format.is_some() { return false; }
         // Preserve immutable deliveries from the earlier formatter. Both known
         // formats contain the exact accepted report and cumulative counts.
         let mut legacy = format!("{}{}", self.summary, self.unverified_disclosure().unwrap_or_default());
@@ -3765,7 +3972,7 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn tool_error_disclosure(&self) -> Option<String> {
-        if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2")) {
+        if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2"|"plain_zh_v3")) {
             return (self.observed_tool_error_count>0).then(||format!("\n\n本轮未成功的操作尝试：{} 次（包括参数检查和命令结果）。具体原因保留在过程记录中。",self.observed_tool_error_count));
         }
         (self.observed_tool_error_count > 0).then(|| format!(
@@ -3775,7 +3982,7 @@ impl AgentCompletionReport {
     }
 
     pub(crate) fn command_failure_disclosure(&self) -> Option<String> {
-        if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2")) {
+        if self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v1"|"plain_zh_v2"|"plain_zh_v3")) {
             return (self.observed_command_failure_count>0).then(||format!("\n\n本轮未成功的命令尝试：{} 次。各次退出状态和输出已保留，后续成功不抵消这些记录。",self.observed_command_failure_count));
         }
         (self.observed_command_failure_count > 0).then(|| format!(

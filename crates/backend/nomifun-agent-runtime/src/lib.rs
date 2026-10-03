@@ -22,7 +22,7 @@ mod compaction_source;
 mod compacted_history;
 pub use compacted_history::AgentCompactedItem;
 mod completion;
-pub use completion::{AgentCompletionCriterion, AgentCompletionObservation, AgentCompletionReport, AgentCriterionDisposition, AgentDeliveryItem, AgentDeliveryResult};
+pub use completion::{AgentCompletionCriterion, AgentCompletionObservation, AgentCompletionReport, AgentCriterionDisposition, AgentDeliveryItem, AgentDeliveryResult, AgentHistoricalDeliveryOrigin, AgentHistoricalDeliveryResult};
 mod delivery_review;
 pub use delivery_review::AgentDeliveryReviewState;
 mod context;
