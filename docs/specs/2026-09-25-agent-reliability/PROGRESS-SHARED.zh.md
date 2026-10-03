@@ -3603,3 +3603,18 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   LOAD schema进入主请求，2请求/1主步仍没有历史查询，重复错误缺失结论。不归为包错版/
   schema不可见，也不由Turn completed关闭语义缺口；停止同机制付费循环。无新效果、五表
   封存/正常退出通过；证据history-scope-recheck，完整原B和公开质量保持OPEN，Windows未代验。
+
+### 明确历史回合引用的受控模型前加载（2026-10-03，macOS先验）
+
+- 旧摘要会重复错误缺失结论，只有reader说明不能保证查询。普通新回合对当前用户明确
+  同Session turn:user地址，复用现有认证history port/完整codec/binding检查限量加载目标
+  archive；无引用/无port/非法/foreign/current地址不读，非目标不导入，不新建权限或重放。
+- 4引用共享8页/5秒，错误/循环/超时/取消不成为缺失或清理证明；当前已加载record/type/
+  error计数与SEARCH/READ在摘要后仍同步，数据只作历史。checkpoint/recovery不改，
+  原source binding与正文/error、原failed Turn保留，输出/上下文既有预算不扩。
+- 两模型前加载子断言首红后Runtime300通过、原B634events/33完整回归通过；真实模型采用/
+  完整B报告及Windows新入口未验，不能以定向回归关Case。外证据history-reference-load。
+- Mac正式`ae24847f0`已实际预加载原33条/无淘汰/错误10并展示SEARCH/READ，6请求
+  （5摘要+1主步）仍零正文查询，重复错误文件缺失结论，严格Case仍FAIL。原效果/prefix与
+  五表冷封存、正常退出通过；不归为数据读不到或入口不可见，下一聚焦正文/完成路径，
+  不再同机制文案复跑。外证据history-reference-load；Windows原结果不改。
