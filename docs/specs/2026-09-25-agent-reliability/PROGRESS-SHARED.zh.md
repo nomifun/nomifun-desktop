@@ -6,7 +6,7 @@
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
 核心共同链路达标后单独通知，再补其中尚缺的Windows命令/native断言，不以全产品发布认证阻断收尾。
 
-### 后续全面目标的当前缺口（2026-10-03；W273/W274）
+### 后续全面目标的当前缺口（2026-10-03；W273～W275）
 
 原六簇中两项指定采用缺口已有正式证据：W273实际Step5按`/requirements/1/source`拒绝反馈
 纠正input1引用；W274人工托盘Quit真实运行中的Turn和三层树，实际exit0/取消一次/reaped162ms，
@@ -18,7 +18,7 @@
 | 步骤遵循 | W250漏stdin/重复cursor0；已保留摘要cursor25/input待办，历史请求工具表和拒绝HTTP/SSE无法恢复，唯一根因未证；不靠新正向短链抹除 |
 | 精确参数 | W249原参数与实物17 bytes缺LF、历史Windows SSE缺；W240模型未提议用户要求的来源SHA guard；没有已证执行层根因，不自动补字节或强制改通用schema |
 | 复杂交付与报告 | 原复杂任务漏项/稳定性未关闭；W273仍错用指定引用行、连带改description、completed却报告等待用户，原生提议与canonical相同，保留生成/报告残余 |
-| Windows完整专项边界 | W268强杀清理/受控冷隔离、W270 cmd owner、W271代码页、W272一次真实S3的deadline/lease归约及W274活树Quit可复用；S3交互ACK首败未解释，第二卷/真实UNC夹具缺、成功自动恢复/OS重启及各专项其余边界未验 |
+| Windows完整专项边界 | W268强杀清理/受控冷隔离、W270 cmd owner、W271代码页、W272一次真实S3的deadline/lease归约、W274活树Quit及W275实机复杂路径/literal argv/显式管道可复用；S3交互ACK首败未解释，第二卷/真实UNC夹具缺、成功自动恢复/OS重启及各专项其余边界未验 |
 
 表中四簇不是四个Case或新的全量队列，未验证项不计PASS。Creative Windows暂停/retry/冷读
 直接复用W260；完整共享、Windows认证及发布矩阵仍未完成。下方W258交付表和阶段总结是原

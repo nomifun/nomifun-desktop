@@ -4194,3 +4194,10 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 同Turn仅一次cancelled，无paused/completed；原exec回执cancelled/success=false、reaped=true/errors空、清理162ms，非退出失败。模型调用仍1/等待流0、付费0，原初始事件及活动前缀逐行保持、915 bytes脚本/SHA不变，后代/监听0；fixture自然exit0。独立限定核对16/16，原通用review未计算的false占位另由`verified-live-review.json`明确解释，不改首例失败。独立核对脚本首次误读output层级失败保留，纠正观察器后读取同一库，无任务重跑。
 - 完整制品外部`2026-10-03/windows/w274-active-tray-quit`含两例原UI/DB、前提失败、人工确认、实际退出码/进程身份及冷核对。关闭当前正式运行中托盘入口和活树清理缺口，复用W264真实写锁失败exit1；不代判其他退出故障分支、OS重启、完整WIN平台/共享生成/发布认证。所有自有GUI/helper/树/Cargo已结束，全面目标仍active。
 - 正常合入远端386ba1e08/3f144f2c3/506ac463d，合并39f795f05；Windows配置冻结/下一Turn刷新/实时安全检查3/3、实际路由模型切换集成1/1、闭Turn引用导入1/1通过，没有重跑其他已验链。该同步不把a109正式样本身份改成合并后产物，也不代判新的配置切换正式UI或macOS退出专项。65份外部文本凭据审计0命中，后续本地测试日志未使用真实供应商凭据。
+
+### W275 Windows literal argv与真实PowerShell管道（2026-10-03；原生子断言）
+
+- WIN-002/008相关：文件尾点/保留名/ADS/普通workspace拒绝UNC、大小写、ACL/共享锁已有W01-B/W03/W34/W35/W36原生或正式证据，执行层未变，直接复用。第二卷/真实授权UNC仍缺夹具；本批不重跑文件链/权限矩阵。
+- 加强两个现有Runtime原生回归，无生产修改：直接Program复制helper至中文/emoji/空格/单引号exe路径，同形cwd；原两段误编码夹具文本改为明确中文/emoji，argv含`$(exit 99)`、反引号、`| & ;`、双引号和尾反斜杠，env含字面`$env:USERPROFILE`及`$()`。helper独立回显的四个UTF-8字节长度/精确值相同，exit0、reaped/errors空及shutdown exact；不发生shell求值。
+- 显式PowerShell Shell新增真实成功/抛错管道：Single-quoted反引号与`$()`逐字输出``literal `$() piped\r\n``，exit0；ForEach-Object抛错保留PIPELINE_FAILED、exit1。原五个native/恢复/非零分支保留7/0/7/1/1；七次均reaped/errors空及shutdown exact。实际宿主PowerShell5.1.26100.8875，两个定向回归首次2/2通过，不把八进程数当八Case。
+- 基线3c4943a44加测试，测试binary SHA前缀6027B8C063E9；外部`2026-10-03/windows/w275-shell-literal-boundary`保留两份实际日志、patch/身份/独立核对。八个记录PID最终无匹配、隔离helper/cwd已随TempDir清理；模型/正式GUI0、无Cargo遗留。只补当前实机literal/显式管道子断言，不计完整WIN-008、App/Tauri实际采用、跨盘/UNC、S3交互、复杂生成或发布认证通过，全面目标active。
