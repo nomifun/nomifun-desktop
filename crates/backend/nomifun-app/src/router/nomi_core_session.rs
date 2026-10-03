@@ -108,6 +108,8 @@ use nomifun_db::{
 use nomifun_db::models::{NomiRemoteEventRow, NomiRemoteSessionRow};
 use nomifun_agent_session::{MessageProjection, SessionObservation};
 use super::history_process_display::{HistoricalToolObservation, load_historical_tool_observations};
+#[path = "history_text_continuation.rs"]
+mod history_text_continuation;
 use nomifun_realtime::UserEventSink;
 use nomifun_agent_kernel::{
     AgentPresetCompiler, CompileRequest, CompiledSnapshot,
@@ -13275,6 +13277,7 @@ async fn get_nomi_core_agent_session_message_history(
         &session_id,
         &projections,
     ).await?;
+    let continuations = history_text_continuation::load(&state.session_owner.pool,&session_id,&projections).await?;
     let mut items = Vec::new();
     let mut template_cache = HashMap::new();
     for projection in projections {
@@ -13282,6 +13285,9 @@ async fn get_nomi_core_agent_session_message_history(
         if let Some(mut message) = canonical_message_response_with_observation(
             &session_id, created_at, projection, observation,
         )? {
+            if let Some(previous)=continuations.get(&message.message_id) {
+                message.content["continuation_of_message_id"]=json!(previous);
+            }
             decorate_agent_transition_template_keys(&state, &owner, &mut message, &mut template_cache).await;
             items.push(message);
         }
@@ -13354,6 +13360,7 @@ async fn get_nomi_core_agent_session_message(
     let observations = load_historical_tool_observations(
         &state.session_owner.pool, &session_id, std::slice::from_ref(&projection),
     ).await?;
+    let continuations=history_text_continuation::load(&state.session_owner.pool,&session_id,std::slice::from_ref(&projection)).await?;
     let observation = observations.get(&projection.projection_id);
     let mut message = canonical_message_response_with_observation(&session_id, created_at, projection, observation)?
         .ok_or_else(|| {
@@ -13364,6 +13371,9 @@ async fn get_nomi_core_agent_session_message(
             )
         })?;
     decorate_agent_transition_template_keys(&state, &owner, &mut message, &mut HashMap::new()).await;
+    if let Some(previous)=continuations.get(&message.message_id) {
+        message.content["continuation_of_message_id"]=json!(previous);
+    }
     Ok(Json(ApiResponse::ok(message)))
 }
 

@@ -7,6 +7,8 @@
     "nativeNonzeroAndOther": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}); another {{otherCount}} unsuccessful result(s) have not been classified. These account for {{toolCount}} unsuccessful results. Check the output and error details in the execution steps.",
     "counts": "Unsuccessful results this turn: {{toolCount}} calls and {{commandCount}} command observations. See exit codes, argument checks and error details in the execution steps."
   },
+  "missingReplyContinuation": "This reply continues an earlier part not loaded on this history page. Load earlier messages to read the complete reply.",
+  "loadEarlierReply": "Load earlier messages",
   "toolGroupViewSteps": "View Steps",
   "toolDetailInput": "Input",
   "toolDetailOutput": "Output",

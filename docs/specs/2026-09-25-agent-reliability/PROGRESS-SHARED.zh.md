@@ -3701,3 +3701,13 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - 原B634events/33真实结果显式回归逐项text/error/binding同、33/33正文全部纳入且
   omitted为空、owner0；七项archive回归通过。上轮正式仍未交付错误总数，首败保持，
   新正式采用待验/Windows未代判，派发参数字节推导仍非owner receipt。外证据step5-b09-report。
+
+### 截断续写的公开回复展示（2026-10-03，macOS真实UI发现）
+
+- 原B正式Step5两请求已实际采用33/33结果全文（原64KiB、全部10条错误），操作/字节
+  正确且无重放；模型仍拒绝合计8次拒绝+2次命令失败为10，完整报告FAIL保持。
+- canonical两段正文均持久化/非hidden，UI却把7277-byte首段折进过程区，仅显示1064-byte
+  尾段。只读typed输出截断事件派生同Turn链接，renderer公开显示真实链，不重写旧正文/ID；
+  不推断“续”文字/时间，不公开思考或工具前说明，缺前页明确提示。Rust2/UI101/type/
+  desktop/i18n定向通过，含纯思考防误链接；正式零模型冷读待验。Windows仅共享代码影响，
+  原平台结果不代判；外证据step5-b09-complete与continuation-cold。

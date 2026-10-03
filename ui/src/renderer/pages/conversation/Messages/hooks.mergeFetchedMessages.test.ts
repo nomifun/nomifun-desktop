@@ -16,6 +16,19 @@ import {
 } from './hooks';
 import { assignTurnIdsFromUserRequests, buildTurnDisclosureItems } from './turnDisclosureModel';
 
+test('cold history preserves typed continuation identity and exact segment bodies', () => {
+  const source=parseMessageId('0190f5fe-7c00-7a00-8000-000000000021');
+  const tail=parseMessageId('0190f5fe-7c00-7a00-8000-000000000022');
+  const turn=parseMessageId('0190f5fe-7c00-7a00-8000-000000000001');
+  const message: TMessage={id:'tail-render',message_id:tail,msg_id:tail,turn_id:turn,
+    conversation_id:parseConversationId('0190f5fe-7c00-7a00-8000-000000000099'),type:'text',position:'left',
+    content:{content:'五（续）\n原始尾段\n',continuation_of_message_id:source}};
+  const normalized=normalizeDbMessage(message);
+  expect(normalized.message_id).toBe(tail);expect(normalized.msg_id).toBe(tail);
+  expect(normalized.type==='text' ? normalized.content.continuation_of_message_id : undefined).toBe(source);
+  expect(normalized.type==='text' ? normalized.content.content : undefined).toBe('五（续）\n原始尾段\n');
+});
+
 const messageId = (label: string): MessageId => {
   let hash = 0xcbf29ce484222325n;
   for (const char of label) {

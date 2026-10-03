@@ -4148,6 +4148,8 @@ export type I18nKey =
   | 'messages.knowledgeWriteback.started'
   | 'messages.knowledgeWriteback.writing'
   | 'messages.knowledgeWriteback.written'
+  | 'messages.loadEarlierReply'
+  | 'messages.missingReplyContinuation'
   | 'messages.openLinkFailed'
   | 'messages.planProgress'
   | 'messages.planTodoList'

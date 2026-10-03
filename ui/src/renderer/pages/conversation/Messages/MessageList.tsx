@@ -950,6 +950,8 @@ const MessageList: React.FC<{
         turnEndedAt: getProcessedItemTurnEndedAt(item),
         terminal: isTerminalAssistantItem(item),
         sourceMessageIds: getProcessedItemSourceMessageIds(item),
+        continuationOfMessageId: item.type === 'text' ? item.content.continuation_of_message_id : undefined,
+        publicText: item.type === 'text' && item.position === 'left',
       };
     });
     const modelInput = assignTurnIdsFromUserRequests(rawModelInput, {
@@ -1479,7 +1481,18 @@ const MessageList: React.FC<{
         </div>
       );
     }
+    const continuation = item.type === 'text' ? item.content.continuation_of_message_id : undefined;
+    const sourceLoaded = !continuation || processedList.some(source =>
+      source.type === 'text' && source.position === 'left' && source.turn_id === item.turn_id &&
+      getProcessedItemSourceMessageIds(source).includes(continuation));
     return (
+      <React.Fragment key={(item as TMessage).id}>
+      {!sourceLoaded && <div role='status' data-testid='missing-reply-continuation' className='text-t-tertiary text-sm m-t-10px'>
+        {t('messages.missingReplyContinuation')}
+        {hasMoreOlder && onLoadOlder && <button type='button' disabled={loadingOlder} onClick={() => void onLoadOlder()}>
+          {t('messages.loadEarlierReply')}
+        </button>}
+      </div>}
       <MessageItem
         message={item as TMessage}
         key={(item as TMessage).id}
@@ -1489,6 +1502,7 @@ const MessageList: React.FC<{
           movedActionMessageIds.has((item as TMessage).id)
         }
       ></MessageItem>
+      </React.Fragment>
     );
   };
 

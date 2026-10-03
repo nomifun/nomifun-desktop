@@ -681,6 +681,25 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   全部text/error/binding逐项一致、omitted IDs为空/owner0；定向7通过，正式修后待验。
   参数计数仍非实际owner写入receipt。证据step5-b09-report/run-002-live及run-001-build。
 
+#### 原33条结果正式采用与续写展示缺口（2026-10-03）
+
+- 源`3c41d3bf5`（随后`ad333dc76`仅合并Windows文档）正式原B报告2请求/2步，
+  Step5/1M/4096/low不变，原64KiB内实际采用33/33完整结果、omitted0、10条原错误
+  全部入请求。before33/after32、末LF/hash、操作顺序、stdin13、EOF/Stop与两exit2
+  均正确；新模型owner0、host AGENTS读取2单列，不重放原操作。正常Cmd-Q0/
+  153.310秒，无expiry/TERM/KILL，1457events/12Turns/14effects与旧前缀/效果保持。
+- 严格完整报告仍FAIL：模型只报8次非exit2工具拒绝和2次命令失败，明确不合计为10。
+  分类/数值生成残余保留，不以完整输入或正确操作替代报告验收、不追加未改根因付费循环。
+- 另发现真实UI只公开显示1064-byte续写尾段；同一最后Turn的7277-byte首段虽已持久化、
+  canonical API为left/非hidden，却被普通中间步骤折叠。修复仅从typed输出截断事件
+  建立同Turn公开正文链接，不按文字“续”/相邻时间猜测，不改正文/ID/旧事件；纯思考、
+  工具解释、拒绝轮及跨Turn不合并，分页缺前段明确提示加载。中英文提示保持一致。
+- 定向Rust2/2（含纯思考/跨Turn/分页防误链接）、UI101/101、typecheck、desktop边界
+  及i18n通过；正式同数据零模型冷读待验。首败、真实输入和独立断言外置
+  `2026-10-03/macos/step5-b09-complete/`，修后冷读外置`continuation-cold/`。
+  A13原完整N1复用；Keychain自然现场未再触发，但生产正常/受控不返回清理分支已验；
+  admission→capture小竞态仍fail-closed，N3/发布认证不加入近期队列，Windows未代判。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

@@ -7,6 +7,8 @@
     "nativeNonzeroAndOther": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）；另有 {{otherCount}} 条未成功结果，其类别尚未确认。以上共计 {{toolCount}} 次未成功结果，请结合执行步骤中的输出和错误详情核对。",
     "counts": "本轮未成功结果：调用 {{toolCount}} 次，命令 {{commandCount}} 次。请在执行步骤中查看退出码、参数检查及错误详情。"
   },
+  "missingReplyContinuation": "这条回复接续了尚未加载的前文。请加载更早的消息以阅读完整回复。",
+  "loadEarlierReply": "加载更早的消息",
   "toolGroupViewSteps": "查看步骤",
   "toolDetailInput": "输入",
   "toolDetailOutput": "输出",

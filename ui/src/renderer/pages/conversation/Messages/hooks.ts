@@ -31,6 +31,7 @@ import {
   normalizeAgentStreamError,
   normalizeTruncatedTurnRecovery,
   preferTextMessageVersion,
+  normalizeTextContinuation,
 } from '@/common/chat/chatLib';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createContext } from '@renderer/utils/ui/createContext';
@@ -773,6 +774,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
 
 const normalizeDecodedTextMetadata = (parsed: Record<string, unknown>): Partial<IMessageText['content']> => {
   const metadata: Partial<IMessageText['content']> = {
+    ...normalizeTextContinuation(parsed),
     ...(typeof parsed.display_at_ms === 'number' && Number.isFinite(parsed.display_at_ms) && parsed.display_at_ms > 0
       ? { display_at_ms: parsed.display_at_ms } : {}),
     ...(parsed.replace === true ? { replace: true } : {}),
