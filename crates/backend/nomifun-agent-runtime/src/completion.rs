@@ -417,6 +417,59 @@ fn public_narrative_description(description:&str)->String {
     format!("{description} Apply the shared PUBLIC_RESULT_LANGUAGE policy from the execution instruction to this public narrative field.")
 }
 
+// Only a validation view is masked. The submitted narrative and resolved
+// source bytes remain untouched. Paths must be complete selected source values;
+// calls/diagnostics require a complete quoted value or diagnostic line.
+fn strict_history_narrative_policy_text(narrative:&str,results:&[AgentHistoricalDeliveryResult])->String {
+    let mut paths=Vec::<&str>::new();let mut quoted_values=Vec::<&str>::new();
+    for data in results.iter().filter_map(|result|result.data.as_ref()) {
+        let arguments=&data["original_arguments"];
+        for field in ["path","cwd"] {if let Some(value)=arguments[field].as_str().filter(|value|!value.is_empty()) {
+            paths.push(value);quoted_values.push(value);
+        }}
+        if let Some(files)=arguments["files"].as_array() {for file in files {
+            if let Some(value)=file["path"].as_str().filter(|value|!value.is_empty()) {paths.push(value);quoted_values.push(value);}
+        }}
+        for field in ["command","cmd"] {if let Some(value)=arguments[field].as_str().filter(|value|!value.is_empty()) {quoted_values.push(value);}}
+        if let Some(args)=arguments["args"].as_array() {for arg in args {
+            if let Some(value)=arg.as_str().filter(|value|!value.is_empty()) {quoted_values.push(value);}
+        }}
+        if let Some(parts)=data["text_parts"].as_array() {for part in parts {
+            if let Some(text)=part["text"].as_str() {
+                if !text.is_empty() {quoted_values.push(text);}
+                quoted_values.extend(text.lines().filter(|line|!line.is_empty()));
+            }
+        }}
+    }
+    let mut masked=narrative.as_bytes().to_vec();
+    let path_char=|ch:char|ch.is_ascii_alphanumeric()||matches!(ch,'_'|'-'|'.'|'/'|'\\'|'='|':');
+    // A standalone field word is never a bare-path exemption. Slash/dot forms
+    // must also match the entire recorded path, not a substring of a fake URL.
+    for path in paths.into_iter().filter(|path|path.contains('/')||path.contains('\\')||path.contains('.')) {
+        for (start,_) in narrative.match_indices(path) {
+            let end=start+path.len();
+            if narrative[..start].chars().next_back().is_none_or(|ch|!path_char(ch))
+                && narrative[end..].chars().next().is_none_or(|ch|!path_char(ch)) {
+                masked[start..end].fill(b' ');
+            }
+        }
+    }
+    let mut quote:Option<(char,usize)>=None;
+    for (index,ch) in narrative.char_indices() {
+        if let Some((close,start))=quote {
+            if ch==close {
+                let value=&narrative[start..index];
+                if quoted_values.contains(&value) {masked[start..index].fill(b' ');}
+                quote=None;
+            }
+        } else {
+            let close=match ch {'`'=>Some('`'),'"'=>Some('"'),'\''=>Some('\''),'“'=>Some('”'),'‘'=>Some('’'),_=>None};
+            if let Some(close)=close {quote=Some((close,index+ch.len_utf8()));}
+        }
+    }
+    String::from_utf8(masked).expect("only complete UTF-8 source spans are masked")
+}
+
 impl CompletionTracker {
     /// Advertised only after the caller's strict current-user/closed-source
     /// gate. This is a different exact contract, not legacy argument repair.
@@ -469,10 +522,20 @@ impl CompletionTracker {
         if requested_sources.len()!=1||requested_sources[0]!=submission.source_turn {
             return Err("The latest accepted input no longer requests this strict historical source".into());
         }
+        let chinese=submission.short_summary.chars()
+            .chain(submission.missing_items.iter().flat_map(|item|item.chars()))
+            .any(|ch|matches!(ch as u32,0x3400..=0x9fff));
+        let mut results=submission.archive_ids.iter().enumerate().map(|(index,id)|AgentHistoricalDeliveryResult {
+            origin:AgentHistoricalDeliveryOrigin {source_turn:submission.source_turn.clone(),archive_id:id.clone()},
+            label:if chinese {format!("历史结果 {}",index+1)} else {format!("Historical result {}",index+1)},data:None,
+        }).collect::<Vec<_>>();
+        self.resolve_historical_results(&mut results,Some(archive),0)?;
         let requested_text=inputs.last().into_iter().flat_map(|input|&input.content).filter_map(|part|match part {
             nomifun_chat_model_broker::ChatContentPart::Text {text}=>Some(text.as_str()),_=>None,
         }).collect::<Vec<_>>().join("\n");
         for narrative in std::iter::once(&submission.short_summary).chain(&submission.missing_items) {
+            let policy_text=strict_history_narrative_policy_text(narrative,&results);
+            let narrative=policy_text.as_str();
             let forbidden=narrative.split(|ch:char|!ch.is_ascii_alphanumeric()&&ch!='_'&&ch!='-')
                 .filter(|word|matches!(*word,"exact_actions"|"model_step"|"failed_tools"|"failed_commands"|"process_id"|"source-bound"
                     |"update_plan"|"report_completion"|"read_file"|"write_file"|"apply_patch"|"exec_command"|"start_process"
@@ -492,14 +555,6 @@ impl CompletionTracker {
         crate::requirements::merge(&[],&[],inputs)?;
         // Match the durable public-format fallback without translating the
         // model's summary or inheriting an earlier input's language.
-        let chinese=submission.short_summary.chars()
-            .chain(submission.missing_items.iter().flat_map(|item|item.chars()))
-            .any(|ch|matches!(ch as u32,0x3400..=0x9fff));
-        let mut results=submission.archive_ids.iter().enumerate().map(|(index,id)|AgentHistoricalDeliveryResult {
-            origin:AgentHistoricalDeliveryOrigin {source_turn:submission.source_turn.clone(),archive_id:id.clone()},
-            label:if chinese {format!("历史结果 {}",index+1)} else {format!("Historical result {}",index+1)},data:None,
-        }).collect::<Vec<_>>();
-        self.resolve_historical_results(&mut results,Some(archive),0)?;
         for result in &mut results {result.data=None;} // Standard submission resolves once more under its existing gates.
         let blocked=!submission.missing_items.is_empty();
         let rationale=if chinese {
@@ -1523,6 +1578,10 @@ fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
 mod tests {
     use super::*;
     async fn strict_history_fixture()->(crate::tool_archive::ToolArchive,Vec<ChatMessage>,String) {
+        strict_history_fixture_with_path("result.txt").await
+    }
+
+    async fn strict_history_fixture_with_path(path:&str)->(crate::tool_archive::ToolArchive,Vec<ChatMessage>,String) {
         use nomifun_agent_contracts::{ChatRouteIdentity,DigestHex,ResolvedSnapshotRef};
         use nomifun_chat_model_broker::{ChatCausality,ChatRole};
         const SOURCE:&str="turn:user:old:session:closed";
@@ -1536,7 +1595,7 @@ mod tests {
             resolved_snapshot_ref:binding.resolved_snapshot_ref().clone(),route_identity:ChatRouteIdentity::new("preset@1","agent_chat","route".into(),1),operation_id:"model".into()};
         let events=vec![AgentEngineEvent::TurnStarted {binding:binding.clone(),turn_operation_id:SOURCE.into()},
             AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
-            AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),arguments:StrictJsonValue(serde_json::json!({"path":"result.txt"})),provider_metadata:None}},
+            AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),arguments:StrictJsonValue(serde_json::json!({"path":path})),provider_metadata:None}},
             AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行\n第二行\n",false)},
             AgentEngineEvent::WorkStatus {status:AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
             AgentEngineEvent::TurnFailed {model_steps:1,message:"old failure".into()}];
@@ -1549,6 +1608,28 @@ mod tests {
         let inputs=vec![crate::context_lifecycle::text_message(ChatRole::User,
             format!("请只依据已关闭回合历史记录整理完整报告。不要修改任何文件，不要执行命令，不要新增当前文件检查。operation_id:{SOURCE}"))];
         (archive,inputs,id)
+    }
+
+    #[tokio::test]
+    async fn strict_narrative_keeps_selected_literal_paths_but_rejects_free_internal_fields() {
+        let tracker=CompletionTracker::default();let work=AgentWorkStatus {failed_tools:1,failed_commands:0,..Default::default()};
+        for path in ["reports/reaped/result.txt","reports/state=ready.txt","elapsed_ms.txt"] {
+            let (archive,inputs,id)=strict_history_fixture_with_path(path).await;
+            let call=|summary:String|ChatToolCall {call_id:"report".into(),name:TOOL_NAME.into(),provider_metadata:None,
+                arguments:StrictJsonValue(serde_json::json!({"source_turn":"turn:user:old:session:closed",
+                    "archive_ids":[id.clone()],"short_summary":summary,"missing_items":[]}))};
+            for summary in [format!("原文件为 `{path}`，以下保留历史结果。"),format!("原文件为 {path}，以下保留历史结果。")] {
+                let result=tracker.normalize_strict_historical_report(&call(summary.clone()),&archive,&work,&inputs).unwrap();
+                assert_eq!(result.arguments.0["summary"],summary,"validation cannot rewrite quoted source bytes");
+                assert_eq!(result.arguments.0["observed_tool_error_count"],1);assert_eq!(result.arguments.0["observed_command_failure_count"],0);
+                assert!(result.arguments.0["criteria"][0].get("evidence_call_ids").is_none());
+            }
+            for summary in [format!("原文件为 `{path}`，reaped=true。"),
+                "结果在 `https://example.test/reaped/file`，已完成。".into(),"`reaped=true`。".into()] {
+                assert!(tracker.normalize_strict_historical_report(&call(summary),&archive,&work,&inputs)
+                    .unwrap_err().contains("Public narrative"),"unknown quotes or free fields cannot inherit a source-word exemption");
+            }
+        }
     }
 
     #[tokio::test]
