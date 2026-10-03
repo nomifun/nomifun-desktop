@@ -439,7 +439,7 @@ impl CompletionTracker {
                     "source_turn":{"type":"string","enum":sources},
                     "archive_ids":{"type":"array","maxItems":MAX_HISTORICAL_DELIVERY_RESULTS,"uniqueItems":true,"items":{"type":"string","enum":ids},
                         "description":"Exact advertised archive IDs from that source. Empty is allowed only with explicit missing_items. Current evidence IDs are not accepted."},
-                    "short_summary":{"type":"string","minLength":1,"maxLength":512,
+                    "short_summary":{"type":"string","minLength":1,"maxLength":2048,
                         "description":"Brief public outcome; do not duplicate original results or internal schemas. Unless the latest user explicitly asks for them, do not use internal identifiers exact_actions, model_step, failed_tools, failed_commands, process_id or source-bound; explain actions, outcomes and counts in the user's language. This does not change exact source diagnostics. PUBLIC_RESULT_LANGUAGE applies."},
                     "missing_items":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":64},
                         "description":"Actual requested results that remain missing. Nonempty marks this report blocked; empty is not host proof of completeness."}
@@ -453,7 +453,7 @@ impl CompletionTracker {
         crate::stream_limits::serialized_size(&call.arguments,48*1024).map_err(|_|"Strict historical report exceeds the existing argument budget")?;
         let submission:StrictHistoricalReportSubmission=serde_json::from_value(call.arguments.0.clone())
             .map_err(|error|format!("Invalid strict historical report: {error}"))?;
-        if submission.short_summary.trim().is_empty()||submission.short_summary.chars().count()>512
+        if submission.short_summary.trim().is_empty()||submission.short_summary.chars().count()>2048
             || submission.archive_ids.len()>MAX_HISTORICAL_DELIVERY_RESULTS||submission.missing_items.len()>16
             || submission.missing_items.iter().any(|item|item.trim().is_empty()||item.chars().count()>64)
             || (submission.archive_ids.is_empty()&&submission.missing_items.is_empty()) {
@@ -1560,6 +1560,8 @@ mod tests {
         assert_eq!(normalized.arguments.0["historical_results"][0]["origin"]["source_turn"],"turn:user:old:session:closed");
         assert!(normalized.arguments.0["historical_results"][0].get("data").is_none());
         assert_eq!(crate::requirements::merge(&[],&[],&inputs).unwrap()[0].source.input,0);
+        let mut complete=call.clone();complete.arguments.0["short_summary"]=serde_json::json!("完整说明".repeat(150));
+        assert_eq!(tracker.normalize_strict_historical_report(&complete,&archive,&work,&inputs).unwrap().arguments.0["summary"],complete.arguments.0["short_summary"],"strict summary uses the same report bound, not the obsolete 512 character bottleneck");
         // Align host-generated language with the durable format, while
         // preserving an English summary after an earlier Chinese input.
         let mut latest_inputs=inputs.clone();
