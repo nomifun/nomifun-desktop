@@ -3894,6 +3894,15 @@ completed Turn已保留并纠正，未重启/重发；实际API exit0/进程监�
   最终1880events/22Turn/14effects，旧prefix/效果同、双库ok；不以组件绿代判actualwire/
   完整报告/变更后丝滑使用。新preexecution和teardown缺陷窄定位中，Windows结果不改。
 
+Windows发现显式wire ceiling与内部预留不一致：context8192/output8000原被接受，实际只
+预留7168，输入/输出/安全量合计超过context。from_limits和caller override首红均保留，
+现拒绝不能完整预留的配置，不改wire值、不合成4096；邻近6回归通过，不归因或重开W276。
+
+Windows另发现完整历史增强沿用v3而改变正文，升级后合法旧v3会被matches_delivery拒绝；
+新增强输出改v4，v3只接受pre/post增强两种已知精确派生，canonical旧文本不改。v4同时
+保留合法cmd脚本文本，原v3不追增字段。首红保留，历史8/strict2/相邻回放1/路由1通过，
+真实旧会话/新v4模型与UI采用仍未验，不改原复杂失败和平台边界。
+
 - 配置后warmup旧Snapshot/newproviderrevision→send新Snapshot/cache复用反例已在既有
   router四回合集成复现，preparing无terminal首红保持。自动binding实际变化时，在已有
   idle/writefence先prove旧runtimeclose再replace；失败保binding/quarantine，无新Turn。
