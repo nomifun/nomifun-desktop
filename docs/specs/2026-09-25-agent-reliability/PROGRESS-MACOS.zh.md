@@ -718,6 +718,20 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   A13原完整N1复用；Keychain自然现场未再触发，但生产正常/受控不返回清理分支已验；
   admission→capture小竞态仍fail-closed，N3/发布认证不加入近期队列，Windows未代判。
 
+#### 历史错误计数与当前回合口径隔离（2026-10-03）
+
+- 原B最后typed WorkStatus（seq1015）明确10工具结果失败/2命令失败，33原结果含两条
+  exec exit2/is_error=true；不是两类互斥的8+2，也不是当前报告回合的计数。旧投影只给
+  selected/included错误记录数，未携带该source ledger，原模型不肯合计的首败保持。
+- validated journal仅保存有界64条原source身份/最后typed WorkStatus计数及事件index，
+  明确引用时作为quoted历史数据投递，不进当前work/const/evidence/恢复权限。口径明确
+  命令is_error计入工具失败、命令观察独立且可能重叠，不机械相加；缺typed status未知，
+  投影省略/缓存重载不减少或重复原ledger。不从owner正文JSON猜计数，无硬编码10。
+- archive定向10通过/1外部输入ignored；显式原B634events/33结果回归1通过，来源/正文/
+  错误全同，最后typed10/2相同，原64KiB内56445bytes/33完整/omitted0/owner0。
+  正式修后待验；外证据`2026-10-03/macos/historical-accounting/run-001-build/`。
+  原完整B报告FAIL未覆盖，Windows未代判，未改renderer或重新走查已排除的执行层字节。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
