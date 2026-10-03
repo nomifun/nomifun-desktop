@@ -6,6 +6,13 @@
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
 核心共同链路达标后单独通知，再补其中尚缺的Windows命令/native断言，不以全产品发布认证阻断收尾。
 
+2026-10-04 mac近期四目标收尾：原A13完整11项交付、B09原效果/字节/步骤及最新33来源
+报告事实与中文表达独立PASS、真实Keychain等待下有界exit1证据复用。最新23788B报告同
+projection正式零模型冷读/必要结果可达/正常exit0(31.924秒)成立，2156events/27Turns/
+14effects逐行不变。生成run480秒观察器expiry/TERM的FAIL仍原样保留，不能由cold证明洗绿。
+配置后warmup停滞/输出默认限制已修并实际采用；不代判Windows、全部旧答案表达、N3或
+发布认证。mac停止新增模型与全量走查，详细证据/系统等待及socket缺证边界见mac页。
+
 2026-10-03全局B发现并修复中文结果尾注展示接线：Runtime plain_zh_v2固定尾注与renderer
 原英文-only suffix不匹配，合法中文报告返回undefined。最小修复只识别相同中文格式，保留
 原文/计数/同Session及Turn回执核对、英文兼容和缺证降级；首回归7PASS/1FAIL保留，修后8/8
@@ -3925,3 +3932,7 @@ Windows另发现完整历史增强沿用v3而改变正文，升级后合法旧v3
   仍observerFAIL。source/backup2059/25/14同、旧prefix/效果保留；正常exit另待零模型验。
 - 普通摘要仍含工具/回执字段，表达FAIL保持；明示reject扩已知字段并一次反馈所有词，
   不裁/重写原值或原source。组件通过不代判修后模型，Windows结果不改。
+- mac最新2请求遇recorder stream/trace失败502，第二SSE无finish/DONE/native参数未完；
+  pause→UI取消，normalCmd-Q0，旧prefix/effects保持；不能补JSON或称完整provider协议输出。
+  同正式包零模型单批冷读8屏/正常exit0/93.704秒、五canonical表原行不变，必要文件/哈希/
+  helper/Stop可达。关闭冷读/正常退出子断言，不洗旧expiry，修后最终表达实际采用仍待验。

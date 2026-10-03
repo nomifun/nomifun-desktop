@@ -1,26 +1,43 @@
 # macOS 命令与会话可靠性进度
 
-更新：2026-10-03。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
+更新：2026-10-04。本次近期四目标收尾完成；此前 Windows 结果仍只作共享历史引用，不代判。
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
 按用户 2026-09-30 的明确目的，本轮收敛为简单系统命令、步骤衔接、过程状态和结果可信性，
 与共享计划的 C01～C08、A/B/C 三组正式会话一致。停止按 M01～M06 穷举全产品余项。
 旧 675 共享 + 72 macOS 专属、2,366 槽与五角色分配仅为历史口径，不再作本轮完成率或结束门槛；
 范围外、复用、手测与未验分开，原 Case 定义、首败及修复证据不删除、不自动记 PASS。
 
-## 近期重开工作最新结算（2026-10-03）
+## 近期重开工作最新结算（2026-10-04，收尾）
 
 仅对应用户近期要求，不恢复历史全量队列：
 
 | 近期目标 | 当前结果 | 保留边界 |
 | --- | --- | --- |
 | A13复杂交付 | 原完整正式N1 PASS，复用 | 不作统计稳定性/N3认证 |
-| B09字节/步骤/报告可读 | 原效果链已验；33/33实际入Step5；续写展示已修；修后原报告恢复N1 PASS，10含2口径正确 | 原failed Turn/全部首败不改completed；不作首发无错或N3认证 |
-| 模型/能力/上下文/推理配置变更 | 空闲公开API四轮、当前Turn一致视图、旧结清状态兼容已验；正式UI切Step5/1M/4096/low并实际请求成立 | admission→capture小竞态仍明确失败；全并发“无感”未认证 |
+| B09字节/步骤/报告可读 | 原效果链已验；最新33/33事实与中文表达独立PASS；同23788B报告正式零模型冷读/正常退出PASS | 原failed Turn/首败及观察器expiry不改PASS；不作首发无错或N3认证 |
+| 模型/能力/上下文/推理配置变更 | 配置保存→warmup→新Turn停滞已修并正式采用；Step5/1M/low默认output不发送固定max_tokens；显式大上限原样 | admission→capture竞态仍明确失败；全并发“无感”及全模型官方规格未认证 |
 | 已用CEF退出清理 | 真实CEF内Keychain等待已复现并有界exit1；新发现pairing任务已修、正常正式及实际App挂起native barrier回归通过 | 系统等待本身未消除；本次独立socket路径absence缺证，原normal/held精确socket证明复用 |
-| 公开报告表达 | 原始结果保持、叙述策略和公开字段已修并通过定向回归 | 新正式样本仍照抄历史内部术语，表达验收FAIL，不能以策略已装配关闭 |
+| 公开报告表达 | 最新原B报告实际中文动作/清理/计数、人类表达独立PASS；原始诊断和技术结果精确保留 | 不回写旧回答，不作任意任务/模型或全部旧报告表达认证 |
 
 本轮不再针对同一未改根因重复付费报告；旧MM重试已验子链复用，旧矩阵/全GEN/N3/发布
 认证不作为近期隐藏门槛。完整证据在仓库外；以下历史段落保留各自当时的待验/首败状态。
+
+### 本次最终收尾证据
+
+- `2026-10-04/macos/readable-report-adoption/`：冻结正式包源63df5779e，3请求/3步，
+  原33条结果/参数/source/顺序全同，事实和人类表达分别PASS；本轮一次表达拒绝保current1/0，
+  source10含2分开、modelowner0/host AGENTS2/draft0。唯一23788B公开投影匹配delivery，
+  71034B stored payload canonical digest通过；2156events/27Turns/14effects，旧2098前缀
+  与效果保持。此生成run因观察器到480秒TERM，overall expiry FAIL保持，不改称normal。
+- 同一最新projection的`run-004-final-cold`：正式Tauri一次UI批处理滚8屏、零model/零新Turn/
+  零effects，before/after两行/两hash/READY-ECHO-EOF/STOP必要AX与成对PNG可达；五表逐行
+  同、integrity ok，native0/31.924秒/noexpiry/TERM/KILL、PID/数据库句柄无残留。它独立证明
+  冷读和正常收尾，不覆盖历史观察器FAIL；必要结果可达不声称33条同时出现在一个视口。
+- A13原完整11/11交付及原件/Git保护正常退出、真实CEF内Keychain等待→自退出1/35.185秒
+  及pairing producer修复证据复用，已核现source影响。Keychain系统等待本身、该自然样本
+  精确socket absence缺证、N3/统计生成稳定性/x86/发布/全生态均保留，不扩大为新工作。
+- 用户要求近期收尾：停止新增模型与走查，仅同步必要源码/回归/短进度；全部完整日志、
+  截图、数据库及模型轨迹仓库外。Windows进度保持另一平台独立事实。
 
 ## 2026-10-02 阶段性 P0 交付（用户选择方案 1）
 
@@ -1015,6 +1032,16 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   cancel_process/reaped/elapsed_ms等工具/回执字段，不以6词门禁通过代判整体表达。
   扩明示叙述拒绝覆盖已知工具/回执字段，一次反馈列全部，而非逐词retry；native argv/
   hash/stdout/技术请求原文保持。定向回归通过，零模型冷读/正常退出及修后最终表达待验。
+- `63df5779e`正式修后2请求：上游recorder明确model_stream_or_trace_failed/502，第二
+  SSE无finish/DONE、report参数4329B字符串未完；不称provider生成了完整非法JSON，不补
+  参数。runtime暂停一次、UI结束一次cancelled，无report/draft/modelowner；2098events/
+  26Turns/14effects，2059前缀和效果同，Cmd-Q0/299.652秒/noexpiry/信号，3PID/2listener
+  absent、双库ok。source事实复用，不以正常退出代判表达采用；具体transport错误未记录。
+- 冷读首runner300秒因分步工具往返超时TERM首败保持。改仅观察程序为单CUA批处理
+  滚8屏后立即Cmd-Q：同正式包/data零模型/零新Turn/零effect，五表2098/1/1/26/14逐行不变、
+  public25335B同记录、before/after两行/两hash/READY-ECHO-EOF/STOP child必要AX与PNG
+  可达，native0/93.704秒无expiry/信号/残留、integrity ok。只关闭冷读/正常收尾子断言，
+  不将旧expiry改PASS或将表达FAIL改PASS。证据historical-readable-closure/run-005-cold-ui-batched。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
