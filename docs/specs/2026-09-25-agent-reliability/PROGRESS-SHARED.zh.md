@@ -20,6 +20,8 @@ one-shot adapter 和一个已注册 realtime adapter 的配置→保存→切换
   校验和及用户数据库不改；旧推理值、默认、fork 与删除边界保留。
 - 长媒体 prompt 不再偷偷裁为 512 字符或改意图重试；Agnes 已选尺寸、TTS 已选 voice/format
   不被 fallback 覆盖，OpenAI 4096 字符限制不再套给其他 TTS 供应商。
+  尾核另补 Agnes video 缺省 typed size 时保留保存/extra 宽高，继续原尺寸合法性检查；
+  不凭退役文档扩规格或代判该视频接口 live 可用。
 
 官方边界参考：[OpenAI Chat](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、
 [Gemini Models](https://ai.google.dev/api/models)、[Anthropic Models](https://platform.claude.com/docs/en/api/models/retrieve)。
