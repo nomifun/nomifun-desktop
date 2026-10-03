@@ -887,6 +887,20 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   自有PID/listener消失。首错wire/本地schema拒绝/半JSON分别外留history-report-single-control，
   不补参数/缩任务/再次付费重发，公开表达仍开放；原A/B事实和Keychain结论不改。
 
+#### 严格历史报告参数的两个账本分离（2026-10-03）
+
+- 上轮真实模型忽略historical_results、旧ID写supported后参数修复半JSON，失败保持。
+  只在已证明strict-only任务广告4字段source_turn/archive_ids/short_summary/missing_items，
+  模型不填criteria/current evidence/counts/data；普通report schema不变，不修JSON或吞错。
+- 最新User需仍strict同一已验source，multi-source保守optional；host fresh构造标准submission
+  当前真实work counts/无evidence的unverified，原全部accepted requirements保留。missing
+  非空生成blocked，空选择/空missing、foreign/unknown/重复/model data/旧字段/撤销均拒绝，
+  原计划/运行进程/recovery/终态fence、来源解析、8KiB/48KiB边界保持。固定unverified不是
+  语义完整性证明，独立原B oracle不改。
+- 2新schema/normalization回归及既有strict/optional控制1通过，Runtime323/1ignored，原
+  B634/33黄金1通过（全部结果/source10含2/56445B相同）。正式采用/报告完整/表达待验，
+  外证据history-report-compact，原失败与Windows结果不代判。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

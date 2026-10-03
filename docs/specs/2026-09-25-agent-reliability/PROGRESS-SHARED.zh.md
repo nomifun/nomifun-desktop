@@ -3829,3 +3829,12 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   protocol pause保留，UI结束回合cancelled，无report/owner0。FAIL_NATIVE_ARGUMENT_JSON
   AFTER_REPORT_SCHEMA_REFUSAL；1693events/18Turns/14effects及旧前缀同，Cmd-Q0/165.832秒
   无expiry/信号，完整外证据history-report-single-control。不补JSON/放宽合同或重发洗绿。
+
+### strict历史报告的紧凑输入合同（2026-10-03，macOS参数混淆后续）
+
+- 仅严格已验历史only任务用source_turn/archive_ids/short_summary/missing_items四字段。
+  host fresh标准submission仍保原全accepted scope/current真实counts，无evidence unverified
+  不作完整proof；missingblocked，最新User撤销/多源/unknown/foreign/注入旧字段/data/预算
+  错误拒绝或退optional，一般report schema和JSON协议不变。source账本不进current证据。
+- 新2及控制1回归、Runtime323/1ignored、原634/33source黄金1通过；正式采用/表达待验，
+  原失败/Windows结果保持，外证据history-report-compact。
