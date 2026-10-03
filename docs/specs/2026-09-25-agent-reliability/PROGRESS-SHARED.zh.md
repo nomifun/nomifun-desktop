@@ -3917,3 +3917,6 @@ Windows另发现完整历史增强沿用v3而改变正文，升级后合法旧v3
   明示拒绝、最新User技术要求/rawsource豁免不改写。定向回归通过，新正式待验，Windows不代判。
 - 新presentation使用历史v4，旧v3回放保持；Runtime327/1ignored通过。字段词门禁仅明示
   有限6词而非全语言完整proof，最新User出现豁免边界不外推。新正式完整UI/表达仍待验。
+- macv4正式4个report各33selector，但625/521chars超strict512全拒绝，有界失败；
+  no公开草稿/owner0、旧prefix/effects同/native0。用户要求最终完整，strict摘要对齐
+  普通report2048而不删必要解释，600字原样回归通过；source/48KiB参数/缺项不变，首败保持。

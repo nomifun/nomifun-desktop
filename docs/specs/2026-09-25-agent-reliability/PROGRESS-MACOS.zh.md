@@ -1002,6 +1002,11 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 新历史展示保存plain_zh/en_v4，旧v3 renderer仍原字节，确保已结清报告replay不被当前
   展示修复改写；v4 direct文件、nativePID/清理/显式shell字段新增均只投已保存值。Runtime
   327/1ignored通过，6词检查不作任意语言全语义认证；最新User词出现豁免的边界保持。
+- `e6b9f4742`正式v4原task：4次valid原生report各选33，但首625chars/后三521chars超过
+  strict512，全部schema拒绝，有界失败，未公开草稿/无acceptedreport。2010events/24Turns/
+  14effects、旧1945前缀保持；native0/187.089秒/noexpiry/信号，original/owner无新操作。
+  按用户完整交付要求，将strict摘要对齐普通report2048，而非要求模型删掉必要解释；
+  参数48KiB/source/原值/错误/缺项保持，600字摘要不裁回归通过。首FAIL另存historical-public-v4。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
