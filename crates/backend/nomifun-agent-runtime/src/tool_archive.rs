@@ -883,16 +883,24 @@ mod tests {
             assert_eq!(read["eof"],true,"this fixture must fit a complete bounded read");
             assert_eq!(read["json_fragment"],entry.payload);
         }
+        assert!(archive.reference_data_message(65536).is_none(), "unaddressed bodies must stay private to the archive");
         archive.set_references(vec![json!({"source_turn":input["operation_id"]})]);
         let message = archive.reference_data_message(65536).expect("owned result bodies must fit the unchanged projection cap");
+        assert_eq!(message.role, ChatRole::Assistant);
+        assert!(message.provider_round_id.is_none());
+        assert!(crate::stream_limits::serialized_size(&message, 65536).is_ok());
         let nomifun_chat_model_broker::ChatContentPart::Text { text } = &message.content[0] else { panic!("only data text expected") };
         let data: Value = serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
         assert_eq!(data["included_complete_result_bodies"].as_u64(),Some(expected.len() as u64));
+        assert_eq!(data["current_evidence"], false);
+        assert_eq!(data["new_user_instruction"], false);
         assert!(data["omitted_archive_ids"].as_array().unwrap().is_empty());
         for record in data["records"].as_array().unwrap() {
             let payload = &record["payload"];
             let original = expected.iter().find(|result|Some(result.call_id.as_ref())==payload["call_id"].as_str()).unwrap();
             assert_eq!(data["sources"][record["source_identity"].as_u64().unwrap() as usize]["source_binding"],serde_json::to_value(&source).unwrap());
+            assert_eq!(data["sources"][record["source_identity"].as_u64().unwrap() as usize]["source_turn"],input["operation_id"]);
+            assert_eq!(record["source_result_order_index"], expected.iter().position(|result|Some(result.call_id.as_ref())==payload["call_id"].as_str()).unwrap());
             assert_eq!(payload["original_is_error"],original.is_error);
             assert_eq!(payload["text_parts"].as_array().unwrap().iter().map(|part|part["text"].as_str().unwrap()).collect::<Vec<_>>(),
                 original.output.iter().map(|part| match part {ChatToolResultPart::Text {text}=>text.as_str(),_=>panic!("no fixture media")}).collect::<Vec<_>>());
@@ -901,6 +909,9 @@ mod tests {
                 assert_eq!(payload["arguments_omitted"],true);
             }
         }
+        println!("closed journal context: selected={} included={} omitted={} bytes={}",
+            data["selected_archive_records"], data["included_complete_result_bodies"],
+            data["omitted_archive_ids"].as_array().unwrap().len(), serde_json::to_vec(&message).unwrap().len());
         println!("closed journal validated; {} historical records retained; no owner invoked",archive.entries.len());
     }
 }
