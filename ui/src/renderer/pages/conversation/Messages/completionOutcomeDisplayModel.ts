@@ -15,6 +15,9 @@ export interface CompletionOutcomeDisplay {
 const toolFooter = String.raw`Unsuccessful tool attempts in this turn: ([1-9]\d{0,9}) \(including argument checks and command outcomes\)\. Details remain available in the execution steps\.`;
 const commandFooter = String.raw`Unsuccessful command attempts in this turn: ([1-9]\d{0,9})\. Each command's exit status and output explain the result\.`;
 const suffix = new RegExp(`\\n\\n(?:${toolFooter}(?:\\n\\n${commandFooter})?|${commandFooter})$`);
+const toolFooterZh = String.raw`本轮未成功的操作尝试：([1-9]\d{0,9}) 次（包括参数检查和命令结果）。具体原因保留在过程记录中。`;
+const commandFooterZh = String.raw`本轮未成功的命令尝试：([1-9]\d{0,9}) 次。各次退出状态和输出已保留，后续成功不抵消这些记录。`;
+const suffixZh = new RegExp(`\\n\\n(?:${toolFooterZh}(?:\\n\\n${commandFooterZh})?|${commandFooterZh})$`);
 
 const hasOpenFence = (text: string): boolean => {
   let fence: { marker: string; length: number } | undefined;
@@ -35,7 +38,7 @@ export function projectCompletionOutcomes(
   messages: readonly TMessage[]
 ): CompletionOutcomeDisplay | undefined {
   if (message.position !== 'left' || message.content.agentMessage === true) return undefined;
-  const match = suffix.exec(text);
+  const match = suffix.exec(text) ?? suffixZh.exec(text);
   if (!match || hasOpenFence(text.slice(0, match.index))) return undefined;
   const toolCount = Number(match[1] ?? 0);
   const commandCount = Number(match[2] ?? match[3] ?? 0);
@@ -43,7 +46,9 @@ export function projectCompletionOutcomes(
   const body = text.slice(0, match.index);
   const precedingParagraph = body.slice(body.lastIndexOf('\n\n') + 2);
   if (precedingParagraph.startsWith('Unsuccessful tool attempts in this turn:')
-    || precedingParagraph.startsWith('Unsuccessful command attempts in this turn:')) return undefined;
+    || precedingParagraph.startsWith('Unsuccessful command attempts in this turn:')
+    || precedingParagraph.startsWith('本轮未成功的操作尝试：')
+    || precedingParagraph.startsWith('本轮未成功的命令尝试：')) return undefined;
   const sameTurn = message.turn_id
     ? messages.filter((item): item is ToolMessage => item.conversation_id === message.conversation_id
       && item.turn_id === message.turn_id && (item.type === 'tool_call' || item.type === 'tool_group'))

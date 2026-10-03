@@ -22,6 +22,32 @@ const rejected = (name = 'report_completion') => ({
 }) as TMessage;
 
 describe('completion outcome display', () => {
+  test('projects exact Chinese host disclosures without changing text or borrowing historical outcomes', () => {
+    const chineseFooter = (tools = 1, commands = 1) => `${tools ? `\n\n本轮未成功的操作尝试：${tools} 次（包括参数检查和命令结果）。具体原因保留在过程记录中。` : ''}${commands ? `\n\n本轮未成功的命令尝试：${commands} 次。各次退出状态和输出已保留，后续成功不抵消这些记录。` : ''}`;
+    const body = '预期诊断返回退出码 1。';
+    const original = `${body}${chineseFooter()}`;
+    const chineseMessage = { ...message, content: { ...message.content, content: original } };
+    expect(projectCompletionOutcomes(chineseMessage, original, [tool()])).toEqual({
+      body, toolCount: 1, commandCount: 1, kind: 'native_nonzero', exitCodes: [1],
+    });
+    expect(projectCompletionOutcomes(chineseMessage, `${body}${chineseFooter(2,1)}`, [tool(), rejected()])).toEqual({
+      body, toolCount: 2, commandCount: 1, kind: 'native_nonzero_and_arguments', exitCodes: [1], argumentCount: 1,
+    });
+    expect(projectCompletionOutcomes(chineseMessage, `${body}${chineseFooter(0,1)}`, [tool()])?.kind).toBe('native_nonzero');
+    expect(projectCompletionOutcomes(chineseMessage, `${body}${chineseFooter(1,0)}`, [rejected()])?.kind).toBe('arguments_not_executed');
+    expect(projectCompletionOutcomes(chineseMessage, original, [tool({ ...receipt, state: 'timed_out', exit_code: undefined,
+      cleanup: { ...receipt.cleanup, terminate_attempted: true } })])?.kind).toBe('native_timeout');
+    for (const rows of [[], [tool(receipt,'turn-b')], [tool(receipt,'turn-a','conversation-b')],
+      [tool({ ...receipt, cleanup: { ...receipt.cleanup, reaped: false } })]]) {
+      expect(projectCompletionOutcomes(chineseMessage, original, rows)?.kind).toBe('counts');
+    }
+    expect(projectCompletionOutcomes(chineseMessage, original.replace('具体原因保留', '具体原因未保留'), [tool()])).toBeUndefined();
+    expect(projectCompletionOutcomes(chineseMessage, `\x60\x60\x60text\n${original}`, [tool()])).toBeUndefined();
+    expect(projectCompletionOutcomes(chineseMessage, `${original}${chineseFooter()}`, [tool()])).toBeUndefined();
+    expect(projectCompletionOutcomes(chineseMessage, `${body}${chineseFooter(4294967296,1)}`, [tool()])).toBeUndefined();
+    expect(chineseMessage.content.content).toBe(original);
+  });
+
   test('distinguishes a proven same-turn timeout without claiming success or changing counts', () => {
     const timeout = { ...receipt, state: 'timed_out', exit_code: undefined,
       cleanup: { ...receipt.cleanup, terminate_attempted: true } };

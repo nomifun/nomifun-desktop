@@ -6,6 +6,17 @@
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
 核心共同链路达标后单独通知，再补其中尚缺的Windows命令/native断言，不以全产品发布认证阻断收尾。
 
+2026-10-03全局B发现并修复中文结果尾注展示接线：Runtime plain_zh_v2固定尾注与renderer
+原英文-only suffix不匹配，合法中文报告返回undefined。最小修复只识别相同中文格式，保留
+原文/计数/同Session及Turn回执核对、英文兼容和缺证降级；首回归7PASS/1FAIL保留，修后8/8
+及desktop boundary通过。正式新UI呈现仍待验，不代判历史模型采用、自由表达或复杂整链通过。
+
+全局A唯一当前规则正式样本保留FAIL：14个真实Step5请求/SSE、14组原生参数与canonical相同；
+初始FIRST+LF、最终FINAL+LF成立，但模型提前承诺的patch无guard、stdin无append_newline，
+后续正确guard/LF参数被承诺核对拒绝，改回原错误承诺后执行。无EOF/最终报告，预算暂停后取消；
+不改执行层或重跑取绿，不覆盖W250/W249/W240。B修复41a689a00与新历史公开来源的Windows
+组件结算见Windows页；C自动采样/D迟到控制载体仅外部候选，正式恢复及新UI采用仍未验。
+
 ### 后续全面目标的当前缺口（2026-10-03；整体A/B/C/D并行结算）
 
 原六簇中两项指定采用缺口已有正式证据：W273实际Step5按`/requirements/1/source`拒绝反馈
