@@ -514,8 +514,10 @@ impl CompletionTracker {
             if sources.insert(item.origin.source_turn.clone()) {projection["source_work_status"]=data["source_work_status"].clone();}
             total=total.saturating_add(crate::stream_limits::serialized_size(&projection,8192)
                 .map_err(|_|"Selected historical result exceeds the existing 8 KiB delivery budget")?);
-            if total>8192 {return Err("Selected historical results exceed the existing 8 KiB delivery budget".into());}
             item.data=Some(data);
+        }
+        if total>8192 {
+            return Err(format!("Selected historical results require {total} serialized bytes; the existing delivery budget is 8192 bytes. No report was published. Select fewer redundant records without dropping necessary facts, or disclose unavailable requested results as blocked using the advertised contract (missing_items in strict mode). Do not resubmit the same selection, clip source values, rerun operations or enlarge the budget."));
         }
         Ok(())
     }
@@ -1537,6 +1539,28 @@ mod tests {
         assert_eq!(normalized.arguments.0["historical_results"][0]["origin"]["source_turn"],"turn:user:old:session:closed");
         assert!(normalized.arguments.0["historical_results"][0].get("data").is_none());
         assert_eq!(crate::requirements::merge(&[],&[],&inputs).unwrap()[0].source.input,0);
+    }
+
+    #[tokio::test]
+    async fn historical_budget_refusal_reports_exact_cost_without_publishing_or_dropping_values() {
+        let (archive,_,id)=strict_history_fixture().await;
+        let tracker=CompletionTracker::default();
+        let make=||AgentHistoricalDeliveryResult {origin:AgentHistoricalDeliveryOrigin {
+            source_turn:"turn:user:old:session:closed".into(),archive_id:id.clone()},label:"历史结果".into(),data:None};
+        let mut selected=vec![make()];
+        tracker.resolve_historical_results(&mut selected,Some(&archive),0).unwrap();
+        let data=selected[0].data.as_ref().unwrap();
+        let projection=serde_json::json!({"text_parts":data["text_parts"],"original_is_error":data["original_is_error"],
+            "archive_truncated":data["archive_truncated"],"source_may_be_bounded":data["source_may_be_bounded"],
+            "omitted_media_parts":data["omitted_media_parts"],"derived_argument_facts":data["derived_argument_facts"],
+            "source_work_status":data["source_work_status"]});
+        let bytes=crate::stream_limits::serialized_size(&projection,8192).unwrap();
+        let mut overflow=vec![make()];
+        let error=tracker.resolve_historical_results(&mut overflow,Some(&archive),8192).unwrap_err();
+        assert!(error.contains(&format!("require {} serialized bytes",8192+bytes)));
+        assert!(error.contains("budget is 8192 bytes")&&error.contains("No report was published"));
+        assert!(tracker.report.is_none());
+        assert_eq!(overflow[0].data,selected[0].data,"budget refusal never clips or alters source values");
     }
 
     #[tokio::test]
