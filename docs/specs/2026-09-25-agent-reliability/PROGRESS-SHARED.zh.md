@@ -3845,3 +3845,27 @@ Windows独立发现strict宿主语言与持久化格式判据不一致：旧中�
 rationale变中文。仅将宿主字段语言对齐最终摘要（含既有missing文字）的格式判据，摘要/缺项
 原字节、最新来源、当前计数及权限不改；首次red及缺项分支red保留，strict2项+路由1项通过。
 真实模型采用未由该组件代判，详见Windows页宿主语言修复及原会话未准入记录。
+
+- mac正式紧凑合同尚未到达：3个ONLY update_plan请求，模型先提出未暴露旧report后无调用，
+  守卫拒绝保持，最终任务未完成，当前1/0与source10含2分开。原前缀/19Turn/14effects不改，
+  native正常0；不把组件通过或未采用记公开报告PASS。
+- fresh纯历史报告去除多余plan模型往返，报告沿已有optional空plan验证/关闭；真实
+  needs_replan仍plan-only。全部scope/source/current/patch/process/exact/预算检查不放宽，
+  最小首红→修后单请求+stale-plan/optional/current伪证负向及Runtime323/1ignored通过。
+  新正式采用待验，外证据history-report-direct；不代判Windows或旧失败。
+
+- direct正式首红定位初次AGENTS discovery对不存在空plan误抬needs_replan，2请求仍plan、
+  无模型call/无report，旧数据与效果保持、native0；不以正文宣称完成代判采用。
+  增加非空AGENTS授权read真实接线最小首红，再沿已有context空plan规则修复；已存在plan
+  或steering/recovery gate仍要求replan，规则内容/权限无变化。host2reads/modelowner0、
+  strict单请求与stale-plan及Runtime323/1ignored通过；新正式待验，证据history-report-instruction-entry。
+
+- mac修后正式首请求起ONLY四字段report，初次AGENTS接线及compact原生调用实际采用；
+  6请求中后4次均validJSON但16记录超原8KiB全部拒绝，有界终态失败，未交付/表达未通过。
+  旧prefix/Turn/14effects同、无modelowner、native0/242.247秒；不扩预算或删必要值取绿。
+  后续仅离线选择/预算定位，原A/B结果与Windows边界不改，完整外证据history-report-instruction-entry。
+- 同时去除strict上下文继承的optional direct-answer/旧historical_results指示，仅替其catalog
+  说明为当前4字段合同；普通optional不变，实际请求无冲突说明回归通过，未再付费验证。
+- 历史超8KiB拒绝反馈增加完整所选projection精确总字节与8192限制/未发布/禁止重复同选择，
+  当前合同blocked缺项路径不变；无裁源/扩预算/自动完成。精确反馈与无发布回归1通过，
+  Runtime324/1ignored。实际模型修正/完整表达未验，未再付费循环或改Windows结果。
