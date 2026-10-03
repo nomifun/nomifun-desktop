@@ -3813,3 +3813,13 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   blocked仍允许缺项，当前证据/计数、running/pending恢复与终态input fence不变。
 - 两classifier与控制正负strict1通过，Runtime321/1ignored，正式采用待验、原表达FAIL
   不抵扣，Windows未代判；外证据history-report-entry。
+
+- `3436e40c5`/同步合并`5937b5bcd`mac正式1请求/1步Specific(update_plan)真实采用，
+  provider却返回report_completion/半截参数JSON、finish=tool_calls；精确协议拒绝且owner0，
+  pause后用户UI结束回合保留cancelled/no report。FAIL_PROVIDER_SPECIFIC_TOOL_CHOICE，不放宽
+  校验或补参数；Cmd-Q0/100.227秒无expiry/信号，1625events/17Turns/14effects及旧前缀同。
+  原表达FAIL仍开放/Windows未代判，外证据history-report-entry。
+
+- strict Specific首阶段选面仍含未来report的共享缺口已收窄为单一当次控制，下一边界
+  按原schema重建，plan→report，不接受错tool或补JSON。正负strict回归通过，修后正式
+  待验，原失败保持/Windows不代判，不立即重复同场付费请求。

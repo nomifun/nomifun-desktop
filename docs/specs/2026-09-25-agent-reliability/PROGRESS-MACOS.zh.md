@@ -863,6 +863,20 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 两组classifier+既有控制正负/strict同夹具1项通过，Runtime321/1ignored。首编类型引用
   失败外留；仅新入口，原B字节/错误/原文断言不改，正式采用待验。外证据history-report-entry。
 
+- `3436e40c5`/同步合并`5937b5bcd`（含共享renderer41a689a00、重编UI/8回归/desktop边界）
+  正式同原task1请求/1步真实Specific(update_plan)，工具面仅history/plan/report；StepFun
+  返回report_completion并携带半截JSON（6213-byte参数，finish=tool_calls/DONE），Broker精确
+  选择合同在执行前拒绝，**FAIL_PROVIDER_SPECIFIC_TOOL_CHOICE**。protocol pause保留，实际
+  UI结束回合后cancelled，无report/v3/public结果；不补JSON/接受错工具或重发制造通过。
+- 正常Cmd-Q0/100.227秒，无expiry/TERM/KILL；1625events/17Turns/14effects及1593前缀/
+  16旧Turn/效果/闭库保持，modelowner0/host指令读2；表达仍未完成，原A/B事实/Keychain
+  证据不被此新失败覆盖。完整输入/公开tool参数/事件与模型trace外置，私密思考不摘抄。
+
+- 后续只修已定位的选面：strict指定plan时曾同时advertise未来report，现每阶段仅保留
+  当次Specific控制，下一边界由原configure重新装配后转report；复用原continuation gate
+  的收窄做法，不放宽Broker或改变任务。strict同夹具正负/owner0/current0回归通过，
+  修后新正式未验，原wrong-tool/半JSON失败保持；不重置失败或立即重复付费请求。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
