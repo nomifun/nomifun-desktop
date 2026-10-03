@@ -3641,3 +3641,12 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - 三项定向resolver→target→wire回归及既有公开API四轮链通过：当前旧值、下一轮新值、
   八种安全修改/任务删除拒绝、无跨Turn视图。未调用真实模型或正式UI，不代判Windows。
   外证据step5-b09-closure/run-001-build，原完整报告/Keychain未因此关闭。
+
+### 结清补丁历史不应阻断仅模型变化（2026-10-03，macOS正式首败）
+
+- 原B切Step5后正式0模型请求即被旧patch state的Snapshot检查阻断；最后state已全空v2，
+  本地问题曾投影成UNKNOWN_UPSTREAM，不能归因供应商。首败与1295/8/14封存保留。
+- 仅完整source Session/operation/engine/terminal时序、无未覆盖后续patch派发、严格
+  default v2且host证明仅模型变化时返回default；pending/legacy/预算超出/错源/无证明
+  仍拒绝，不迁移checkpoint或恢复权限。真正不兼容恢复为SessionConfigurationChanged。
+  三项定向回归通过；修后正式待验，Windows未代判。外证据step5-b09-closure。
