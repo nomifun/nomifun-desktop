@@ -18,6 +18,19 @@ pub struct AgentHistoryPage {
 
 #[async_trait::async_trait]
 pub trait AgentHistoryPort: Send + Sync + std::fmt::Debug {
+    /// Optional direct reader for an explicit current-user Turn reference.
+    /// None means this host does not support direct addressing; callers may
+    /// use the existing bounded cursor walk. Some(page) is an authoritative
+    /// lookup outcome (including an unavailable/out-of-scope target), never a
+    /// grant to cross Session, accepted-root, context-reset or Agent boundaries.
+    async fn read_exact(
+        &self,
+        _causality: &ChatCausality,
+        _operation: &str,
+    ) -> Result<Option<AgentHistoryPage>, AgentEngineError> {
+        Ok(None)
+    }
+
     /// Optional owner proof for a Snapshot differing ONLY by its Chat route.
     /// False by default; never an execution/recovery or resource-scope grant.
     async fn model_snapshot_compatible(
