@@ -377,6 +377,10 @@ pub(crate) async fn run_turn(
             archive.set_references(resolved);
             adaptive.activate([crate::AgentRuntimeModule::ToolHistory],
                 crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,event_sink.as_ref()).await?;
+            if required_historical_report(archive,std::slice::from_ref(&requirement),&model_request.causality) {
+                adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                    crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,event_sink.as_ref()).await?;
+            }
         }
     }
     let mut discovered_tools = std::collections::BTreeSet::new();
@@ -634,6 +638,11 @@ pub(crate) async fn run_turn(
                 }
             }
             model_request.input.instructions[slot] = latest;
+        }
+        if tool_archive.as_ref().is_some_and(|archive|required_historical_report(archive,&retained_inputs,&model_request.causality))
+            && !adaptive.task_ledger() {
+            adaptive.activate(crate::adaptive::LEDGER_MODULES,crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,event_sink.as_ref()).await?;
+            long_horizon.get_or_insert_with(LongHorizonState::default);
         }
         if let Some(state) = long_horizon.as_mut() {
             state.completion.delivery_review.align_inputs(retained_inputs.len());
@@ -1918,6 +1927,7 @@ struct AdaptiveContextSlots {
     patch_recovery: Option<usize>,
     tool_history: Option<usize>,
     historical_delivery: Option<usize>,
+    historical_report_only: Option<usize>,
     task_plan: Option<usize>,
     completion: Option<usize>,
     completion_review: Option<usize>,
@@ -2226,7 +2236,45 @@ fn synchronize_adaptive_context(
     if let Some(context)=tool_archive.and_then(|archive|archive.historical_delivery_context()) {
         upsert_instruction(&mut request.input.instructions,&mut slots.historical_delivery,context);
     } else if let Some(slot)=slots.historical_delivery {request.input.instructions[slot].clear();}
+    let historical_report_only=tool_archive.is_some_and(|archive|required_historical_report(archive,accepted_inputs,&request.causality))
+        && long_horizon.is_none_or(|state|state.work_status.running_processes.is_empty())
+        && !patch_recovery.pending() && !patch_recovery.unresolved();
+    if historical_report_only {
+        upsert_instruction(&mut request.input.instructions,&mut slots.historical_report_only,
+            "The latest accepted user task is explicitly restricted to reporting already-recorded closed-turn results: no file changes, commands, process actions or new current-state checks. Only history readers and existing plan/report controls are available. The plan covers this current report task, never the old action plan. Submit exact historical_results through report_completion so host presentation preserves original values/source counts and marks them historical. Current evidence/counts remain unchanged. Missing required results remain blocked; do not invent, replay or enlarge the publication budget.".into());
+        request.input.tools.retain(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
+            |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ));
+        if let Some(report)=request.input.tools.iter_mut().find(|tool|tool.name==crate::completion::TOOL_NAME) {
+            if report.input_schema.0["properties"].get("historical_results").is_some() {
+                // Missing historical results must still be reportable as
+                // blocked, without fabricating a selection just to close.
+                let rule=serde_json::json!({
+                    "if":{"properties":{"criteria":{"contains":{"type":"object","properties":{"disposition":{"const":"blocked"}},"required":["disposition"]}}},"required":["criteria"]},
+                    "then":{},"else":{"required":["historical_results"]}
+                });
+                let object=report.input_schema.0.as_object_mut().expect("completion schema is an object");
+                object.entry("allOf").or_insert_with(||serde_json::json!([])).as_array_mut().expect("completion allOf is an array").push(rule);
+            }
+        }
+        if adaptive.task_ledger() && long_horizon.is_some_and(|state|
+            state.work_status.running_processes.is_empty() && !patch_recovery.pending() && !patch_recovery.unresolved()) {
+            let name=if long_horizon.is_some_and(|state|state.execution_plan.revision==0||state.execution_plan.needs_replan) {
+                crate::planning::TOOL_NAME
+            } else {crate::completion::TOOL_NAME};
+            if request.input.tools.iter().any(|tool|tool.name==name) {
+                request.input.tool_choice=ChatToolChoice::Specific {name:name.into()};
+            }
+        }
+    } else if let Some(slot)=slots.historical_report_only {request.input.instructions[slot].clear();}
     Ok(())
+}
+
+fn required_historical_report(archive:&crate::tool_archive::ToolArchive,inputs:&[ChatMessage],causality:&nomifun_chat_model_broker::ChatCausality)->bool {
+    let sources=crate::requirements::historical_report_only_sources(inputs,causality.agent_session_id.as_ref(),causality.turn_operation_id.as_ref());
+    let catalog=archive.historical_delivery_catalog();
+    !sources.is_empty() && sources.iter().all(|source|catalog["sources"].as_array().is_some_and(|known|
+        known.iter().any(|entry|entry["source_turn"]==*source)))
+        && catalog["records"].as_array().is_some_and(|records|!records.is_empty())
 }
 
 fn upsert_instruction(
@@ -3544,11 +3592,16 @@ mod tests {
                     ]})})
             }
         }
-        #[derive(Default)] struct Model {calls:AtomicUsize,forge_current:bool,rejection_seen:std::sync::atomic::AtomicBool}
+        #[derive(Default)] struct Model {calls:AtomicUsize,forge_current:bool,required_mode:bool,rejection_seen:std::sync::atomic::AtomicBool}
         #[async_trait] impl AgentModelPort for Model {
             async fn open_stream(&self,request:ChatModelRequest,_:CancellationToken)->Result<AgentModelStream,ChatModelError> {
                 let step=self.calls.fetch_add(1,Ordering::SeqCst);
                 let report=request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME).unwrap();
+                if self.required_mode {
+                    assert!(request.input.tools.iter().all(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
+                        |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ)),"report-only mode grants no platform tools");
+                    assert_eq!(request.input.tool_choice,ChatToolChoice::Specific {name:if step==0 {crate::planning::TOOL_NAME} else {crate::completion::TOOL_NAME}.into()});
+                }
                 assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"],if step>1 {1} else {0});
                 assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
                 let events=if step==0 {
@@ -3584,7 +3637,13 @@ mod tests {
         assert_eq!(model.calls.load(Ordering::SeqCst),2);assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
         assert!(result.output_text.contains("第一行 MAC-B\n第二行 after\n"));
         assert!(result.output_text.contains("原回合未成功的工具结果：10 次"));assert!(!result.output_text.contains("failed_tools"));
-        let invalid=Arc::new(Model {calls:AtomicUsize::new(0),forge_current:true,rejection_seen:std::sync::atomic::AtomicBool::new(false)});
+        let required=Arc::new(Model {required_mode:true,..Default::default()});
+        let mut strict=sample.clone();strict.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
+            format!("只依据已关闭回合的历史记录整理完整报告。不要修改任何文件，不要执行命令，不要新增当前文件检查。operation_id:{SOURCE}"));
+        let published=open_session(required.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(strict,AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.unwrap();
+        assert!(published.output_text.contains("第一行 MAC-B\n第二行 after\n"));assert_eq!(required.calls.load(Ordering::SeqCst),2);
+        let invalid=Arc::new(Model {calls:AtomicUsize::new(0),forge_current:true,required_mode:false,rejection_seen:std::sync::atomic::AtomicBool::new(false)});
         assert!(open_session(invalid.clone(),Arc::new(NeverOwner)).run_turn(
             AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.is_err());
         assert_eq!(invalid.calls.load(Ordering::SeqCst),3);

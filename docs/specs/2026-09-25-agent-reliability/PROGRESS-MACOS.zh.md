@@ -850,6 +850,19 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   15旧Turn/原效果/闭库保持，owner0/host指令读2。原可选接口的模型采用不能由组件或
   schema已广告代判；公开表达目标仍开放，A13/B09结果正确性与真实Keychain证据继续复用。
 
+#### 明确只整理历史报告的收窄入口（2026-10-03）
+
+- 可选v3未被原任务模型选择，首败保留。仅latest accepted User普通非引用文本同时明确
+  历史报告/仅旧结果/NoMutate/NoExec/NoCurrentCheck，并含同Session精确source，且当前reader
+  已验closed/loaded/有目录时进入report-only。非文字证明source成功；fence/quote/JSON、
+  普通提问、许可当前检查、条件/矛盾与后续撤销不触发。未知/未载来源仍optional。
+- 该模式只收窄history/plan/report，不授Capability或freshness，不继承旧plan/requirements；
+  沿原当前plan→report fence，当前const与source计数分离。完成需历史选择，真实blocked
+  允许无选择报告缺项；运行中进程或pending recovery时不移除必要原收尾面。新input边界
+  重新判定，原current scope/terminal take不变，公开/快照预算不增。
+- 两组classifier+既有控制正负/strict同夹具1项通过，Runtime321/1ignored。首编类型引用
+  失败外留；仅新入口，原B字节/错误/原文断言不改，正式采用待验。外证据history-report-entry。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

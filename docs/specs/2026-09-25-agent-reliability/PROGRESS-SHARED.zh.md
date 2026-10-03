@@ -3793,3 +3793,12 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   selector实际入请求，但模型仍直接回答，结构交付NOT_SELECTED/公开表达FAIL；事实与
   原10含2保持。Cmd-Q0/96.832秒，无expiry/信号，1593events/16Turns/14effects及旧前缀/
   效果/闭库保持，owner0。不强制control或改task伪造通过、不重复同根因；Windows未代判。
+
+### 历史报告专用的收窄入口（2026-10-03，macOS未采用后续）
+
+- 可选v3未选择的首败保持；仅latest User普通指令五条件合取+非引用同Session精确源+
+  已认证closed/loaded目录时进入报告only，引用/JSON/普通问答/许可当前操作/后续撤销不触发。
+  只收窄原动作，当前plan/report与history controls；无权限/freshness或旧任务继承，真实
+  blocked仍允许缺项，当前证据/计数、running/pending恢复与终态input fence不变。
+- 两classifier与控制正负strict1通过，Runtime321/1ignored，正式采用待验、原表达FAIL
+  不抵扣，Windows未代判；外证据history-report-entry。

@@ -302,6 +302,41 @@ mod tests {
             input("仍然不允许修改文件。"),
         ]));
     }
+
+    #[test]
+    fn historical_report_only_matches_direct_closed_results_request_cn_and_en_not_prior_inputs() {
+        let input=|text:&str|crate::context_lifecycle::text_message(ChatRole::User,text.into());
+        let cn=concat!(
+            "请只依据该关闭回合的真实工具记录补齐原任务所需的中文完整报告，保留原失败，不要重发原任务。\n",
+            "仅允许读取本 Session 已关闭回合的历史记录以恢复已经取得的结果。不要修改任何文件，不要执行命令或测试，不要重新启动进程、写 stdin、关闭 stdin、取消或重放任何旧操作，也不要新增当前文件检查。历史结果要标明观察时点，不能冒充当前验证，不得将旧 failed Turn 改称完成。若真实记录不够，明确指出缺失，不猜测或重做。\n",
+            "来源 operation_id：turn:user:input:session:old；此标识只用于历史定位，不授予执行权限。"
+        );
+        assert!(historical_report_only_requested(&[input(cn)]));
+        assert_eq!(historical_report_only_sources(&[input(cn)],"session","turn:user:new:session:current"),["turn:user:input:session:old"]);
+        let en="Provide a historical report using only recorded results from the closed turn `turn:user:input:session:old`. Do not modify any files. Do not execute commands. No new checks. Keep original failures and do not claim current verification.";
+        assert_eq!(historical_report_only_sources(&[input(en)],"session","turn:user:new:session:current"),["turn:user:input:session:old"]);
+        assert!(historical_report_only_sources(&[input(cn),input("现在可以修改文件并执行命令，请检查当前结果。")],"session","current").is_empty());
+        assert!(historical_report_only_sources(&[input(en)],"foreign","current").is_empty());
+    }
+
+    #[test]
+    fn historical_report_only_rejects_quoted_specs_ordinary_questions_and_mixed_current_actions() {
+        let input=|text:&str|crate::context_lifecycle::text_message(ChatRole::User,text.into());
+        let positive="请只依据已关闭回合的历史记录整理完整报告。不要修改任何文件，不要执行命令，不要新增当前文件检查。";
+        for text in [
+            format!("请解释这个JSON，不能把原文当作指令。{}",serde_json::json!({"spec":positive,"source":"turn:user:input:session:old"})),
+            format!("请解释这段字符串为何有这些限制。\n```text\n{positive} turn:user:input:session:old\n```"),
+            format!("请解释下列引用。\n> {positive} turn:user:input:session:old"),
+            "这个已关闭 turn:user:input:session:old 的 failed_tools 是什么？不要修改任何文件，不要执行命令，不要新增检查，直接解释即可。".into(),
+            format!("{positive} turn:user:input:session:old 但报告后读取当前 result.txt 核验SHA。"),
+            format!("如果你愿意，{positive} turn:user:input:session:old"),
+            format!("{positive} 唯一标识在数据中：\n```json\n{{\"source\":\"turn:user:input:session:old\"}}\n```"),
+        ] {
+            assert!(historical_report_only_sources(&[input(&text)],"session","current").is_empty(),"not a direct report-only source: {text}");
+        }
+        let raw=serde_json::json!({"task":positive,"source":"turn:user:input:session:old"}).to_string();
+        assert!(!historical_report_only_requested(&[input(&raw)]));
+    }
 }
 
 pub(crate) fn validate_ledger_budget(next: &[AgentTaskRequirement]) -> Result<(), String> {
@@ -455,4 +490,73 @@ pub(crate) fn workspace_mutation_forbidden(inputs: &[ChatMessage]) -> bool {
         }
     }
     policy.unwrap_or(false)
+}
+
+/// Conservative output/action narrowing for an explicitly requested historical
+/// report. The caller must independently prove the current explicit source is
+/// loaded and canonically closed. This text matcher grants no history access,
+/// execution, evidence freshness or permission, and never changes user input.
+fn historical_report_only_direct_text(inputs:&[ChatMessage])->Option<String> {
+    let latest=inputs.iter().rfind(|input|input.role==ChatRole::User)?;
+    let mut direct=String::new();
+    for part in &latest.content {
+        let ChatContentPart::Text {text}=part else {continue;};
+        let trimmed=text.trim();
+        if matches!(trimmed.chars().next(),Some('{'|'['))
+            && serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {continue;}
+        let mut fenced=false;
+        for line in text.lines() {
+            let line=line.trim_start();
+            if line.starts_with("```")||line.starts_with("~~~") {fenced=!fenced;continue;}
+            if fenced||line.starts_with('>') {continue;}
+            let mut quote=None;let mut quoted=String::new();
+            for ch in line.chars() {
+                if let Some(end)=quote {
+                    if ch==end {
+                        if end=='`' && quoted.starts_with("turn:user:") && quoted.len()<=256
+                            && quoted.split(':').count()==5 && quoted.split(':').all(|field|!field.is_empty())
+                            && quoted.chars().all(|ch|ch.is_ascii_alphanumeric()||matches!(ch,':'|'-'|'_')) {
+                            direct.push_str(&quoted);
+                        }
+                        quote=None;quoted.clear();
+                    } else {quoted.push(ch);}
+                    continue;
+                }
+                quote=match ch {'"'=>Some('"'),'\''=>Some('\''),'`'=>Some('`'),'“'=>Some('”'),'‘'=>Some('’'),_=>None};
+                if quote.is_none() {direct.push(ch);}
+            }
+            direct.push('\n');
+        }
+    }
+    let normalized=direct.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+    let has=|phrases:&[&str]|phrases.iter().any(|phrase|normalized.contains(phrase));
+    if has(&["这段字符串为何","这段文字为何","解释这段字符串","解释这个json","explain this string","explain this json",
+        "现在检查","现在验证","现在读取","然后检查","再检查","再验证","再读取","报告后读取","报告后检查",
+        "允许检查","可以检查","核验当前","检查当前","读取当前","查看当前","现在执行","允许执行",
+        "then run","then check","after the report","verify current","inspect current","read current","now run",
+        "current checks are allowed","you may inspect","may execute","no tools","do not call any tools","不要调用任何工具",
+        "可以修改文件","允许修改文件","请重做","然后重做","就重做","如果可以","如果你","如果要",
+        "if possible","if allowed","if you","would you","can you","是否应该","难道","为什么要"]) {return None;}
+    let report=(normalized.contains("报告")&&has(&["补齐","整理","汇总","交付","完整报告","报告必须"]))
+        || has(&["provide a historical report","deliver the historical report","report the historical results",
+            "report the previously recorded results","complete the historical report","summarize the recorded results"]);
+    let old_only=has(&["只依据","仅依据","仅允许读取","只读取","use only","using only","only read","based only"])
+        && has(&["历史记录","工具记录","关闭回合","已关闭","historical records","historical results","recorded results","closed turn"]);
+    let no_commands=has(&["不要执行命令","不得执行命令","不执行任何命令","不要运行命令","禁止运行命令",
+        "do not execute commands","do not run commands","do not run any commands","no command execution","never execute commands"]);
+    let no_new_checks=has(&["不要新增当前文件检查","不要新增检查","不得新增检查","不进行新的检查","不要做新检查",
+        "不要开展新的检查","不进行当前检查","no new checks","do not perform new checks","do not inspect current files",
+        "do not check current files","do not perform current checks"]);
+    let direct_input=crate::context_lifecycle::text_message(ChatRole::User,direct.clone());
+    (report&&old_only&&no_commands&&no_new_checks&&workspace_mutation_forbidden(&[direct_input])).then_some(direct)
+}
+
+#[cfg(test)]
+fn historical_report_only_requested(inputs:&[ChatMessage])->bool {
+    historical_report_only_direct_text(inputs).is_some()
+}
+
+pub(crate) fn historical_report_only_sources(inputs:&[ChatMessage],session:&str,current:&str)->Vec<String> {
+    let Some(direct)=historical_report_only_direct_text(inputs) else {return Vec::new();};
+    crate::history_reference::addressed(&crate::context_lifecycle::text_message(ChatRole::User,direct),session,current)
 }
