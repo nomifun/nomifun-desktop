@@ -4300,3 +4300,9 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - dd4增强仍命名v3，新记录顺序/原调用展示令旧合法v3的delivery不等当前重算；history.rs回放调用matches_delivery后会拒绝整个关闭回合。另合法exec/start的cmd字段未入公开调用，只展示command/args/cwd，可全部null。均由真实源码链确认，未从新模型正样本推测。
 - 先新增旧v3精确文本回归，原matches_delivery首红保留；新增强报告持久化v4，v3只兼容pre-dd4/post-dd4两种已知精确派生及原既有前缀，旧canonical文字仍由原事件读取。不regex删改正文、不放宽计数/来源/预算或接受任意模型文本；v4补cmd多行脚本，v3不追增该字段。中英文格式/中文当前footer版本识别跟随v4，普通v1/v2保持。
 - 历史交付8/8、strict来源与缺项2/2、既有精确回放1/1及单报告路由1/1通过；新回归保留原文/源计数/摘要篡改拒绝，v3序列化还原相同、v4脚本JSON逆解逐字相同。初次外部test hunk因换行未适用的组织首错保留，LF source hunk审核后应用。外部`2026-10-03/windows/global-history-capacity-review`保存候选/首红/修后日志；没有GUI/模型/DB，旧原会话/v4正式采用和整体认证仍OPEN。
+
+### 本轮完整历史与输出预算交付（2026-10-03；限定源码修复）
+
+- 两包分别提交08a974eaf（显式输出完整预留）/bd8b1f580（v4、精确v3回放和cmd原文）。push正常拒绝后合入52cc08bb5/e6b9f4742；代码/文档重叠按两边语义合并，首编遗漏三个新函数参数另留，纠正后历史8/strict2通过。新增可读文件/cleanup/诊断字段仅v4，v3不追加；精确旧诊断回归另外通过，不regex改写canonical。
+- 新warmup旧Snapshot/newproviderrevision根因由共享提交明确修复：idle/write fence内先证明旧host已关闭，再替换model binding，失败保quarantine不准入。Windows既有四回合路由集成1/1通过，含实际warmup→配置刷新→默认output wire省略及正常shutdown。此为新的可区分组件证据，不用它反推W276旧唯一原因或正式问题已消失；原时间盒不自动重开。
+- 本轮无正式GUI或模型任务、真实供应商请求0，自有Cargo均结束，旧stdin/Stop/历史真值/Creative/正常及活树Quit证据复用。新v4/输出默认值正式采用、原会话准入缺证、生成/完整交付残余、W276/成功恢复及S3/卷UNC等继续OPEN；完整共享、Windows和发布认证未完成，全面目标active。
