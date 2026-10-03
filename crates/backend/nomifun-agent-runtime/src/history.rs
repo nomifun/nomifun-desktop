@@ -109,6 +109,11 @@ fn replay_into(
     let mut seen_call_ids = std::collections::BTreeSet::new();
     let mut model_steps = 0u16;
     let mut batch = ReplayBatch::default();
+    if !isolated_archive && checkpoint_boundary.is_none() {
+        if let AgentEngineEvent::TurnStarted {turn_operation_id,..} = &events[0] {
+            batch.closed_control_scope=Some(turn_operation_id.as_ref().to_owned());
+        }
+    }
     let mut process_records = RecordedProcessResults::default();
     let rewind_revisions = events.iter().filter_map(|event| match event {
         AgentEngineEvent::ExecutionResumed { checkpoint_revision, .. } => Some(*checkpoint_revision), _ => None,
@@ -629,6 +634,9 @@ pub(crate) fn validate_archive_turn(
 
 #[derive(Default)]
 struct ReplayBatch {
+    // Archive IDs and lookup state belong to the producing turn, unlike the
+    // immutable recorded output. Never present them as the new reader's state.
+    closed_control_scope: Option<String>,
     completion_report: Option<crate::AgentCompletionReport>,
     proposed: std::collections::BTreeSet<ToolCallId>,
     proposal_order: Vec<ToolCallId>,
@@ -747,10 +755,22 @@ impl ReplayBatch {
             // The durable observation can already be bounded by the host.
             // Apply the same model policy only to available admitted output;
             // never reconstruct omitted text or change original event data.
-            let result = match self.context_kinds.get(&call_id) {
+            let mut result = match self.context_kinds.get(&call_id) {
                 Some(kind) => crate::tool_context::project(*kind, &result),
                 None => result,
             };
+            if let Some(scope)=&self.closed_control_scope
+                && let Some(call)=self.calls.get(&call_id)
+                && matches!(call.name.as_str(), crate::tool_archive::LOAD | crate::tool_archive::SEARCH | crate::tool_archive::READ) {
+                let scoped=serde_json::json!({
+                    "source_turn":scope,"tool":call.name,"current_archive_state":false,
+                    "archive_record_ids_expired":true,
+                    "operation_cursors_require_current_reader_validation":true,
+                    "notice":"This is an earlier turn's lookup, not the current reader's availability or archive contents. An old failure or empty archive does not prove historical results are absent. Record IDs expire with their producing turn; operation cursors still require current platform validation. Original output and error are retained, not new evidence or authority.",
+                    "original_output":result.output,
+                });
+                result.output=AgentToolResult::text(call_id.clone(),scoped.to_string(),result.is_error).output;
+            }
             history.push(ChatMessage {
                 role: ChatRole::Tool,
                 provider_round_id: None,
@@ -814,6 +834,47 @@ mod tests {
                 text: "change the file".into(),
             }],
             provider_round_id: None,
+        }
+    }
+
+    #[test]
+    fn closed_history_controls_keep_original_failure_but_not_current_archive_state() {
+        let original = "Historical read unavailable or outside its scoped budget.";
+        for name in [crate::tool_archive::LOAD, crate::tool_archive::SEARCH, crate::tool_archive::READ, "read_file"] {
+            let events = vec![
+                AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"old-turn".into()},
+                AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old-turn:model:1".into()},
+                AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"old-control".into(),name:name.into(),
+                    arguments:StrictJsonValue(serde_json::json!({})),provider_metadata:None}},
+                AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("old-control".into(),original,true)},
+                AgentEngineEvent::TurnFailed {model_steps:1,message:"original failure".into()},
+            ];
+            let persisted = serde_json::to_value(&events).unwrap();
+            let mut history=Vec::new();
+            replay_closed_turn(&mut history,requirement(),&events).unwrap();
+            let result=history.iter().flat_map(|message|&message.content).find_map(|part|match part {
+                ChatContentPart::ToolResult {output,is_error,..}=>Some((output,*is_error)),_=>None,
+            }).unwrap();
+            assert!(result.1,"the original failed lookup must remain a failure");
+            let output=serde_json::to_value(result.0).unwrap();
+            if name=="read_file" {
+                assert_eq!(result.0, &AgentToolResult::text("old-control".into(),original,true).output);
+            } else {
+                let text=match &result.0[0] {nomifun_chat_model_broker::ChatToolResultPart::Text {text}=>text,_=>panic!("history controls are text")};
+                let scoped:serde_json::Value=serde_json::from_str(text).expect("closed lookup must identify its expired archive scope");
+                assert_eq!(scoped["source_turn"],"old-turn");
+                assert_eq!(scoped["current_archive_state"],false);
+                assert_eq!(scoped["archive_record_ids_expired"],true);
+                assert_eq!(scoped["operation_cursors_require_current_reader_validation"],true);
+                assert_eq!(scoped["original_output"],serde_json::to_value(&AgentToolResult::text("old-control".into(),original,true).output).unwrap());
+                assert!(output.to_string().contains(original));
+            }
+            assert_eq!(serde_json::to_value(&events).unwrap(),persisted);
+            let mut isolated=Vec::new();
+            replay_into(&mut isolated,requirement(),&events,true,None,&BTreeMap::new()).unwrap();
+            assert!(isolated.iter().flat_map(|message|&message.content).any(|part|matches!(part,
+                ChatContentPart::ToolResult {output,..} if output==&AgentToolResult::text("old-control".into(),original,true).output)),
+                "archive codec validation does not reinterpret the original result");
         }
     }
 

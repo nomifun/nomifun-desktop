@@ -3587,3 +3587,15 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - 原生生产server/client子进程四路径通过，macOS lib32通过、desktop/Helper/example编译
   通过。此层无CEF/Keychain/UI，不关闭真实系统等待、物理阻塞自退出/冷库或原B最终报告；
   模型0，完整首败/修后外置guardian-native，Windows验收不代判。
+
+### closed-turn 历史查询的过期作用域（2026-10-03，macOS发现）
+
+- 原B正式Low报告首败：旧history错误/空archive被原样重放，当前loader虽有schema却没有
+  首次作用域状态说明；模型未查历史，错误报告实际可读的文件结果缺失。1请求/无新效果，
+  Turn completed不等于完整Case通过，原B33记录与字节独立审计保持。
+- closed-history仅给LOAD/SEARCH/READ回复加原turn/过期record-ID标签并保留原output/error；
+  旧操作cursor仍由当前平台核验，不删除历史或赋予当前证据/执行权限。普通owner结果、
+  archive原codec与checkpoint不改。已授权loader的首次reader说明与实际可见schema同步，
+  激活后替换真实archive状态，无port不宣称可用、不新增自动请求或输出/上下文额度。
+- 两首红后Runtime296通过、显式原B634events/33逐项原正文/error/source_binding完整回归
+  通过；修后正式模型未验，Windows未代判。原B公开漏项仍OPEN，外证据history-upgrade-report。
