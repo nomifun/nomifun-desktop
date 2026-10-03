@@ -337,7 +337,7 @@ struct Submission {
 }
 
 pub(crate) fn definition() -> ChatToolDefinition {
-    ChatToolDefinition {
+    let mut tool = ChatToolDefinition {
         name: TOOL_NAME.into(),
         description: "Finish this turn after work and processes settle. A validated report is terminal: deliver the summary, close the optional plan, and call no more tools; routine completion needs no separate update_plan. Every criterion needs a nonempty rationale. When cumulative error/failure counts are required, copy each exact runtime-supplied value; later success never erases earlier failures. Use few descriptive criteria, not necessarily plan labels. All plural fields must be JSON arrays, not JSON-encoded strings. Each criterion allows at most eight evidence_call_ids; use separate criteria for different results or more than eight IDs. A requirement may span criteria. Omitted requirement_ids covers all accepted requirements; explicit IDs must cover every recorded requirement. Keep derived restatements and forbidden-action absence in the summary unless independently evidenced; never create an evidence-free supported criterion. Each supported criterion must cite a current listed non-null path or call_id. Reuse an eligible observation only when its returned scope and result support each claim. For separate process calls, cite each matching call ID only while listed in available_evidence; never borrow the newest ID for an earlier result. Nested IDs are context only: do not cite launch_call_id or interaction_call_ids unless also listed as top-level available_evidence call_id. If an earlier matching call is absent from available_evidence, use unverified with no evidence for current-state verification. Advertised history tools may recover already-seen output for the requested summary; recovery never makes that observation current or eligible for citation. Do not repeat observations or effects merely to repair this account. Finish mutations before final read-only verification. Re-read a needed stale file only when authorized. Artifact source paths are not current workspace observations; cite eligible call IDs for deletions and artifacts. Never repeat a mutation to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification without inventing extra checks. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch; later effects or input invalidate the report. This grants no extra authority.".into(),
         deferred: false,
@@ -368,7 +368,18 @@ pub(crate) fn definition() -> ChatToolDefinition {
                 }}
             }
         })),
+    };
+    let fields=&mut tool.input_schema.0["properties"];
+    fields["summary"]["description"]=serde_json::json!(public_narrative_description(fields["summary"]["description"].as_str().unwrap_or_default()));
+    for field in ["step","rationale"] {
+        let property=&mut fields["criteria"]["items"]["properties"][field];
+        property["description"]=serde_json::json!(public_narrative_description(property["description"].as_str().unwrap_or_default()));
     }
+    tool
+}
+
+fn public_narrative_description(description:&str)->String {
+    format!("{description} Apply the shared PUBLIC_RESULT_LANGUAGE policy from the execution instruction to this public narrative field.")
 }
 
 impl CompletionTracker {
@@ -401,8 +412,8 @@ impl CompletionTracker {
         let slots = crate::delivery_review::delivery_slots(inputs);
         if slots.is_empty() { return; }
         let refs = self.delivery_results().into_keys().collect::<Vec<_>>();
-        tool.input_schema.0["properties"]["summary"]["description"] = serde_json::json!(
-            "Brief public outcome in the user's language. Exact selected results are published separately by the host; do not duplicate them in this summary. Disclose deviations and missing work plainly. There is no later reply. Delivery references do not grant evidence freshness or extra authority.");
+        tool.input_schema.0["properties"]["summary"]["description"] = serde_json::json!(public_narrative_description(
+            "Brief public outcome in the user's language. Exact selected results are published separately by the host; do not duplicate them in this summary. Disclose deviations and missing work plainly. There is no later reply. Delivery references do not grant evidence freshness or extra authority."));
         let fields=&mut tool.input_schema.0["properties"]["criteria"]["items"]["properties"];
         for (name,description) in [
             ("disposition","supported requires matching current evidence; unverified describes earlier observations without current-state proof; blocked means required work/effects remain; scope_changed requires an exact later user citation. All requested earlier values still belong in selected delivery results, not vague labels."),
@@ -415,7 +426,7 @@ impl CompletionTracker {
             serde_json::json!({"type":"array","maxItems":16,"items":{
                 "type":"object","additionalProperties":false,"required":["result_ref","label"],
                 "properties":{"result_ref":{"type":"string","enum":refs},
-                    "label":{"type":"string","minLength":1,"maxLength":256,"description":"Short public label in the user's language; do not expose internal evidence/routing terminology."}}
+                    "label":{"type":"string","minLength":1,"maxLength":256,"description":public_narrative_description("Short public label in the user's language; do not expose internal evidence/routing terminology.")}}
             }})
         };
         tool.input_schema.0["required"].as_array_mut().unwrap().push(serde_json::json!("delivery_items"));
@@ -425,7 +436,7 @@ impl CompletionTracker {
             "items":{"type":"object","additionalProperties":false,"required":["item_id","status","results"],
                 "properties":{"item_id":{"type":"string","enum":slots.iter().map(|(id,_)|id).collect::<Vec<_>>()},
                     "status":{"type":"string","enum":["delivered","missing","scope_changed"]},
-                    "results":result_schema,"explanation":{"type":"string","maxLength":1024},
+                    "results":result_schema,"explanation":{"type":"string","maxLength":1024,"description":public_narrative_description("Explain missing work, scope changes or uncertainty plainly without altering actual result values.")},
                     "scope_change":crate::requirements::citation_schema()}
             }
         });
@@ -1293,6 +1304,49 @@ fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_result_language_schema_references_cover_narrative_fields_without_new_assertions() {
+        let tracker=CompletionTracker::default();
+        let work=AgentWorkStatus {failed_tools:2,failed_commands:1,..Default::default()};
+        let mut tool=tracker.definition_with_evidence(&AgentPlan::default(),&work,false);
+        for value in [&tool.input_schema.0["properties"]["summary"],
+            &tool.input_schema.0["properties"]["criteria"]["items"]["properties"]["step"],
+            &tool.input_schema.0["properties"]["criteria"]["items"]["properties"]["rationale"]] {
+            assert!(value["description"].as_str().unwrap().contains("PUBLIC_RESULT_LANGUAGE"));
+        }
+        assert_eq!(tool.input_schema.0["properties"]["observed_tool_error_count"]["const"],2);
+        assert_eq!(tool.input_schema.0["properties"]["observed_command_failure_count"]["const"],1);
+        assert!(!tool.input_schema.0["required"].as_array().unwrap().iter().any(|field|field=="public_language"));
+        let inputs=vec![crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,"1. Read the requested file.\n2. Report the recorded result.".into())];
+        let mut tracker=tracker;tracker.observations.push(file_observation("read","result.txt",0));
+        tracker.scopes.insert("read".into(),serde_json::json!({"owner_observation":{
+            "observed_text":{"content":"原文\n"},"offset":0,"eof":true,"total_bytes":7,"sha256":"a".repeat(64)}}));
+        tracker.add_delivery_schema(&mut tool,&inputs);
+        for value in [&tool.input_schema.0["properties"]["summary"],
+            &tool.input_schema.0["properties"]["delivery_items"]["items"]["properties"]["explanation"],
+            &tool.input_schema.0["properties"]["delivery_items"]["items"]["properties"]["results"]["items"]["properties"]["label"]] {
+            assert!(value["description"].as_str().unwrap().contains("PUBLIC_RESULT_LANGUAGE"));
+        }
+        assert_eq!(tool.input_schema.0["properties"]["observed_tool_error_count"]["const"],2);
+    }
+
+    #[test]
+    fn public_result_language_never_rewrites_exact_owner_carriers_or_requested_technical_narrative() {
+        let original=serde_json::json!({"stdout":"exact_actions model_step failed_tools process_id\n你好 MAC-B\n",
+            "argv":["/bin/sh","-c","printf '你好\\n'"],"sha256":"a".repeat(64),"pid":42,
+            "opaque_handle":"0190f5fe-7c00-7a00-8000-000000000001"});
+        let rendered=plain_public_result_versioned(&original,true,true);
+        let encoded=rendered.trim().strip_prefix("```json\n").unwrap().strip_suffix("\n```").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(encoded).unwrap(),original);
+        let mut report:AgentCompletionReport=serde_json::from_value(serde_json::json!({
+            "plan_revision":0,"observation_revision":0,"input_revision":1,"workspace_epoch":0,
+            "summary":"按要求保留技术原文：exact_actions process_id=0190f5fe-7c00-7a00-8000-000000000001\n", "criteria":[]
+        })).unwrap();
+        let before=report.delivery_text();report.public_format=Some("plain_zh_v2".into());
+        assert_eq!(report.delivery_text(),before);
+        assert!(crate::workflow::PUBLIC_RESULT_LANGUAGE.contains("explicitly requests technical identifiers"));
+        assert!(crate::workflow::PUBLIC_RESULT_LANGUAGE.contains("never changes exact file contents, stdout/stderr, argv"));
+    }
     #[test]
     fn public_v2_translates_only_known_wrapper_fields_and_keeps_owner_values() {
         let source=serde_json::json!({"query":"files_scanned", "matches":[{"path":"worktree_modified","line":2,"column_bytes":0,
