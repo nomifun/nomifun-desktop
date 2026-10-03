@@ -4225,3 +4225,10 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - helper从原附属CONOUT$经GetConsoleScreenBufferInfo独立报告实际窗口/缓冲，非复述resize返回：原PID54724初始80×24，原owner resize后同PID/started_at保持、实际132×43。原raw输出/游标完整拼接至563、dropped0；ConPTY重绘旧initial行不当重启/helper重复执行。
 - 本次取消interrupt/terminate、force=false、reaped=true/errors空、cleanup1.1674505s；原OS句柄终态/shutdown exact，预热后的宿主handle数131→131。新增一个明确环境opt-in回归，首次显式1/1通过，其他八项filtered不计通过。原PID及自有Cargo已核对结束，无模型/正式UI/DB改动。
 - 制品外部`2026-10-03/windows/global-d-conpty-size`含隔离候选/基线SHA、实际native日志和范围核对。只关闭此次应用实际尺寸与同owner生命周期子断言，不计完整WIN-010、S3 ACK、完整Windows或发布认证；C成功冷续做与B正式采用仍在各自队列，W276/缺卷UNC和生成余项不改PASS。
+
+### 全局C流成功冷恢复载体准备（2026-10-03；正式恢复未验）
+
+- 与A装配审查、B产物/原件保护和D实机尺寸独立准备，仅新增conversation_gui_fixture的`--success-recovery`。唯一write returned后第二请求只SSE注释，无语义结果；旧等待流实际释放后才可arm，本地后续fresh replan/read/close/report，意外请求400且绝不再write。原模式不改，无生产恢复/lease/checkpoint/fence更改。
+- 主agent审核并跑fixture合同3/3：新mode禁止活流arm/finish释放、fresh IDs和重复写入；旧active-quit/creative拒绝两项同组保持。仅夹具合同PASS，不代判用户任务完成或成功自动恢复。
+- 正式采样仍须唯一write/实物26 bytes、最新生产checkpoint确在结算之后且tail仅下一model_step_started、pending/unknown0，以及实际lease_until+20秒装入固定120秒观察边界。条件不成立不kill；同binary/data/work、新profile、生产lease自然到期，不SQL改期限、原记录或权限。C占下一个正式UI槽，当前未启动该GUI/模型。
+- 仓库外`2026-10-03/windows/global-c-success-recovery`保留独立候选/只读采样说明和3/3日志；实际故障/自动续做/无重放及正式退出均未验。W276/S3时间盒不重开，旧强杀清理/受控隔离/正常托盘Quit直接复用，不计新增恢复Case通过。

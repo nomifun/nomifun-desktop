@@ -1,7 +1,8 @@
 //! Deterministic acceptance through the real desktop, Runtime, tools and history.
 //! Modes include --creative-failure, --creative-submit-failure,
 //! --creative-retry-ack-loss, --shutdown-wait, --crash-tree, --lease-retirement
-//! and --active-quit (one long owned exec, no pending model request).
+//! --active-quit (one long owned exec, no pending model request), and
+//! --success-recovery (one completed write, held model-only tail, fresh read).
 //! Launch NomiFun with that NOMIFUN_DATA_DIR; send a normal request, inspect the
 //! live journal, POST /finish to release the final response, then reload. Send
 //! "格式异常" in a second turn to exercise split pseudo-tool-call rejection.
@@ -12,7 +13,7 @@ use axum::{
 };
 use nomifun_app::{DesktopHostServices, DesktopServer};
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
+use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::Duration};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +23,9 @@ struct Fixture {
     creative_submit_failure: bool,
     creative_retry_ack_loss: bool,
     shutdown_wait: bool,
+    success_recovery: bool,
+    recovery_armed: AtomicBool,
+    recovery_wait_observed: AtomicBool,
     crash_tree: bool,
     process_timeout_ms: u64,
     tree_script: std::sync::OnceLock<PathBuf>,
@@ -45,8 +49,106 @@ fn frame(delta: Value, finish: Option<&str>) -> String {
     }))
 }
 
+const RECOVERY_FILE: &str = "recovery-check.txt";
+const RECOVERY_CONTENT: &str = "GLOBAL_C_AUTO_RECOVERY_OK\n";
+const RECOVERY_WRITE: &str = "global-c-write-once";
+const RECOVERY_REPLAN: &str = "global-c-replan-fresh";
+const RECOVERY_READ: &str = "global-c-read-fresh";
+const RECOVERY_CLOSE: &str = "global-c-plan-close-fresh";
+const RECOVERY_REPORT: &str = "global-c-report-fresh";
+
+enum RecoveryReply { Hold, Tool(&'static str, &'static str, Value) }
+
+fn recovery_result<'a>(body: &'a Value, id: &str) -> Option<&'a Value> {
+    body["messages"].as_array()?.iter().find(|message|
+        message["role"] == "tool" && message["tool_call_id"] == id)
+}
+
+fn recovery_reply(call: usize, body: &Value, armed: bool) -> Result<RecoveryReply, &'static str> {
+    let result = |id| recovery_result(body, id).is_some();
+    let read_matches = || recovery_result(body, RECOVERY_READ)
+        .is_some_and(|message| message["content"].to_string().contains("GLOBAL_C_AUTO_RECOVERY_OK"));
+    let reply = match call {
+        0 if !armed => RecoveryReply::Tool(RECOVERY_WRITE, "write_file",
+            json!({"path":RECOVERY_FILE,"content":RECOVERY_CONTENT})),
+        1 if !armed && result(RECOVERY_WRITE) => RecoveryReply::Hold,
+        2 if armed && result(RECOVERY_WRITE) => RecoveryReply::Tool(RECOVERY_REPLAN, "update_plan",
+            json!({"explanation":"Reconsider the saved task after cold recovery; do not repeat its completed write.",
+                "plan":[{"step":"Verify saved file","status":"in_progress"}]})),
+        3 if armed && result(RECOVERY_WRITE) && result(RECOVERY_REPLAN) => RecoveryReply::Tool(RECOVERY_READ, "read_file",
+            json!({"path":RECOVERY_FILE})),
+        4 if armed && result(RECOVERY_WRITE) && read_matches() => RecoveryReply::Tool(RECOVERY_CLOSE, "update_plan",
+            json!({"explanation":"The fresh read confirms the saved content.",
+                "plan":[{"step":"Verify saved file","status":"completed"}]})),
+        5 if armed && result(RECOVERY_WRITE) && result(RECOVERY_CLOSE) && read_matches() => RecoveryReply::Tool(RECOVERY_REPORT, "report_completion",
+            json!({"summary":"冷恢复后已回读 recovery-check.txt，当前正文为 GLOBAL_C_AUTO_RECOVERY_OK，文件内容核对完成。",
+                "criteria":[{"step":"Verify saved file","disposition":"supported",
+                    "evidence_call_ids":[RECOVERY_READ],"requirement_ids":["input_0"],
+                    "rationale":"The fresh read confirms the requested file content after cold recovery."}]})),
+        _ => return Err("SUCCESS_RECOVERY_UNEXPECTED_REQUEST_OR_MISSING_RESULT"),
+    };
+    if let RecoveryReply::Tool(_, name, _) = &reply {
+        if !body["tools"].as_array().is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == *name)) {
+            return Err("SUCCESS_RECOVERY_TOOL_NOT_EXPOSED");
+        }
+    }
+    Ok(reply)
+}
+
+fn recovery_rejection(message: &'static str) -> axum::response::Response {
+    axum::response::Response::builder().status(400).header("content-type", "application/json")
+        .body(axum::body::Body::from(json!({"error":{"message":message,"type":"invalid_request_error"}}).to_string())).unwrap()
+}
+
+async fn success_recovery_model(fixture: Arc<Fixture>, body: Value, call: usize) -> axum::response::Response {
+    match recovery_reply(call, &body, fixture.recovery_armed.load(Ordering::SeqCst)) {
+        Err(message) => recovery_rejection(message),
+        Ok(RecoveryReply::Hold) => {
+            fixture.recovery_wait_observed.store(true, Ordering::SeqCst);
+            fixture.waiting_streams.fetch_add(1, Ordering::SeqCst);
+            // Comments only: no text, tool proposal, finish or semantic output
+            // may arrive after the production checkpoint before the GUI fault.
+            // /finish deliberately cannot release this original response.
+            let stream = futures_util::stream::unfold(WaitingStream(fixture), |guard| async move {
+                let current = Arc::clone(&guard.0);
+                tokio::select! {
+                    _ = current.stop.cancelled() => None,
+                    _ = tokio::time::sleep(Duration::from_millis(250)) =>
+                        Some((Ok::<_, std::io::Error>(": SUCCESS_RECOVERY_WAIT_FOR_GUI_FAULT\n\n".to_owned()), guard)),
+                }
+            });
+            axum::response::Response::builder().header("content-type", "text/event-stream")
+                .body(axum::body::Body::from_stream(stream)).unwrap()
+        },
+        Ok(RecoveryReply::Tool(id, name, arguments)) => {
+            let frames = vec![frame(json!({"role":"assistant","tool_calls":[{"index":0,"id":id,"type":"function",
+                "function":{"name":name,"arguments":arguments.to_string()}}]}), None),
+                frame(json!({}), Some("tool_calls")), "data: [DONE]\n\n".into()];
+            let stream = futures_util::stream::unfold(frames.into_iter(), |mut frames| async move {
+                let next = frames.next()?;
+                tokio::time::sleep(Duration::from_millis(180)).await;
+                Some((Ok::<_, std::io::Error>(next), frames))
+            });
+            axum::response::Response::builder().header("content-type", "text/event-stream")
+                .body(axum::body::Body::from_stream(stream)).unwrap()
+        },
+    }
+}
+
+async fn arm_success_recovery(State(f): State<Arc<Fixture>>) -> (axum::http::StatusCode, Json<Value>) {
+    if !f.success_recovery || !f.recovery_wait_observed.load(Ordering::SeqCst)
+        || f.waiting_streams.load(Ordering::SeqCst) != 0
+        || (f.calls.load(Ordering::SeqCst) != 2 && !f.recovery_armed.load(Ordering::SeqCst)) {
+        return (axum::http::StatusCode::CONFLICT, Json(json!({"armed":false,
+            "reason":"Original held stream must be dropped; operator must independently prove the exact GUI fault and checkpoint."})));
+    }
+    f.recovery_armed.store(true, Ordering::SeqCst);
+    (axum::http::StatusCode::OK, Json(json!({"armed":true,"grants_recovery_authority":false})))
+}
+
 async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> axum::response::Response {
     let call = fixture.calls.fetch_add(1, Ordering::SeqCst);
+    if fixture.success_recovery { return success_recovery_model(fixture, body, call).await; }
     let active_quit = fixture.crash_tree && fixture.process_timeout_ms == 600000;
     if active_quit && call >= 1 {
         return axum::response::Response::builder().status(400)
@@ -218,10 +320,11 @@ async fn main() -> anyhow::Result<()> {
     let creative_retry_ack_loss = mode.as_deref() == Some("--creative-retry-ack-loss");
     let lease_retirement = mode.as_deref() == Some("--lease-retirement");
     let active_quit = mode.as_deref() == Some("--active-quit");
+    let success_recovery = mode.as_deref() == Some("--success-recovery");
     let crash_tree = mode.as_deref() == Some("--crash-tree") || lease_retirement || active_quit;
     let process_timeout_ms = if active_quit { 600000 } else if lease_retirement { 1000 } else { 30000 };
     let shutdown_wait = mode.as_deref() == Some("--shutdown-wait") || crash_tree;
-    anyhow::ensure!(mode.is_none() || creative_failure || creative_submit_failure || creative_retry_ack_loss || shutdown_wait, "unsupported fixture mode");
+    anyhow::ensure!(mode.is_none() || creative_failure || creative_submit_failure || creative_retry_ack_loss || shutdown_wait || success_recovery, "unsupported fixture mode");
     std::fs::create_dir(&root)?;
     let fixture = Arc::new(Fixture {
         calls: AtomicUsize::new(0),
@@ -229,6 +332,9 @@ async fn main() -> anyhow::Result<()> {
         creative_submit_failure,
         creative_retry_ack_loss,
         shutdown_wait,
+        success_recovery,
+        recovery_armed: AtomicBool::new(false),
+        recovery_wait_observed: AtomicBool::new(false),
         crash_tree,
         process_timeout_ms,
         tree_script: std::sync::OnceLock::new(),
@@ -239,17 +345,20 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let routes = Router::new().route("/v1/chat/completions", post(model))
+        .route("/arm-recovery", post(arm_success_recovery))
         .route("/finish", post(|State(f): State<Arc<Fixture>>| async move { f.finish.add_permits(1); "released" }))
         .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst),
             "creative_failure":f.creative_failure,"creative_submit_failure":f.creative_submit_failure,"creative_retry_ack_loss":f.creative_retry_ack_loss,"shutdown_wait":f.shutdown_wait,
-            "crash_tree":f.crash_tree,"process_timeout_ms":f.process_timeout_ms,"waiting_streams":f.waiting_streams.load(Ordering::SeqCst)})) }))
+            "crash_tree":f.crash_tree,"process_timeout_ms":f.process_timeout_ms,"waiting_streams":f.waiting_streams.load(Ordering::SeqCst),
+            "success_recovery":f.success_recovery,"recovery_armed":f.recovery_armed.load(Ordering::SeqCst),
+            "recovery_wait_observed":f.recovery_wait_observed.load(Ordering::SeqCst)})) }))
         .route("/shutdown", post(|State(f): State<Arc<Fixture>>| async move { f.stop.cancel(); "stopped" }))
         .with_state(fixture.clone());
     let stop = fixture.stop.clone();
     tokio::spawn(async move { axum::serve(listener, routes).with_graceful_shutdown(stop.cancelled_owned()).await });
     let cli = nomifun_app::cli::Cli {
         host:"127.0.0.1".into(), port:0, data_dir:root.clone(),
-        work_dir:shutdown_wait.then(|| root.parent().unwrap().join("work")),
+        work_dir:(shutdown_wait || success_recovery).then(|| root.parent().unwrap().join("work")),
         app_version:env!("CARGO_PKG_VERSION").into(), local:true,
         log_dir:Some(root.join("logs")), log_level:Some("off".into()), command:None,
     };
@@ -312,7 +421,8 @@ else if (process.argv[2] === 'child') {
     println!("CONVERSATION_GUI_FIXTURE_READY {}",json!({
         "data_dir":root,"control":format!("http://{address}"),
         "session_id":prepared.get("session_id"),"canvas_id":prepared.get("canvas_id"),
-        "creative_failure":creative_failure,"creative_submit_failure":creative_submit_failure,"creative_retry_ack_loss":creative_retry_ack_loss,"shutdown_wait":shutdown_wait,"crash_tree":crash_tree,"process_timeout_ms":process_timeout_ms
+        "creative_failure":creative_failure,"creative_submit_failure":creative_submit_failure,"creative_retry_ack_loss":creative_retry_ack_loss,"shutdown_wait":shutdown_wait,"crash_tree":crash_tree,"process_timeout_ms":process_timeout_ms,
+        "success_recovery":success_recovery
     }));
     fixture.stop.cancelled().await;
     Ok(())
@@ -323,11 +433,76 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn success_recovery_holds_model_only_tail_and_never_reproposes_the_write() {
+        use futures_util::StreamExt;
+        let fixture = Arc::new(Fixture {
+            calls: AtomicUsize::new(0), creative_failure: false,
+            creative_submit_failure: false, creative_retry_ack_loss: false,
+            shutdown_wait: false, success_recovery: true,
+            recovery_armed: AtomicBool::new(false), recovery_wait_observed: AtomicBool::new(false),
+            crash_tree: false, process_timeout_ms: 30000,
+            tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
+            finish: Semaphore::new(0), stop: CancellationToken::new(),
+        });
+        let mut body = json!({"messages":[],"tools":[
+            {"type":"function","function":{"name":"write_file"}},
+            {"type":"function","function":{"name":"read_file"}},
+            {"type":"function","function":{"name":"update_plan"}},
+            {"type":"function","function":{"name":"report_completion"}}
+        ]});
+        assert_eq!(arm_success_recovery(State(fixture.clone())).await.0, axum::http::StatusCode::CONFLICT);
+        let first = model(State(fixture.clone()), Json(body.clone())).await;
+        let bytes = axum::body::to_bytes(first.into_body(), 65536).await.unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.contains(RECOVERY_WRITE) && text.contains("write_file") && text.contains("[DONE]"));
+        body["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":RECOVERY_WRITE,"content":"write returned"}));
+        let held = model(State(fixture.clone()), Json(body.clone())).await;
+        let mut stream = held.into_body().into_data_stream();
+        let comment = stream.next().await.unwrap().unwrap();
+        assert!(std::str::from_utf8(&comment).unwrap().starts_with(": SUCCESS_RECOVERY_WAIT_FOR_GUI_FAULT"));
+        assert_eq!(fixture.waiting_streams.load(Ordering::SeqCst), 1);
+        fixture.finish.add_permits(1);
+        assert!(std::str::from_utf8(&stream.next().await.unwrap().unwrap()).unwrap().starts_with(':'));
+        assert_eq!(arm_success_recovery(State(fixture.clone())).await.0, axum::http::StatusCode::CONFLICT,
+            "arming must not release or complete the still-live original stream");
+        drop(stream);
+        assert_eq!(fixture.waiting_streams.load(Ordering::SeqCst), 0);
+        assert_eq!(arm_success_recovery(State(fixture.clone())).await.0, axum::http::StatusCode::OK);
+        assert!(recovery_reply(2, &json!({"messages":[],"tools":body["tools"]}), true).is_err(),
+            "recovery requires the original write result; it must never fall back to writing again");
+        let expected = [(RECOVERY_REPLAN,"update_plan"),(RECOVERY_READ,"read_file"),
+            (RECOVERY_CLOSE,"update_plan"),(RECOVERY_REPORT,"report_completion")];
+        let mut ids = std::collections::BTreeSet::from([RECOVERY_WRITE.to_owned()]);
+        for (id, name) in expected {
+            let response = model(State(fixture.clone()), Json(body.clone())).await;
+            assert_eq!(response.status(), 200);
+            let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert!(text.contains("[DONE]") && !text.contains("write_file"));
+            let delta = text.lines().filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|frame| frame["choices"][0]["delta"]["tool_calls"].is_array()).unwrap();
+            let call = &delta["choices"][0]["delta"]["tool_calls"][0];
+            assert_eq!(call["id"], id); assert_eq!(call["function"]["name"], name);
+            assert!(ids.insert(id.to_owned()), "all resumed tool IDs must be fresh");
+            let arguments: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+            if id == RECOVERY_READ { assert_eq!(arguments["path"], RECOVERY_FILE); }
+            if id == RECOVERY_REPORT { assert_eq!(arguments["criteria"][0]["evidence_call_ids"], json!([RECOVERY_READ])); }
+            body["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":id,
+                "content":if id == RECOVERY_READ { RECOVERY_CONTENT } else { "returned" }}));
+        }
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 6);
+        assert_eq!(model(State(fixture), Json(body)).await.status(), 400,
+            "an unexpected post-report request must stop the fixture, never recreate the file");
+    }
+
+    #[tokio::test]
     async fn active_quit_uses_one_owned_exec_without_a_waiting_model_stream() {
         let fixture = Arc::new(Fixture {
             calls: AtomicUsize::new(0), creative_failure: false,
             creative_submit_failure: false, creative_retry_ack_loss: false,
             shutdown_wait: true, crash_tree: true, process_timeout_ms: 600000,
+            success_recovery: false, recovery_armed: AtomicBool::new(false), recovery_wait_observed: AtomicBool::new(false),
             tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
             finish: Semaphore::new(0), stop: CancellationToken::new(),
         });
@@ -355,6 +530,7 @@ mod tests {
         let fixture = Arc::new(Fixture {
             calls: AtomicUsize::new(0), creative_failure: false, creative_submit_failure: true, creative_retry_ack_loss: false,
             shutdown_wait: false, crash_tree: false, process_timeout_ms: 30000, tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
+            success_recovery: false, recovery_armed: AtomicBool::new(false), recovery_wait_observed: AtomicBool::new(false),
             finish: Semaphore::new(0), stop: CancellationToken::new(),
         });
         let response = model(State(fixture.clone()), Json(json!({"messages":[]}))).await;
