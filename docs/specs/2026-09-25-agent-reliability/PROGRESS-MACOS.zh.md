@@ -913,6 +913,16 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   replan仍plan及optional/current伪证负向同夹具通过；Runtime323/1ignored。修后正式待验，
   新证据history-report-direct，不重跑原A/B操作或Keychain。
 
+- `ca7682036`/同步`adccdb482`正式同原task仍FAIL：首次root AGENTS加载把不存在的
+  optional空plan标needs_replan，2个请求仍ONLYplan、无模型call，报告未采用；不把正文宣称
+  完成或组件绿代判。1798events/20Turns/14effects、1746前缀和旧Turn全同，Cmd-Q0/90.281秒
+  无expiry/信号/新owner，源备五表同/ok，首败外置history-report-direct。
+- 此初次装配缺口增加非空AGENTS真实授权read夹具，首红与live一致；改用已有空plan
+  invalidation规则：已存在plan才由context refresh抬replan，已被steering/recovery抬起的gate
+  不清除，规则完整装配/权限不变。同夹具2个host reads/模型owner0/首轮report，stale-plan
+  及既有patch/steering/current伪证邻近Runtime323/1ignored通过。正式采用待验，证据另记
+  history-report-bootstrap；不再靠无read authority组件冒充正式接线。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

@@ -606,7 +606,10 @@ pub(crate) async fn run_turn(
             completion_review_used = false;
             model_request.input.provider_round_parent = None;
             if let Some(state) = long_horizon.as_mut() {
-                state.execution_plan.needs_replan = true;
+                // Initial instruction discovery does not make a nonexistent
+                // optional plan stale. Established plans and a gate already
+                // raised by steering/recovery still require replanning.
+                mark_patch_recovery_context_changed(&mut state.execution_plan);
                 state.completion.invalidate();
                 if adaptive.task_ledger() {
                     event_sink.emit(AgentEngineEvent::PlanUpdated {
@@ -1815,7 +1818,7 @@ pub(crate) async fn run_turn(
 }
 
 fn mark_patch_recovery_context_changed(plan: &mut crate::AgentPlan) {
-    // Fresh recovery reads change the model-visible facts before any effect.
+    // Fresh instruction/recovery reads change model-visible context before effects.
     // They invalidate an established plan, but must not turn the deliberately
     // optional empty plan into a synthetic gate that rejects the first repair.
     // A gate already raised by steering or another cause remains raised.
@@ -3649,6 +3652,19 @@ mod tests {
         #[async_trait] impl AgentToolInvoker for NeverOwner {
             async fn invoke(&self,_:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {panic!("historical publication cannot invoke an owner")}
         }
+        #[derive(Default)] struct ReportInstructions(AtomicUsize);
+        #[async_trait] impl AgentToolInvoker for ReportInstructions {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                assert!(invocation.call.call_id.as_ref().starts_with("agent-instructions:"),"no model-selected owner call is permitted");
+                self.0.fetch_add(1,Ordering::SeqCst);
+                if invocation.call.arguments.0["path"]=="AGENTS.md" {
+                    let content="Report historical results only; do not replay commands.\n";
+                    Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":"AGENTS.md","content":content,
+                        "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes()),"total_bytes":content.len(),
+                        "offset":0,"eof":true,"next_offset":null}).to_string(),false))
+                } else {Ok(instruction_result(&invocation).expect("only root instruction reads are allowed"))}
+            }
+        }
         let model=Arc::new(Model::default());let mut sample=request();
         sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,format!("整理已关闭回合的记录，operation_id:{SOURCE}，不要重做。"));
         let result=open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
@@ -3659,10 +3675,13 @@ mod tests {
         let required=Arc::new(Model {required_mode:true,..Default::default()});
         let mut strict=sample.clone();strict.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
             format!("只依据已关闭回合的历史记录整理完整报告。不要修改任何文件，不要执行命令，不要新增当前文件检查。operation_id:{SOURCE}"));
-        let published=open_session(required.clone(),Arc::new(NeverOwner)).run_turn(
-            AgentTurnRequest::new(strict.clone(),AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.unwrap();
+        let instructions=Arc::new(ReportInstructions::default());
+        let instruction_plan=AgentToolPlan::new([tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true)]).unwrap();
+        let published=open_session(required.clone(),instructions.clone()).run_turn(
+            AgentTurnRequest::new(strict.clone(),instruction_plan,principal(),0).with_history_port(Arc::new(History))).await.unwrap();
         assert!(matches!(published.terminal,AgentTurnTerminal::Completed {..}));
         assert!(published.output_text.contains("第一行 MAC-B\n第二行 after\n"));assert_eq!(required.calls.load(Ordering::SeqCst),1);
+        assert_eq!(instructions.0.load(Ordering::SeqCst),2,"root instructions are loaded before the single model round");
         // A fresh report closes an optional empty plan, but must not override
         // a real replan obligation from the current turn.
         let strict_input=strict.input.messages[0].clone();
