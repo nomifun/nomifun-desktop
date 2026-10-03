@@ -933,6 +933,10 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - strict catalog仍沿optional旧说明说direct answer可完成及historical_results，和4字段选面
   矛盾；只在strict上下文按当前合同生成catalog说明，普通optional路径不变。增加实际首
   请求无旧说明断言并通过同控制回归；此文案接线未新增正式模型复跑，不以它关闭预算/表达。
+- 超预算错误原只给泛化8KiB拒绝；现完整测量最多16个既有有界projection后返回精确总字节/
+  8192限制及“未发布”，说明只删冗余、不删必要事实，缺项按当前合同blocked，禁止同选择
+  重试/裁源/重做/扩预算。总额超过仍拒绝，不改变source数据、计划或报告；精确值/无发布/
+  不改原文回归1通过，Runtime324/1ignored。修后模型恢复效果未验，不再本轮付费循环。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 

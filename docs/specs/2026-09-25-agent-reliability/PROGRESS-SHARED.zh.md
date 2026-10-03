@@ -3861,3 +3861,6 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   后续仅离线选择/预算定位，原A/B结果与Windows边界不改，完整外证据history-report-instruction-entry。
 - 同时去除strict上下文继承的optional direct-answer/旧historical_results指示，仅替其catalog
   说明为当前4字段合同；普通optional不变，实际请求无冲突说明回归通过，未再付费验证。
+- 历史超8KiB拒绝反馈增加完整所选projection精确总字节与8192限制/未发布/禁止重复同选择，
+  当前合同blocked缺项路径不变；无裁源/扩预算/自动完成。精确反馈与无发布回归1通过，
+  Runtime324/1ignored。实际模型修正/完整表达未验，未再付费循环或改Windows结果。
