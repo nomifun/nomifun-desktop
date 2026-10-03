@@ -3911,3 +3911,8 @@ completed Turn已保留并纠正，未重启/重发；实际API exit0/进程监�
 - macv4正式4个report各33selector，但625/521chars超strict512全拒绝，有界失败；
   no公开草稿/owner0、旧prefix/effects同/native0。用户要求最终完整，strict摘要对齐
   普通report2048而不删必要解释，600字原样回归通过；source/48KiB参数/缺项不变，首败保持。
+- mac98e16同原task33accepted/current0/0/draft0/25335B，max_tokens省略；实际UIafter全文/
+  哈希和父子STOP/清理已见。锁定等待+滚动超native480触runnerTERM，expiredtrue/exit0
+  仍observerFAIL。source/backup2059/25/14同、旧prefix/效果保留；正常exit另待零模型验。
+- 普通摘要仍含工具/回执字段，表达FAIL保持；明示reject扩已知字段并一次反馈所有词，
+  不裁/重写原值或原source。组件通过不代判修后模型，Windows结果不改。

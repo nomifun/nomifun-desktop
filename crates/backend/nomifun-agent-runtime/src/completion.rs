@@ -440,7 +440,7 @@ impl CompletionTracker {
                     "archive_ids":{"type":"array","maxItems":MAX_HISTORICAL_DELIVERY_RESULTS,"uniqueItems":true,"items":{"type":"string","enum":ids},
                         "description":"Exact advertised archive IDs from that source. Empty is allowed only with explicit missing_items. Current evidence IDs are not accepted."},
                     "short_summary":{"type":"string","minLength":1,"maxLength":2048,
-                        "description":"Brief public outcome; do not duplicate original results or internal schemas. Unless the latest user explicitly asks for them, do not use internal identifiers exact_actions, model_step, failed_tools, failed_commands, process_id or source-bound; explain actions, outcomes and counts in the user's language. This does not change exact source diagnostics. PUBLIC_RESULT_LANGUAGE applies."},
+                        "description":"Brief public outcome; do not duplicate original results or internal schemas. Unless requested by the latest user, explain actions and counts without internal function names (such as apply_patch/cancel_process) or result-wrapper fields (such as reaped/elapsed_ms/failed_commands); use readable descriptions in the user's language. Exact CLI names, paths, hashes and source diagnostics are unchanged. PUBLIC_RESULT_LANGUAGE applies."},
                     "missing_items":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":64},
                         "description":"Actual requested results that remain missing. Nonempty marks this report blocked; empty is not host proof of completeness."}
                 }}))}
@@ -474,10 +474,17 @@ impl CompletionTracker {
         }).collect::<Vec<_>>().join("\n");
         for narrative in std::iter::once(&submission.short_summary).chain(&submission.missing_items) {
             let forbidden=narrative.split(|ch:char|!ch.is_ascii_alphanumeric()&&ch!='_'&&ch!='-')
-                .find(|word|matches!(*word,"exact_actions"|"model_step"|"failed_tools"|"failed_commands"|"process_id"|"source-bound")
-                    && !requested_text.contains(word));
-            if let Some(field)=forbidden {
-                return Err(format!("Public narrative contains the unrequested internal field {field}. Explain its action, outcome or count in the user's language and resubmit only the report. Exact source diagnostics and user-requested technical terms are unchanged; do not rerun operations or alter original values."));
+                .filter(|word|matches!(*word,"exact_actions"|"model_step"|"failed_tools"|"failed_commands"|"process_id"|"source-bound"
+                    |"update_plan"|"report_completion"|"read_file"|"write_file"|"apply_patch"|"exec_command"|"start_process"
+                    |"poll_process"|"write_process_stdin"|"close_process_stdin"|"cancel_process"|"reaped"|"elapsed_ms"
+                    |"interrupt_attempted"|"terminate_attempted"|"force_kill_attempted"|"timeout_ms"|"wait_ms"
+                    |"bytes_before"|"bytes_after"|"hunks_applied"|"written_sha256"|"eof")
+                    && !requested_text.contains(word)).collect::<BTreeSet<_>>();
+            let assigned_fields=["state","signal","errors"].into_iter().filter(|field|!requested_text.contains(field)
+                && (narrative.contains(&format!("{field}="))||narrative.contains(&format!("{field}:")))).collect::<Vec<_>>();
+            if !forbidden.is_empty()||!assigned_fields.is_empty() {
+                let fields=forbidden.into_iter().chain(assigned_fields).collect::<Vec<_>>().join(", ");
+                return Err(format!("Public narrative contains unrequested internal identifiers: {fields}. Explain ALL listed actions, outcomes and counts in the user's language and resubmit only the report. Exact source diagnostics and user-requested technical terms are unchanged; do not rerun operations or alter original values."));
             }
         }
         // Keep the whole current input coverage path, never import old plans
@@ -1629,6 +1636,10 @@ mod tests {
             text.push_str(" 报告请明确保留 failed_commands 字段。");
         }
         assert!(tracker.normalize_strict_historical_report(&call(internal),&archive,&work,&technical).is_ok(),"explicit technical wording is not rewritten or forbidden");
+        for term in ["apply_patch","cancel_process","reaped","elapsed_ms"] {
+            let mut narrative=args.clone();narrative["short_summary"]=serde_json::json!(format!("原回合{term}=已完成"));
+            assert!(tracker.normalize_strict_historical_report(&call(narrative),&archive,&work,&inputs).unwrap_err().contains("Public narrative"),"known wrapper/tool name must be explained, not copied");
+        }
         let mut foreign=args.clone();foreign["source_turn"]=serde_json::json!("foreign");assert!(tracker.normalize_strict_historical_report(&call(foreign),&archive,&work,&inputs).is_err());
         let mut unknown=args.clone();unknown["archive_ids"]=serde_json::json!(["f".repeat(64)]);assert!(tracker.normalize_strict_historical_report(&call(unknown),&archive,&work,&inputs).is_err());
         let mut empty=args.clone();empty["missing_items"]=serde_json::json!([]);assert!(tracker.normalize_strict_historical_report(&call(empty),&archive,&work,&inputs).is_err());
