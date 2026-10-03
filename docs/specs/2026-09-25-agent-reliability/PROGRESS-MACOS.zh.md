@@ -597,6 +597,18 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   原B完整报告、公开表达及真实Keychain保持OPEN，原A N1复用。证据在
   step5-b09-closure/run-001-build，Windows结果未改写。
 
+#### 运行中保存推理配置不混代（2026-10-03）
+
+- 确认全局模型保存立即替换capability，后续Broker旧exact digest会拒绝；Session专用
+  模型/强度PUT的active guard原本正确，未放宽。Runtime现在在trusted Turn准备中捕获
+  traits/params/context/output/压缩阈值，预算与请求用同一视图；终态或持久失败暂停清除。
+- 每次仍以实时安全字段＋原非安全字段重建原完整digest并精确核对；凭据/启用/地址/
+  endpoint/protocol/connection变化仍拒绝，不缓存旧凭据或扩权限。捕获前已变更则首次
+  模型调用前明确配置变化并失败，保留小型admission→capture竞态，不假称无限并发丝滑。
+- 三项定向生产resolver/目标/wire回归验证本轮low/2048/32k/75%、下一轮high/4096/1M/80%，
+  八种安全变更和任务删除拒绝、错Turn不能清除/复用、捕获失配不发布部分视图；已有
+  四轮公开API链继续通过。无真实模型/UI样本；证据step5-b09-closure/run-001-build。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
