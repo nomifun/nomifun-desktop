@@ -3884,3 +3884,9 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   收尾owned_runtime_teardown未证明，保护exit1/426.487秒、noexpiry/无外部信号，非CEF。
   最终1880events/22Turn/14effects，旧prefix/效果同、双库ok；不以组件绿代判actualwire/
   完整报告/变更后丝滑使用。新preexecution和teardown缺陷窄定位中，Windows结果不改。
+
+- 配置后warmup旧Snapshot/newproviderrevision→send新Snapshot/cache复用反例已在既有
+  router四回合集成复现，preparing无terminal首红保持。自动binding实际变化时，在已有
+  idle/writefence先prove旧runtimeclose再replace；失败保binding/quarantine，无新Turn。
+  同集成修后及unsetoutput→warmup→send actual省略max_tokens通过，正常shutdown原断言
+  保持；不放宽Snapshot/权限或吞cleanup错误。mac正式修后待验，Windows未代判。

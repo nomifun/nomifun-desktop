@@ -973,6 +973,18 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   首403/线程sample/AX截图/exit1/首normal-seal断言红另存，失败快照独立封存，不洗exit0。
   下一步只定位此配置后pre-execution/teardown核心链，不重发或恢复旧矩阵。
 
+#### 配置保存→预热→新回合根因修复（2026-10-03）
+
+- 已复现而非推测：既有正式router四回合集成加入save→warmup→send，15秒等待后同现场
+  preparing/no terminal首红。UI保存确实bump provider revision；问题是保存后warmup仍从
+  旧canonical Snapshot固定host，send才refresh Snapshot，provider版本相等却复用旧host。
+- 仅自动模型binding实际变化的已有idle/writefence分支：先沿原registry证明旧owner关闭，
+  后replace immutablebinding、新Turn才可创建。关闭失败保旧binding/quarantine并返回错，
+  不放宽read_turn_receipt Snapshot一致性；未发现cleanup反向获取Sessionfence。
+- 同原四回合集成修后通过7.52秒；再加入unsetoutput→warmup→send通过8.07秒，actual
+  wire未带max_tokens、能力降级/思考覆盖/历史handoff及正常整宿主shutdown均原断言保持。
+  正式修后待验，证据model-config-warmup-repair，原zero-model/exit1首败不覆盖。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
