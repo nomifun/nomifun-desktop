@@ -561,6 +561,18 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   独立审计在外部history-reference-load/run-002-live；原A N1复用，B报告/表达及真实
   Keychain仍OPEN，Windows未代验。修复已推送不代表语义Case关闭，保留本次新失败。
 
+#### 按用户建议改用 Step 5 Preview（2026-10-03，接入预检）
+
+- 用户建议后先停继续加收尾策略，核对替代模型。官方Step 5 Preview文档标明1M上下文/
+  最大输入、64k最大输出；现有本机加密StepFun Plan凭据一次小探针HTTP200，requested/
+  served均step-5-preview，77tokens。凭据仅内存、日志不含key或思考正文，不从Windows借用。
+- 本机当前仅登记step-3.7-flash，context/output元数据为空；fixture亦硬编码转发3.7，
+  所以改UI标签不能冒充Step 5真实链路。下一次优先配置隔离验证的Step 5与已确认上下文，
+  不改变全局默认或旧B冻结绑定/旧验收；进程期限、清理保护及单步输出仍单独冻结。
+- 本批只证明Coding Plan模型可用和官方规格，不是NomiFun有效1M或B09/UI通过。收尾门控
+  草案尚未实现/提交，先作模型对照；原完整B、公开表达和真实Keychain仍OPEN。完整预检
+  外置step5-model-probe/run-001，官方来源https://platform.stepfun.com/docs/zh/guides/models/step-5-preview。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
