@@ -2262,6 +2262,7 @@ fn synchronize_adaptive_context(
                 crate::planning::TOOL_NAME
             } else {crate::completion::TOOL_NAME};
             if request.input.tools.iter().any(|tool|tool.name==name) {
+                request.input.tools.retain(|tool|tool.name==name);
                 request.input.tool_choice=ChatToolChoice::Specific {name:name.into()};
             }
         }
@@ -3596,14 +3597,17 @@ mod tests {
         #[async_trait] impl AgentModelPort for Model {
             async fn open_stream(&self,request:ChatModelRequest,_:CancellationToken)->Result<AgentModelStream,ChatModelError> {
                 let step=self.calls.fetch_add(1,Ordering::SeqCst);
-                let report=request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME).unwrap();
+                let report=request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME);
                 if self.required_mode {
                     assert!(request.input.tools.iter().all(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
                         |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ)),"report-only mode grants no platform tools");
                     assert_eq!(request.input.tool_choice,ChatToolChoice::Specific {name:if step==0 {crate::planning::TOOL_NAME} else {crate::completion::TOOL_NAME}.into()});
+                    assert_eq!(request.input.tools.len(),1,"a required control cannot compete with future phase controls");
                 }
-                assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"],if step>1 {1} else {0});
-                assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
+                if let Some(report)=report {
+                    assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"],if step>1 {1} else {0});
+                    assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
+                }
                 let events=if step==0 {
                     control_step("plan",crate::planning::TOOL_NAME,json!({"plan":[{"step":"整理所选历史结果","status":"in_progress"}]}))
                 } else if step>1 {
@@ -3613,7 +3617,7 @@ mod tests {
                     self.rejection_seen.store(true,Ordering::SeqCst);
                     vec![Err(ChatModelError::protocol_violation("controlled end after expected invalid evidence refusal"))]
                 } else {
-                    let origin=report.input_schema.0["properties"]["historical_results"]["items"]["properties"]["origin"]["enum"][0].clone();
+                    let origin=report.unwrap().input_schema.0["properties"]["historical_results"]["items"]["properties"]["origin"]["enum"][0].clone();
                     assert_eq!(origin["source_turn"],SOURCE);
                     let criterion=if self.forge_current {json!({"disposition":"supported","rationale":"forged current claim",
                         "evidence_call_ids":[origin["archive_id"].clone()]})}
