@@ -3714,5 +3714,7 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - canonical两段正文均持久化/非hidden，UI却把7277-byte首段折进过程区，仅显示1064-byte
   尾段。只读typed输出截断事件派生同Turn链接，renderer公开显示真实链，不重写旧正文/ID；
   不推断“续”文字/时间，不公开思考或工具前说明，缺前页明确提示。Rust2/UI101/type/
-  desktop/i18n定向通过，含纯思考防误链接；正式零模型冷读待验。Windows仅共享代码影响，
-  原平台结果不代判；外证据step5-b09-complete与continuation-cold。
+  desktop/i18n定向通过，含纯思考防误链接；`b78ac77a3`/同步合并`c7f02f926`正式同原数据
+  零模型冷读已公开首/尾正文并正常Cmd-Q0/67.485秒。原1457events/12Turns/14effects及
+  源/备份五表全同、双integrity/无自有PID或listener；不证明新生成语义或流中历史刷新前
+  展示。Windows仅共享代码影响，原平台结果不代判；外证据step5-b09-complete与continuation-cold。
