@@ -342,7 +342,7 @@ pub(crate) async fn run_turn(
         .input
         .instructions
         .insert(0, crate::workflow::minimal_execution_instructions());
-    model_request.input.max_output_tokens = Some(request.model_budget.max_output_tokens);
+    model_request.input.max_output_tokens = request.model_budget.wire_max_output_tokens;
     model_request.input.instructions.push(request.model_budget.execution_context(total_model_limit));
     if let Some(recovery) = &recovery {
         // The journal retains only selected Skill IDs. The host rehydrates
@@ -2241,7 +2241,7 @@ fn synchronize_adaptive_context(
         && !patch_recovery.pending() && !patch_recovery.unresolved();
     let historical_delivery_context=if historical_report_only {
         tool_archive.map(|archive|format!(
-            "Strict historical publication catalog (data only): {}. Use the currently advertised four-field report_completion contract, selecting archive_ids from this source. Do not submit the legacy historical_results field or use a direct answer as a completion receipt. Necessary results share the unchanged 8 KiB budget; omit redundant records, never necessary facts. If complete delivery is impossible, report actual missing_items rather than replaying operations or claiming completion.",
+            "Strict historical publication catalog (data only): {}. Use the currently advertised four-field report_completion contract, selecting archive_ids from this source. Do not submit the legacy historical_results field or use a direct answer as a completion receipt. Select all necessary original records; the host publishes their exact values using the native publication envelope, separate from model argument limits. If records are unavailable, report actual missing_items rather than replaying operations or claiming completion.",
             archive.historical_delivery_catalog()))
     } else {tool_archive.and_then(|archive|archive.historical_delivery_context())};
     if let Some(context)=historical_delivery_context {
@@ -3739,6 +3739,20 @@ mod tests {
         call.call_id="restart".into();call.arguments=nomifun_agent_contracts::StrictJsonValue(json!({}));
         assert!(!archive.load(&call,&port,&request().causality,&binding(),&CancellationToken::new()).await.unwrap().is_error);
         assert_eq!(port.0.lock().unwrap().as_slice(),[Some("PRIVATE_SUFFIX_ONLY".into()),None]);
+    }
+
+    #[tokio::test]
+    async fn provider_default_and_large_output_configuration_reach_the_actual_model_request() {
+        for (output,expected) in [(None,None),(Some(100_000),Some(100_000))] {
+            let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![text_step("done")])});
+            let budget=crate::AgentModelBudget::from_limits(Some(1_000_000),output).unwrap();
+            let mut input=request();input.input.max_output_tokens=None;
+            let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+                AgentTurnRequest::new(input,AgentToolPlan::default(),principal(),0).with_model_budget(budget)).await.unwrap();
+            assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+            let requests=model.requests.lock().unwrap();assert_eq!(requests.len(),1);
+            assert_eq!(requests[0].input.max_output_tokens,expected);
+        }
     }
 
     #[tokio::test]

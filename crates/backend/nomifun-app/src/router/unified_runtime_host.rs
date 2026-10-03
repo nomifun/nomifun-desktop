@@ -735,10 +735,10 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         .await?;
         // Unknown-limit fallback and output reservation are explicit policies;
         // use the same frozen observation as the Broker's inference request.
-        let (context, output) = facts.envelope_with_unknown_policy(super::engine_model_facts::EngineModelLimits {
+        let (context, _) = facts.envelope_with_unknown_policy(super::engine_model_facts::EngineModelLimits {
             context_tokens: Some(32_768), output_tokens: Some(4096), compaction_threshold_pct: None,
         }).ok_or_else(|| error("model limits cannot support Nomi context policy"))?;
-        let model_budget = AgentModelBudget::from_limits(Some(context), Some(output))
+        let model_budget = AgentModelBudget::from_limits(Some(context), facts.configured_output_ceiling())
             .and_then(|budget| budget.with_compaction_threshold_pct(facts.compaction_threshold_pct()))
             .map_err(error)?;
         let operation = admitted.operation_id().to_owned();

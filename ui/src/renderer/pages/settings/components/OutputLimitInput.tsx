@@ -120,7 +120,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
       {
         value: PROVIDER_DEFAULT_VALUE,
         label: t('settings.outputLimitDefaultOption', {
-          defaultValue: 'Default (provider decides)',
+          defaultValue: 'Default (provider/model)',
         }),
       },
       ...OUTPUT_LIMIT_PRESETS.map((preset) => ({
@@ -223,7 +223,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
       >
         {normalizedValue === undefined
           ? t('settings.outputLimitProviderDefault', {
-              defaultValue: 'Leave unset to use the provider default.',
+              defaultValue: 'Leave unset to use the provider/model default.',
             })
           : t('settings.outputLimitConverted', {
               value: formatOutputLimit(normalizedValue),

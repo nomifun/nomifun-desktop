@@ -15,8 +15,6 @@ import {
   type ModelProtocolManifestMap,
 } from './providerModelAdvanced';
 
-export const DEFAULT_REQUIRED_OUTPUT_LIMIT = 4_096;
-
 export type ProviderCompatibilityMode = 'auto' | 'openai' | 'anthropic';
 
 const OPENAI_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
@@ -302,9 +300,9 @@ export const selectProviderAutoConfiguration = (
     ...(best?.suggestedBaseUrl
       ? { suggestedBaseUrl: best.suggestedBaseUrl }
       : {}),
-    ...(selected.descriptor.requires_output_ceiling
-      ? { outputLimit: DEFAULT_REQUIRED_OUTPUT_LIMIT }
-      : {}),
+    // Protocol discovery is not a model output-limit recommendation. Required
+    // protocols must obtain an explicit value from verified model facts or
+    // the user's configuration; optional protocols keep the provider default.
   };
 };
 
@@ -350,7 +348,7 @@ export const applyProviderCompatibilityMode = (
           realtimeEndpoint: '',
           allowCrossOriginCredentials: false,
           providerParamsJson: '',
-          outputLimit: undefined,
+          outputLimit: capability.outputLimit,
         };
       }),
     };
@@ -378,7 +376,7 @@ export const applyProviderCompatibilityMode = (
             realtimeEndpoint: '',
             allowCrossOriginCredentials: false,
             providerParamsJson: '',
-            outputLimit: undefined,
+            outputLimit: capability.outputLimit,
           };
         }
         return capability;
@@ -410,14 +408,9 @@ export const applyProviderCompatibilityMode = (
               providerParamsJson: '',
             }
           : {}),
-        outputLimit:
-          protocol === 'anthropic.messages'
-            ? resetTransport
-              ? DEFAULT_REQUIRED_OUTPUT_LIMIT
-              : capability.outputLimit ?? DEFAULT_REQUIRED_OUTPUT_LIMIT
-            : resetTransport
-              ? undefined
-              : capability.outputLimit,
+        // A transport switch must not replace a configured model limit with
+        // a guessed universal value, or erase an explicit customization.
+        outputLimit: capability.outputLimit,
       };
     }),
   };
