@@ -307,6 +307,7 @@ junction = "1"
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 chromiumoxide.workspace = true
 nomi-process-runtime.workspace = true
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }

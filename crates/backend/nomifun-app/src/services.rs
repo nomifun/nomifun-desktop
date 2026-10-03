@@ -2971,6 +2971,42 @@ mod tests {
         assert_eq!(factory.calls.load(Ordering::Acquire),2,"acknowledged native success is not re-entered");
     }
 
+    #[cfg(feature="browser-use")]
+    #[tokio::test]
+    async fn assembled_pairing_timer_is_joined_before_a_blocked_native_close() {
+        let db=nomifun_db::init_database_memory().await.unwrap();let root=tempfile::tempdir().unwrap();
+        let mut services=AppServices::from_config(db,&test_config(root.path())).await.unwrap();
+        let canonical=nomifun_conversation::CanonicalAgentSessionOwner::from_pool(services.database.pool().clone()).await.unwrap();
+        let owner=Arc::new(crate::router::nomi_core_session::NomiCoreSessionOwner::new(
+            canonical,services.agent_runtime_sessions.clone(),services.event_bus.clone(),services.background_tasks.clone(),
+            services.work_dir.join("conversations"),services.database.pool().clone(),services.creation_service.clone()));
+        let before=services.background_tasks.state.lock().unwrap().tasks.iter().map(JoinHandle::id).collect::<Vec<_>>();
+        let (_state,_components)=crate::router::build_channel_state(&services,owner).await;
+        let timer={let state=services.background_tasks.state.lock().unwrap();
+            let added=state.tasks.iter().filter(|task|!before.contains(&task.id())).collect::<Vec<_>>();
+            assert_eq!(added.len(),1,"actual channel assembly must register exactly its pairing timer");
+            added[0].abort_handle()};
+        let factory=Arc::new(StorageIndependentFactory {database:services.database.clone(),entered:Arc::new(tokio::sync::Notify::new()),
+            release:Arc::new(tokio::sync::Semaphore::new(0)),calls:AtomicUsize::new(0),fail_once:AtomicBool::new(false)});
+        services.browser_resources=Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(factory.clone())));
+        let services=Arc::new(services);let closing=services.clone();
+        let wait=tokio::spawn(async move {closing.shutdown_nomi_core_host().await});
+        factory.entered.notified().await;
+        assert!(services.database.pool().is_closed());assert!(timer.is_finished(),"the actual pairing task must finish before native entry");
+        assert_eq!(services.background_tasks.snapshot(),(BackgroundTaskRegistryPhase::Closed,0));
+        // SQLite's real worker must initialize under wall time. Only freeze
+        // the clock after its pool is closed and the native gate is entered.
+        // Keep one runnable task so paused time cannot auto-run a native timeout.
+        tokio::time::pause();
+        let keep_running=tokio::spawn(async {loop {tokio::task::yield_now().await;}});
+        tokio::time::advance(nomifun_channel::constants::PAIRING_CLEANUP_INTERVAL*2).await;
+        tokio::task::yield_now().await;
+        assert!(!wait.is_finished(),"native close remains deliberately held, not a fake successful exit");
+        assert!(timer.is_finished());assert_eq!(services.background_tasks.snapshot(),(BackgroundTaskRegistryPhase::Closed,0));
+        tokio::time::resume();keep_running.abort();let _=keep_running.await;
+        factory.release.add_permits(1);wait.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_storage_waiter_keeps_owned_close_worker_for_retry() {
         let db=nomifun_db::init_database_memory().await.unwrap();let root=tempfile::tempdir().unwrap();

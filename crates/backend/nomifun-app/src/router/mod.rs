@@ -84,6 +84,9 @@ mod routes;
 mod state;
 mod trace;
 
+#[cfg(test)]
+pub(crate) use state::build_channel_state;
+
 pub use routes::{
     create_router, create_router_with_all_state, create_router_with_states, try_create_router,
 };
