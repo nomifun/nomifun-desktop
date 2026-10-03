@@ -921,7 +921,7 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   invalidation规则：已存在plan才由context refresh抬replan，已被steering/recovery抬起的gate
   不清除，规则完整装配/权限不变。同夹具2个host reads/模型owner0/首轮report，stale-plan
   及既有patch/steering/current伪证邻近Runtime323/1ignored通过。正式采用待验，证据另记
-  history-report-bootstrap；不再靠无read authority组件冒充正式接线。
+  history-report-instruction-entry；不再靠无read authority组件冒充正式接线。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 

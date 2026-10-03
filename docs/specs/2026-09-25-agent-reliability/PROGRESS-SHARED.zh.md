@@ -3853,4 +3853,4 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   无模型call/无report，旧数据与效果保持、native0；不以正文宣称完成代判采用。
   增加非空AGENTS授权read真实接线最小首红，再沿已有context空plan规则修复；已存在plan
   或steering/recovery gate仍要求replan，规则内容/权限无变化。host2reads/modelowner0、
-  strict单请求与stale-plan及Runtime323/1ignored通过；新正式待验，证据history-report-bootstrap。
+  strict单请求与stale-plan及Runtime323/1ignored通过；新正式待验，证据history-report-instruction-entry。
