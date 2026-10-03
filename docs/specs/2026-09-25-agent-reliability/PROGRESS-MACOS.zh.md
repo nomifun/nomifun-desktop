@@ -527,6 +527,15 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   原B failed Turn和全部首败保留；CEF/Keychain未用，不代判其风险。完整日志/截图/数据库/
   public reply/HTTP在外部history-upgrade-report；Windows结果未改，不重发旧操作。
 
+- 修后正式源`30c274dee`再次封存 **FAIL**：2请求（1摘要+1主模型）、1步、35新events，
+  scoped旧回复确实进入摘要输入、当前reader说明与LOAD schema确实进入主请求，但模型
+  仍零历史查询并重复错误文件缺失结论。不是修复包错版或loader不可见；无新机制不再付费
+  复跑/纯文案微调。后续聚焦检索/缺失结论路径，不能靠旧摘要或普通完成终态判完整交付。
+- 此次正式Cmd-Q0/52.473秒/noexpiry/noTERM/noKILL，1238/1/1/6/14五表与源库全同、
+  原1203 prefix及14effects精确同/双库integrity ok；新owner效果0。外部history-scope-recheck
+  独立审计/公开回复/HTTP/UI/源码包与旧失败分开。原A N1复用、B完整报告/公开语言及真实
+  Keychain仍OPEN，不代判Windows或恢复阶段全范围认证。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
