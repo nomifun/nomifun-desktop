@@ -4193,3 +4193,4 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 第二新库/隔离work/profile PID64760、14:19:47启动；退出前实际UI一条运行中命令，canonical Turn running/pause0/tool_started1/tool_finished0，独立OS快照证明78632→75392→8076三层树及原路径/出生UTC。用户实际选托盘Quit，原持有OS句柄记录14:23:12.158实际exit0，没有原生API退出、窗口关闭或观察器kill。
 - 同Turn仅一次cancelled，无paused/completed；原exec回执cancelled/success=false、reaped=true/errors空、清理162ms，非退出失败。模型调用仍1/等待流0、付费0，原初始事件及活动前缀逐行保持、915 bytes脚本/SHA不变，后代/监听0；fixture自然exit0。独立限定核对16/16，原通用review未计算的false占位另由`verified-live-review.json`明确解释，不改首例失败。独立核对脚本首次误读output层级失败保留，纠正观察器后读取同一库，无任务重跑。
 - 完整制品外部`2026-10-03/windows/w274-active-tray-quit`含两例原UI/DB、前提失败、人工确认、实际退出码/进程身份及冷核对。关闭当前正式运行中托盘入口和活树清理缺口，复用W264真实写锁失败exit1；不代判其他退出故障分支、OS重启、完整WIN平台/共享生成/发布认证。所有自有GUI/helper/树/Cargo已结束，全面目标仍active。
+- 正常合入远端386ba1e08/3f144f2c3/506ac463d，合并39f795f05；Windows配置冻结/下一Turn刷新/实时安全检查3/3、实际路由模型切换集成1/1、闭Turn引用导入1/1通过，没有重跑其他已验链。该同步不把a109正式样本身份改成合并后产物，也不代判新的配置切换正式UI或macOS退出专项。65份外部文本凭据审计0命中，后续本地测试日志未使用真实供应商凭据。
