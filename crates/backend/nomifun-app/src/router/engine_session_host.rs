@@ -509,9 +509,18 @@ impl EngineSessionHost {
         &self,
         gate: Arc<dyn nomifun_chat_model_broker::ChatCausalityGate>,
     ) -> Result<Arc<dyn nomifun_chat_model_broker::EngineModelPort>, AppError> {
-        let invoke = self.broker.build_model_invoke(self.http.clone());
-        let broker = self
-            .broker
+        self.compose_model_port_with_configuration(gate, None)
+    }
+
+    pub(super) fn compose_model_port_with_configuration(
+        &self,
+        gate: Arc<dyn nomifun_chat_model_broker::ChatCausalityGate>,
+        configuration: Option<super::chat_broker_host::TurnModelConfiguration>,
+    ) -> Result<Arc<dyn nomifun_chat_model_broker::EngineModelPort>, AppError> {
+        let composition = configuration.map(|view| self.broker.for_turn_configuration(view))
+            .unwrap_or_else(|| self.broker.clone());
+        let invoke = composition.build_model_invoke(self.http.clone());
+        let broker = composition
             .build_broker(
                 gate,
                 invoke,
@@ -521,6 +530,27 @@ impl EngineSessionHost {
         Ok(Arc::new(
             nomifun_chat_model_broker::BrokerEngineModelPort::new(broker),
         ))
+    }
+
+    pub(super) async fn capture_turn_model_configuration(
+        &self, receipt: &EngineTurnReceipt, configuration: &super::chat_broker_host::TurnModelConfiguration,
+    ) -> Result<super::engine_model_facts::EngineRouteModelFacts, AppError> {
+        if !receipt.belongs_to(&self.source) {
+            return Err(AppError::Conflict("model configuration receipt belongs to another Host".into()));
+        }
+        let identity = receipt.session().snapshot().content.chat_route_identity.as_ref()
+            .ok_or_else(|| AppError::Conflict("Turn has no exact model identity".into()))?;
+        let record = receipt.session().revision().payload.chat_route_records.get(&identity.model_task)
+            .ok_or_else(|| AppError::Conflict("Turn model configuration is missing".into()))?;
+        record.validate_for(identity).map_err(|error| AppError::Conflict(error.to_string()))?;
+        configuration.capture(&self.pool, receipt.operation_id(), record).await
+            .map_err(|error| match error {
+                nomifun_chat_model_broker::ProductionRepositoryError::InvalidData => AppError::SessionConfigurationChanged(
+                    "Model configuration changed before Turn preparation; resend after the current Turn settles".into()),
+                error => AppError::Conflict(format!("Turn model configuration unavailable: {error}")),
+            })?;
+        configuration.model_facts(identity, record)
+            .map_err(|_| AppError::Conflict("Turn model limits are invalid".into()))
     }
 
     pub async fn read_history(

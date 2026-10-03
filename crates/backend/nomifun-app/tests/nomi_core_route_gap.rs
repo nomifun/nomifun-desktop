@@ -1566,6 +1566,7 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";
     const SECOND_REPLY: &str = "SECOND_MODEL_REPLY";
     const THIRD_REPLY: &str = "TARGET_AGENT_REPLY";
+    const FOURTH_REPLY: &str = "CONFIG_DOWNGRADE_REPLY";
 
     async fn call(
         router: axum::Router,
@@ -1679,7 +1680,9 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         .and(wiremock::matchers::path("/v1/chat/completions"))
         .respond_with(move |request: &wiremock::Request| {
             let body = request.body_json::<Value>().unwrap();
-            let reply = if body.to_string().contains("third turn") {
+            let reply = if body.to_string().contains("fourth turn") {
+                FOURTH_REPLY
+            } else if body.to_string().contains("third turn") {
                 THIRD_REPLY
             } else if body["model"] == "model-two" {
                 SECOND_REPLY
@@ -1804,12 +1807,13 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         .expect("coding Session workspace");
     tokio::fs::create_dir_all(workspace).await.unwrap();
 
+    let first_key = uuid::Uuid::now_v7().to_string();
     let (status, first_turn) = call(
         router.clone(),
         "POST",
         &format!("/api/agent-sessions/{session_id}/turns"),
         json!({
-            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "idempotency_key": first_key,
             "input": { "content": "first turn" }
         }),
     )
@@ -1876,6 +1880,36 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         "reselecting the current model must be idempotent"
     );
 
+    // Normal model configuration changes must be usable on the next Turn
+    // without reselecting the same model or rebuilding this conversation.
+    let (status, configured_model) = call(
+        router.clone(), "PUT", "/api/provider-models", json!({
+            "provider_id": second_model["provider_id"],
+            "model": {
+                "model": "model-two", "enabled": true,
+                "capabilities": [{
+                    "task": "chat", "traits": ["vision_input"],
+                    "context_limit": 1000000, "output_limit": 4096,
+                    "protocol": "openai.chat_text", "connection_role": "default",
+                    "provider_params": {"reasoning_effort": "medium"}
+                }]
+            }
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{configured_model}");
+    let (status, replay) = call(
+        router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({"idempotency_key": first_key, "input": {"content": "first turn"}}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["data"]["operation_id"], first_turn["data"]["operation_id"]);
+    assert_eq!(model_requests.lock().unwrap().len(), 1, "redelivery must not call a new model");
+    let (status, conflict) = call(
+        router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({"idempotency_key": first_key, "input": {"content": "changed old turn"}}),
+    ).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+
     let (status, second_turn) = call(
         router.clone(),
         "POST",
@@ -1888,6 +1922,23 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     .await;
     assert_eq!(status, StatusCode::OK, "{second_turn}");
     wait_for_reply(router.clone(), session_id, SECOND_REPLY).await;
+    {
+        let wire=model_requests.lock().unwrap();
+        assert_eq!(wire[1]["reasoning_effort"],"medium","new model parameter must reach the next actual request");
+        assert_eq!(wire[1]["max_tokens"],4096);
+    }
+    let (status,config_refreshed)=call(router.clone(),"GET",&format!("/api/agent-sessions/{session_id}/projection"),json!({})).await;
+    assert_eq!(status,StatusCode::OK,"{config_refreshed}");
+    assert_eq!(config_refreshed["data"]["agent_snapshot"]["canonical_binding"]["binding_version"].as_u64(),
+        switched_binding["binding_version"].as_u64().map(|version|version+1));
+    assert_eq!(config_refreshed["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"],
+        switched_binding["typed_resource_bindings"]);
+    let (status, reasoning) = call(
+        router.clone(), "PUT",
+        &format!("/api/agent-sessions/{session_id}/reasoning-effort"),
+        json!({"reasoning_effort": "high"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{reasoning}");
 
     // Add one exact, canonical closed Turn with a structured plan so the switch
     // exercises deterministic continue_task export/import without asking a
@@ -1905,6 +1956,11 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         .chat_causality_facts(&session_contract, &second_operation)
         .await
         .unwrap();
+    assert!(second_facts.event_payloads.values().any(|payload| {
+        let event=&payload["event"];
+        event["event"]=="execution_budget_prepared" && event["context_window_tokens"]==1_000_000
+            && event["max_output_tokens"]==4096
+    }),"updated context/output configuration must be effective at the runtime boundary");
     let source_engine_binding = second_facts
         .events
         .iter()
@@ -2223,6 +2279,8 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         .map(|request| request["model"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(models, vec!["model-one", "model-two", "model-two"]);
+    assert_eq!(requests[2]["reasoning_effort"], "high",
+        "the explicit Session intelligence setting must reach the actual request");
     assert!(
         requests[1].to_string().contains(FIRST_REPLY),
         "the replacement Runtime must continue from the same durable history"
@@ -2279,6 +2337,53 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
         message["content"]["agent_transition"]["next_preset_id"] == minimal_preset_id
             && message["content"]["agent_transition"]["next_template_key"] == "chat.minimal"
     }), "{localized_history}");
+
+    // Removing reasoning support must also remove the incompatible Session
+    // override, rather than keeping an unusable old wire parameter.
+    let (status, downgraded_model) = call(
+        router.clone(), "PUT", "/api/provider-models", json!({
+            "provider_id": second_model["provider_id"],
+            "model": {
+                "model": "model-two", "enabled": true,
+                "capabilities": [{
+                    "task": "chat", "traits": [],
+                    "context_limit": 1000000, "output_limit": 4096,
+                    "protocol": "openai.chat_text", "connection_role": "default",
+                    "provider_params": {}
+                }]
+            }
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{downgraded_model}");
+    // Technical reasoning support is provider-observed health, not a user
+    // Chat input trait. Supply that host fact in this isolated fixture.
+    {
+        use nomifun_db::{IProviderModelCapabilityRepository, SqliteProviderModelCapabilityRepository};
+        let provider_id = second_model["provider_id"].as_str().unwrap();
+        let revision: i64 = sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id = ?")
+            .bind(provider_id).fetch_one(services.database.pool()).await.unwrap();
+        assert!(SqliteProviderModelCapabilityRepository::new(services.database.pool().clone())
+            .mark_technical_capability_unsupported(provider_id, revision, "model-two", "chat", "reasoning")
+            .await.unwrap());
+    }
+    let (status, fourth_turn) = call(
+        router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({"idempotency_key": uuid::Uuid::now_v7().to_string(), "input": {"content": "fourth turn"}}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{fourth_turn}");
+    wait_for_reply(router.clone(), session_id, FOURTH_REPLY).await;
+    let (status, downgraded_projection) = call(
+        router.clone(), "GET", &format!("/api/agent-sessions/{session_id}/projection"), json!({}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{downgraded_projection}");
+    assert!(downgraded_projection["data"]["reasoning_effort"].is_null());
+    {
+        let requests = model_requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[3]["model"], "model-two");
+        assert!(requests[3].get("reasoning_effort").is_none(),
+            "removed reasoning capability must be reflected on the next actual request");
+    }
 
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;

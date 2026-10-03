@@ -3636,3 +3636,26 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   （5摘要+1主步）仍零正文查询，重复错误文件缺失结论，严格Case仍FAIL。原效果/prefix与
   五表冷封存、正常退出通过；不归为数据读不到或入口不可见，下一聚焦正文/完成路径，
   不再同机制文案复跑。外证据history-reference-load；Windows原结果不改。
+
+### Session模型配置变更与数据历史兼容（2026-10-03，macOS确定性先验）
+
+- 已保存路由不刷新，但Runtime读到新限制，会使普通上下文/参数修改被旧摘要校验阻断；
+  下一本机空闲新Turn按原选模型解析、在Session写fence下CAS仅Chat绑定，其他Agent/
+  资源合同不变。不兼容推理覆盖按已有模型切换规则清除，旧key保持原admission/完整
+  输入冲突检查且不重放。远端、Attempt、active Turn和恢复绑定不自动改写。
+- 受控工具archive接入已有host仅模型Snapshot兼容证明，默认false；完整journal、原
+  binding、Session/runtime/build合同继续验证，只导入数据而非权限、恢复或新鲜性。
+- App公开保存→下一请求四轮验证通过：模型切换、vision/1M/4096/medium、Session high、
+  供应商negative reasoning后的参数撤销，原历史保留/资源不变/旧key无重放。archive4、
+  引用3及fixture9通过，原301 Runtime基线复用；三次夹具/安排失败外留、不吞错改PASS。
+  本批无真实模型请求或正式UI样本，active全局配置并发修改仍待闭环；Windows不代判。
+  外证据2026-10-03/macos/step5-b09-closure/run-001-build。
+
+### 运行Turn模型推理配置视图（2026-10-03，macOS确定性先验）
+
+- trusted准备捕获本Turn非安全模型字段，预算/request共用，终态或durable失败暂停清除；
+  每次仍用实时安全字段重建原exact digest，凭据/启用/URL/协议/连接不冻结或旁路。
+  捕获前保存失配明确首调用前失败，仍有admission→capture小窗口，未称全并发丝滑。
+- 三项定向resolver→target→wire回归及既有公开API四轮链通过：当前旧值、下一轮新值、
+  八种安全修改/任务删除拒绝、无跨Turn视图。未调用真实模型或正式UI，不代判Windows。
+  外证据step5-b09-closure/run-001-build，原完整报告/Keychain未因此关闭。

@@ -349,6 +349,18 @@ impl Engine {
             monitor_gate.store(1,Ordering::Release);
             #[cfg(debug_assertions)]
             eprintln!("CEF_SHUTDOWN phase=native_entry elapsed_ms={}", shutdown_started.elapsed().as_millis());
+            #[cfg(debug_assertions)]
+            if host_storage_closed && shutdown_state::hold_native_entry(&engine.root) {
+                // Exercise the actual post-storage-close guardian/monitor with
+                // an occupied main thread after real CEF use. This explicit
+                // boundary fixture has NOT called cef_shutdown; its log must
+                // never be accepted as a CEF-internal or Keychain reproduction.
+                eprintln!("CEF_SHUTDOWN phase=native_entry_held_fixture actual_cef_shutdown_called=false host_storage_closed=true");
+                // No altered timeout or synthetic completion: only the
+                // production independent monitor can terminate this process
+                // after exact Helper cleanup and guardian Stop/join proof.
+                loop { std::thread::park(); }
+            }
             shutdown();
             engine.stopped.mark_native_returned();
             let returned=engine.guardian.native_returned();
