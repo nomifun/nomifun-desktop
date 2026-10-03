@@ -25,8 +25,38 @@ fn invalid() -> AgentEngineError {
     )
 }
 
+impl HistoryPort {
+    fn require_causality(&self, causality: &ChatCausality) -> Result<(), AgentEngineError> {
+        if causality.agent_session_id.as_ref() != self.receipt.session().session().conversation_id
+            || causality.turn_operation_id.as_ref() != self.receipt.operation_id()
+            || causality.causation_event_id.as_ref() != self.receipt.root_message_id()
+            || causality.resolved_snapshot_ref != self.receipt.session().snapshot().snapshot_ref
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl AgentHistoryPort for HistoryPort {
+    async fn model_snapshot_compatible(
+        &self,
+        causality: &ChatCausality,
+        source: &nomifun_agent_contracts::ResolvedSnapshotRef,
+    ) -> Result<bool, AgentEngineError> {
+        self.require_causality(causality)?;
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        let compatible = self.host
+            .historical_model_binding_compatible(self.receipt.session(), source)
+            .await.map_err(|_| invalid())?;
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        Ok(compatible)
+    }
     async fn read_previous(
         &self,
         causality: &ChatCausality,
@@ -35,13 +65,7 @@ impl AgentHistoryPort for HistoryPort {
         if self.cancellation.is_cancelled() {
             return Err(AgentEngineError::Cancelled);
         }
-        if causality.agent_session_id.as_ref() != self.receipt.session().session().conversation_id
-            || causality.turn_operation_id.as_ref() != self.receipt.operation_id()
-            || causality.causation_event_id.as_ref() != self.receipt.root_message_id()
-            || causality.resolved_snapshot_ref != self.receipt.session().snapshot().snapshot_ref
-        {
-            return Err(invalid());
-        }
+        self.require_causality(causality)?;
         let mut window = self
             .host
             .read_history_before(&self.receipt, 1, before_operation)

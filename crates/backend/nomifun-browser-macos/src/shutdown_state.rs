@@ -44,6 +44,22 @@ pub(super) fn lose_completion_ack(root: &std::path::Path) -> bool {
     acknowledgement_scope_matches(root, &key)
 }
 
+/// An additional explicit debug mode may hold the main-thread native entry
+/// boundary before calling CEF. It reuses the existing isolated-root UUID
+/// capability, never changes the production deadline, and does not simulate
+/// a CEF-internal or system Keychain wait.
+#[cfg(debug_assertions)]
+pub(super) fn hold_native_entry(root: &std::path::Path) -> bool {
+    let Ok(mode) = std::env::var("NOMIFUN_RELIABILITY_CEF_SHUTDOWN_FAULT") else { return false; };
+    let Ok(key) = std::env::var("NOMIFUN_RELIABILITY_CEF_ACK_LOSS_KEY") else { return false; };
+    native_entry_hold_scope_matches(root, &mode, &key)
+}
+
+#[cfg(debug_assertions)]
+fn native_entry_hold_scope_matches(root: &std::path::Path, mode: &str, key: &str) -> bool {
+    mode == "native-entry-hold" && acknowledgement_scope_matches(root, key)
+}
+
 #[cfg(debug_assertions)]
 fn acknowledgement_scope_matches(root: &std::path::Path, key: &str) -> bool {
     let Ok(id) = uuid::Uuid::parse_str(key) else { return false; };
@@ -113,14 +129,22 @@ mod tests {
         let root = data.path().join("browser-v3/agent-sessions");
         let key = "01a0fbba-4472-7c02-a40f-1c1a3104669d";
         assert!(!acknowledgement_scope_matches(&root, key));
+        assert!(!native_entry_hold_scope_matches(&root, "native-entry-hold", key));
         std::fs::write(data.path().join(".reliability-cef-ack-loss"), key).unwrap();
         assert!(acknowledgement_scope_matches(&root, key));
+        assert!(native_entry_hold_scope_matches(&root, "native-entry-hold", key));
+        for mode in ["", "ack-loss", "NATIVE-ENTRY-HOLD", "native-entry-hold\n"] {
+            assert!(!native_entry_hold_scope_matches(&root, mode, key));
+        }
         assert!(!acknowledgement_scope_matches(&root, "01a0fbba-4472-7c02-a40f-1c1a3104669e"));
+        assert!(!native_entry_hold_scope_matches(&root, "native-entry-hold", "01a0fbba-4472-7c02-a40f-1c1a3104669e"));
         assert!(!acknowledgement_scope_matches(&root, "not-a-key"));
         assert!(!acknowledgement_scope_matches(&root, &key.to_uppercase()));
         assert!(!acknowledgement_scope_matches(&data.path().join("other/agent-sessions"), key));
+        assert!(!native_entry_hold_scope_matches(&data.path().join("other/agent-sessions"), "native-entry-hold", key));
         assert!(!acknowledgement_scope_matches(&data.path().join("browser-v3/Default"), key));
         std::fs::write(data.path().join(".reliability-cef-ack-loss"), format!("{key}\n")).unwrap();
         assert!(!acknowledgement_scope_matches(&root, key));
+        assert!(!native_entry_hold_scope_matches(&root, "native-entry-hold", key));
     }
 }

@@ -573,6 +573,51 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   草案尚未实现/提交，先作模型对照；原完整B、公开表达和真实Keychain仍OPEN。完整预检
   外置step5-model-probe/run-001，官方来源https://platform.stepfun.com/docs/zh/guides/models/step-5-preview。
 
+#### 正常模型配置变更的下一轮生效（2026-10-03，用户明确补充）
+
+- 本项只补模型/能力/上下文/推理设置的实际生效链，不重开模型管理CRUD或历史矩阵。发现
+  已保存Session路由仍持旧配置摘要，而Runtime读取新限制，可能在下一请求被Broker精确
+  校验拒绝；工具历史archive又比普通会话历史更严格，合法仅模型变化会拒绝旧Snapshot。
+- 空闲、本机、非Attempt的新Turn在同Session写fence下，按原选择的provider/model重新
+  解析配置并CAS更新仅Chat路由；Agent指令、能力授权和typed资源保持原合同。新模型
+  不支持原Session推理强度时清除该不兼容覆盖，沿用显式切换模型的既有规则。原Turn/
+  旧结果不改；exact-key重送使用原admission并校验完整输入，不调用新模型或重做效果。
+- archive复用宿主已有的仅模型Snapshot兼容证明；默认拒绝，仍验证Session/runtime/
+  build合同、完整journal及原source_binding，不授予恢复或执行权限、不赋予历史新鲜性。
+  fixture支持显式Step5与1,000,000上下文，实际转发模型和登记模型一致；输出4096、
+  时限/清理限制独立不变，未更改用户全局模型或读取明文凭据。
+- 本机arm64/macOS26.6.2(25G83)/非大小写敏感APFS；确定性App API→Broker→Runtime
+  四请求通过：model-one→model-two、公开配置保存vision/context/output/medium无需重选
+  即生效、Session high实际入wire、供应商负向reasoning事实后下一轮无旧参数；历史回复
+  保留、资源不变、旧key无重放且改输入仍冲突。中途能力下降导致后续同Agent选择变为
+  no-op的测试安排已拆到原断言之后，不改其预期；非法traits/不完整health夹具初错均外留。
+- 定向archive 4通过/1外部输入ignored，引用读取3通过，fixture预算/模型DTO9通过；
+  原Runtime301通过基线复用。此层不是正式Tauri/Step5整链，也未关闭执行中途保存全局
+  配置的并发边界；Broker每次invocation仍核对实时配置，不能宣称该分支已丝滑验证。
+  原B完整报告、公开表达及真实Keychain保持OPEN，原A N1复用。证据在
+  step5-b09-closure/run-001-build，Windows结果未改写。
+
+#### 运行中保存推理配置不混代（2026-10-03）
+
+- 确认全局模型保存立即替换capability，后续Broker旧exact digest会拒绝；Session专用
+  模型/强度PUT的active guard原本正确，未放宽。Runtime现在在trusted Turn准备中捕获
+  traits/params/context/output/压缩阈值，预算与请求用同一视图；终态或持久失败暂停清除。
+- 每次仍以实时安全字段＋原非安全字段重建原完整digest并精确核对；凭据/启用/地址/
+  endpoint/protocol/connection变化仍拒绝，不缓存旧凭据或扩权限。捕获前已变更则首次
+  模型调用前明确配置变化并失败，保留小型admission→capture竞态，不假称无限并发丝滑。
+- 三项定向生产resolver/目标/wire回归验证本轮low/2048/32k/75%、下一轮high/4096/1M/80%，
+  八种安全变更和任务删除拒绝、错Turn不能清除/复用、捕获失配不发布部分视图；已有
+  四轮公开API链继续通过。无真实模型/UI样本；证据step5-b09-closure/run-001-build。
+
+#### 已用CEF的生产失败保护正式验证准备（2026-10-03）
+
+- 复用debug隔离根/精确UUID标记，新增仅host_storage_closed后的native-entry-hold：
+  实际Browser使用、guardian已确认entry、独立生产monitor已启用后让主线程不返回。
+  实际cef_shutdown尚未调用，日志明确false；不能记成Keychain/CEF内部阻塞复现。
+- 四项shutdown-state回归通过；release无入口，原30+5秒、精确Helper清理与guardian
+  Stop/join、不明证明不紧急退出的底线不变。正式normal/held各独立零模型运行待验，
+  只计划共用本轮同一个最新正式包，不重跑旧ack-loss或矩阵。外证据guardian-live-exit。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为

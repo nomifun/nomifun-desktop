@@ -378,13 +378,16 @@ pub(crate) fn factory(
                 active: tokio::sync::Mutex::new(None),
                 last_terminal_root: std::sync::Mutex::new(None),
                 unstarted_cancelled_root: std::sync::Mutex::new(None),
+                model_configuration: Default::default(),
                 tools: tools.clone(),
                 resources: resources.clone(),
                 supervision,
             });
             #[cfg(test)]
             reliability_tests::capture_host(&host);
-            let model = host.session_host.compose_model_port(host.clone())?;
+            let model = host.session_host.compose_model_port_with_configuration(
+                host.clone(), Some(host.model_configuration.clone()),
+            )?;
             let model = resources.wrap_model_middleware(model)?;
             let runtime =
                 UnifiedAgentRuntime::new(&options, engine, engine_binding, model, tools, host)?;
@@ -440,6 +443,7 @@ struct ConversationRuntimeHost {
     active: tokio::sync::Mutex<Option<ActiveTurn>>,
     last_terminal_root: std::sync::Mutex<Option<String>>,
     unstarted_cancelled_root: std::sync::Mutex<Option<String>>,
+    model_configuration: super::chat_broker_host::TurnModelConfiguration,
     tools: Arc<JoinedTools>,
     resources: Arc<super::engine_kernel_session::EngineKernelSession>,
     supervision: Arc<dyn nomifun_idmm::IdmmProgressSink>,
@@ -584,6 +588,8 @@ impl ConversationRuntimeHost {
         }
         self.append_locked_record(turn, payload, model_operation, terminal).await?;
         if terminal {
+            self.model_configuration.clear(&turn.operation)
+                .map_err(|_| error("terminal model configuration belongs to another Turn"))?;
             *self
                 .last_terminal_root
                 .lock()
@@ -633,6 +639,8 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let Some(turn) = active.as_ref() else { return Ok(false); };
         if turn.root != self.root(message) { return Err(error("cleanup suspension targets another Turn")); }
         turn.journal.pause_with_unproven_cleanup().await?;
+        self.model_configuration.clear(&turn.operation)
+            .map_err(|_| error("paused model configuration belongs to another Turn"))?;
         *self.last_terminal_root.lock().map_err(|_|error("terminal root state poisoned"))? = Some(turn.root.clone());
         *active = None;
         Ok(true)
@@ -712,15 +720,21 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .as_deref()
             .unwrap_or(&message.msg_id);
         let admitted = self.admit_preparation(message, cancellation.clone()).await?;
+        // One trusted observation freezes inference settings for THIS Turn.
+        // A save before capture must still match the original exact graph;
+        // a save afterward cannot mix its new budget/wire fields into this Turn.
+        // Credentials, enabled state, transport and health remain live fences.
+        let facts = self.session_host.capture_turn_model_configuration(
+            &admitted, &self.model_configuration,
+        ).await?;
         let patch_recovery = super::runtime_patch_recovery::load(
             self.session_host.as_ref(),
             &admitted,
             &self.snapshot_ref,
         )
         .await?;
-        // Refresh platform facts each turn. Unknown-limit fallback and output
-        // reservation are explicit runtime policies, not platform defaults.
-        let facts = self.session_host.read_model_facts(admitted.session()).await?;
+        // Unknown-limit fallback and output reservation are explicit policies;
+        // use the same frozen observation as the Broker's inference request.
         let (context, output) = facts.envelope_with_unknown_policy(super::engine_model_facts::EngineModelLimits {
             context_tokens: Some(32_768), output_tokens: Some(4096), compaction_threshold_pct: None,
         }).ok_or_else(|| error("model limits cannot support Nomi context policy"))?;
@@ -1242,6 +1256,7 @@ impl ChatCausalityGate for ConversationRuntimeHost {
             || causality.causation_event_id.as_ref() != turn.root
             || causality.resolved_snapshot_ref != self.snapshot_ref
             || causality.route_identity != self.route
+            || !self.model_configuration.belongs_to(&turn.operation)
         {
             return Err(reject(
                 "Nomi request differs from its admitted Conversation authority",
