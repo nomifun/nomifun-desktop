@@ -4267,3 +4267,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - B实际修复提交41a689a00，原红回归及修后8/8/boundary保持。push首先被远端更新正常拒绝，随后正常合并577ad3f44/0da91c71a历史结果公开来源；Windows定向18/18通过，ignored owned项另外1/1通过，原结果16/16/28127bytes/遗漏0、无owner调用，合并后renderer8/8通过。组件不是Windows正式模型/新UI采用，原Mac NOT_SELECTED/表达FAIL也不改PASS。
 - C只交付预部署自动采样草案（固定时钟/原OS句柄/真实lease门禁），接纳回调与真实冷启动器未接合；D只冻结迟到resize未应用的正式呈现并保存carrier候选，接口未验/未就绪，原准备盒到线停止。均未执行新样本、无产品修改或PASS，不把候选代码/说明当闭环进度。
 - 自有GUI/模型转发/Cargo/原Bun及后代/监听均已结束。仍开放：旧wire缺证与步骤/guard/LF/复杂生成；新历史正文/公开结构/typed续接及中文修复正式采用；W276和成功冷恢复；S3 ACK、跨盘/真实UNC及平台其余边界。正式活树托盘Quit W274已通过可复用，W276实际exit1仍未解释；完整共享、Windows和发布认证未完成。
+
+### 全局B 中文非零尾注的正式Tauri呈现（2026-10-03；限定UI子断言通过）
+
+- 复用41a689a00修复/8回归及boundary；同步5937b5bcd，重新构建frontend 9496a455-67a5-4406-993c-9a3de6112767、正式desktop SHA 9E1FBE03B9DCEF7F432F4B30446D8464A5057212C47BCF97122A49A76ABA3F18及初始化helper。新库/独立work/profile，正式Tauri 1280×832，未复制旧DB或读取真实凭据；本地模型，无上游请求。
+- 首载体误先要求普通单句任务尚未暴露的update_plan，1本地请求/0提议/0effects，UI暂停后取消；原请求/错误/取消与载体源码保留。根据既有adaptive合同纠正顺序为先合法单次exec、真实非零后暴露completion；同GUI/同数据/同原提示、下一Turn，未变权限/任务要求/源码/进程期限，原20～30分钟盒不重置。
+- 正确载体2请求/2原生提议与canonical参数逐组相同，唯一Bun exec实际exited/exit1/signal null、reaped/errors空、原输出B_CN_EXIT_ONE加LF共14bytes/cursor14/dropped0。report首次接受/Turn completed，当前计数1/1由实际schema const取得；Runtime生成中文固定尾注，载体未写footer。正式界面实际像素显示“本轮1次命令已结束并返回非零结果（退出码1）”及完整原输出，没有改成应用故障。body.innerText的sidebar原始摘要不代替最终Markdown像素观察。
+- 原PID29228/12:21:10Z由既有native API自然exit0/12:34:08Z，非托盘；两代本地carrier各自然shutdown0，107events/2Turns/1effect整行SHA及空workspace退出前后保持，后代/监听0。仓库外`2026-10-03/windows/global-b-historical-reader/formal-renderer`保留首败、两次输入/各自固定观察期限、真实wire/回执/像素/独立核对和实际退出；不计首发全绿或完整共享Case通过，其他分类新UI/冷读/历史模型采用不由本例覆盖。
+- 独立新历史路由3436e40c5审查无确定反例；旧片段误报的v3 footer缺口在当前SHA核对后撤回，无补丁。Windows现有两项historical_report_only加一项optional_historical_publication共3/3通过，未重复18+owned1。当前正规关闭来源的真实模型采用/晚输入组合仍未验，A生成/C恢复/D平台及W276边界保持OPEN，全面目标继续active。

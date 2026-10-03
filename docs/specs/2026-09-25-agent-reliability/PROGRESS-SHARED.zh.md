@@ -9,7 +9,9 @@
 2026-10-03全局B发现并修复中文结果尾注展示接线：Runtime plain_zh_v2固定尾注与renderer
 原英文-only suffix不匹配，合法中文报告返回undefined。最小修复只识别相同中文格式，保留
 原文/计数/同Session及Turn回执核对、英文兼容和缺证降级；首回归7PASS/1FAIL保留，修后8/8
-及desktop boundary通过。正式新UI呈现仍待验，不代判历史模型采用、自由表达或复杂整链通过。
+及desktop boundary通过。随后5937b5bcd正式Tauri已验证中文非零分类（真实exit1/原输出、宿主
+1/1尾注、UI原生非零说明）；首载体因未暴露plan而未执行的前提失败保留。仅此UI子断言成立，
+其他分类新UI、历史模型采用、自由表达及复杂整链仍未验，详见Windows页全局B正式呈现。
 
 全局A唯一当前规则正式样本保留FAIL：14个真实Step5请求/SSE、14组原生参数与canonical相同；
 初始FIRST+LF、最终FINAL+LF成立，但模型提前承诺的patch无guard、stdin无append_newline，
