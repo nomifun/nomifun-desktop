@@ -4170,3 +4170,10 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - pipe/ConPTY分别原10s deadline、15s lease：休眠前READY及原父子OS句柄存活，唤醒后两者均TimedOut/reaped，清理404/420ms；原句柄均终止、registry退休后迟到write均SessionNotFound，无输入应用/进程重放。仅这两个受管原生归约子断言通过，W266/W268机制直接复用。
 - 交互ConPTY无deadline/expire_on_idle=false、10s lease，唤醒后同一父子句柄仍活，原write(AFTER_REAL_S3_ONCE加LF)返回Ok并被console回显；5秒内应用S3_ACK缺失，因此该子断言FAIL，驱动实际exit2，不把整个WIN-015计PASS。LF/cooked-input夹具原因尚未用零休眠对照证明，唯一原因缺证；原父子随后cancel/reaped、171ms清理。定位已超过30分钟，停止对照/再次休眠，不靠新批次重置时间盒。
 - 外部`2026-10-03/windows/w272-real-s3`含完整驱动/源码二进制身份、一次物理电源intent/返回/独立事件、原owner/句柄和三个结果、exit2及cleanup。六个原PID均无遗留，timer取消、测试进程token恢复；自有Cargo/GUI/驱动均结束。交互确认、正式UI采用、完整WIN-015及其余生成/平台/发布边界仍开放，全面目标active。
+
+#### W269 控制前提核对：普通排队发送不等于即时追加（2026-10-03；供应商0请求）
+
+- 恢复目标后先前“托盘/夹具阻断全部工作”的判断纠正；当前Tauri窗口可自主操作。正常同步cca92ee93的共享历史失败归属修复，desktop/helper正式构建成功，前端e247ffd0/1280×832核对；新库正式初始化后内存重加密导入所选StepFun连接，03-bootstrap自然exit0/模型0，不复制旧库或身份凭据。
+- 同W269根08-control-premise保存组织前提失败：LF比较/焦点与实际文本核对通过，但发送前完整控件快照同时有“发送”和“立刻发送（插入正在生成的回复）”，控制器错误选择前者，仅形成UI排队；canonical steer-accepted=0、要求两个来源输入的前提不成立。此前“必须等待模型边界”的推断撤回；当前可证原因是选错按钮，未证产品丢失接纳输入。前向门所有请求均需接纳证据，30s后本地400暂停，当前1份原始请求保存、上游HTTP/SSE均0；未把本地失败归因供应商，也未启动第二模型试验。
+- 已将仓库外控制器限定为实际即时追加按钮，修正后的接纳/引用拒绝/采用仍未执行，不计PASS。两carrier文件集合/SHA保持，原Turn通过实际UI结束为cancelled一次。PID58636持续预持句柄证明已有原生API自然exit0、后代/监听0；不是托盘Quit，原观察器不再因10分钟到期丢句柄。forwarder按路径/启动UTC精确清理、steerer结束，37份文本凭据审计0命中。
+- 无本地生产修复；同步历史closed-turn/current-reader两个定向回归通过，原W269首败及本次组织失败保持。仅当前正式GUI控制前提变化，原W249/W250/W240、真实引用采用和全部认证仍开放；不把控制器核对算作模型修复。本项超过原时间盒，停止进一步定位/试验，完整制品保留上述同目录，全面目标active。
