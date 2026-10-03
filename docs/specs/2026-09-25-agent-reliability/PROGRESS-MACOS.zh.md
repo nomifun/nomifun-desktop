@@ -877,6 +877,16 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   的收窄做法，不放宽Broker或改变任务。strict同夹具正负/owner0/current0回归通过，
   修后新正式未验，原wrong-tool/半JSON失败保持；不重置失败或立即重复付费请求。
 
+- `d9c2113e9`正式同原task修后一次：首两请求工具表仅plan，首stop/no call后按原有界
+  继续，第二valid plan接受；第三/第四表仅report，单控制选面真实采用。第三validJSON却
+  使用历史ID做current evidence且缺historical_results，参数拒绝保持；第四实际6348B
+  半JSON/finish=tool_calls→protocol pause，UI结束本回合后cancelled。**FAIL_NATIVE_ARGUMENT_JSON
+  AFTER_REPORT_SCHEMA_REFUSAL**，无accepted report/交付/表达PASS，既有协议校验不放宽。
+- 4请求/4步、modelowner0/host AGENTS读2，原14effects及1625前缀/17旧Turn保持；最终
+  1693events/18Turns/14effects，Cmd-Q0/165.832秒无expiry/TERM/KILL，源备五表同/ok及
+  自有PID/listener消失。首错wire/本地schema拒绝/半JSON分别外留history-report-single-control，
+  不补参数/缩任务/再次付费重发，公开表达仍开放；原A/B事实和Keychain结论不改。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
