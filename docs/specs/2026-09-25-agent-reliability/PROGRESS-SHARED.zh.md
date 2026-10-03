@@ -3864,3 +3864,17 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - 历史超8KiB拒绝反馈增加完整所选projection精确总字节与8192限制/未发布/禁止重复同选择，
   当前合同blocked缺项路径不变；无裁源/扩预算/自动完成。精确反馈与无发布回归1通过，
   Runtime324/1ignored。实际模型修正/完整表达未验，未再付费循环或改Windows结果。
+
+### 完整历史报告与服务商默认输出（2026-10-03，用户变更容量要求）
+
+- 不再要求完整报告适应8KiB/16条摘要限制。host retained历史选择≤128、正文/解析快照
+  使用已有native256KiB envelope，仍在1MiB事件存储下；模型原生参数48KiB/source/current/
+  权限/缺项/错误保护不变。原33results全部submit/快照/中文render/回读精确通过（69,250/
+  22,661B），不靠删必需记录取绿。旧超限/fixture首错分别保留；正式采用待验。
+- 默认输出不再因context预留量强制4096；配置wire Option独立，无limit按provider默认，
+  已配大上限不被16K/ctx÷8截小；UI去除unknown required协议4096猜值、保留custom，
+  未知required明确缺配置。Runtime327/1ignored、route1、UI17/boundary/i18n、fixture10通过。
+  actual model request None/100K已断言，explicit输出完整预留输入窗口；首次夹具显式100
+  导致default断言红保留，case明确unset再通过，caller自定义限制未抹去。
+  StepFun官方Chat max_tokens默认INF已核对，实际默认wire与完整报告合并一次正式验证待验，
+  外证据history-report-complete-capacity，不改Windows原生验收结果。

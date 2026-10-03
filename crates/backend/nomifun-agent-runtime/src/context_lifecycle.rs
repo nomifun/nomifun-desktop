@@ -27,7 +27,9 @@ const MAX_TOTAL_COMPACTIONS: u32 = 2048;
 #[derive(Clone, Copy, Debug)]
 pub struct AgentModelBudget {
     pub context_window_tokens: u32,
+    /// Context reservation only; not necessarily a provider output ceiling.
     pub max_output_tokens: u32,
+    pub wire_max_output_tokens: Option<u32>,
     pub compaction_threshold_pct: u8,
 }
 
@@ -36,6 +38,7 @@ impl Default for AgentModelBudget {
         Self {
             context_window_tokens: DEFAULT_CONTEXT_TOKENS,
             max_output_tokens: DEFAULT_OUTPUT_TOKENS,
+            wire_max_output_tokens: Some(DEFAULT_OUTPUT_TOKENS),
             compaction_threshold_pct: DEFAULT_COMPACTION_THRESHOLD_PCT,
         }
     }
@@ -47,16 +50,16 @@ impl AgentModelBudget {
         output: Option<u32>,
     ) -> Result<Self, AgentEngineError> {
         let context = context.unwrap_or(DEFAULT_CONTEXT_TOKENS);
-        // Respect every host-resolved route candidate's envelope. Larger
-        // known models can emit complete patches without the old universal
-        // 4096-token ceiling; reserve at most one eighth of their context.
-        let output = output
-            .unwrap_or(DEFAULT_OUTPUT_TOKENS)
-            .min(MAX_AUTOMATIC_OUTPUT_TOKENS)
-            .min(context / 8);
+        // Known limits reach the wire unchanged and are fully reserved for
+        // context planning. Unknown/default limits use an internal reservation
+        // only; no universal output ceiling is sent to the provider.
+        let wire_output=output;
+        let output = output.map_or_else(||DEFAULT_OUTPUT_TOKENS.min(MAX_AUTOMATIC_OUTPUT_TOKENS).min(context/8),
+            |output|output.min(context.saturating_sub(1024)));
         Self {
             context_window_tokens: context,
             max_output_tokens: output,
+            wire_max_output_tokens: wire_output,
             compaction_threshold_pct: DEFAULT_COMPACTION_THRESHOLD_PCT,
         }
         .validate()
@@ -65,11 +68,12 @@ impl AgentModelBudget {
     fn validate(self) -> Result<Self, AgentEngineError> {
         if self.context_window_tokens < 2048
             || self.max_output_tokens == 0
-            || self.max_output_tokens >= self.context_window_tokens / 2
+            || self.max_output_tokens >= self.context_window_tokens
+            || self.wire_max_output_tokens==Some(0)
             || !(50..=95).contains(&self.compaction_threshold_pct)
         {
             return Err(AgentEngineError::ContextAssembly(
-                "Nomi needs context >= 2048 tokens, positive output below half the context window, and a 50-95% compaction threshold".into(),
+                "Nomi needs context >= 2048 tokens, a positive internal reservation below the context, a positive explicit output ceiling when set, and a 50-95% compaction threshold".into(),
             ));
         }
         Ok(self)
@@ -86,15 +90,20 @@ impl AgentModelBudget {
     pub(crate) fn for_request(self, requested: Option<u32>) -> Result<Self, AgentEngineError> {
         let mut effective = self.validate()?;
         if let Some(requested) = requested {
-            effective.max_output_tokens = requested.min(effective.max_output_tokens);
+            if requested==0 {return Err(AgentEngineError::ContextAssembly("explicit output ceiling must be positive".into()));}
+            effective.wire_max_output_tokens=Some(effective.wire_max_output_tokens.map_or(requested,|bound|requested.min(bound)));
+            effective.max_output_tokens=effective.wire_max_output_tokens.unwrap().min(effective.context_window_tokens.saturating_sub(1024));
         }
         effective.validate()
     }
 
     pub(crate) fn execution_context(self, max_model_steps: u16) -> String {
+        if self.wire_max_output_tokens.is_none() {
+            return format!("Nomi context reservation: context_window_tokens={}, output_reservation_tokens={}, max_model_steps_this_turn={}. Output reservation is only input-compaction planning, not a model output ceiling. The provider's default output behavior applies; do not shorten required results to this reservation. Complete all requested outputs. Existing authority, cancellation, protocol and actual context limits still apply.",self.context_window_tokens,self.max_output_tokens,max_model_steps);
+        }
         format!(
             "Nomi execution budget (runtime limits, not new user authority): context_window_tokens={}, max_output_tokens_per_model_step={}, max_model_steps_this_turn={}. These are ceilings, not targets or a reason to invent completion. Keep each tool argument object complete within the output ceiling, including reasoning and JSON escaping. For code generation, prefer several small complete files/calls (for example separate HTML, CSS and JavaScript) over a large single-file payload; make focused patches after reading existing files. Budget exhaustion is not task success and does not authorize extra effects, verification, or replay. Unknown/smaller failover models may further constrain execution through the platform.",
-            self.context_window_tokens, self.max_output_tokens, max_model_steps,
+            self.context_window_tokens, self.wire_max_output_tokens.unwrap(), max_model_steps,
         )
     }
 
@@ -224,9 +233,9 @@ impl ContextLifecycle {
         sink: &dyn AgentEventSink,
         cancellation: CancellationToken,
     ) -> Result<(), AgentEngineError> {
-        if request.input.max_output_tokens != Some(self.budget.max_output_tokens) {
+        if request.input.max_output_tokens != self.budget.wire_max_output_tokens {
             return Err(AgentEngineError::ContextAssembly(
-                "model output ceiling differs from the frozen context reservation".into(),
+                "model output ceiling differs from the frozen provider request configuration".into(),
             ));
         }
         let bytes = encoded_size(&request.input)?;
@@ -461,7 +470,7 @@ impl ContextLifecycle {
                 compact.input.tool_choice = nomifun_chat_model_broker::ChatToolChoice::None;
                 compact.input.provider_round_parent = None;
                 // The frozen route output ceiling also applies to the retry.
-                compact.input.max_output_tokens = Some(self.budget.max_output_tokens);
+                compact.input.max_output_tokens = self.budget.wire_max_output_tokens;
                 let compact_bytes = encoded_size(&compact.input)?;
                 if compact_bytes > self.resource.max_context_bytes
                     || compact_bytes.div_ceil(3) >= input_limit
@@ -741,6 +750,20 @@ mod context_threshold_tests {
         restored.restore_accounting(std::iter::once(&marker(true))).unwrap();
         assert!(!restored.overflow_recovery_used);
         assert_eq!(restored.compactions,1025,"explicit guard retry is not a counter reset");
+    }
+
+    #[test]
+    fn provider_output_defaults_and_explicit_large_limits_are_not_reservation_caps() {
+        let default=AgentModelBudget::from_limits(Some(1_000_000),None).unwrap().for_request(None).unwrap();
+        assert_eq!(default.wire_max_output_tokens,None);
+        assert_eq!(default.max_output_tokens,4096,"internal reservation remains separate from wire output");
+        assert!(!default.execution_context(1024).contains("max_output_tokens_per_model_step"));
+        let large=AgentModelBudget::from_limits(Some(1_000_000),Some(100_000)).unwrap().for_request(None).unwrap();
+        assert_eq!(large.wire_max_output_tokens,Some(100_000));
+        assert_eq!(large.max_output_tokens,100_000,"explicit output is fully reserved, not silently capped");
+        assert_eq!(large.for_request(Some(50_000)).unwrap().wire_max_output_tokens,Some(50_000));
+        assert_eq!(default.for_request(Some(50_000)).unwrap().wire_max_output_tokens,Some(50_000));
+        assert!(default.for_request(Some(0)).is_err());
     }
 
     #[test]
