@@ -1366,7 +1366,7 @@ impl CompletionTracker {
         if !submission.historical_results.is_empty() {
             let chinese=submission.summary.chars().any(|c|matches!(c as u32,0x3400..=0x9fff));
             let published=submission.historical_results.iter().try_fold(0usize,|total,result| {
-                let text=format!("{}\n{}",result.label,historical_public_result_versioned(result.data.as_ref().unwrap(),chinese,true));
+                let text=format!("{}\n{}",result.label,historical_public_result_versioned(result.data.as_ref().unwrap(),chinese,true,true));
                 crate::stream_limits::serialized_size(&text,MAX_HISTORICAL_DELIVERY_BYTES).map(|bytes|total.saturating_add(bytes))
             }).map_err(|_|"Historical rendered output exceeds the existing delivery bound")?;
             if published.saturating_add(current_delivery_bytes)>MAX_HISTORICAL_DELIVERY_BYTES {
@@ -1649,6 +1649,44 @@ mod tests {
     }
 
     #[test]
+    fn historical_v3_upgrade_retains_both_exact_formats_and_v4_shell_context() {
+        let script="Write-Output '原样'\nCopy-Item -LiteralPath '源 文件.txt' -Destination 'copy.txt' -ErrorAction Stop";
+        let mut report:AgentCompletionReport=serde_json::from_value(serde_json::json!({
+            "plan_revision":1,"observation_revision":0,"input_revision":1,"workspace_epoch":0,
+            "summary":"历史结果。","criteria":[],"public_format":"plain_zh_v3",
+            "historical_results":[{"origin":{"source_turn":"turn:user:msg:session:old","archive_id":"a".repeat(64)},
+                "label":"原调用","data":{"tool":"exec_command","result_order":0,"original_arguments":{"cmd":script},
+                    "text_parts":[{"text":"archived value\n","truncated":false}],"original_is_error":false,
+                    "source_work_status":{"failed_tools":10,"failed_commands":2},"current_evidence":false}}]})).unwrap();
+        let previous=concat!("历史结果。\n\n以下为所选历史回合的记录，未重新执行，也不代表当前状态核验。",
+            "\n原回合未成功的工具结果：10 次；命令失败观察：2 次。两种统计可能重叠，不相加。",
+            "\n\n1. 原调用\n\n```text\narchived value\n```\n\n");
+        let post=report.delivery_text();
+        assert_ne!(post,previous);assert!(report.matches_delivery(previous));assert!(report.matches_delivery(&post));
+        assert!(report.matches_delivery(&format!("\n\n{previous}")));
+        assert!(!report.matches_delivery(&previous.replace("archived value","forged value")));
+        assert!(!report.matches_delivery(&previous.replace("10 次","8 次")));
+        assert!(!post.contains("脚本文本"),"already-published v3 cannot acquire new shell context");
+        let restored:AgentCompletionReport=serde_json::from_slice(&serde_json::to_vec(&report).unwrap()).unwrap();
+        assert!(restored.matches_delivery(previous));assert_eq!(restored.delivery_text(),post);
+        let source=report.historical_results.clone();
+        report.public_format=Some("plain_zh_v4".into());
+        let current=report.delivery_text();assert!(current.contains("脚本文本"));
+        let invocation=current.split_once("```text\n").unwrap().1.split_once("\n```").unwrap().0;
+        let value:serde_json::Value=serde_json::from_str(invocation).unwrap();assert_eq!(value["脚本文本"],script);
+        assert_eq!(report.historical_results,source);assert_eq!(report.observed_tool_error_count,0);
+        assert_eq!(report.observed_command_failure_count,0);assert!(report.matches_delivery(&current));
+        assert!(!report.matches_delivery(previous),"v4 accepts only its own exact contract");
+        let mut diagnostic=report.clone();
+        diagnostic.public_format=Some("plain_zh_v3".into());
+        let raw=r#"{"unrecognized":"exact\nvalue"}"#;
+        diagnostic.historical_results[0].data.as_mut().unwrap()["text_parts"]=serde_json::json!([{"text":raw,"truncated":false}]);
+        let old_diagnostic=diagnostic.delivery_text();
+        assert!(old_diagnostic.contains(raw));
+        assert!(!old_diagnostic.contains("原始诊断"),"new readable diagnostic headings must not change v3 bytes");
+    }
+
+    #[test]
     fn historical_v3_publication_preserves_exact_values_and_separate_source_counts() {
         let exact="READY MAC-B\nECHO 你好 MAC-B\nEOF MAC-B\n";
         let original=serde_json::json!({"process_id":"old-process","state":"exited","exit_code":0,
@@ -1698,9 +1736,9 @@ mod tests {
         let after="第一行 MAC-B\n第二行 after\n";
         let read_data=serde_json::json!({"tool":"read_file","text_parts":[{"text":
             serde_json::json!({"path":"终版 结果.txt","content":after,"sha256":"a".repeat(64),"total_bytes":32,"offset":0,"eof":true}).to_string()}]});
-        let read=historical_public_result_versioned(&read_data,true,true);
+        let read=historical_public_result_versioned(&read_data,true,true,true);
         assert!(read.contains(after)&&read.contains("文件字节数：32")&&read.contains(&"a".repeat(64)));
-        assert!(!historical_public_result_versioned(&read_data,true,false).contains(after),"old v3 projection stays unchanged");
+        assert!(!historical_public_result_versioned(&read_data,true,true,false).contains(after),"old v3 projection stays unchanged");
     }
     #[test]
     fn public_result_language_schema_references_cover_narrative_fields_without_new_assertions() {
@@ -4058,33 +4096,38 @@ fn public_structured_result(data:&serde_json::Value,chinese:bool)->Option<String
 }
 
 fn historical_public_result(data:&serde_json::Value,chinese:bool)->String {
-    historical_public_result_versioned(data,chinese,false)
+    historical_public_result_versioned(data,chinese,true,true)
 }
 
-fn historical_public_result_versioned(data:&serde_json::Value,chinese:bool,version4:bool)->String {
+fn historical_public_result_versioned(data:&serde_json::Value,chinese:bool,include_invocation:bool,version4:bool)->String {
     let mut output=String::new();
-    if let Some(order)=data["result_order"].as_u64() {
-        output.push_str(&if chinese {format!("原回合记录顺序：{}。\n",order+1)} else {format!("Original record order: {}.\n",order+1)});
-    }
-    let arguments=&data["original_arguments"];
-    match data["tool"].as_str() {
-        Some("write_file")=>{
-            if let Some(path)=arguments["path"].as_str() {output.push_str(&format!("{}：{}\n",if chinese {"写入目标"} else {"Write target"},public_owner_text_versioned(path,true)));}
-            if let Some(content)=arguments["content"].as_str() {
-                output.push_str(if chinese {"当时提交的文件内容（原文；是否实际写入以随后结果为准）：\n"} else {"Original submitted file contents (the following result determines whether the write ran):\n"});
-                output.push_str(&public_owner_text_versioned(content,true));output.push('\n');
+    if include_invocation {
+        if let Some(order)=data["result_order"].as_u64() {
+            output.push_str(&if chinese {format!("原回合记录顺序：{}。\n",order+1)} else {format!("Original record order: {}.\n",order+1)});
+        }
+        let arguments=&data["original_arguments"];
+        match data["tool"].as_str() {
+            Some("write_file")=>{
+                if let Some(path)=arguments["path"].as_str() {output.push_str(&format!("{}：{}\n",if chinese {"写入目标"} else {"Write target"},public_owner_text_versioned(path,true)));}
+                if let Some(content)=arguments["content"].as_str() {
+                    output.push_str(if chinese {"当时提交的文件内容（原文；是否实际写入以随后结果为准）：\n"} else {"Original submitted file contents (the following result determines whether the write ran):\n"});
+                    output.push_str(&public_owner_text_versioned(content,true));output.push('\n');
+                }
             }
+            Some("exec_command"|"start_process")=>{
+                let mut invocation=if version4&&arguments["cmd"].is_string() {serde_json::json!({if chinese {"脚本文本"} else {"Shell script"}:arguments["cmd"]})}
+                else {serde_json::json!({
+                    if chinese {"命令或程序"} else {"Command or program"}:arguments["command"],
+                    if chinese {"字面参数"} else {"Literal arguments"}:arguments["args"],
+                    if chinese {"工作目录"} else {"Working directory"}:arguments["cwd"]})};
+                if version4&&arguments["cmd"].is_string() && let Some(cwd)=arguments.get("cwd") {
+                    invocation[if chinese {"工作目录"} else {"Working directory"}]=cwd.clone();
+                }
+                output.push_str(if chinese {"当时提交的调用（不代表成功；结果如下）：\n"} else {"Original submitted invocation (not a success claim; result follows):\n"});
+                output.push_str(&public_owner_text_versioned(&invocation.to_string(),true));output.push('\n');
+            }
+            _=>{}
         }
-        Some("exec_command"|"start_process")=>{
-            let invocation=if version4&&arguments["cmd"].is_string() {serde_json::json!({if chinese {"显式 shell 命令"} else {"Explicit shell command"}:arguments["cmd"]})}
-            else {serde_json::json!({
-                if chinese {"命令或程序"} else {"Command or program"}:arguments["command"],
-                if chinese {"字面参数"} else {"Literal arguments"}:arguments["args"],
-                if chinese {"工作目录"} else {"Working directory"}:arguments["cwd"]})};
-            output.push_str(if chinese {"当时提交的调用（不代表成功；结果如下）：\n"} else {"Original submitted invocation (not a success claim; result follows):\n"});
-            output.push_str(&public_owner_text_versioned(&invocation.to_string(),true));output.push('\n');
-        }
-        _=>{}
     }
     if data["archive_truncated"]==true || data["source_may_be_bounded"]==true || data["omitted_media_parts"].as_u64().unwrap_or(0)>0 {
         output.push_str(if chinese {"该历史记录可能有截断或未保留的媒体；不能据此声称原结果完整。\n"}
@@ -4126,7 +4169,7 @@ fn historical_public_result_versioned(data:&serde_json::Value,chinese:bool,versi
             } else if value["observed_text"]["content"].is_string() || value["file_exists"]==false {
                 output.push_str(&plain_public_result_versioned(&value,chinese,true));
             } else if let Some(rendered)=public_structured_result(&value,chinese) {output.push_str(&rendered);}
-            else if value["bytes_written"].is_number() || value["bytes_after"].is_number() {
+            else if version4&&(value["bytes_written"].is_number() || value["bytes_after"].is_number()) {
                 // Known file owner wrapper fields only. Never infer success,
                 // current state or missing bytes from a model-authored note.
                 for (key,zh,en) in [("bytes_written","写入字节数","Written bytes"),("bytes_before","修改前字节数","Bytes before"),
@@ -4137,7 +4180,7 @@ fn historical_public_result_versioned(data:&serde_json::Value,chinese:bool,versi
                 output.push_str(if chinese {"\n原始结果（历史原文，未改写）：\n"} else {"\nOriginal result (unchanged historical text):\n"});
                 output.push_str(&public_owner_text_versioned(text,true));
             } else {
-                output.push_str(if chinese {"原始诊断（历史原文，未改写）：\n"} else {"Original historical diagnostic (unchanged):\n"});
+                if version4 {output.push_str(if chinese {"原始诊断（历史原文，未改写）：\n"} else {"Original historical diagnostic (unchanged):\n"});}
                 output.push_str(&public_owner_text_versioned(text,true));
             }
         } else {output.push_str(&public_owner_text_versioned(text,true));}
@@ -4155,10 +4198,14 @@ fn historical_public_result_versioned(data:&serde_json::Value,chinese:bool,versi
 
 impl AgentCompletionReport {
     pub(crate) fn delivery_text(&self) -> String {
+        let version4=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v4"|"plain_en_v4"));
+        self.delivery_text_versioned(true,version4)
+    }
+
+    fn delivery_text_versioned(&self,include_invocation:bool,include_shell_script:bool) -> String {
         let mut delivery = self.summary.clone();
         if !self.historical_results.is_empty() {
             let chinese=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v3"|"plain_zh_v4"));
-            let version4=self.public_format.as_deref().is_some_and(|format|matches!(format,"plain_zh_v4"|"plain_en_v4"));
             delivery.push_str(if chinese {"\n\n以下为所选历史回合的记录，未重新执行，也不代表当前状态核验。"}
                 else {"\n\nSelected historical observations follow. They were not reexecuted and do not verify current state."});
             let mut sources=BTreeSet::new();
@@ -4173,7 +4220,7 @@ impl AgentCompletionReport {
                     }
                 }
                 delivery.push_str(&format!("\n\n{}. {}\n",index+1,result.label));
-                delivery.push_str(&historical_public_result_versioned(data,chinese,version4));
+                delivery.push_str(&historical_public_result_versioned(data,chinese,include_invocation,include_shell_script));
             }
         }
         for item in &self.delivery_items {
@@ -4223,6 +4270,14 @@ impl AgentCompletionReport {
     pub(crate) fn matches_delivery(&self, text: &str) -> bool {
         let current = self.delivery_text();
         if text == current || text == format!("\n\n{current}") { return true; }
+        // v3 has two known immutable formats around the complete-history
+        // enhancement. Accept only their exact derivations; canonical text
+        // remains unchanged. New submitted shell context is v4 only.
+        if !self.historical_results.is_empty() && self.public_format.as_deref()
+            .is_some_and(|format|matches!(format,"plain_zh_v3"|"plain_en_v3")) {
+            let previous=self.delivery_text_versioned(false,false);
+            if text==previous || text==format!("\n\n{previous}") {return true;}
+        }
         if !self.delivery_items.is_empty() || !self.historical_results.is_empty() || self.public_format.is_some() { return false; }
         // Preserve immutable deliveries from the earlier formatter. Both known
         // formats contain the exact accepted report and cumulative counts.
