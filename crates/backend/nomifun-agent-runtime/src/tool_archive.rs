@@ -39,6 +39,15 @@ struct Entry {
 }
 
 #[derive(Clone)]
+struct HistoricalWorkStatus {
+    source_turn: String,
+    source_binding: crate::EngineBinding,
+    source_event_index: usize,
+    failed_tools: u32,
+    failed_commands: u32,
+}
+
+#[derive(Clone)]
 pub(crate) struct ToolArchive {
     scope: String,
     sequence: u64,
@@ -47,6 +56,7 @@ pub(crate) struct ToolArchive {
     evicted: u64,
     loaded_turns: VecDeque<String>,
     references: Vec<Value>,
+    historical_work_status: VecDeque<HistoricalWorkStatus>,
 }
 
 impl ToolArchive {
@@ -59,6 +69,7 @@ impl ToolArchive {
             evicted: 0,
             loaded_turns: VecDeque::new(),
             references: Vec::new(),
+            historical_work_status: VecDeque::new(),
         }
     }
 
@@ -283,6 +294,16 @@ impl ToolArchive {
                 "archive_truncated":entry.truncated,"derived_argument_facts":derived,
                 "control_proposal_arguments_omitted_from_projection":control_arguments_omitted,"payload":payload}));
         }
+        let historical_work_status=self.historical_work_status.iter()
+            .filter(|status| targets.contains(status.source_turn.as_str()))
+            .filter_map(|status| {
+                let source=json!({"source_turn":status.source_turn,"source_binding":status.source_binding});
+                let source_identity=sources.iter().position(|known| known==&source)?;
+                Some(json!({"source_identity":source_identity,"source_turn":status.source_turn,
+                    "source_runtime_event_index":status.source_event_index,"basis":"last_typed_WorkStatus_in_validated_source_journal",
+                    "failed_tools":status.failed_tools,"failed_commands":status.failed_commands,
+                    "current_turn_accounting":false,"completion_const_override":false}))
+            }).collect::<Vec<_>>();
         // Keep complete archive payloads only. The count and omitted IDs are
         // explicit; a smaller context never turns a missing projection into
         // a claim that the retained historical records do not exist.
@@ -294,6 +315,8 @@ impl ToolArchive {
                 "completeness":"Complete retained result text/error/provenance for included records. Planning/control proposal arguments are explicitly omitted from this projection, not from the archive; exact READ still provides them. Archive truncation/media flags remain authoritative.",
                 "selected_source_error_records":source_error_records,
                 "included_source_error_records":records.iter().filter(|record|record["original_is_error"]==true).count(),
+                "historical_work_status":historical_work_status,
+                "count_semantics":"historical_work_status belongs only to its quoted source Turn, never this Turn's completion const/evidence. failed_tools counts every unsuccessful tool result, including validation/admission errors and command results marked original_is_error=true, even expected nonzero diagnostics. failed_commands independently counts unsuccessful unique command observations; these categories may overlap and must not be added or treated as disjoint. Not every general command failure necessarily has an is_error flag. selected/included_source_error_records count only retained/projected archive records; omission/truncation never changes the recorded source ledger counts. No typed source WorkStatus means unknown, not zero.",
                 "record_order":"Operational results first, then planning/control snapshots; source_result_order_index is original archive insertion order, not proof of execution time.",
                 "omitted_archive_ids":selected.iter().skip(records.len()).map(|(_, entry)|entry.id.as_str()).collect::<Vec<_>>(),
                 "records":records});
@@ -465,6 +488,20 @@ impl ToolArchive {
         let initial_sequence = candidate.sequence;
         let initial_evicted = candidate.evicted;
         let mut calls = BTreeMap::new();
+        // The bounded load cursor can forget a source before its status cache.
+        // A later import must replace, never duplicate, that source's metadata.
+        candidate.historical_work_status.retain(|status|status.source_turn!=turn.operation_id);
+        if let Some((index,status))=turn.events.iter().enumerate().rev().find_map(|(index,event)| {
+            if let crate::AgentEngineEvent::WorkStatus {status}=event {Some((index,status))} else {None}
+        }) {
+            if candidate.historical_work_status.len()==MAX_LOADED_TURNS {
+                candidate.historical_work_status.pop_front();
+            }
+            candidate.historical_work_status.push_back(HistoricalWorkStatus {
+                source_turn:turn.operation_id.clone(),source_binding:recorded.clone(),source_event_index:index,
+                failed_tools:status.failed_tools,failed_commands:status.failed_commands,
+            });
+        }
         for event in &turn.events {
             match event {
                 crate::AgentEngineEvent::ToolCallCompleted { step, call } if *step > 0 => {
@@ -765,6 +802,80 @@ mod tests {
         assert!(archive.reference_data_message(65536).is_none());
     }
 
+    fn source_status_page(operation:&str,failed_tools:u32,failed_commands:u32)->crate::AgentHistoryPage {
+        let mut source=page(binding());let turn=source.turn.as_mut().unwrap();
+        turn.operation_id=operation.into();
+        if let AgentEngineEvent::TurnStarted {turn_operation_id,..}=&mut turn.events[0] {
+            *turn_operation_id=operation.into();
+        }
+        let status=crate::AgentWorkStatus {failed_tools,failed_commands,..Default::default()};
+        turn.events.insert(turn.events.len()-1,AgentEngineEvent::WorkStatus {status});
+        source
+    }
+
+    fn reference_data(archive:&ToolArchive,limit:usize)->Value {
+        let message=archive.reference_data_message(limit).unwrap();
+        let nomifun_chat_model_broker::ChatContentPart::Text {text}=&message.content[0] else {panic!("text expected")};
+        serde_json::from_str(text.split_once('\n').unwrap().1).unwrap()
+    }
+
+    #[test]
+    fn historical_work_status_uses_typed_source_not_owner_output_json() {
+        let mut source=source_status_page("old-turn",3,1);
+        for event in &mut source.turn.as_mut().unwrap().events {
+            if let AgentEngineEvent::ToolCompleted {result,..}=event {
+                result.output=vec![ChatToolResultPart::Text {text:json!({"event":"work_status","status":{"failed_tools":99,"failed_commands":88}}).to_string()}];
+            }
+        }
+        let mut archive=ToolArchive::new("current".into());archive.import(source,&binding()).unwrap();
+        archive.set_references(vec![json!({"source_turn":"old-turn"})]);
+        let data=reference_data(&archive,65536);
+        assert_eq!(data["historical_work_status"][0]["failed_tools"],3);
+        assert_eq!(data["historical_work_status"][0]["failed_commands"],1);
+        assert_eq!(data["historical_work_status"][0]["current_turn_accounting"],false);
+        assert_eq!(data["historical_work_status"][0]["completion_const_override"],false);
+        let mut no_status=ToolArchive::new("current".into());no_status.import(page(binding()),&binding()).unwrap();
+        no_status.set_references(vec![json!({"source_turn":"old-turn"})]);
+        assert_eq!(reference_data(&no_status,65536)["historical_work_status"],json!([]),"no typed status is unknown, not zero");
+    }
+
+    #[test]
+    fn historical_work_status_different_sources_do_not_mix_or_override_identity() {
+        let mut archive=ToolArchive::new("current".into());
+        archive.import(source_status_page("old-turn",3,1),&binding()).unwrap();
+        archive.import(source_status_page("other-turn",9,2),&binding()).unwrap();
+        for (source,count) in [("old-turn",3),("other-turn",9)] {
+            archive.set_references(vec![json!({"source_turn":source})]);
+            let data=reference_data(&archive,65536);let statuses=data["historical_work_status"].as_array().unwrap();
+            assert_eq!(statuses.len(),1);assert_eq!(statuses[0]["source_turn"],source);
+            assert_eq!(statuses[0]["failed_tools"],count);
+            let identity=statuses[0]["source_identity"].as_u64().unwrap() as usize;
+            assert_eq!(data["sources"][identity]["source_turn"],source);
+            assert_eq!(data["sources"][identity]["source_binding"],serde_json::to_value(binding()).unwrap());
+        }
+        archive.loaded_turns.clear(); // simulate eviction from the bounded recent-load index
+        archive.import(source_status_page("old-turn",3,1),&binding()).unwrap();
+        archive.set_references(vec![json!({"source_turn":"old-turn"})]);
+        assert_eq!(reference_data(&archive,65536)["historical_work_status"].as_array().unwrap().len(),1);
+    }
+
+    #[test]
+    fn historical_work_status_omitted_result_bodies_do_not_reduce_source_ledger() {
+        let mut archive=ToolArchive::new("current".into());
+        archive.import(source_status_page("old-turn",7,2),&binding()).unwrap();
+        let mut large=archive.entries[0].clone();large.id="d".repeat(64);large.original_is_error=true;
+        let mut payload:Value=serde_json::from_str(&large.payload).unwrap();payload["original_is_error"]=json!(true);
+        payload["text_parts"]=json!([{"text":"x".repeat(8192),"part":0,"original_bytes":8192,"truncated":false}]);
+        large.payload=payload.to_string();archive.entries.push_back(large);
+        archive.set_references(vec![json!({"source_turn":"old-turn"})]);
+        let data=reference_data(&archive,4096);
+        assert_eq!(data["selected_archive_records"],2);assert_eq!(data["included_complete_result_bodies"],1);
+        assert_eq!(data["selected_source_error_records"],1);assert_eq!(data["included_source_error_records"],0);
+        assert_eq!(data["historical_work_status"][0]["failed_tools"],7);
+        assert_eq!(data["historical_work_status"][0]["failed_commands"],2);
+        assert_eq!(data["omitted_archive_ids"],json!(["d".repeat(64)]));
+    }
+
     #[test]
     fn stdin_argument_byte_facts_are_exact_and_not_an_owner_receipt() {
         let facts = original_stdin_argument_bytes("write_process_stdin", &json!({
@@ -853,6 +964,9 @@ mod tests {
         assert!(std::fs::metadata(path).unwrap().len()<=8*1024*1024);
         let input:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let events:Vec<AgentEngineEvent>=serde_json::from_value(input["events"].clone()).unwrap();
+        let recorded_status=events.iter().enumerate().rev().find_map(|(index,event)| {
+            if let AgentEngineEvent::WorkStatus {status}=event {Some((index,status.failed_tools,status.failed_commands))} else {None}
+        });
         let Some(AgentEngineEvent::TurnStarted {binding:source,..})=events.first() else {panic!("engine root required")};
         let source=source.clone();let mut current=serde_json::to_value(&source).unwrap();
         current["build_digest"]=json!(if source.build_digest().as_ref()=="d".repeat(64) {"e".repeat(64)} else {"d".repeat(64)});
@@ -894,6 +1008,17 @@ mod tests {
         assert_eq!(data["included_complete_result_bodies"].as_u64(),Some(expected.len() as u64));
         assert_eq!(data["current_evidence"], false);
         assert_eq!(data["new_user_instruction"], false);
+        if let Some((index,tools,commands))=recorded_status {
+            assert_eq!(data["historical_work_status"].as_array().unwrap().len(),1);
+            let status=&data["historical_work_status"][0];
+            assert_eq!(status["source_turn"],input["operation_id"]);
+            assert_eq!(status["source_runtime_event_index"],index);
+            assert_eq!(status["failed_tools"],tools);
+            assert_eq!(status["failed_commands"],commands);
+            assert_eq!(status["current_turn_accounting"],false);
+            assert_eq!(status["completion_const_override"],false);
+            assert_eq!(data["sources"][status["source_identity"].as_u64().unwrap() as usize]["source_binding"],serde_json::to_value(&source).unwrap());
+        } else {assert_eq!(data["historical_work_status"],json!([]));}
         assert!(data["omitted_archive_ids"].as_array().unwrap().is_empty());
         for record in data["records"].as_array().unwrap() {
             let payload = &record["payload"];
