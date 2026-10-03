@@ -901,6 +901,18 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   B634/33黄金1通过（全部结果/source10含2/56445B相同）。正式采用/报告完整/表达待验，
   外证据history-report-compact，原失败与Windows结果不代判。
 
+- `bf8cfcb3f`正式同原任务：3请求/3步均仅update_plan Specific；首模型提出旧形状
+  report_completion，被未暴露工具守卫拒绝（本轮tool error1/command0），后两次无调用，
+  最终NOMIFUN_TASK_INCOMPLETE。**FAIL_BEFORE_COMPACT_REPORT_ADOPTION**，四字段合同未到达，
+  无报告/表达PASS，旧source10含2不变；1746events/19Turns/14effects、1693前缀和旧Turn全同。
+  Cmd-Q0/362.840秒（含解锁等待）无expiry/信号，源备五表同/ok，无新owner；完整证据外置。
+- 新定位：fresh只读报告仍强制多一轮plan，而系统说明已要求报告字段，与当次选面冲突。
+  仅fresh且无needs_replan直接广告严格report；复用原有效report自动关闭optional空plan，
+  不是自动接受模型错误或宿主生成完成。真实needs_replan仍只广告plan，patch/process/exact
+  未结算及最新输入/来源/字节预算原门禁保持。最小入口首红保留，修后strict单请求/无owner、
+  replan仍plan及optional/current伪证负向同夹具通过；Runtime323/1ignored。修后正式待验，
+  新证据history-report-direct，不重跑原A/B操作或Keychain。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
