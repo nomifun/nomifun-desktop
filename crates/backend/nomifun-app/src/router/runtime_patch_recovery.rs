@@ -82,9 +82,9 @@ pub(super) async fn load(
         event.correlation_id.as_ref() == source_operation
             && patch_recovery_source_terminal(event.kind.0.as_str())
     });
-    if source_terminal.is_none() {
+    let Some(source_terminal) = source_terminal else {
         return Err(failure("recovery source has no canonical terminal Turn"));
-    }
+    };
     let source_start = facts.events.iter().find_map(|event| {
         if event.kind.0 != "runtime/progress-recorded"
             || event.correlation_id.as_ref() != source_operation
@@ -94,17 +94,25 @@ pub(super) async fn load(
         let payload = facts.event_payloads.get(event.event_id.as_ref())?.get("event")?;
         serde_json::from_value::<AgentEngineEvent>(payload.clone())
             .ok()
-            .and_then(|event| match event {
+            .and_then(|engine_event| match engine_event {
                 AgentEngineEvent::TurnStarted {
                     binding,
                     turn_operation_id,
-                } => Some((binding, turn_operation_id)),
+                } => Some((binding, turn_operation_id, event.seq)),
                 _ => None,
             })
     });
-    let Some((recorded, turn_operation_id)) = source_start else {
+    let Some((recorded, turn_operation_id, source_start_seq)) = source_start else {
         return Err(failure("recovery source has no engine binding"));
     };
+    if source_start_seq >= state_seq || source_terminal.seq <= state_seq {
+        return Err(failure("recovery state is outside its source Turn boundary"));
+    }
+    if latest_patch_dispatch > state_seq && !state.has_pending() {
+        return Err(failure(
+            "a later patch dispatch is not covered by recovery state",
+        ));
+    }
     if !patch_recovery_source_matches(
         &recorded,
         &turn_operation_id,
@@ -112,16 +120,28 @@ pub(super) async fn load(
         source_operation.as_str(),
         snapshot,
     ) {
-        return Err(failure(
-            "recovery state differs from exact Session engine/snapshot",
-        ));
-    }
-    if latest_patch_dispatch > state_seq && !state.has_pending() {
-        return Err(failure(
-            "a later patch dispatch is not covered by recovery state",
+        let exact_source = patch_recovery_source_matches(
+            &recorded, &turn_operation_id, &session, source_operation.as_str(),
+            recorded.resolved_snapshot_ref(),
+        );
+        // A fully settled empty state grants no recovery authority. Only the
+        // trusted host may prove a model-only transition; pending mutations
+        // keep the original exact-Snapshot requirement unchanged.
+        if exact_source && state == AgentPatchRecoveryState::default()
+            && settled_model_transition(&state, exact_source,
+                host.historical_model_binding_compatible(receipt.session(), recorded.resolved_snapshot_ref()).await?)
+        {
+            return Ok(AgentPatchRecoveryState::default());
+        }
+        return Err(AppError::SessionConfigurationChanged(
+            "Pending or incompatible patch recovery is bound to the previous Agent configuration; resolve it before continuing with another model configuration".into(),
         ));
     }
     Ok(state)
+}
+
+fn settled_model_transition(state: &AgentPatchRecoveryState, exact_source: bool, model_compatible: bool) -> bool {
+    state == &AgentPatchRecoveryState::default() && exact_source && model_compatible
 }
 
 fn patch_recovery_source_terminal(kind: &str) -> bool {
@@ -146,12 +166,29 @@ fn patch_recovery_source_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::{patch_recovery_source_matches, patch_recovery_source_terminal};
+    use super::{patch_recovery_source_matches, patch_recovery_source_terminal, settled_model_transition};
     use nomifun_agent_contracts::{
         AgentSessionId, DigestHex, OperationId, ResolvedSnapshotId, ResolvedSnapshotRef,
         RuntimeBindingId,
     };
     use nomifun_agent_runtime::{EngineBinding, EngineBuildId};
+
+    #[test]
+    fn settled_patch_state_needs_exact_source_and_owner_model_proof() {
+        let state = nomifun_agent_runtime::AgentPatchRecoveryState::default();
+        assert!(settled_model_transition(&state, true, true));
+        assert!(!settled_model_transition(&state, false, true));
+        assert!(!settled_model_transition(&state, true, false));
+        for state in [
+            nomifun_agent_runtime::AgentPatchRecoveryState { targets: vec!["file.txt".into()], ..state.clone() },
+            nomifun_agent_runtime::AgentPatchRecoveryState { unresolved_targets: vec!["file.txt".into()], unresolved_before_input: Some(1), ..state.clone() },
+            nomifun_agent_runtime::AgentPatchRecoveryState { target_budget_exceeded: true, ..state.clone() },
+            nomifun_agent_runtime::AgentPatchRecoveryState { version: 1, ..state.clone() },
+            nomifun_agent_runtime::AgentPatchRecoveryState { version: 0, ..state.clone() },
+        ] {
+            assert!(!settled_model_transition(&state, true, true));
+        }
+    }
 
     #[test]
     fn completed_failed_and_cancelled_turns_can_own_permanent_patch_recovery() {

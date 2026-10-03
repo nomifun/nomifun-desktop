@@ -618,6 +618,26 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   Stop/join、不明证明不紧急退出的底线不变。正式normal/held各独立零模型运行待验，
   只计划共用本轮同一个最新正式包，不重跑旧ack-loss或矩阵。外证据guardian-live-exit。
 
+- 正式源`506ac463d`的normal修后与held分别通过：真实页面trusted/count1、模型0，
+  Cmd-Q后正常native return/exit0（5.231秒）；受控主线程不返回后生产monitor自行exit1
+  （35.318秒），无监督器expiry/TERM/KILL。捕获Main/Helper/guardian及私有socket/dir
+  全absence；两库各1Session/3events/0Turns/0effects，源/备份五表同、双integrity及
+  profile URL隔离通过。首个观察器误将Helper参数当guardian、错过余量后的expiry/TERM
+  失败原样保留，不回填PASS。held未调用实际cef_shutdown，不宣称Keychain复现；本风险
+  的生产有界失败保护已验，系统等待原始成因/自然现场仍保留。外证据guardian-live-exit。
+
+#### Step5正式接入首败与结清补丁状态（2026-10-03）
+
+- 正式UI在原B数据登记/保存Step5、vision、1M/4096，原Session实际切换且保持low；
+  配置阶段错选8192/错过owned期限另保留，模型任务未发/0请求，后用实际保存值校正。
+  run004报告首败0模型步/0StepFun请求：本地patch recovery拒绝旧Snapshot，未归上游。
+  正常退出287.451秒/无信号，1295events/8Turns/14effects冷封存，1286前缀/7旧Turn/
+  14effects精确保留，无新owner效果。完整B报告仍FAIL，不以已选新模型关闭。
+- 最后patch state seq239是全空v2且源已failed关闭；现仅对完整source身份/时序及无
+  后续未覆盖派发、宿主仅模型兼容证明成立的全空状态返回default。不迁移pending或
+  checkpoint权限，不改旧日志；真正不兼容恢复报本地SessionConfigurationChanged。
+  三项定向回归通过，正式修后待验。证据step5-b09-closure/run-004-report及run-001-build。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
