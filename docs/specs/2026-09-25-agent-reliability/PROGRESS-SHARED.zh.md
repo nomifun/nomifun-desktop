@@ -1,10 +1,16 @@
 # 命令与会话可靠性共享进度
 
-更新：2026-10-02。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-10-04。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 2026-09-30按用户明确目的收敛为[八个命令问题簇、三组正式会话](IMPLEMENTATION-PLAN.zh.md)。
 本轮处理简单命令、步骤衔接、过程状态及结果可信性；通用/编程入口各保留真实执行证据。
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
 核心共同链路达标后单独通知，再补其中尚缺的Windows命令/native断言，不以全产品发布认证阻断收尾。
+
+2026-10-04用户明确跨盘/真实UNC先跳过，保留未验。Windows e869aa532正式Tauri/Computer Use
+已核对当前Turn插入后旧2048/low冻结、下一Turn默认wire省略/high刷新两项；canonical预算与实际
+请求一致。夹具强制报告响应错误和响应上限首败保留，完整报告链不计PASS，W276旧原因不外推。
+成功恢复在输入前因cold-launcher PowerShell环境停止，Turn/effect0、未故障/冷启，仍未验；B/D
+仅准备候选，既有stdin/Stop/历史真值/Creative/W274托盘Quit复用。完整共享/Windows/发布未认证。
 
 2026-10-04 mac近期四目标收尾：原A13完整11项交付、B09原效果/字节/步骤及最新33来源
 报告事实与中文表达独立PASS、真实Keychain等待下有界exit1证据复用。最新23788B报告同

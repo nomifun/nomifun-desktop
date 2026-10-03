@@ -4319,3 +4319,12 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原PID27264/15:30:41Z实际executionclaim1、budget65536/2048、请求1中的max_tokens2048/reasoning_effort low，达到原W276未到的执行阶段。活动Turn中公开API保存1M/default null/high成功；接着UI填入并点击已观察的立刻插入按钮时，模型流已暂停，steer-accepted0，没有第二请求/下一Turn。组织时序失败保留，不延长期限或重发；同Turn/下一Turn冻结未计PASS，旧W276原因不由首请求成立反证。
 - 固定首次提交+120秒，实际第一流15:34:17.743Z由客户端关闭；canonical pause为EXECUTION_MODEL_PROVIDER_UNAVAILABLE，不凭该码外推真实供应商故障。真实UI结束本回合后cancelled一次/effects0；原OS句柄实际API exit0/15:37:33Z，非托盘，model carrier自然shutdown0，后代/监听0。外部`2026-10-03/windows/global-c-config-refresh-formal`保存构建身份、两配置/warmup、原请求/部分SSE/固定观察、UI/独立结算与真实退出；无新定位或以样本重置原盒。
 - B独立路径误拒修复f82b8d085在该GUI退出后才应用，不能追认为本例源码；其他生成、v4/原历史模型采用、成功恢复、S3/卷UNC及全共享/Windows/发布认证仍OPEN，全面目标active。
+
+### 全局C配置参数正式采用与恢复预部署（2026-10-04；仅两项参数子断言通过）
+
+- 用户明确跳过本机不支持的跨盘/真实UNC，保留未验；其他工作继续，沿用每问题20～30分钟停止线。正常同步远端e869aa532（仅Mac进度），无新产品源码；正式desktop与初始化helper重新构建，源码e869aa532、desktop SHA 733BE633F39150BAE11CE5B3791F1114D436E7673CF33C2A1CD2608100655A52、前端fd8cbb7e/1280×832一致。初次helper包名/前端清单路径错误已另存，纠正后实际构建成功。
+- 新官方data/work/profile，经Computer Use操作正式Tauri。首样本PID52460实际接纳插入一次，但本地首SSE没有正常release，保留暂停/取消，不计冻结通过；API exit0及后代/监听0。修正夹具只增加收到真实steer事件后正常结束原SSE，不改产品期限、lease、schema或参数断言。
+- 同data/work的新profile、PID77052：公开接口在首请求后保存1M/default null/high；原Turn三个实际wire请求均max_tokens=2048/reasoning_effort=low，唯一steer-accepted成立。下一Turn唯一请求省略max_tokens、reasoning_effort=high；canonical预算从65536/2048到1M/内部默认预留4096（预留不是wire）。两个配置子断言通过，effects0、上游付费请求0。
+- 当前Turn的强制report收到夹具plain文本，被产品正确判failed；下一Turn触及夹具原三响应上限后暂停/取消。以上首败均保留，不把参数子断言扩成完整报告链PASS或W276旧原因已解释。PID77052实际API exit0、carrier自然exit0，后代/监听0；正式托盘Quit继续复用W274。
+- C成功恢复的新库原PID65828已部署，但cold launcher使用powershell.exe时无法识别Get-FileHash，首次预部署停止。未发送输入（Turn/effect0）、未sampler/fault/arm/冷启动；真实GUI/API与helper均exit0。退出快照一项输入法伴随PID后续已消失，晚读无遗留；保留原快照。经Get-Command验证的pwsh绝对路径修正仅存候选，时间盒到线，不删原件重部署，成功恢复仍未验。
+- 仓库外`2026-10-04/windows/global-c-config-resume`保存首次夹具失败、修正后的四份真实请求及已有SSE、canonical/预算独立核对及两次实际退出；第四次上限响应未单独保存原HTTP，不离线补造。`global-c-recovery-resume`保存预部署首败、固定原句柄和清理。B提交Network观察与D迟到resize载体独立准备已停止，仅候选、未正式执行，不能计修复进度。旧wire/生成残余、v4/typed实际采用、W276/成功恢复、S3等保持开放，完整共享/Windows/发布认证未完成；自有GUI/Cargo/helper/carrier/监听已清理。
