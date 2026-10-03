@@ -4162,3 +4162,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - App原生exec实得21bytes/mixed/完整中文及emoji，当前cursor21空poll仍保持原终态和全部元数据；scope quiescent/cleanup通过。新增仅测试及Windows测试所需Globalization feature，未修改renderer；无正式UI/模型/SSE，不代判模型报告或完整WIN-012/全部平台认证。制品外部`2026-10-03/windows/w271-mixed-stream-supervisor`保存原始回执/分流bytes、终态及构建结果，自有Cargo/GUI/原writer均无遗留。
 - 当前computer-use应用/窗口两次清单均没有托盘目标；活动托盘Quit仍待人工可用条件，尚未准备新实例，不复用旧PID或改产品入口。W249/W250旧wire缺证、W240提议偏差、精确引用真实采用及原复杂交付继续开放，全面目标active。
 - WIN-015仅完成只读夹具预检：宿主支持S3、当前交流电且AC允许wake timer，绝对时间timer/resume=true实际arm成功/last_error=0，随即cancel并close。原token的SeShutdownPrivilege存在但Disabled；实际系统sleep/wake尚未执行，不计Case通过，不改电源/安全设置。预检JSON随同制品保存，后续仍需实际电源周期及同一owner/句柄的终态证据。
+
+### W272 实际S3与原owner归约（2026-10-03；WIN-015部分通过、首败保留）
+
+- 仓库外驱动链接当前be2bdd246的生产ProcessSupervisor；初次SDK编译错误保留，修正驱动签名/枚举及输入分帧后构建通过，无产品源码修改。一次实际SetSuspendState(false,false,false)，UTC绝对wake timer；仅测试进程临时启用已有SeShutdownPrivilege并恢复原值，不改系统电源/安全设置，无正式Tauri/UI/模型请求。
+- 实际墙钟65.501s、排除休眠计时3.673s，LastSleep/LastWake改变；系统Kernel-Power42及Power-Troubleshooter1均Target/EffectiveState=4，WakeTimerOwner精确指向本次驱动，证实实际S3及自有timer唤醒。SetSuspendState返回true；保存的last_error=1300不当作成功调用的失败证据。40秒设定不等于实测65.5秒，完整原日志保留。
+- pipe/ConPTY分别原10s deadline、15s lease：休眠前READY及原父子OS句柄存活，唤醒后两者均TimedOut/reaped，清理404/420ms；原句柄均终止、registry退休后迟到write均SessionNotFound，无输入应用/进程重放。仅这两个受管原生归约子断言通过，W266/W268机制直接复用。
+- 交互ConPTY无deadline/expire_on_idle=false、10s lease，唤醒后同一父子句柄仍活，原write(AFTER_REAL_S3_ONCE加LF)返回Ok并被console回显；5秒内应用S3_ACK缺失，因此该子断言FAIL，驱动实际exit2，不把整个WIN-015计PASS。LF/cooked-input夹具原因尚未用零休眠对照证明，唯一原因缺证；原父子随后cancel/reaped、171ms清理。定位已超过30分钟，停止对照/再次休眠，不靠新批次重置时间盒。
+- 外部`2026-10-03/windows/w272-real-s3`含完整驱动/源码二进制身份、一次物理电源intent/返回/独立事件、原owner/句柄和三个结果、exit2及cleanup。六个原PID均无遗留，timer取消、测试进程token恢复；自有Cargo/GUI/驱动均结束。交互确认、正式UI采用、完整WIN-015及其余生成/平台/发布边界仍开放，全面目标active。
