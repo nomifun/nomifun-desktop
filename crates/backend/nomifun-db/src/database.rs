@@ -833,6 +833,10 @@ mod tests {
         .await
         .unwrap();
 
+        // This fixture reconstructs migration 001, so later Agent and Plugin
+        // DDL must be removed together with their receipts, before the exact
+        // retired Plugin replacement is exercised.
+        remove_native_checkpoint_fixture_columns(database.pool()).await;
         let mut conn = database.pool().acquire().await.unwrap();
         let mut retired = String::from(
             "PRAGMA foreign_keys = OFF;\n\
@@ -937,7 +941,53 @@ mod tests {
         "plugin_artifacts",
     ];
 
+    async fn restore_plugin_baseline_fixture_schema(pool: &SqlitePool) {
+        // A file-backed fixture pool has several connections. Keep dependent
+        // DROP/CREATE statements on one connection so a second connection's
+        // old schema cache cannot reject the replacement's index at prepare.
+        let mut conn = pool.acquire().await.unwrap();
+        // These helpers are used only on newly initialized disposable test
+        // databases. Never discard an actual authoring or install history.
+        for table in ["plugin_drafts", "plugin_mutations"] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&mut *conn).await.unwrap();
+            assert_eq!(count, 0, "old-schema fixture must start without {table} rows");
+        }
+        sqlx::raw_sql("DROP TRIGGER IF EXISTS trg_plugin_drafts_clear_base_before_plugin_delete; \
+            DROP TABLE plugin_drafts; \
+            ALTER TABLE plugin_mutations DROP COLUMN draft_association_json;")
+            .execute(&mut *conn).await.unwrap();
+        let dropped: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('plugin_drafts','idx_plugin_drafts_owner_updated','trg_plugin_drafts_identity_immutable')")
+            .fetch_one(&mut *conn).await.unwrap();
+        assert_eq!(dropped, 0, "DROP must remove the draft table and its owned index/trigger");
+        // Read the exact unchanged migration-001 definitions, including its
+        // messages_json/status constraint, index and identity trigger. Merely
+        // dropping the 008 columns cannot undo the table replacement in 009.
+        for (stage, (start, end)) in [
+            ("CREATE TABLE plugin_drafts (", "CREATE TABLE plugin_credential_bindings ("),
+            ("CREATE INDEX idx_plugin_drafts_owner_updated", "CREATE INDEX idx_plugin_credential_bindings_credential_id"),
+            ("CREATE TRIGGER trg_plugin_drafts_identity_immutable", "CREATE TRIGGER trg_plugin_credential_bindings_updated_at_monotonic"),
+        ].into_iter().enumerate() {
+            let sql = baseline_segment(start, end).unwrap();
+            assert_eq!(sql.matches("CREATE INDEX idx_plugin_drafts_owner_updated").count(), usize::from(stage == 1));
+            sqlx::raw_sql(sql)
+                .execute(&mut *conn).await.unwrap();
+            let objects: Vec<(String, String, String)> = sqlx::query_as("SELECT type,name,tbl_name FROM sqlite_schema WHERE name IN ('plugin_drafts','idx_plugin_drafts_owner_updated','trg_plugin_drafts_identity_immutable') ORDER BY type,name")
+                .fetch_all(&mut *conn).await.unwrap();
+            assert_eq!(objects.len(), stage + 1, "exact original schema objects after restoration stage {stage}");
+            assert!(objects.iter().all(|(_, _, table)| table == "plugin_drafts"));
+        }
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version>=8")
+            .execute(&mut *conn).await.unwrap();
+    }
+
     async fn remove_native_pause_fixture_columns(pool: &SqlitePool) {
+        // Every older-schema fixture must remove the new forward-only column
+        // and its receipt before it can truthfully reapply migration 011.
+        sqlx::raw_sql("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort_v3; \
+            DELETE FROM _sqlx_migrations WHERE version=11;")
+            .execute(pool).await.unwrap();
+        restore_plugin_baseline_fixture_schema(pool).await;
         sqlx::raw_sql("ALTER TABLE agent_turns DROP COLUMN native_pause_revision; \
             ALTER TABLE agent_turns DROP COLUMN native_pause_json; \
             ALTER TABLE agent_turns DROP COLUMN native_pause_requested_json; \
@@ -1007,7 +1057,7 @@ mod tests {
                 else { assert_eq!(row.0,"failed"); assert!(row.1.is_none()); }
             }
             let head: i64 = sqlx::query_scalar("SELECT migration_head FROM schema_metadata WHERE singleton_key='canonical'").fetch_one(upgraded.pool()).await.unwrap();
-            assert_eq!(head,6);
+            assert_eq!(head,i64::from(nomifun_agent_contracts::AGENT_STORE_MIGRATION_HEAD));
             upgraded.close().await;
         }
     }
@@ -1129,6 +1179,64 @@ mod tests {
         .unwrap();
         assert_eq!(effort.as_deref(), Some("high"));
         upgraded.close().await;
+    }
+
+    #[tokio::test]
+    async fn native_reasoning_v3_forward_migration_preserves_v2_values_and_adds_none_minimal() {
+        // A disposable in-memory fixture with the exact current SQLx receipts
+        // through 010, not a rewritten user database or old migration file.
+        let database = init_database_memory().await.unwrap();
+        sqlx::query("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort_v3")
+            .execute(database.pool()).await.unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=11")
+            .execute(database.pool()).await.unwrap();
+        sqlx::query("UPDATE schema_metadata SET migration_head=6, canonical_schema_manifest_digest='de5d31539af0cc75f26d2090546a908b39e8719665d3f8dac6eda6e0b26fa036' WHERE singleton_key='canonical'")
+            .execute(database.pool()).await.unwrap();
+        sqlx::query("INSERT INTO client_preferences(key,value,updated_at) VALUES ('v3-reasoning-preserve','unchanged',1)")
+            .execute(database.pool()).await.unwrap();
+        let cases = [
+            (Some("low"), Some("xhigh"), Some("xhigh")),
+            (Some("high"), None, Some("high")),
+            (None, Some("ultra"), Some("ultra")),
+            (None, None, None),
+        ];
+        let mut sessions = Vec::new();
+        for (legacy, v2, expected) in cases {
+            let session = uuid::Uuid::now_v7().to_string();
+            sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,archived,pinned,agent_binding_json,next_seq,created_at,reasoning_effort,reasoning_effort_v2) VALUES (?,'{}','live',0,0,'{}',1,1,?,?)")
+                .bind(&session).bind(legacy).bind(v2).execute(database.pool()).await.unwrap();
+            sessions.push((session, legacy, v2, expected));
+        }
+        assert!(!validate_known_migration_lineage_prefix(database.pool()).await.unwrap());
+        DB_MIGRATOR.run(database.pool()).await.unwrap();
+        validate_current_migration_lineage(database.pool()).await.unwrap();
+        for (session, legacy, v2, expected) in &sessions {
+            let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT reasoning_effort,reasoning_effort_v2,reasoning_effort_v3 FROM agent_sessions WHERE agent_session_id=?"
+            ).bind(session).fetch_one(database.pool()).await.unwrap();
+            assert_eq!(row.0.as_deref(), *legacy);
+            assert_eq!(row.1.as_deref(), *v2);
+            assert_eq!(row.2.as_deref(), *expected);
+        }
+        for tier in ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            sqlx::query("UPDATE agent_sessions SET reasoning_effort_v3=? WHERE agent_session_id=?")
+                .bind(tier).bind(&sessions[0].0).execute(database.pool()).await.unwrap();
+        }
+        assert!(sqlx::query("UPDATE agent_sessions SET reasoning_effort_v3='unsupported' WHERE agent_session_id=?")
+            .bind(&sessions[0].0).execute(database.pool()).await.is_err());
+        let metadata: (i64, String) = sqlx::query_as("SELECT migration_head,canonical_schema_manifest_digest FROM schema_metadata WHERE singleton_key='canonical'")
+            .fetch_one(database.pool()).await.unwrap();
+        assert_eq!(metadata.0, i64::from(nomifun_agent_contracts::AGENT_STORE_MIGRATION_HEAD));
+        assert_eq!(metadata.1, nomifun_agent_contracts::digest_payload(&nomifun_agent_contracts::agent_store_schema_manifest_payload()).unwrap().as_ref());
+        let value: String = sqlx::query_scalar("SELECT value FROM client_preferences WHERE key='v3-reasoning-preserve'")
+            .fetch_one(database.pool()).await.unwrap();
+        assert_eq!(value, "unchanged");
+        // Reapplying a current migration chain is a no-op, preserving new tiers.
+        DB_MIGRATOR.run(database.pool()).await.unwrap();
+        let tier: String = sqlx::query_scalar("SELECT reasoning_effort_v3 FROM agent_sessions WHERE agent_session_id=?")
+            .bind(&sessions[0].0).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(tier, "ultra");
+        database.close().await;
     }
 
     #[tokio::test]

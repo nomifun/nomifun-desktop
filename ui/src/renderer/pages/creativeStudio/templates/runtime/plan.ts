@@ -157,7 +157,7 @@ export function createPlannerTaskInput(
       rendered.value,
       '</brief>',
     ].join('\n'),
-    max_tokens: entry.step.planning.maxTokens,
+    ...(entry.step.planning.maxTokens == null ? {} : { max_tokens: entry.step.planning.maxTokens }),
   };
   return {
     ...identity,

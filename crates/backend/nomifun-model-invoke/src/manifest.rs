@@ -830,6 +830,13 @@ pub fn validate_provider_params_for_protocol(
             "capability provider_params contains reserved local transport/auth field {key:?}"
         )));
     }
+    if let Some(kind) = object.get("_nomifun_context_limit_kind") {
+        if task != Chat || !matches!(kind.as_str(), Some("input_only" | "combined")) {
+            return Err(InvokeError::config(
+                "_nomifun_context_limit_kind is local Chat context metadata and must be input_only or combined",
+            ));
+        }
+    }
     // This historical StepFun adapter-control hint is deliberately consumed
     // nowhere. Reject it at save time instead of accepting a no-op field or
     // leaking it upstream.
@@ -966,9 +973,9 @@ pub fn protocol_supports_reasoning_effort(protocol_id: &str) -> bool {
 pub fn protocol_supports_reasoning_effort_value(protocol_id: &str, value: &str) -> bool {
     match protocol_id {
         "openai.chat_text" | "openai.responses" => {
-            matches!(value, "low" | "medium" | "high" | "xhigh" | "max" | "ultra")
+            matches!(value, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra")
         }
-        "gemini.generate_text" => matches!(value, "low" | "medium" | "high"),
+        "gemini.generate_text" => matches!(value, "minimal" | "low" | "medium" | "high"),
         _ => false,
     }
 }
@@ -1576,6 +1583,20 @@ mod tests {
     }
 
     #[test]
+    fn local_context_kind_metadata_accepts_only_declared_chat_semantics() {
+        for kind in ["input_only", "combined"] {
+            validate_provider_params_for_protocol("gemini.generate_text", Chat,
+                &serde_json::json!({"_nomifun_context_limit_kind": kind})).unwrap();
+        }
+        for kind in [serde_json::json!("unknown"), serde_json::json!(true), serde_json::json!(0)] {
+            assert!(validate_provider_params_for_protocol("openai.chat_text", Chat,
+                &serde_json::json!({"_nomifun_context_limit_kind": kind})).is_err());
+        }
+        assert!(validate_provider_params_for_protocol("openai.images", ImageGeneration,
+            &serde_json::json!({"_nomifun_context_limit_kind": "input_only"})).is_err());
+    }
+
+    #[test]
     fn response_chaining_is_a_typed_responses_only_chat_control() {
         for value in [serde_json::json!(true), serde_json::json!(false)] {
             validate_provider_params_for_protocol(
@@ -2097,7 +2118,7 @@ mod tests {
     #[test]
     fn reasoning_effort_is_a_typed_control_for_compatible_chat_protocols() {
         for protocol in ["openai.chat_text", "openai.responses"] {
-            for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+            for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
                 validate_provider_params_for_protocol(
                     protocol,
                     Chat,
@@ -2106,7 +2127,7 @@ mod tests {
                 .unwrap();
             }
         }
-        for effort in ["low", "medium", "high"] {
+        for effort in ["minimal", "low", "medium", "high"] {
             validate_provider_params_for_protocol(
                 "gemini.generate_text",
                 Chat,

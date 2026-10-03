@@ -94,15 +94,23 @@ describe('provider auto configuration', () => {
     expect(selectProviderAutoConfiguration(optionalTarget,[{candidate:optionalTarget.candidates[0]!}])?.outputLimit).toBeUndefined();
   });
 
-  test('transport mode changes preserve an explicit custom output limit', () => {
+  test('transport mode changes preserve custom limits and parameters without weakening destination reset', () => {
     const customized={model:'m',capabilities:[{...emptyCapabilityDraft('chat'),transportSource:'user' as const,
-      protocol:'openai.chat_text',outputLimit:65_536}]};
+      protocol:'openai.chat_text',contextLimit:1_000_000,outputLimit:100_000,
+      providerParamsJson:'{"reasoning_effort":"high","temperature":0.2}',
+      baseUrlOverride:'https://old.example',allowCrossOriginCredentials:true}]};
     const anthropic=applyProviderCompatibilityMode(customized,'anthropic',true);
-    expect(anthropic.capabilities[0].outputLimit).toBe(65_536);
+    expect(anthropic.capabilities[0].outputLimit).toBe(100_000);
+    expect(anthropic.capabilities[0]).toMatchObject({contextLimit:1_000_000,
+      providerParamsJson:customized.capabilities[0].providerParamsJson,baseUrlOverride:'',allowCrossOriginCredentials:false});
+    expect(validateModelDefinition(anthropic,{chat:manifest([descriptor('anthropic.messages',['header_key:x-api-key'],true)])},
+      'https://provider.example',[],[],[],'header_key:x-api-key').errors.some(error=>error.code==='invalid_provider_params')).toBe(true);
     const openai=applyProviderCompatibilityMode(anthropic,'openai',true);
-    expect(openai.capabilities[0].outputLimit).toBe(65_536);
+    expect(openai.capabilities[0].outputLimit).toBe(100_000);
+    expect(openai.capabilities[0].providerParamsJson).toBe(customized.capabilities[0].providerParamsJson);
     const automatic=applyProviderCompatibilityMode(openai,'auto',true);
-    expect(automatic.capabilities[0].outputLimit).toBe(65_536);
+    expect(automatic.capabilities[0].outputLimit).toBe(100_000);
+    expect(automatic.capabilities[0].providerParamsJson).toBe(customized.capabilities[0].providerParamsJson);
   });
 
   test('is limited to Custom and New API', () => {
@@ -187,7 +195,7 @@ describe('provider auto configuration', () => {
       transportSource: 'user',
       protocol: 'anthropic.messages',
       endpoint: '',
-      providerParamsJson: '',
+      providerParamsJson: '{"temperature":0.2}',
       outputLimit: undefined,
     });
 

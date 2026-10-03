@@ -86,6 +86,7 @@ const toProviderModelCapabilityInput = (
   provider_params: capability.provider_params,
   context_limit: capability.context_limit,
   output_limit: capability.output_limit,
+  compaction_threshold_pct: capability.compaction_threshold_pct,
 });
 
 /** Convert a response row into the full-replacement save input. */

@@ -31,6 +31,8 @@
   "reasoningEffort": {
     "label": "本会话思考深度",
     "auto": "自动",
+    "none": "无思考",
+    "minimal": "最少",
     "low": "低",
     "medium": "中",
     "high": "高",

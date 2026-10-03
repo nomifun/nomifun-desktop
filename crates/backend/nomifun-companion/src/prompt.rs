@@ -6,8 +6,6 @@ use serde::Deserialize;
 
 use crate::store::{MEMORY_KINDS, CompanionMemory};
 
-pub const LEARN_MAX_TOKENS: u32 = 4096;
-
 /// Valid moods the companion can be in (renderer maps each to an animation).
 pub const MOODS: [&str; 5] = ["happy", "content", "sleepy", "worried", "excited"];
 
@@ -122,8 +120,6 @@ fn extract_json_object(raw: &str) -> Option<&str> {
 }
 
 // ----- session-window archive digests (伙伴会话窗口归档) -----
-
-pub const ARCHIVE_MAX_TOKENS: u32 = 2048;
 
 /// Structured output of one session-window digest run.
 #[derive(Debug, Deserialize)]

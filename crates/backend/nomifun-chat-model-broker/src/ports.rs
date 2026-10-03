@@ -22,6 +22,13 @@ pub trait ChatRouteResolver: Send + Sync {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<ResolvedChatRouteSet, ChatModelError>;
+
+    /// Exact selected model's configured output bound for one actual attempt.
+    /// None preserves provider defaults; this must not intersect unused routes
+    /// or substitute an Engine context-reservation fallback for a wire limit.
+    async fn output_limit_for_route(&self, _route: &ResolvedChatRoute) -> Result<Option<u32>, ChatModelError> {
+        Ok(None)
+    }
 }
 
 /// Host-owned sink for conclusive negative technical-capability observations.

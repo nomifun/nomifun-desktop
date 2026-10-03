@@ -350,6 +350,33 @@ pub struct ProbeProviderConnectionResponse {
     pub candidates: Vec<ProbeCandidateResult>,
 }
 
+/// Semantic dimension of a declared context value. An input ceiling must not
+/// have the independently declared output ceiling subtracted from it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum ModelContextLimitKind {
+    InputOnly,
+    Combined,
+}
+
+/// Field-level origin of advisory token limits from a provider catalog.
+/// These are response field paths, not inferred limits or user preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct ModelTokenLimitSources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context_limit_kind: Option<ModelContextLimitKind>,
+}
+
 /// A fetched model entry with one fixed wire shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
@@ -374,6 +401,15 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
+    /// Provider-declared maximum output tokens. Absent when unknown; this is
+    /// an import suggestion, never permission to replace an existing manual
+    /// ceiling or an explicit provider-default (`None`) configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub token_limit_sources: Option<ModelTokenLimitSources>,
 }
 
 /// Response for `POST /api/providers/:id/models`.
@@ -464,6 +500,8 @@ mod tests {
                 tasks: vec![ModelTask::Chat],
                 traits: vec![ModelTrait::VisionInput],
                 context_limit: None,
+                output_limit: None,
+                token_limit_sources: None,
             }],
             fixed_base_url: None,
         };
@@ -492,18 +530,26 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(older.context_limit, None);
+        assert_eq!(older.output_limit, None);
+        assert_eq!(older.token_limit_sources, None);
         let value = serde_json::to_value(&older).unwrap();
         assert!(
             !value.as_object().unwrap().contains_key("context_limit"),
             "an unknown window must be omitted, not serialized as null: {value}"
         );
+        assert!(!value.as_object().unwrap().contains_key("output_limit"));
+        assert!(!value.as_object().unwrap().contains_key("token_limit_sources"));
 
         let declared: ModelInfo = serde_json::from_value(json!({
             "id": "gemini-3.1-pro",
-            "context_limit": 1_048_576_i64
+            "context_limit": 1_048_576_i64,
+            "output_limit": 65_536_i64,
+            "token_limit_sources": {"context_limit":"inputTokenLimit", "output_limit":"outputTokenLimit"}
         }))
         .unwrap();
         assert_eq!(declared.context_limit, Some(1_048_576));
+        assert_eq!(declared.output_limit, Some(65_536));
+        assert_eq!(declared.token_limit_sources.as_ref().unwrap().output_limit.as_deref(), Some("outputTokenLimit"));
         assert_eq!(
             serde_json::to_value(&declared).unwrap()["context_limit"],
             json!(1_048_576_i64)

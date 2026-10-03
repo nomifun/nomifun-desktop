@@ -10,6 +10,7 @@ use super::engine_session_host::AdmittedEngineSession;
 pub struct EngineModelLimits {
     pub context_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
+    pub context_is_input_only: bool,
     pub compaction_threshold_pct: Option<u8>,
 }
 
@@ -40,33 +41,25 @@ impl EngineRouteModelFacts {
         &self.candidates
     }
 
-    /// Apply the caller's explicit unknown-limit policy to EVERY candidate,
-    /// then intersect. None if any bound remains unknown (or policy is zero).
-    /// A known large primary must not mask an unknown/smaller failover.
-    pub fn envelope_with_unknown_policy(&self, unknown: EngineModelLimits) -> Option<(u32, u32)> {
-        self.candidates
-            .iter()
-            .try_fold((u32::MAX, u32::MAX), |acc, candidate| {
-                let context = candidate.limits.context_tokens.or(unknown.context_tokens)?;
-                let output = candidate.limits.output_tokens.or(unknown.output_tokens)?;
-                (context > 0 && output > 0).then_some((acc.0.min(context), acc.1.min(output)))
-            })
+    /// Plan for the selected primary, not the smallest unused backup. Broker
+    /// applies each actual attempt's configuration independently on failover.
+    /// None remains unknown; it is not a synthetic 32K/4K provider capability.
+    pub fn primary_limits(&self) -> Option<EngineModelLimits> {
+        self.candidates.first().map(|candidate| candidate.limits)
     }
 
-    /// The route can fail over at any model boundary, so use the earliest
-    /// configured trigger among its candidates. Use 75% when none is set.
+    /// Preserve the primary's user-selected strategy. A backup's threshold
+    /// cannot prematurely summarize the primary's large-context history.
     pub fn compaction_threshold_pct(&self) -> u8 {
-        self.candidates
-            .iter()
-            .filter_map(|candidate| candidate.limits.compaction_threshold_pct)
-            .min()
+        self.primary_limits()
+            .and_then(|limits| limits.compaction_threshold_pct)
             .unwrap_or(75)
     }
 
     /// Only configured output limits become provider wire ceilings. An
     /// unknown/default candidate must not synthesize a 4096-token cap.
     pub fn configured_output_ceiling(&self)->Option<u32> {
-        self.candidates.iter().filter_map(|candidate|candidate.limits.output_tokens).min()
+        self.primary_limits().and_then(|limits| limits.output_tokens)
     }
 }
 
@@ -97,11 +90,11 @@ pub(super) async fn load(
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut candidates = Vec::with_capacity(record.failovers.len() + 1);
     for candidate in std::iter::once(&record.primary).chain(record.failovers.iter()) {
-        let row: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
-            "SELECT context_limit, output_limit, compaction_threshold_pct FROM provider_model_capabilities WHERE provider_id = ? AND model = ? AND task = 'chat'")
+        let row: Option<(Option<i64>, Option<i64>, Option<i64>, String)> = sqlx::query_as(
+            "SELECT context_limit, output_limit, compaction_threshold_pct, provider_params FROM provider_model_capabilities WHERE provider_id = ? AND model = ? AND task = 'chat'")
             .bind(&candidate.provider_id).bind(&candidate.model)
             .fetch_optional(&mut *tx).await.map_err(failure)?;
-        let (context, output, threshold) =
+        let (context, output, threshold, params) =
             row.ok_or_else(|| failure("selected model capability no longer exists"))?;
         let positive = |value: Option<i64>| -> Result<Option<u32>, AppError> {
             value
@@ -119,6 +112,8 @@ pub(super) async fn load(
             limits: EngineModelLimits {
                 context_tokens: positive(context)?,
                 output_tokens: positive(output)?,
+                context_is_input_only: serde_json::from_str::<serde_json::Value>(&params)
+                    .map_err(failure)?.get("_nomifun_context_limit_kind").and_then(serde_json::Value::as_str) == Some("input_only"),
                 compaction_threshold_pct: threshold
                     .map(|value| {
                         u8::try_from(value)
@@ -147,20 +142,24 @@ mod tests {
         let mut facts=EngineRouteModelFacts {
             route:ChatRouteIdentity::new("preset","agent.chat",ModelRouteId::from("route"),1),
             candidates:vec![EngineRouteCandidateFacts {provider_id:"primary".into(),model:"provider-default".into(),
-                limits:EngineModelLimits {context_tokens:Some(1_000_000),output_tokens:None,compaction_threshold_pct:None}}],
+                limits:EngineModelLimits {context_tokens:Some(1_000_000),output_tokens:None,context_is_input_only:false,compaction_threshold_pct:None}}],
         };
         assert_eq!(facts.configured_output_ceiling(),None);
         facts.candidates[0].limits.output_tokens=Some(100_000);
         assert_eq!(facts.configured_output_ceiling(),Some(100_000));
         facts.candidates.push(EngineRouteCandidateFacts {provider_id:"backup".into(),model:"default".into(),
-            limits:EngineModelLimits {context_tokens:Some(1_000_000),output_tokens:None,compaction_threshold_pct:None}});
+            limits:EngineModelLimits {context_tokens:Some(1_000_000),output_tokens:None,context_is_input_only:false,compaction_threshold_pct:None}});
         assert_eq!(facts.configured_output_ceiling(),Some(100_000),"unknown failover must not synthesize 4096");
         facts.candidates[1].limits.output_tokens=Some(32_000);
-        assert_eq!(facts.configured_output_ceiling(),Some(32_000));
+        assert_eq!(facts.configured_output_ceiling(),Some(100_000), "unused smaller backup cannot cap primary output");
+        facts.candidates[1].limits.context_tokens = Some(32_768);
+        assert_eq!(facts.primary_limits().unwrap().context_tokens, Some(1_000_000));
+        facts.candidates[0].limits.context_tokens = None;
+        assert_eq!(facts.primary_limits().unwrap().context_tokens, None, "unknown primary remains provider-defined");
     }
 
     #[test]
-    fn route_uses_earliest_compaction_threshold_across_failover_candidates() {
+    fn route_preserves_primary_compaction_threshold_despite_smaller_failover() {
         let candidates = vec![
             EngineRouteCandidateFacts {
                 provider_id: "primary".into(),
@@ -168,6 +167,7 @@ mod tests {
                 limits: EngineModelLimits {
                     context_tokens: Some(128_000),
                     output_tokens: Some(8_000),
+                    context_is_input_only: false,
                     compaction_threshold_pct: Some(90),
                 },
             },
@@ -177,6 +177,7 @@ mod tests {
                 limits: EngineModelLimits {
                     context_tokens: Some(64_000),
                     output_tokens: Some(4_000),
+                    context_is_input_only: false,
                     compaction_threshold_pct: Some(60),
                 },
             },
@@ -185,7 +186,7 @@ mod tests {
             route: ChatRouteIdentity::new("preset", "agent.chat", ModelRouteId::from("route"), 1),
             candidates,
         };
-        assert_eq!(facts.compaction_threshold_pct(), 60);
+        assert_eq!(facts.compaction_threshold_pct(), 90);
 
         let mut only_primary = facts.clone();
         only_primary.candidates[1].limits.compaction_threshold_pct = None;

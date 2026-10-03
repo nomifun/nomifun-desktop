@@ -1973,7 +1973,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompanionCompleter for NoopCompleter {
-        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
             Ok("{}".into())
         }
     }

@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    CapabilityHealth, ModelTask, ProviderModelCapabilityInput,
+    CapabilityHealth, ModelContextLimitKind, ModelTask, ProviderModelCapabilityInput,
     ProviderModelCapabilityResponse, ProviderModelResponse, SaveProviderModelRequest,
+    MODEL_CONTEXT_LIMIT_KIND_PARAM,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{
@@ -528,6 +529,13 @@ pub(crate) fn validate_provider_params(
     task: ModelTask,
     params: &serde_json::Value,
 ) -> Result<(), AppError> {
+    if let Some(kind) = params.get(MODEL_CONTEXT_LIMIT_KIND_PARAM) {
+        serde_json::from_value::<ModelContextLimitKind>(kind.clone()).map_err(|_| {
+            AppError::BadRequest(format!(
+                "{MODEL_CONTEXT_LIMIT_KIND_PARAM} must be input_only or combined"
+            ))
+        })?;
+    }
     validate_provider_params_for_protocol(protocol.trim(), task, params).map_err(Into::into)
 }
 

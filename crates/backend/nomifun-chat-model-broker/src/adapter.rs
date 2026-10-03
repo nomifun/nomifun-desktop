@@ -459,8 +459,16 @@ fn encode_anthropic_request(
 fn encode_openai_chat_request(
     request: &ChatModelRequest,
     route: &ResolvedChatRoute,
-) -> Value {
+) -> Result<Value, ChatModelError> {
     let input = &request.input;
+    if let Some(reasoning) = &input.reasoning {
+        if reasoning.max_reasoning_tokens.is_some()
+            || matches!(reasoning.summary, crate::contracts::ReasoningSummary::Concise | crate::contracts::ReasoningSummary::Detailed) {
+            return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+                "OpenAI Chat cannot encode a separate reasoning token budget or explicit summary detail; use Responses for summaries",
+                crate::contracts::ChatRetryDirective::Never));
+        }
+    }
     let mut messages = Vec::new();
     for instruction in &input.instructions {
         messages.push(json!({"role": "system", "content": instruction}));
@@ -506,14 +514,19 @@ fn encode_openai_chat_request(
     if !matches!(input.response_format, ChatResponseFormat::Text) {
         body["response_format"] = response_format_value(&input.response_format);
     }
-    body
+    Ok(body)
 }
 
 fn encode_openai_responses_request(
     request: &ChatModelRequest,
     route: &ResolvedChatRoute,
-) -> Value {
+) -> Result<Value, ChatModelError> {
     let input = &request.input;
+    if input.reasoning.as_ref().is_some_and(|reasoning| reasoning.max_reasoning_tokens.is_some()) {
+        return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+            "OpenAI Responses does not expose a separate reasoning token budget; configure effort or the total output limit",
+            crate::contracts::ChatRetryDirective::Never));
+    }
     let mut body = json!({
         "model": route.model,
         "instructions": input.instructions.join("\n\n"),
@@ -567,7 +580,7 @@ fn encode_openai_responses_request(
         }
         if !options.is_empty() { body["reasoning"] = Value::Object(options); }
     }
-    body
+    Ok(body)
 }
 
 fn encode_gemini_request(
@@ -575,6 +588,11 @@ fn encode_gemini_request(
     _route: &ResolvedChatRoute,
 ) -> Result<Value, ChatModelError> {
     let input = &request.input;
+    if matches!(input.prompt_cache, crate::contracts::PromptCachePolicy::Ephemeral) {
+        return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+            "Gemini ephemeral caching requires an explicit cachedContent lifecycle; this adapter supports automatic caching",
+            crate::contracts::ChatRetryDirective::Never));
+    }
     let call_names = input
         .tool_call_names()
         .map_err(|error| ChatModelError::invalid_request(error.to_string()))?;
@@ -590,27 +608,45 @@ fn encode_gemini_request(
     if let Some(max_output_tokens) = input.max_output_tokens {
         generation.insert("maxOutputTokens".to_owned(), Value::from(max_output_tokens));
     }
-    if let Some(reasoning) = &input.reasoning
-        && let Some(effort) = reasoning.effort
-    {
-        let thinking_level = match effort {
+    if let Some(reasoning) = &input.reasoning {
+        if reasoning.effort.is_some() && reasoning.max_reasoning_tokens.is_some() {
+            return Err(ChatModelError::invalid_request(
+                "Gemini thinking cannot combine an effort level and a token budget",
+            ));
+        }
+        let mut thinking = Map::new();
+        if let Some(effort) = reasoning.effort {
+            let thinking_level = match effort {
+            crate::contracts::ReasoningEffort::Minimal => "minimal",
             crate::contracts::ReasoningEffort::Low => "low",
             crate::contracts::ReasoningEffort::Medium => "medium",
             crate::contracts::ReasoningEffort::High => "high",
-            crate::contracts::ReasoningEffort::XHigh
+            crate::contracts::ReasoningEffort::None
+            | crate::contracts::ReasoningEffort::XHigh
             | crate::contracts::ReasoningEffort::Max
             | crate::contracts::ReasoningEffort::Ultra => {
                 return Err(ChatModelError::new(
                     ChatModelErrorCode::UnsupportedFeature,
-                    "Gemini thinking level does not support xhigh, max, or ultra",
+                    "Gemini thinking level does not support none, xhigh, max, or ultra",
                     crate::contracts::ChatRetryDirective::Never,
                 ));
             }
-        };
-        generation.insert(
-            "thinkingConfig".to_owned(),
-            json!({"thinkingLevel": thinking_level}),
-        );
+            };
+            thinking.insert("thinkingLevel".into(), Value::String(thinking_level.into()));
+        }
+        if let Some(budget) = reasoning.max_reasoning_tokens {
+            thinking.insert("thinkingBudget".into(), Value::from(budget));
+        }
+        match reasoning.summary {
+            crate::contracts::ReasoningSummary::None => {}
+            crate::contracts::ReasoningSummary::Auto => { thinking.insert("includeThoughts".into(), Value::Bool(true)); }
+            crate::contracts::ReasoningSummary::Concise | crate::contracts::ReasoningSummary::Detailed => {
+                return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+                    "Gemini exposes a boolean thought-summary control, not concise or detailed summary levels",
+                    crate::contracts::ChatRetryDirective::Never));
+            }
+        }
+        if !thinking.is_empty() { generation.insert("thinkingConfig".into(), Value::Object(thinking)); }
     }
     if !matches!(input.response_format, ChatResponseFormat::Text) {
         generation.insert("responseMimeType".to_owned(), Value::String("application/json".to_owned()));

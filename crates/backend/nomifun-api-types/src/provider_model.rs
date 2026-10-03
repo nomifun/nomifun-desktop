@@ -14,6 +14,11 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use crate::model_task::{ModelTask, ModelTechnicalCapability, ModelTrait};
 use crate::provider::{HealthStatus, ProviderHealthCheckErrorKind};
 
+/// Nomi-owned metadata, persisted with provider parameters but never sent to
+/// an upstream model API. Absence preserves existing combined-window policy;
+/// it is not evidence about historical user-authored values.
+pub const MODEL_CONTEXT_LIMIT_KIND_PARAM: &str = "_nomifun_context_limit_kind";
+
 fn empty_object() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }

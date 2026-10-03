@@ -110,6 +110,11 @@ pub trait ProductionModelRepository: Send + Sync {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<Option<ResolvedChatRouteSet>, ProductionRepositoryError>;
+
+    /// Read only this attempted route's exact frozen model configuration.
+    async fn output_limit_for_route(&self, _route: &ResolvedChatRoute) -> Result<Option<u32>, ProductionRepositoryError> {
+        Ok(None)
+    }
 }
 
 /// Adapter-facing connection repository and credential authority.
@@ -332,6 +337,11 @@ impl ChatRouteResolver for ProductionRouteResolver {
         selection: &ChatRouteSelection,
     ) -> Result<ResolvedChatRouteSet, ChatModelError> {
         self.resolve_repository_route(selection).await
+    }
+
+    async fn output_limit_for_route(&self, route: &ResolvedChatRoute) -> Result<Option<u32>, ChatModelError> {
+        self.model_repository.output_limit_for_route(route).await
+            .map_err(|error| repository_error("model output configuration", error))
     }
 }
 

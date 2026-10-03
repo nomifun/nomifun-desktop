@@ -260,10 +260,10 @@ fn map_target(target: CreationTaskTarget) -> CreativeTaskOwner {
 }
 
 fn map_text(request: CreationTextRequest) -> MappedCreationTask {
-    let mut params = Map::from_iter([
-        ("prompt".to_owned(), Value::String(request.prompt)),
-        ("max_tokens".to_owned(), json!(request.max_tokens)),
-    ]);
+    let mut params = Map::from_iter([("prompt".to_owned(), Value::String(request.prompt))]);
+    if let Some(max_tokens) = request.max_tokens {
+        params.insert("max_tokens".to_owned(), json!(max_tokens));
+    }
     insert_optional(&mut params, "system", request.system);
     MappedCreationTask {
         capability: "text".to_owned(),
@@ -543,6 +543,19 @@ mod tests {
         assert_eq!(host.invoke(request.clone()).await.unwrap().0["creation_task_id"], task_id, "accepted replays retain their frozen model after retirement");
         assert!(task.params.get("provider_id").is_none());
         assert!(task.params.get("model").is_none());
+    }
+
+    #[test]
+    fn text_mapping_omits_unset_token_limit_and_preserves_explicit_limit() {
+        let target = CreationTaskTarget::ConversationTurn { conversation_id: generate_id(), message_id: generate_id() };
+        let omitted = map_text(CreationTextRequest {
+            target: target.clone(), prompt: "report".into(), system: None, max_tokens: None,
+        });
+        assert!(omitted.params.get("max_tokens").is_none());
+        let explicit = map_text(CreationTextRequest {
+            target, prompt: "report".into(), system: None, max_tokens: Some(65_536),
+        });
+        assert_eq!(explicit.params["max_tokens"], 65_536);
     }
 
     #[test]

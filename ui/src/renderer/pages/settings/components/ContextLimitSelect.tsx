@@ -9,7 +9,7 @@ const CONTEXT_WINDOW_OPTIONS = [
   {
     value: DEFAULT_CONTEXT_LIMIT_VALUE,
     labelKey: 'settings.contextLimitDefaultOption',
-    defaultLabel: '自动（运行时默认）',
+    defaultLabel: '未覆盖（供应商/模型上下文）',
   },
   { value: 32_000, defaultLabel: '32k' },
   { value: 64_000, defaultLabel: '64k' },
@@ -21,8 +21,8 @@ const CONTEXT_WINDOW_OPTIONS = [
 const isPresetContextLimit = (value: number): boolean =>
   CONTEXT_WINDOW_OPTIONS.some((option) => option.value === value);
 
-const normalizeContextLimit = (value: unknown): number | undefined => {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+export const normalizeContextLimit = (value: unknown): number | undefined => {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 0xffff_ffff) return value;
   return undefined;
 };
 
@@ -92,7 +92,11 @@ export const ContextLimitSelect: React.FC<ContextLimitSelectProps> = ({ value, o
           placeholder={t('settings.contextLimitCustomPlaceholder', { defaultValue: '输入 tokens 数量' })}
           style={{ width: '100%' }}
           aria-label={t('settings.contextLimitCustomPlaceholder', { defaultValue: '输入 tokens 数量' })}
-          onChange={(nextValue) => onChange?.(normalizeContextLimit(nextValue))}
+          onChange={(nextValue) => {
+            const normalized = normalizeContextLimit(nextValue);
+            if (typeof nextValue === 'number' && normalized === undefined) return;
+            onChange?.(normalized);
+          }}
         />
       )}
     </div>

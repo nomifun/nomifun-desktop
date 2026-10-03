@@ -199,8 +199,10 @@ fn build_image_body(call: &ResolvedCall) -> Result<(Value, usize), InvokeError> 
         "model": call.model,
         "prompt": prompt,
         "n": count,
-        "size": size.unwrap_or(DEFAULT_IMAGE_SIZE),
     });
+    if let Some(size) = size {
+        typed["size"] = Value::String(size.to_owned());
+    }
     if let Some(images) = images {
         typed["extra_body"] = json!({"response_format": "b64_json"});
         typed["extra_body"]["image"] = Value::Array(
@@ -220,6 +222,10 @@ fn build_image_body(call: &ResolvedCall) -> Result<(Value, usize), InvokeError> 
             "Agnes image request body must be an object",
         )
     })?;
+    // Agnes requires a size. Supply the local fallback only when neither the
+    // capability nor this request selected one; configured 2K–4K tiers must
+    // survive a caller that leaves its optional typed size unset.
+    object.entry("size").or_insert_with(|| Value::String(DEFAULT_IMAGE_SIZE.into()));
     // These OpenAI-style top-level fields are specifically rejected by the
     // Agnes text-image queue. `response_format` is owned by `extra_body`.
     object.remove("quality");
@@ -664,6 +670,27 @@ mod tests {
             server.uri()
         ));
         call
+    }
+
+    #[test]
+    fn image_size_defaults_preserve_configured_and_request_tiers() {
+        for (configured, extra, typed_size, expected) in [
+            (json!({}), json!({}), None, DEFAULT_IMAGE_SIZE),
+            (json!({"size": "4K"}), json!({}), None, "4K"),
+            (json!({"size": "4K"}), json!({"size": "2K"}), None, "2K"),
+            (json!({"size": "4K"}), json!({"size": "2K"}), Some("3K"), "3K"),
+        ] {
+            let mut call = call_with_endpoint(
+                "https://unused.invalid/v1", IMAGE_MODEL, IMAGE_ADAPTER_ID,
+                "/images/generations", TaskRequest::ImageGeneration(crate::types::ImageGenRequest {
+                    prompt: "detailed scene".into(), count: 1,
+                    size: typed_size.map(str::to_owned), quality: None, extra,
+                }),
+            );
+            call.model_params = configured;
+            let (body, _) = build_image_body(&call).unwrap();
+            assert_eq!(body["size"], expected);
+        }
     }
 
     #[tokio::test]

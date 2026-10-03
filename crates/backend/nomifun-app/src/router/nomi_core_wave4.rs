@@ -1284,7 +1284,7 @@ mod tests {
             _model: &str,
             _system: &str,
             _user: &str,
-            _max_tokens: u32,
+            _max_tokens: Option<u32>,
         ) -> Result<String, AppError> {
             Ok("{}".to_owned())
         }

@@ -17,9 +17,10 @@ use crate::error::SttError;
 use crate::state::ShellRouterState;
 use crate::stt::CloudSttRoute;
 
-/// Hard ceiling on `/api/tts` input length (characters). Mirrors the OpenAI
-/// `/audio/speech` contract's own 4096-character input cap.
-const MAX_TTS_TEXT_CHARS: usize = 4096;
+/// Request-memory ceiling for `/api/tts`, independent of any model's text limit.
+/// The selected provider enforces its own contract; OpenAI's 4096-character
+/// limit must not constrain native providers that accept longer text.
+const MAX_TTS_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_STT_AUDIO_BYTES: usize = 30 * 1024 * 1024;
 const MAX_STT_REQUEST_BYTES: usize = MAX_STT_AUDIO_BYTES + 1024 * 1024;
 
@@ -99,10 +100,10 @@ async fn text_to_speech(
     if req.text.trim().is_empty() {
         return Err(AppError::BadRequest("text must not be empty".to_owned()));
     }
-    let char_count = req.text.chars().count();
-    if char_count > MAX_TTS_TEXT_CHARS {
+    let text_bytes = req.text.len();
+    if text_bytes > MAX_TTS_TEXT_BYTES {
         return Err(AppError::BadRequest(format!(
-            "text is {char_count} characters; the limit is {MAX_TTS_TEXT_CHARS}"
+            "text is {text_bytes} bytes; the request resource limit is {MAX_TTS_TEXT_BYTES} bytes"
         )));
     }
     let Some(invoke) = state.model_invoke_service.as_ref() else {
@@ -496,6 +497,44 @@ mod tests {
         let legacy_only =
             ClientPreferencesResponse::from([("textToSpeech".into(), json!({"model": "tts-1"}))]);
         assert!(text_to_speech_config_from_preferences(&legacy_only).is_none());
+    }
+
+    fn tts_request(text: String) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/tts")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "model": "speech-2.8-hd",
+                "text": text,
+            }).to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tts_route_does_not_apply_openai_character_limit_to_other_providers() {
+        for size in [4097, 9999, MAX_TTS_TEXT_BYTES] {
+            let response = make_router().oneshot(tts_request("a".repeat(size))).await.unwrap();
+            // The fixture has no invoke service. Reaching this error proves
+            // the complete text passed the shared endpoint's resource check.
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = body_json(response).await;
+            assert!(body["error"].as_str().unwrap().contains("model invoke service is unavailable"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tts_route_enforces_resource_ceiling_in_utf8_bytes() {
+        for text in [
+            "a".repeat(MAX_TTS_TEXT_BYTES + 1),
+            "界".repeat(MAX_TTS_TEXT_BYTES / 3 + 1),
+        ] {
+            let response = make_router().oneshot(tts_request(text)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = body_json(response).await;
+            assert!(body["error"].as_str().unwrap().contains("request resource limit"));
+        }
     }
 
     #[tokio::test]

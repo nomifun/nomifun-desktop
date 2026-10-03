@@ -995,7 +995,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompanionCompleter for NoopCompleter {
-        async fn complete(&self, _provider_id: &str, _model: &str, _system: &str, _user: &str, _max_tokens: u32) -> Result<String, AppError> {
+        async fn complete(&self, _provider_id: &str, _model: &str, _system: &str, _user: &str, _max_tokens: Option<u32>) -> Result<String, AppError> {
             Ok(String::new())
         }
     }

@@ -1,6 +1,8 @@
-export type SessionReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+export type SessionReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
 export const SESSION_REASONING_EFFORTS = [
+  'none',
+  'minimal',
   'low',
   'medium',
   'high',
@@ -9,7 +11,7 @@ export const SESSION_REASONING_EFFORTS = [
   'ultra',
 ] as const;
 
-const STANDARD_REASONING_EFFORTS = ['low', 'medium', 'high'] as const;
+const STANDARD_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high'] as const;
 const NO_REASONING_EFFORTS: readonly SessionReasoningEffort[] = [];
 
 /**

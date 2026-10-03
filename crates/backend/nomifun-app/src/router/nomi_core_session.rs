@@ -12734,6 +12734,8 @@ async fn switch_nomi_core_agent_session_model(
 
 fn contract_reasoning_effort(value: SessionReasoningEffortDto) -> ReasoningEffort {
     match value {
+        SessionReasoningEffortDto::None => ReasoningEffort::None,
+        SessionReasoningEffortDto::Minimal => ReasoningEffort::Minimal,
         SessionReasoningEffortDto::Low => ReasoningEffort::Low,
         SessionReasoningEffortDto::Medium => ReasoningEffort::Medium,
         SessionReasoningEffortDto::High => ReasoningEffort::High,
@@ -12745,6 +12747,8 @@ fn contract_reasoning_effort(value: SessionReasoningEffortDto) -> ReasoningEffor
 
 fn session_reasoning_effort_dto(value: ReasoningEffort) -> SessionReasoningEffortDto {
     match value {
+        ReasoningEffort::None => SessionReasoningEffortDto::None,
+        ReasoningEffort::Minimal => SessionReasoningEffortDto::Minimal,
         ReasoningEffort::Low => SessionReasoningEffortDto::Low,
         ReasoningEffort::Medium => SessionReasoningEffortDto::Medium,
         ReasoningEffort::High => SessionReasoningEffortDto::High,
@@ -12789,14 +12793,14 @@ async fn binding_supports_reasoning_effort(
             "AgentSession reasoning route differs from its frozen identity: {error}"
         ))
     })?;
-    if !record.primary.features.contains(&ChatRouteFeature::Reasoning) {
+    if effort != ReasoningEffort::None && !record.primary.features.contains(&ChatRouteFeature::Reasoning) {
         return Ok(false);
     }
     Ok(match record.primary.protocol {
         ChatRouteProtocol::OpenaiChat | ChatRouteProtocol::OpenaiResponses => true,
         ChatRouteProtocol::Gemini => matches!(
             effort,
-            ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High
+            ReasoningEffort::Minimal | ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High
         ),
         _ => false,
     })
