@@ -1171,11 +1171,16 @@ pub async fn build_channel_state(
         .with_group_policy_fence(Arc::clone(&group_policy_fence)),
     );
 
-    // Expired pairing codes are purged only by this background sweep —the
-    // timer existed but had no caller, so stale codes lingered in the DB
-    // indefinitely. Deliberately detached (handle dropped): like the channel
-    // message loop and plugin restore tasks, it runs for the process lifetime.
-    let _pairing_cleanup = nomifun_channel::pairing::PairingService::start_cleanup_timer(repo.clone());
+    // Pairing cleanup owns repository access until its current sweep returns.
+    // Cancel and join it with the existing host background barrier before SQLite
+    // closes, including when native Browser shutdown remains blocked.
+    let pairing_shutdown = services.background_shutdown.child_token();
+    services.register_background_task(
+        nomifun_channel::pairing::PairingService::start_cleanup_timer_with_shutdown(
+            repo.clone(),
+            pairing_shutdown,
+        ),
+    );
 
     let session_manager = Arc::new(nomifun_channel::session::SessionManager::new(repo.clone()));
 

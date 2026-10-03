@@ -16,7 +16,7 @@
 | A13复杂交付 | 原完整正式N1 PASS，复用 | 不作统计稳定性/N3认证 |
 | B09字节/步骤/报告可读 | 原效果链已验；33/33实际入Step5；续写展示已修；修后原报告恢复N1 PASS，10含2口径正确 | 原failed Turn/全部首败不改completed；不作首发无错或N3认证 |
 | 模型/能力/上下文/推理配置变更 | 空闲公开API四轮、当前Turn一致视图、旧结清状态兼容已验；正式UI切Step5/1M/4096/low并实际请求成立 | admission→capture小竞态仍明确失败；全并发“无感”未认证 |
-| 已用CEF退出清理 | 正式正常退出及受控不返回时生产monitor非零有界退出已验 | 实际系统Keychain自然等待未再复现，不冒充根因消除 |
+| 已用CEF退出清理 | 正式正常/受控失败已验；真实CEF内Keychain等待已复现并自行有界exit1 | 系统等待本身未消除；新发现pairing后台任务收尾待修后验、独立socket路径证明缺失 |
 | 公开报告表达 | 原始结果保持、叙述策略和公开字段已修并通过定向回归 | 新正式样本仍照抄历史内部术语，表达验收FAIL，不能以策略已装配关闭 |
 
 本轮不再针对同一未改根因重复付费报告；旧MM重试已验子链复用，旧矩阵/全GEN/N3/发布
@@ -768,6 +768,42 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 正常Cmd-Q0/70.066秒，无expiry/TERM/KILL；1525events/14Turns/14effects与1493前缀/
   13旧Turn/效果及源备五表同，模型owner0/host指令读2单列。无润色新任务/操作重放；
   同一未改原因不付费循环，原已正确B报告保持。独立语义/表达审计外置public-report-language。
+
+#### 实际CEF/Keychain阻塞后的生产失败退出（2026-10-03）
+
+- 沿上次观察器首败只修外置观察：同180+5秒、关闭余量45秒、单导航/单采样，正式源
+  `11ecee9c4`/旧隔离Default/新Session，模型0/无fault/无保护或权限改变。单导航30.102秒
+  502（Page.navigate settlement timeout）和UI暂不可用保留FAIL，未点击/不重发；及时Cmd-Q。
+- **真实物理阻塞已复现**：native entry一次/return0；7秒后一次只读sample成功，主线程
+  Engine::shutdown_owned→实际cef bindings shutdown→CEF→Mach RPC，同次ForegroundWorker
+  SecItemCopyMatching→CSSM_DecryptDataFinal→SecurityServer decrypt等待。不是边界hold。
+- 生产monitor在Helper清理/guardian late join后自行exit1；native123.511秒，Cmd-Q后
+  35.185秒，无expiry/TERM/KILL，实际物理完成仍false，正确不伪装正常0。日志另暴露closed
+  pool后pairing定时清理仍尝试访问DB（未获得连接/未写入），其后台任务收尾正在单独修复。
+  独立审计：Main/fixture/7 Helper及6listener消失、源备五表1/1/0/3/0同/双integrity，
+  主库WAL/shm实际无且无open handle；旧Default不变。未在live取socket路径，独立目录
+  absence仍未知；导航目标URL0/bootstrap1/Default0，不记Browser正链PASS。外证据
+  `2026-10-03/macos/keychain-effective-exit/`，原导航/观察器失败和Windows结果不改。
+
+#### 已观察后台清理任务的取消与join归属（2026-10-03）
+
+- 上述真实阻塞期间pairing timer在closed pool后发起清理。根因是build_channel_state
+  丢弃JoinHandle，永久interval不接宿主取消；不是成功late写入，不吞警告或延迟关池掩盖。
+- timer新增取消感知入口、旧接口兼容；关机优先停止下一sweep，已开始repo调用自然完成
+  后才join。App接现有background_shutdown子token并注册handle，原barrier在关池前证明收尾，
+  不改任务权限、后台超时/abort/error语义或其他服务。原周期/停止后零后续query/在途query
+  完成后才模拟关repo三项回归通过；App现有drain回归1通过，修后正式验证待验，外证据pairing-exit-owner。
+
+#### 旧模型回答与结果事实的重放来源区分（2026-10-03）
+
+- 新表达策略仍失败；实际11份旧plain Assistant回答42278bytes未标来源，107/111新回答行
+  沿用上一报告。仅normal closed replay的typed公开文本/验证后CompletionDelivered包装
+  historical_assistant_answer低信任数据：原original_text/否定/UTF8/LF/来源保持，不是当前
+  模板、证据或User指令；报告中owner原值仍保留原provenance。未知compaction来源=null，
+  不伪造当前Turn；User/Tools/canonical/UI及checkpoint/isolated codec不改。
+- history九项（含两新反例、现代/legacy完成字节精确）及checkpoint/明确引用两项通过。
+  原634-source公开文本为0，不能冒充wrapper验收；需要修后真实request旧报告集合及新
+  表达独立核对。保持原表达FAIL，源码机制不抵扣模型采用，外证据closed-assistant-provenance。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
