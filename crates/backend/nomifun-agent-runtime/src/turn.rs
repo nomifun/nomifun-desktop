@@ -1917,6 +1917,7 @@ struct AdaptiveContextSlots {
     scoped_instructions: Option<usize>,
     patch_recovery: Option<usize>,
     tool_history: Option<usize>,
+    historical_delivery: Option<usize>,
     task_plan: Option<usize>,
     completion: Option<usize>,
     completion_review: Option<usize>,
@@ -2107,6 +2108,9 @@ fn synchronize_adaptive_context(
             patch_recovery.pending() || patch_recovery.unresolved(),
         );
         state.completion.add_delivery_schema(completion_tool, accepted_inputs);
+        if let Some(archive)=tool_archive {
+            state.completion.add_historical_delivery_schema(completion_tool,archive);
+        }
         if failure_stop_gate && !crate::delivery_review::delivery_slots(accepted_inputs).is_empty() {
             if let Some(slot) = slots.failure_stop {
                 request.input.instructions[slot].push_str(" For this numbered task, extend that minimal shape with the REQUIRED delivery_items from the advertised schema: include every advertised item_id, status=missing, results=[], and a plain explanation. Copy required exact observed error counts too. This is a blocked account, not permission to retry or discover results.");
@@ -2207,6 +2211,21 @@ fn synchronize_adaptive_context(
             request.input.instructions[slot].clear();
         }
     }
+    if !adaptive.task_ledger() && let Some(archive)=tool_archive {
+        let tracker=crate::completion::CompletionTracker::default();
+        let mut report=tracker.definition_with_evidence(&crate::AgentPlan::default(),&crate::AgentWorkStatus::default(),false);
+        tracker.add_historical_delivery_schema(&mut report,archive);
+        if report.input_schema.0["properties"].get("historical_results").is_some() {
+            // Optional read-only publication controls. Explicit update_plan
+            // activates the existing ledger; an ordinary historical question
+            // may still answer directly without inheriting an old task plan.
+            request.input.tools.push(crate::planning::definition());
+            request.input.tools.push(report);
+        }
+    }
+    if let Some(context)=tool_archive.and_then(|archive|archive.historical_delivery_context()) {
+        upsert_instruction(&mut request.input.instructions,&mut slots.historical_delivery,context);
+    } else if let Some(slot)=slots.historical_delivery {request.input.instructions[slot].clear();}
     Ok(())
 }
 
@@ -2478,9 +2497,9 @@ async fn invoke_tool_calls(
         let report = if planned.is_error {
             AgentToolResult::text(completed[1].call_id.clone(), "Completion was not applied because the preceding plan update failed. The prior plan and effects remain unchanged.", true)
         } else {
-            completion.submit(&completed[1], execution_plan, work_status, accepted_inputs,
+            completion.submit_with_history(&completed[1], execution_plan, work_status, accepted_inputs,
                 patch_recovery.pending() || patch_recovery.unresolved(),
-                patch_recovery.unresolved_before_input(), event_sink).await?
+                patch_recovery.unresolved_before_input(), event_sink,Some(tool_archive)).await?
         };
         if !report.is_error && completion.current(execution_plan, work_status, accepted_inputs.len())
             .is_some_and(|report| !report.is_blocked() && patch_recovery.unresolved_before_input()
@@ -2498,9 +2517,9 @@ async fn invoke_tool_calls(
         let mut results = Vec::new();
         for call in &completed {
             let result = if completed.len() == 1 {
-                completion.submit(call, execution_plan, work_status, accepted_inputs,
+                completion.submit_with_history(call, execution_plan, work_status, accepted_inputs,
                     patch_recovery.pending() || patch_recovery.unresolved(),
-                    patch_recovery.unresolved_before_input(), event_sink).await?
+                    patch_recovery.unresolved_before_input(), event_sink,Some(tool_archive)).await?
             } else {
                 AgentToolResult::text(call.call_id.clone(), "No tools executed: submit report_completion alone after the plan and all observations are settled.", true)
             };
@@ -3496,12 +3515,80 @@ mod tests {
         assert_eq!(port.0.load(Ordering::SeqCst),1,"the explicit source must be resolved before the model can claim it missing");
         let requests=model.requests.lock().unwrap();
         assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::SEARCH));
-        assert!(!requests[0].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME));
+        assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME),
+            "resolved explicit history advertises optional publication controls without forcing the ordinary answer through them");
+        assert_eq!(requests.len(),2,"the original search/direct-answer path remains available without plan or completion calls");
         let first = serde_json::to_string(&requests[0].input.messages).unwrap();
         assert!(first.contains("第二行 after"), "explicitly requested original body must reach the first request without requiring a guessed READ");
         assert!(first.contains("quoted_explicit_turn_archive_data"));
         assert_eq!(requests[0].input.messages.last().unwrap(), &accepted_reference_input);
         assert!(serde_json::to_string(&requests[1].input.messages).unwrap().contains("第二行 after"));
+    }
+
+    #[tokio::test]
+    async fn optional_historical_publication_uses_existing_controls_without_current_evidence_or_owner_calls() {
+        const SOURCE:&str="turn:user:msg:session:old";
+        #[derive(Debug)] struct History;
+        #[async_trait] impl crate::AgentHistoryPort for History {
+            async fn read_previous(&self,_:&ChatCausality,_:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                Ok(crate::AgentHistoryPage {has_older:false,turn:Some(crate::AgentRecordedTurn {
+                    operation_id:SOURCE.into(),receipt_status:"failed".into(),
+                    requirement:crate::context_lifecycle::text_message(ChatRole::User,"old requested read".into()),events:vec![
+                        AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:SOURCE.into()},
+                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
+                            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
+                        AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行 MAC-B\n第二行 after\n",false)},
+                        AgentEngineEvent::WorkStatus {status:crate::AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
+                        AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into()},
+                    ]})})
+            }
+        }
+        #[derive(Default)] struct Model {calls:AtomicUsize,forge_current:bool,rejection_seen:std::sync::atomic::AtomicBool}
+        #[async_trait] impl AgentModelPort for Model {
+            async fn open_stream(&self,request:ChatModelRequest,_:CancellationToken)->Result<AgentModelStream,ChatModelError> {
+                let step=self.calls.fetch_add(1,Ordering::SeqCst);
+                let report=request.input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME).unwrap();
+                assert_eq!(report.input_schema.0["properties"]["observed_tool_error_count"]["const"],if step>1 {1} else {0});
+                assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
+                let events=if step==0 {
+                    control_step("plan",crate::planning::TOOL_NAME,json!({"plan":[{"step":"整理所选历史结果","status":"in_progress"}]}))
+                } else if step>1 {
+                    let results=serde_json::to_string(&request.input.messages).unwrap();
+                    assert!(results.contains("Evidence call is unknown") || results.contains("INVALID_TOOL_ARGUMENTS"),
+                        "a historical ID must be rejected by advertised current-evidence schema or validation before publication");
+                    self.rejection_seen.store(true,Ordering::SeqCst);
+                    vec![Err(ChatModelError::protocol_violation("controlled end after expected invalid evidence refusal"))]
+                } else {
+                    let origin=report.input_schema.0["properties"]["historical_results"]["items"]["properties"]["origin"]["enum"][0].clone();
+                    assert_eq!(origin["source_turn"],SOURCE);
+                    let criterion=if self.forge_current {json!({"disposition":"supported","rationale":"forged current claim",
+                        "evidence_call_ids":[origin["archive_id"].clone()]})}
+                        else {json!({"disposition":"unverified","rationale":"未作新的当前状态核验。"})};
+                    control_step("report",crate::completion::TOOL_NAME,json!({"summary":"已整理历史结果，未重新执行。",
+                        "criteria":[criterion],
+                        "observed_tool_error_count":0,"observed_command_failure_count":0,
+                        "historical_results":[{"origin":origin,"label":"原文件内容"}]}))
+                };
+                Ok(Box::pin(stream::iter(events)))
+            }
+        }
+        struct NeverOwner;
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,_:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {panic!("historical publication cannot invoke an owner")}
+        }
+        let model=Arc::new(Model::default());let mut sample=request();
+        sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,format!("整理已关闭回合的记录，operation_id:{SOURCE}，不要重做。"));
+        let result=open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(sample.clone(),AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.unwrap();
+        assert_eq!(model.calls.load(Ordering::SeqCst),2);assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert!(result.output_text.contains("第一行 MAC-B\n第二行 after\n"));
+        assert!(result.output_text.contains("原回合未成功的工具结果：10 次"));assert!(!result.output_text.contains("failed_tools"));
+        let invalid=Arc::new(Model {calls:AtomicUsize::new(0),forge_current:true,rejection_seen:std::sync::atomic::AtomicBool::new(false)});
+        assert!(open_session(invalid.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.is_err());
+        assert_eq!(invalid.calls.load(Ordering::SeqCst),3);
+        assert!(invalid.rejection_seen.load(Ordering::SeqCst),"a caught model panic cannot substitute for the intended evidence rejection");
     }
 
     #[tokio::test]

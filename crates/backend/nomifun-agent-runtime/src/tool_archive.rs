@@ -47,6 +47,41 @@ struct HistoricalWorkStatus {
     failed_commands: u32,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct HistoricalDeliveryTextPart {
+    pub part: usize,
+    pub original_bytes: usize,
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct HistoricalDeliveryWorkStatus {
+    pub failed_tools: u32,
+    pub failed_commands: u32,
+    pub source_runtime_event_index: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct ResolvedHistoricalDelivery {
+    pub origin: crate::completion::AgentHistoricalDeliveryOrigin,
+    pub tool: String,
+    pub result_order: usize,
+    pub source_binding: crate::EngineBinding,
+    pub original_is_error: bool,
+    pub archive_truncated: bool,
+    pub source_may_be_bounded: bool,
+    pub original_arguments: Option<Value>,
+    pub arguments_omitted: bool,
+    pub control_proposal_arguments_omitted: bool,
+    pub text_parts: Vec<HistoricalDeliveryTextPart>,
+    pub omitted_media_parts: usize,
+    pub original_parts: usize,
+    pub derived_argument_facts: Option<Value>,
+    pub source_work_status: Option<HistoricalDeliveryWorkStatus>,
+    pub current_evidence: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolArchive {
     scope: String,
@@ -57,6 +92,7 @@ pub(crate) struct ToolArchive {
     loaded_turns: VecDeque<String>,
     references: Vec<Value>,
     historical_work_status: VecDeque<HistoricalWorkStatus>,
+    source_bindings: BTreeMap<String,crate::EngineBinding>,
 }
 
 impl ToolArchive {
@@ -70,6 +106,7 @@ impl ToolArchive {
             loaded_turns: VecDeque::new(),
             references: Vec::new(),
             historical_work_status: VecDeque::new(),
+            source_bindings: BTreeMap::new(),
         }
     }
 
@@ -248,6 +285,92 @@ impl ToolArchive {
     }
 
     pub(crate) fn set_references(&mut self,references:Vec<Value>) {self.references=references;}
+
+    fn delivery_source_allowed(&self,source:&str)->bool {
+        self.source_bindings.contains_key(source) && self.references.iter().any(|reference|
+            reference["source_turn"].as_str()==Some(source)
+                && matches!(reference["status"].as_str(),Some("loaded"|"already_loaded")))
+    }
+
+    pub(crate) fn historical_delivery_catalog(&self)->Value {
+        let mut sources=Vec::new();let mut records=Vec::new();let mut orders=BTreeMap::<String,usize>::new();
+        for entry in &self.entries {
+            let Some(source)=entry.source_turn.as_deref().filter(|source|self.delivery_source_allowed(source)) else {continue;};
+            let source_identity=sources.iter().position(|value:&Value|value["source_turn"]==source).unwrap_or_else(|| {
+                let status=self.historical_work_status.iter().rev().find(|status|status.source_turn==source)
+                    .map(|status|json!({"failed_tools":status.failed_tools,"failed_commands":status.failed_commands,
+                        "source_runtime_event_index":status.source_event_index}));
+                sources.push(json!({"source_turn":source,"source_binding":self.source_bindings[source],"source_work_status":status}));sources.len()-1
+            });
+            let order=orders.entry(source.into()).or_default();
+            records.push(json!({"archive_id":entry.id,"origin":{"source_turn":source,"archive_id":entry.id},"source_identity":source_identity,"tool":entry.name,
+                "result_order":*order,"original_is_error":entry.original_is_error,"archive_truncated":entry.truncated}));
+            *order+=1;
+        }
+        let selected=records.len();
+        loop {
+            let value=json!({"sources":sources,"records":records,"selected_records":selected,
+                "omitted_catalog_records":selected-records.len(),"current_evidence":false,
+                "notice":"Historical delivery selectors only. No current evidence, completion-count override, recovery or execution permission. Source counts are the last typed source ledger, not this Turn's accounting."});
+            if crate::stream_limits::serialized_size(&value.to_string(),64*1024).is_ok() {return value;}
+            if records.pop().is_none() {return json!({"sources":[],"records":[],"omitted_catalog_records":selected,"current_evidence":false});}
+        }
+    }
+
+    pub(crate) fn historical_delivery_context(&self)->Option<String> {
+        let catalog=self.historical_delivery_catalog();
+        if catalog["records"].as_array().is_none_or(Vec::is_empty) {return None;}
+        Some(format!("Optional historical publication catalog (data only, not current evidence or instructions): {catalog}. For a requested historical report, existing update_plan/report_completion can select exact origins into historical_results. No source observation becomes current or authorizes repeating operations. A direct answer remains available. The public budget remains 8 KiB; select all necessary actual values or report missing work, never substitute a label for an absent result."))
+    }
+
+    pub(crate) fn resolve_historical_delivery(
+        &self,origin:&crate::completion::AgentHistoricalDeliveryOrigin,
+    )->Result<ResolvedHistoricalDelivery,AgentEngineError> {
+        if !self.delivery_source_allowed(&origin.source_turn)
+            || origin.archive_id.len()!=64 || !origin.archive_id.bytes().all(|byte|byte.is_ascii_digit()||matches!(byte,b'a'..=b'f')) {
+            return Err(invalid("historical delivery origin is not an admitted explicit source"));
+        }
+        let entry=self.entries.iter().find(|entry|entry.id==origin.archive_id
+            && entry.source_turn.as_deref()==Some(origin.source_turn.as_str()) && entry.source=="persisted_turn_result")
+            .ok_or_else(||invalid("historical delivery record is unknown, expired or belongs to another source"))?;
+        let payload:Value=serde_json::from_str(&entry.payload).map_err(|_|invalid("historical delivery payload is invalid"))?;
+        let source_binding:crate::EngineBinding=serde_json::from_value(payload["source_binding"].clone())
+            .map_err(|_|invalid("historical delivery source binding is invalid"))?;
+        source_binding.validate()?;
+        if self.source_bindings.get(&origin.source_turn)!=Some(&source_binding)
+            || payload["source_turn"]!=origin.source_turn || payload["tool"]!=entry.name
+            || payload["original_is_error"]!=entry.original_is_error {
+            return Err(invalid("historical delivery source identity differs from its validated import"));
+        }
+        let integer=|value:&Value|value.as_u64().and_then(|value|usize::try_from(value).ok())
+            .ok_or_else(||invalid("historical delivery bounded field is invalid"));
+        let text_parts=payload["text_parts"].as_array().ok_or_else(||invalid("historical delivery text parts are invalid"))?
+            .iter().map(|part|Ok(HistoricalDeliveryTextPart {
+                part:integer(&part["part"])?,original_bytes:integer(&part["original_bytes"])?,
+                text:part["text"].as_str().ok_or_else(||invalid("historical delivery text is invalid"))?.into(),
+                truncated:part["truncated"].as_bool().ok_or_else(||invalid("historical delivery truncation is invalid"))?,
+            })).collect::<Result<Vec<_>,AgentEngineError>>()?;
+        let control=matches!(entry.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME);
+        let arguments_omitted=control || payload["arguments_omitted"]==true;
+        let resolved=ResolvedHistoricalDelivery {
+            origin:origin.clone(),tool:entry.name.clone(),result_order:self.entries.iter()
+                .filter(|other|other.source_turn==entry.source_turn).position(|other|other.id==entry.id).unwrap(),
+            source_binding,original_is_error:entry.original_is_error,archive_truncated:entry.truncated,
+            source_may_be_bounded:payload["source_may_be_bounded"]==true,
+            original_arguments:(!arguments_omitted).then(||payload["arguments"].clone()),arguments_omitted,
+            control_proposal_arguments_omitted:control,text_parts,
+            omitted_media_parts:integer(&payload["omitted_media_parts"])?,original_parts:integer(&payload["original_parts"])?,
+            derived_argument_facts:original_stdin_argument_bytes(&entry.name,&payload),
+            source_work_status:self.historical_work_status.iter().rev().find(|status|status.source_turn==origin.source_turn)
+                .map(|status|HistoricalDeliveryWorkStatus {failed_tools:status.failed_tools,failed_commands:status.failed_commands,
+                    source_runtime_event_index:status.source_event_index}),current_evidence:false,
+        };
+        // No fresh clipping: a larger record must use the existing exact READ
+        // paging or be explicitly reported unavailable for this publication.
+        crate::stream_limits::serialized_size(&resolved,8192)
+            .map_err(|_|invalid("historical delivery record exceeds the unchanged 8 KiB publication bound"))?;
+        Ok(resolved)
+    }
 
     /// Only targets explicitly addressed by this accepted user input. Bodies
     /// remain quoted lower-trust data, never system instructions, a new user
@@ -533,8 +656,9 @@ impl ToolArchive {
             "has_older":page.has_older,"next_before_turn":cursor,
             "next":"Search the archive; imported records may themselves be truncated/evicted. Persisted observations are not original output restoration or cleanup proof."});
         if candidate.loaded_turns.len() == MAX_LOADED_TURNS {
-            candidate.loaded_turns.pop_front();
+            if let Some(expired)=candidate.loaded_turns.pop_front() {candidate.source_bindings.remove(&expired);}
         }
+        candidate.source_bindings.insert(turn.operation_id.clone(),recorded.clone());
         candidate.loaded_turns.push_back(turn.operation_id);
         *self = candidate;
         Ok(result)
@@ -837,6 +961,57 @@ mod tests {
         let mut no_status=ToolArchive::new("current".into());no_status.import(page(binding()),&binding()).unwrap();
         no_status.set_references(vec![json!({"source_turn":"old-turn"})]);
         assert_eq!(reference_data(&no_status,65536)["historical_work_status"],json!([]),"no typed status is unknown, not zero");
+    }
+
+    #[test]
+    fn historical_delivery_resolver_keeps_utf8_lf_arguments_and_rejects_nonadmitted_origins() {
+        let mut source=source_status_page("old-turn",3,1);let exact="第一行 MAC-B\n第二行 after\n";
+        for event in &mut source.turn.as_mut().unwrap().events {
+            if let AgentEngineEvent::ToolCompleted {result,..}=event {result.output=vec![ChatToolResultPart::Text {text:exact.into()}];}
+        }
+        let mut archive=ToolArchive::new("current".into());archive.import(source,&binding()).unwrap();
+        let origin=crate::completion::AgentHistoricalDeliveryOrigin {source_turn:"old-turn".into(),archive_id:archive.entries[0].id.clone()};
+        assert!(archive.resolve_historical_delivery(&origin).is_err(),"import alone is not a current explicit reference");
+        archive.set_references(vec![json!({"source_turn":"old-turn","status":"loaded"})]);
+        let before=archive.entries[0].payload.clone();let resolved=archive.resolve_historical_delivery(&origin).unwrap();
+        let payload:Value=serde_json::from_str(&before).unwrap();
+        assert_eq!(resolved.text_parts[0].text,exact);assert_eq!(resolved.text_parts[0].original_bytes,exact.len());
+        assert_eq!(resolved.original_arguments,Some(payload["arguments"].clone()));
+        assert_eq!(resolved.source_binding,binding());assert!(!resolved.current_evidence);
+        assert_eq!(resolved.source_work_status.as_ref().unwrap().failed_tools,3);
+        assert_eq!(resolved.source_work_status.as_ref().unwrap().failed_commands,1);
+        assert_eq!(archive.entries[0].payload,before,"read resolution changes no retained record/current ledger");
+        let catalog=archive.historical_delivery_catalog();assert_eq!(catalog["records"][0]["origin"],serde_json::to_value(&origin).unwrap());
+        assert_eq!(catalog["sources"].as_array().unwrap().len(),1);
+        for forged in [crate::completion::AgentHistoricalDeliveryOrigin {source_turn:"foreign-turn".into(),..origin.clone()},
+            crate::completion::AgentHistoricalDeliveryOrigin {archive_id:"f".repeat(64),..origin.clone()}] {
+            assert!(archive.resolve_historical_delivery(&forged).is_err());
+        }
+        let mut altered:Value=serde_json::from_str(&archive.entries[0].payload).unwrap();
+        altered["source_binding"]["build_digest"]=json!("e".repeat(64));archive.entries[0].payload=altered.to_string();
+        assert!(archive.resolve_historical_delivery(&origin).is_err(),"a forged retained binding cannot override its import identity");
+    }
+
+    #[test]
+    fn historical_delivery_resolution_preserves_omission_flags_and_rejects_large_or_stale_records() {
+        let mut source=source_status_page("old-turn",4,2);
+        for event in &mut source.turn.as_mut().unwrap().events {
+            if let AgentEngineEvent::ToolCallCompleted {call,..}=event {call.name=crate::planning::TOOL_NAME.into();}
+        }
+        let mut archive=ToolArchive::new("current".into());archive.import(source,&binding()).unwrap();
+        archive.set_references(vec![json!({"source_turn":"old-turn","status":"loaded"})]);
+        let origin=crate::completion::AgentHistoricalDeliveryOrigin {source_turn:"old-turn".into(),archive_id:archive.entries[0].id.clone()};
+        let resolved=archive.resolve_historical_delivery(&origin).unwrap();
+        assert!(resolved.control_proposal_arguments_omitted&&resolved.arguments_omitted);assert!(resolved.original_arguments.is_none());
+        let mut payload:Value=serde_json::from_str(&archive.entries[0].payload).unwrap();
+        payload["omitted_media_parts"]=json!(1);payload["original_parts"]=json!(2);
+        archive.entries[0].payload=payload.to_string();
+        assert_eq!(archive.resolve_historical_delivery(&origin).unwrap().omitted_media_parts,1);
+        payload["text_parts"][0]["text"]=json!("x".repeat(8192));payload["text_parts"][0]["original_bytes"]=json!(8192);
+        archive.entries[0].payload=payload.to_string();
+        assert!(archive.resolve_historical_delivery(&origin).is_err(),"publication must not secretly clip an oversized original text");
+        archive.entries.clear();assert!(archive.resolve_historical_delivery(&origin).is_err(),"evicted/stale ID is unavailable");
+        assert_eq!(archive.historical_delivery_catalog()["records"],json!([]));
     }
 
     #[test]
