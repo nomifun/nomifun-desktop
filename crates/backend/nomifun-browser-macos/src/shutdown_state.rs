@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 pub(super) struct ShutdownState {
     admission: AtomicU8,
     native_returned: AtomicBool,
+    native_entered: AtomicBool,
 }
 
 impl ShutdownState {
@@ -15,9 +16,11 @@ impl ShutdownState {
     /// Published immediately after the actual FFI return, before any optional
     /// acknowledgement loss. Physical return is not acknowledged cleanup.
     pub(super) fn mark_native_returned(&self) {self.native_returned.store(true, Ordering::Release);}
+    pub(super) fn mark_native_entered(&self) {self.native_entered.store(true,Ordering::Release);}
+    pub(super) fn native_has_returned(&self)->bool {self.native_returned.load(Ordering::Acquire)}
 
     pub(super) fn native_is_running(&self) -> bool {
-        self.admission.load(Ordering::Acquire)==1 && !self.native_returned.load(Ordering::Acquire)
+        self.native_entered.load(Ordering::Acquire) && !self.native_returned.load(Ordering::Acquire)
     }
 
     pub(super) fn finish(&self) {
@@ -93,7 +96,8 @@ mod tests {
     #[test]
     fn lost_ack_after_physical_return_is_not_a_running_native_call() {
         let state=ShutdownState::default();assert!(!state.native_is_running());
-        assert!(state.begin());assert!(state.native_is_running());
+        assert!(state.begin());assert!(!state.native_is_running());
+        state.mark_native_entered();assert!(state.native_is_running());
         state.mark_native_returned();
         assert!(!state.native_is_running());assert!(!state.completed());
         assert!(state.blocks_work());assert!(!state.begin());

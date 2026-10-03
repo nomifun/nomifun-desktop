@@ -3572,3 +3572,18 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - Browser21、App22(browser-use)/21(default)、Knowledge6、native state4通过。CEF返回事实
   与ack分离，丢ack仍失败/不可重入。真实guardian接入/系统Keychain/native live未完成，
   证据外置history-cursor-live，Windows新共享分段/消费者关闭未代验，首败保留。
+
+### macOS guardian 接入与宿主关闭资格（2026-10-03）
+
+- Browser工厂新增独立的 post-storage-close Rust入口：需显式storage-independent opt-in，
+  不能升级已开始的ordinary flight；App只在真实存储关闭阶段后调用。默认实现仍走原关闭，
+  Windows架构/结果不变。资格不是模型能力或权限，失败不会制造完成；平台23及App定向1通过。
+- macOS加载CEF前启动私有受管guardian，真实内核身份/执行代/nonce登记Helper；正常返回、
+  初始化失败及30秒native超时清理共用5秒预算。宿主消费者/存储已关闭、Helper执行代absent/
+  guardian已join、Main仍在FFI才允许独立非零退出；不依赖被占用的主队列，不重入CEF。
+- 本机真实Unix RPC首红发现对端关闭后setsockopt读超时EINVAL；改为绝对期限非阻塞poll，
+  不取消peer/birth/path检查。确认丢失夹具以1字节响应前缀证明已接纳、正文不解码，再由
+  独立Status核对；关闭前未接纳的首次失败保留，不以UID或请求中的PID替代内核身份。
+- 原生生产server/client子进程四路径通过，macOS lib32通过、desktop/Helper/example编译
+  通过。此层无CEF/Keychain/UI，不关闭真实系统等待、物理阻塞自退出/冷库或原B最终报告；
+  模型0，完整首败/修后外置guardian-native，Windows验收不代判。

@@ -58,6 +58,13 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
             HostEngine::Deferred(engine) => engine.shutdown().await,
         }.map_err(native_error)
     }
+
+    async fn shutdown_after_storage_close(&self) -> Result<(), WorkspaceError> {
+        match &self.engine {
+            HostEngine::Initialized(engine)=>engine.shutdown_after_storage_close().await,
+            HostEngine::Deferred(engine)=>engine.shutdown_after_storage_close().await,
+        }.map_err(native_error)
+    }
 }
 struct NativeTab {
     close_gate: Mutex<()>, view: View, metadata: Arc<StdMutex<BrowserTabSnapshot>>,

@@ -1,6 +1,6 @@
 # macOS 命令与会话可靠性进度
 
-更新：2026-10-02。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
+更新：2026-10-03。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
 按用户 2026-09-30 的明确目的，本轮收敛为简单系统命令、步骤衔接、过程状态和结果可信性，
 与共享计划的 C01～C08、A/B/C 三组正式会话一致。停止按 M01～M06 穷举全产品余项。
@@ -470,6 +470,35 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 仅基础API，尚未由CEF Helper/独立guardian消费：launch nonce、初始化前guardian启动、
   精确库存与后台失败退出仍待接入。不能由这组真实kernel测试关闭Keychain/system-wait
   或正式Tauri Case。完整日志外置history-cursor-live；Windows路径未改变/未代验。
+
+#### Guardian 接入与真实本地清理边界（2026-10-03）
+
+- C05-09/10、A11/A13/A17/A18 的退出子断言：CEF 加载前由受管进程启动独立 guardian；
+  私有 socket、内核 peer PID/UID、Main birth/path、5种打包 Helper 路径及一次性 launch nonce
+  共同登记真实 Helper。Helper 在 Sandbox/CEF 前登记，未知角色/身份/库存失败关闭；不按
+  名称或 PID/进程组扫描扩大终止范围。正常返回、初始化失败及30秒 native期限后共用5秒
+  Helper清理预算，未决声明/迟到证明不能转完整清理。guardian本身确认 Stop 后才 join。
+- 仅宿主真实消费者/资源/存储关闭后的 Rust 入口可启用独立失败 monitor；普通关闭、其他
+  平台默认路径及已有 ordinary flight 不自动升级。实际FFI返回与ack/完成分开；主线程仍
+  在FFI且登记执行代全部absent、guardian已join时才允许进程自行非零退出。未知证明不退出，
+  不重入CEF、不把timeout当完成，不扩大权限或改动Keychain/TCC/Seatbelt。
+- 首次真实 Unix RPC 在对端关闭后设置读超时返回 EINVAL，最小 socket 测试首红保留；
+  改用同一绝对期限内的非阻塞读写/poll，读取关闭前缓冲，保持内核peer及birth/path检查。
+  ACK夹具首败是关闭前未证明服务器接纳；修后仅读响应帧头1字节、丢弃正文，再独立Status
+  核对解除期限，不以未接纳请求放宽身份校验。首次协议严格字段拒绝失败也保留。
+- 本机 macOS26.6.2/25G83 arm64、APFS非大小写敏感/owners enabled。生产server/client真实
+  子进程夹具四路径：正常返回1.745秒、30秒超时31.305秒、确认正文丢失2.721秒、初始化
+  失败1.689秒，均exit0/noexpiry/noTERM/noKILL（指外部supervisor）；登记Helper被精确清除/
+  回收、无关同路径sibling两次PING仍活、guardian回收/socket移除。超时receipt仍明确
+  native_running=true；夹具没有加载CEF、访问Keychain或执行生产紧急exit1，不能代判R4。
+- 定向验证macOS lib32/32、Browser workspace23/23、App存储关闭后重试1/1、desktop check、
+  process-runtime边界及实际Helper/example构建通过。模型调用0，完整首败/修后/环境/制品hash外置
+  `2026-10-03/macos/guardian-native/`。真实打包CEF Helper登记、系统Keychain等待、主线程
+  物理阻塞后的非零自行退出/冷库仍未live；release/notarization/N3未验，Windows结果未改。
+- 同时只读刷新原B：1172events/14returned effects，0running/accepted/completed，新
+  history-upgrade-report仅准备文件，最新真实请求仍旧cursor轮的3次thinking-only。解锁
+  问题内“已发送/loader已采用”的描述不符合本次新轮证据，已纠正；未重发原操作/新增请求。
+  本次桌面接口仍报locked，正式B报告和CEF UI验证待手动解锁，不把这一阻断扩为确定性阻断。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
