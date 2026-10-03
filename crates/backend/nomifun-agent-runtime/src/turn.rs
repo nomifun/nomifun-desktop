@@ -369,6 +369,16 @@ pub(crate) async fn run_turn(
     let mut tool_archive = adaptive
         .tool_history()
         .then(|| crate::tool_archive::ToolArchive::new(tool_archive_scope.clone()));
+    if recovery.is_none() && let Some(port)=request.history_port.as_deref() {
+        let references=crate::history_reference::references(&requirement,&model_request.causality);
+        if !references.is_empty() {
+            let archive=tool_archive.get_or_insert_with(||crate::tool_archive::ToolArchive::new(tool_archive_scope.clone()));
+            let resolved=crate::history_reference::load(archive,&references,port,&model_request.causality,&binding,&cancellation).await?;
+            archive.set_references(resolved);
+            adaptive.activate([crate::AgentRuntimeModule::ToolHistory],
+                crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,event_sink.as_ref()).await?;
+        }
+    }
     let mut discovered_tools = std::collections::BTreeSet::new();
 
     // The host supplies canonical facts; the engine selects its model context.
@@ -3436,6 +3446,46 @@ mod tests {
         let requests=model.requests.lock().unwrap();
         assert!(!requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::LOAD));
         assert!(!requests[0].input.instructions.iter().any(|text|text==crate::tool_archive::BOOTSTRAP_CONTEXT));
+    }
+
+    #[tokio::test]
+    async fn explicit_closed_turn_reference_loads_results_before_model_without_owner_calls() {
+        #[derive(Debug,Default)] struct History(AtomicUsize);
+        #[async_trait] impl crate::AgentHistoryPort for History {
+            async fn read_previous(&self,_:&ChatCausality,before:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                assert!(before.is_none());self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(crate::AgentHistoryPage {has_older:false,turn:Some(crate::AgentRecordedTurn {
+                    operation_id:"turn:user:msg:session:old".into(),receipt_status:"failed".into(),
+                    requirement:crate::context_lifecycle::text_message(ChatRole::User,"original file task".into()),
+                    events:vec![
+                        AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"turn:user:msg:session:old".into()},
+                        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"original-read".into(),name:"read_file".into(),
+                            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
+                        AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
+                        AgentEngineEvent::TurnFailed {model_steps:1,message:"original report failure".into()},
+                    ],
+                })})
+            }
+        }
+        #[derive(Default)] struct NeverOwner;
+        #[async_trait] impl AgentToolInvoker for NeverOwner {
+            async fn invoke(&self,_:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                panic!("explicit historical reference cannot invoke an owner")
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("find-original",crate::tool_archive::SEARCH,json!({"query":"第二行 after"})),text_step("Historical result observed; no operation repeated.")])});
+        let port=Arc::new(History::default());let mut sample=request();
+        sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
+            "只依据历史工具记录补报告。operation_id:turn:user:msg:session:old，不重发原操作。".into());
+        open_session(model.clone(),Arc::new(NeverOwner)).run_turn(
+            AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0).with_history_port(port.clone())).await.unwrap();
+        assert_eq!(port.0.load(Ordering::SeqCst),1,"the explicit source must be resolved before the model can claim it missing");
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[0].input.tools.iter().any(|tool|tool.name==crate::tool_archive::SEARCH));
+        assert!(!requests[0].input.tools.iter().any(|tool|tool.name==crate::planning::TOOL_NAME));
+        assert!(serde_json::to_string(&requests[1].input.messages).unwrap().contains("第二行 after"));
     }
 
     #[tokio::test]
