@@ -3823,3 +3823,9 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - strict Specific首阶段选面仍含未来report的共享缺口已收窄为单一当次控制，下一边界
   按原schema重建，plan→report，不接受错tool或补JSON。正负strict回归通过，修后正式
   待验，原失败保持/Windows不代判，不立即重复同场付费请求。
+
+- `d9c2113e9`mac单一plan→单一report真实采用：4请求/4步、plan接受，report先因旧ID
+  current evidence/缺historical_results被schema拒绝，随后provider半JSON且tool_calls终止，
+  protocol pause保留，UI结束回合cancelled，无report/owner0。FAIL_NATIVE_ARGUMENT_JSON
+  AFTER_REPORT_SCHEMA_REFUSAL；1693events/18Turns/14effects及旧前缀同，Cmd-Q0/165.832秒
+  无expiry/信号，完整外证据history-report-single-control。不补JSON/放宽合同或重发洗绿。
