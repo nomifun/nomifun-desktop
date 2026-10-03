@@ -3784,3 +3784,17 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   build_channel_state注册timer→join/registry Closed0→真实pool close→native gate持续持有并
   跨两个周期的回归1/1通过。只补test-util/cfg(test)装配入口；初编/SQLx暂停初始化首败
   外留后调整测试时钟阶段，原断言不减。它是修后barrier证据，不冒充新的自然Keychain样本。
+
+### 可选历史交付来源与当前完成账本分离（2026-10-03，macOS表达后续）
+
+- historical_results以明确source_turn/archive_id选择已验archive，host解析原文/flags/
+  绑定/来源计数并冻结v3展示；不接受model data、不进current evidence/const。可选暴露现
+  plan/report控制，不强制普通历史答复走Ledger；选plan后原权限/进程/recovery/终态输入
+  fence及完整当前任务覆盖保持。未知诊断保留，v1/v2旧字节不改，公开8KiB与快照48KiB不增。
+- Runtime319/1ignored、原B634/33黄金1及可选控制正负路径通过，原direct答复仍可用。
+  正式采用/表达待验，旧FAIL及Windows结果保持，外证据historical-public-delivery。
+
+- `577ad3f44`/同步合并`88eeff987`mac正式原B同task1请求/1步，plan/report和33历史
+  selector实际入请求，但模型仍直接回答，结构交付NOT_SELECTED/公开表达FAIL；事实与
+  原10含2保持。Cmd-Q0/96.832秒，无expiry/信号，1593events/16Turns/14effects及旧前缀/
+  效果/闭库保持，owner0。不强制control或改task伪造通过、不重复同根因；Windows未代判。

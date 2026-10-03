@@ -14,7 +14,7 @@ pub(crate) fn references(input:&ChatMessage, causality:&ChatCausality)->Vec<Stri
     addressed(input,causality.agent_session_id.as_ref(),causality.turn_operation_id.as_ref())
 }
 
-fn addressed(input:&ChatMessage,session:&str,current:&str)->Vec<String> {
+pub(crate) fn addressed(input:&ChatMessage,session:&str,current:&str)->Vec<String> {
     if input.role!=ChatRole::User {return Vec::new();}
     let mut seen=BTreeSet::new();let mut result=Vec::new();
     for part in &input.content {
