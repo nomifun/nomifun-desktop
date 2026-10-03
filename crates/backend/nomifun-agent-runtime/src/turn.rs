@@ -341,7 +341,7 @@ pub(crate) async fn run_turn(
     model_request
         .input
         .instructions
-        .insert(0, crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.into());
+        .insert(0, crate::workflow::minimal_execution_instructions());
     model_request.input.max_output_tokens = Some(request.model_budget.max_output_tokens);
     model_request.input.instructions.push(request.model_budget.execution_context(total_model_limit));
     if let Some(recovery) = &recovery {
@@ -4158,6 +4158,22 @@ mod tests {
             Ok(ChatModelEvent::OutputTextDelta { text: text.into() }),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
         ]
+    }
+
+    #[tokio::test]
+    async fn public_result_language_is_in_the_real_direct_request_without_extra_slot_or_technical_rewrite() {
+        let exact="exact_actions model_step failed_tools process_id=0190f5fe-7c00-7a00-8000-000000000001\n你好 MAC-B\n";
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![text_step(exact)])});
+        let mut sample=request();sample.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
+            "请给出这些技术标识和原始文字，不做改写。".into());
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0)).await.unwrap();
+        assert_eq!(result.output_text,exact);
+        let requests=model.requests.lock().unwrap();assert_eq!(requests.len(),1);
+        assert_eq!(requests[0].input.instructions[0],crate::workflow::minimal_execution_instructions());
+        assert_eq!(requests[0].input.instructions.iter().filter(|text|text.contains(crate::workflow::PUBLIC_RESULT_LANGUAGE)).count(),1);
+        assert!(requests[0].input.instructions[0].starts_with(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS));
+        assert!(requests[0].input.instructions[0].contains("explicitly requests technical identifiers"));
     }
 
     fn control_step(id: &str, name: &str, arguments: serde_json::Value) -> Vec<Result<ChatModelEvent, ChatModelError>> {

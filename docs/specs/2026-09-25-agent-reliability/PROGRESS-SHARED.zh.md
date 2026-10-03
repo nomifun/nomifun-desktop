@@ -3727,4 +3727,19 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   Turn const/work/evidence。说明工具is_error含非零命令flag，命令观察独立、可重叠不相加；
   无status未知、省略不减ledger、不解析owner正文JSON、不硬编码个案数字。
 - archive10项及显式原B634/33 journal1项通过，原64KiB内56445bytes全部33结果与10/2
-  来源账本一致；正式采用待验，旧失败/Windows结果不代判。外证据historical-accounting。
+  来源账本一致；`da09563a0`/同步合并`919c685bf`正式原B报告恢复1请求/1步通过，实际33/33
+  及typed10/2入模型，8084-byte公开完整结果/UI与源记录相同，无owner重放，当前账本0/0。
+  Cmd-Q0/89.201秒无expiry或信号、1493events/13Turns/14effects及旧前缀/效果/闭库同。
+  原failed Turn/旧FAIL保持，非首发或N3认证，Windows未代判。外证据historical-accounting。
+
+### 公开语言策略与原始结果载体分离（2026-10-03，macOS正式叙述残余）
+
+- 补普通公开叙述的opaque process/resource句柄与引擎规划/计数术语边界：共享policy
+  合入原MINIMAL同一instruction，公开字段描述引用，默认用户语言说明动作/结果/原因。
+  技术原文/标识显式例外，源值/stdout/argv/hash/PID与数字/required/enum/证据资格均不改，
+  不用regex清洗、不加词表拒绝或权限。直接Assistant与structured completion共用policy。
+- 三项机制及五项邻近精确载体/回放/计数回归通过；`11ecee9c4`正式同原B报告一次采用，
+  1请求/1步、policy在system0一次，源33结果/10含2保持；新正文仍照抄历史引擎术语，
+  表达FAIL，不以机制通过关闭模型表达。Cmd-Q0/70.066秒无expiry/信号，1525events/
+  14Turns/14effects与原前缀/效果/闭库同，owner0。未改根因不继续付费循环，Windows
+  原结果不代判，外证据public-report-language。
