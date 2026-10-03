@@ -1194,6 +1194,91 @@ async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
 
 #[cfg(windows)]
 #[tokio::test]
+#[ignore = "requires the unchanged Windows ACP 936 fixture and Bun"]
+async fn windows_acp936_pipe_streams_keep_exact_bytes_and_frozen_encoding() {
+    use nomi_process_runtime::OutputStream;
+    use std::sync::Mutex;
+    // SAFETY: GetACP only reads the host's current ANSI code page.
+    assert_eq!(unsafe { windows_sys::Win32::Globalization::GetACP() }, 936,
+        "do not change host settings to make this opt-in fixture eligible");
+    let script = r#"
+const go = new Promise(resolve => process.stdin.once('data', resolve));
+process.stdout.write(Buffer.from([0xd6]));
+await Bun.sleep(40);
+process.stdout.write(Buffer.from([0xd0, 0xce, 0xc4, 10]));
+process.stdin.resume();
+await go;
+process.stdin.pause();
+const error = Buffer.from('UTF8:中文🙂\n');
+process.stderr.write(error.subarray(0, 12));
+await Bun.sleep(40);
+process.stderr.write(error.subarray(12));
+"#;
+    let expected_stdout = [0xd6, 0xd0, 0xce, 0xc4, 10];
+    let expected_stderr = "UTF8:中文🙂\n".as_bytes();
+    // These are two retention contracts, not repeated statistical samples.
+    for limit in [21, 8] {
+        let workspace = tempfile::tempdir().expect("isolated mixed-encoding cwd");
+        let mut process = request("bun", [OsString::from("-e"), script.into()]);
+        process.cwd = workspace.path().canonicalize().unwrap();
+        process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+        process.policy.output_limit_bytes = limit;
+        process.policy.deadline = Some(Instant::now() + Duration::from_secs(10));
+        let observed = Arc::new(Mutex::new(Vec::<(OutputStream, Vec<u8>)>::new()));
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor.start_with_output_observer(process, {
+            let observed = observed.clone();
+            Arc::new(move |stream, bytes| observed.lock().unwrap().push((stream, bytes.to_vec())))
+        }).await.expect("the original mixed-encoding process should start");
+        let exact_process = ExactWindowsProcess::open(handle.pid).unwrap();
+        // Gate stderr on actual stdout transport observation, not a timing guess.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let count: usize = observed.lock().unwrap().iter()
+                    .filter(|(stream, _)| *stream == OutputStream::Stdout)
+                    .map(|(_, bytes)| bytes.len()).sum();
+                if count == expected_stdout.len() { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("stdout must be observed before the input gate opens");
+        supervisor.write(&handle.owner, &handle.session_id, b"go\n").await.unwrap();
+        supervisor.close_stdin(&handle.owner, &handle.session_id).await.unwrap();
+        let outcome = wait_for_terminal(&supervisor, &handle).await;
+        let ProcessOutcome::Exited { code, output, cleanup, .. } = &outcome else {
+            panic!("the original process must exit: {outcome:?}");
+        };
+        assert_eq!(*code, Some(0));
+        assert!(cleanup.reaped);
+        exact_process.wait_terminated(Duration::from_secs(1), "mixed-encoding writer").await;
+        for (stream, expected) in [(OutputStream::Stdout, expected_stdout.as_slice()), (OutputStream::Stderr, expected_stderr)] {
+            let actual: Vec<u8> = observed.lock().unwrap().iter()
+                .filter(|(kind, _)| *kind == stream).flat_map(|(_, bytes)| bytes.iter().copied()).collect();
+            assert_eq!(actual, expected, "the real pipe bytes must match for {stream:?}");
+        }
+        assert_eq!(output.next_cursor.offset(), 21);
+        assert_eq!(output.retained_bytes, limit);
+        assert_eq!(output.dropped_bytes, (21 - limit) as u64);
+        assert_eq!(output.encoding.source_encoding, "mixed");
+        assert_eq!(output.encoding.decode_errors, 1, "one ACP fallback diagnostic is expected");
+        assert_eq!(output.text(), if limit == 21 { "中文\nUTF8:中文🙂\n" } else { "文🙂\n" });
+        let mut expected_raw = expected_stdout.to_vec();
+        expected_raw.extend_from_slice(expected_stderr);
+        assert_eq!(output.raw_bytes(), expected_raw[21-limit..]);
+        let PollResult::Finished(ProcessOutcome::Exited { output: empty, .. }) = supervisor.poll(
+            &handle.owner, &handle.session_id, output.next_cursor, Instant::now()
+        ).await.unwrap() else { panic!("the original terminal must stay frozen"); };
+        assert!(empty.chunks.is_empty());
+        assert_eq!(empty.next_cursor, output.next_cursor);
+        assert_eq!(empty.encoding, output.encoding);
+        assert_eq!(empty.retained_bytes, limit);
+        assert_eq!(empty.dropped_bytes, output.dropped_bytes);
+        assert!(supervisor.shutdown().await.is_exact());
+        println!("WINDOWS_MIXED_PIPE_EVIDENCE limit={limit} pid={} terminal={outcome:?} empty={empty:?}", handle.pid);
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn windows_powershell_preserves_final_native_and_pipeline_status() {
     for (script, expected) in [
         ("cmd /c exit 7", 7),
