@@ -39,9 +39,34 @@ pub(crate) async fn load(
     let deadline=tokio::time::Instant::now()+LOOKUP_BUDGET;
     let mut reports=Vec::new();let mut remaining=MAX_PAGES;
     for target in references.iter().take(MAX_REFERENCES) {
+        if remaining==0 || tokio::time::Instant::now()>=deadline {break;}
         let mut cursor=None;let mut seen=BTreeSet::new();
         let mut report=json!({"source_turn":target,"status":"reference_not_loaded","current_evidence":false});
-        for _ in 0..MAX_PAGES {
+        // Optional exact capability never falls back after an authoritative
+        // outcome/error. Unsupported defaults perform no page read and retain
+        // the original eight-page cursor budget. A direct page consumes one.
+        let direct=tokio::select! {
+            biased;
+            _=cancellation.cancelled()=>return Err(AgentEngineError::Cancelled),
+            result=tokio::time::timeout_at(deadline,port.read_exact(causality,target))=>match result {
+                Ok(Ok(page))=>Ok(page),
+                Ok(Err(AgentEngineError::Cancelled))=>return Err(AgentEngineError::Cancelled),
+                Ok(Err(_))|Err(_)=>Err(()),
+            }
+        };
+        let fallback=match direct {
+            Ok(Some(page))=>{
+                remaining-=1;
+                if page.turn.as_ref().is_some_and(|turn| turn.operation_id==*target)
+                    && tokio::time::Instant::now()<deadline {
+                    report=admit(archive,page,target,port,causality,binding,cancellation,deadline).await?;
+                }
+                false
+            }
+            Ok(None)=>true,
+            Err(())=>false,
+        };
+        for _ in 0..(if fallback {MAX_PAGES} else {0}) {
             if remaining==0 || tokio::time::Instant::now()>=deadline {break;}
             remaining-=1;
             let page=tokio::select! {
@@ -62,14 +87,7 @@ pub(crate) async fn load(
             if crate::stream_limits::serialized_size(&turn.events,8*1024*1024).is_err() {break;}
             let next=turn.operation_id.clone();
             if &next==target {
-                let admitted=tokio::select! {
-                    biased;
-                    _=cancellation.cancelled()=>return Err(AgentEngineError::Cancelled),
-                    result=tokio::time::timeout_at(deadline,archive.import_scoped_reference(crate::AgentHistoryPage {turn:Some(turn),has_older:page.has_older},binding,port,causality))=>
-                        result.unwrap_or_else(|_|Err(AgentEngineError::ContextAssembly("reference lookup budget expired".into()))),
-                };
-                report=admitted
-                    .unwrap_or_else(|_|json!({"source_turn":target,"status":"reference_not_admitted","current_evidence":false}));
+                report=admit(archive,crate::AgentHistoryPage {turn:Some(turn),has_older:page.has_older},target,port,causality,binding,cancellation,deadline).await?;
                 break;
             }
             if !page.has_older {break;}
@@ -84,6 +102,30 @@ pub(crate) async fn load(
         reports.push(report);
     }
     Ok(reports)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn admit(
+    archive:&mut crate::tool_archive::ToolArchive, page:crate::AgentHistoryPage,target:&str,
+    port:&dyn AgentHistoryPort,causality:&ChatCausality,binding:&EngineBinding,
+    cancellation:&CancellationToken,deadline:tokio::time::Instant,
+)->Result<Value,AgentEngineError> {
+    if page.turn.as_ref().is_none_or(|turn| turn.operation_id!=target
+        || crate::stream_limits::serialized_size(&turn.events,8*1024*1024).is_err())
+    {
+        return Ok(json!({"source_turn":target,"status":"reference_not_admitted","current_evidence":false}));
+    }
+    let admitted=tokio::select! {
+        biased;
+        _=cancellation.cancelled()=>return Err(AgentEngineError::Cancelled),
+        result=tokio::time::timeout_at(deadline,archive.import_scoped_reference(page,binding,port,causality))=>
+            result.unwrap_or_else(|_|Err(AgentEngineError::ContextAssembly("reference lookup budget expired".into()))),
+    };
+    match admitted {
+        Err(AgentEngineError::Cancelled)=>Err(AgentEngineError::Cancelled),
+        Ok(report)=>Ok(report),
+        Err(_)=>Ok(json!({"source_turn":target,"status":"reference_not_admitted","current_evidence":false})),
+    }
 }
 
 #[cfg(test)]
@@ -143,5 +185,63 @@ mod tests {
         let cancel=CancellationToken::new();cancel.cancel();
         assert!(matches!(load(&mut archive,&["turn:user:msg:session:target".into()],&port,&cause,&binding,&cancel).await,Err(AgentEngineError::Cancelled)));
         assert_eq!(port.0.load(Ordering::SeqCst),1);
+    }
+
+    #[tokio::test]
+    async fn exact_reference_beyond_cursor_window_imports_only_addressed_validated_turn() {
+        #[derive(Debug)] struct Exact { calls:AtomicUsize, binding:EngineBinding }
+        #[async_trait::async_trait] impl AgentHistoryPort for Exact {
+            async fn read_exact(&self,_:&ChatCausality,target:&str)->Result<Option<crate::AgentHistoryPage>,AgentEngineError> {
+                self.calls.fetch_add(1,Ordering::SeqCst);
+                assert_eq!(target,"turn:user:msg:session:older-than-eight");
+                Ok(Some(crate::AgentHistoryPage {has_older:false,turn:Some(crate::AgentRecordedTurn {
+                    operation_id:target.into(),receipt_status:"failed".into(),
+                    requirement:crate::context_lifecycle::text_message(ChatRole::User,"original file task".into()),
+                    events:vec![
+                        crate::AgentEngineEvent::TurnStarted {binding:self.binding.clone(),turn_operation_id:target.into()},
+                        crate::AgentEngineEvent::ModelStepStarted {step:1,operation_id:"old:model:1".into()},
+                        crate::AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {
+                            call_id:"original-read".into(),name:"read_file".into(),
+                            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
+                        crate::AgentEngineEvent::ToolCompleted {step:1,result:crate::AgentToolResult::text(
+                            "original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
+                        crate::AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failure".into()},
+                    ],
+                })}))
+            }
+            async fn read_previous(&self,_:&ChatCausality,_:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                panic!("direct addressing must not walk or import unrelated intervening turns")
+            }
+        }
+        let (binding,cause)=fixture();let port=Exact {calls:AtomicUsize::new(0),binding:binding.clone()};
+        let mut archive=crate::tool_archive::ToolArchive::new("scope".into());
+        let report=load(&mut archive,&["turn:user:msg:session:older-than-eight".into()],&port,&cause,&binding,&CancellationToken::new()).await.unwrap();
+        assert_eq!(port.calls.load(Ordering::SeqCst),1);
+        assert_eq!(report[0]["status"],"loaded");assert_eq!(report[0]["imported_records"],1);
+        assert_eq!(report[0]["source_turn"],"turn:user:msg:session:older-than-eight");
+        assert_eq!(report[0]["current_evidence"],false);
+    }
+
+    #[tokio::test]
+    async fn direct_unavailable_or_wrong_target_does_not_fall_back_or_import() {
+        #[derive(Debug)] struct Exact { wrong:bool }
+        #[async_trait::async_trait] impl AgentHistoryPort for Exact {
+            async fn read_exact(&self,_:&ChatCausality,_:&str)->Result<Option<crate::AgentHistoryPage>,AgentEngineError> {
+                Ok(Some(crate::AgentHistoryPage {has_older:false,turn:if self.wrong {Some(crate::AgentRecordedTurn {
+                    operation_id:"turn:user:msg:session:other".into(),receipt_status:"failed".into(),
+                    requirement:crate::context_lifecycle::text_message(ChatRole::User,"other".into()),events:vec![],
+                })} else {None}}))
+            }
+            async fn read_previous(&self,_:&ChatCausality,_:Option<&str>)->Result<crate::AgentHistoryPage,AgentEngineError> {
+                panic!("an authoritative direct outcome must not bypass its history floor with a cursor fallback")
+            }
+        }
+        let (binding,cause)=fixture();
+        for wrong in [false,true] {
+            let mut archive=crate::tool_archive::ToolArchive::new("scope".into());let before=archive.context();
+            let report=load(&mut archive,&["turn:user:msg:session:target".into()],&Exact {wrong},&cause,&binding,&CancellationToken::new()).await.unwrap();
+            assert_eq!(archive.context(),before);assert_eq!(report[0]["status"],"reference_not_loaded");
+            assert_eq!(report[0]["current_evidence"],false);
+        }
     }
 }

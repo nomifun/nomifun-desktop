@@ -66,7 +66,7 @@ impl AgentHistoryPort for HistoryPort {
             return Err(AgentEngineError::Cancelled);
         }
         self.require_causality(causality)?;
-        let mut window = self
+        let window = self
             .host
             .read_history_before(&self.receipt, 1, before_operation)
             .await
@@ -74,6 +74,30 @@ impl AgentHistoryPort for HistoryPort {
         if self.cancellation.is_cancelled() {
             return Err(AgentEngineError::Cancelled);
         }
+        Self::project(window)
+    }
+
+    async fn read_exact(
+        &self,
+        causality: &ChatCausality,
+        operation: &str,
+    ) -> Result<Option<AgentHistoryPage>, AgentEngineError> {
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        self.require_causality(causality)?;
+        let window = self.host.read_history_exact(&self.receipt, operation).await
+            .map_err(|_| invalid())?;
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        Ok(Some(Self::project(window)?))
+    }
+}
+
+impl HistoryPort {
+    fn project(mut window: super::super::engine_history::EngineHistoryWindow) -> Result<AgentHistoryPage, AgentEngineError> {
+        if window.turns.len() > 1 { return Err(invalid()); }
         let Some(turn) = window.turns.pop() else {
             return Ok(AgentHistoryPage {
                 turn: None,
