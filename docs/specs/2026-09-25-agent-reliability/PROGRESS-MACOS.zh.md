@@ -19,6 +19,9 @@
   原四 Turn 配置切换/精确绑定 2、UI 118 全通过；另外 DTO、one-shot/template/字段编码
   小回归通过，typecheck/桌面边界/i18n 通过。旧库夹具恢复改在单一连接上逐步核对真实
   表/index/trigger，首 31/35 红保留、37 修后全 8 绿；不改生产迁移制造通过。
+- 最后补遗只修 Agnes video 宽高优先级：保存/extra/typed 各层精确，非法值仍拒绝；
+  `run-002-agnes-video/` 保留首夹具缺字段编译失败，修后 adapter 定向回归 12/12 通过。
+  视频退役文档不作官方新规格或 live 验收，其他平台结果未改。
 
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
 按用户 2026-09-30 的明确目的，本轮收敛为简单系统命令、步骤衔接、过程状态和结果可信性，
