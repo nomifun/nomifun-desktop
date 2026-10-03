@@ -3922,6 +3922,10 @@ Windows另发现词门禁误拒合法已选来源路径reports/reaped/result.txt
 仅在校验视图中豁免完整已解析路径/明确引用的完整调用或诊断span，提交原文不改；真实自由
 字段叙述、假URL和无来源引号仍拒绝。首红保留，正负路径及strict来源/缺项回归通过，正式
 模型采用未由组件代判，详见Windows页原样来源误拒修复。
+
+Windows按新warmup根因的修后正式样本已executionclaim/旧参数请求1，但新配置保存后UI
+插入未接纳、流暂停，没有下一Turn；冻结两项仍未验，组织首败保持。实际API exit0/清理
+成立，非托盘；不由此宣布W276全通过或保留的原原因已定位，详见Windows页配置正式样本。
 - macv4正式4个report各33selector，但625/521chars超strict512全拒绝，有界失败；
   no公开草稿/owner0、旧prefix/effects同/native0。用户要求最终完整，strict摘要对齐
   普通report2048而不删必要解释，600字原样回归通过；source/48KiB参数/缺项不变，首败保持。
