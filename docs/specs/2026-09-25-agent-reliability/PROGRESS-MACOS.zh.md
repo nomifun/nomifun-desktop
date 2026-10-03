@@ -16,7 +16,7 @@
 | A13复杂交付 | 原完整正式N1 PASS，复用 | 不作统计稳定性/N3认证 |
 | B09字节/步骤/报告可读 | 原效果链已验；33/33实际入Step5；续写展示已修；修后原报告恢复N1 PASS，10含2口径正确 | 原failed Turn/全部首败不改completed；不作首发无错或N3认证 |
 | 模型/能力/上下文/推理配置变更 | 空闲公开API四轮、当前Turn一致视图、旧结清状态兼容已验；正式UI切Step5/1M/4096/low并实际请求成立 | admission→capture小竞态仍明确失败；全并发“无感”未认证 |
-| 已用CEF退出清理 | 正式正常/受控失败已验；真实CEF内Keychain等待已复现并自行有界exit1 | 系统等待本身未消除；新发现pairing后台任务收尾待修后验、独立socket路径证明缺失 |
+| 已用CEF退出清理 | 真实CEF内Keychain等待已复现并有界exit1；新发现pairing任务已修、正常正式及实际App挂起native barrier回归通过 | 系统等待本身未消除；本次独立socket路径absence缺证，原normal/held精确socket证明复用 |
 | 公开报告表达 | 原始结果保持、叙述策略和公开字段已修并通过定向回归 | 新正式样本仍照抄历史内部术语，表达验收FAIL，不能以策略已装配关闭 |
 
 本轮不再针对同一未改根因重复付费报告；旧MM重试已验子链复用，旧矩阵/全GEN/N3/发布
@@ -794,6 +794,13 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   不改任务权限、后台超时/abort/error语义或其他服务。原周期/停止后零后续query/在途query
   完成后才模拟关repo三项回归通过；App现有drain回归1通过，修后正式验证待验，外证据pairing-exit-owner。
 
+- 修后正式原B样本跨60秒且无late-pool警告；另补实际build_channel_state注册timer的App
+  native-stage gate回归，等待原query/join后关闭真实memory pool，再持native等待并跨两周期，
+  要求该实际task.is_finished及registry Closed/0。首编缺test-util/内部test入口外留，修正仅
+  dev-dependency/cfg(test)出口，不扩大production API、超时或断言；第二轮暂停时钟使SQLx
+  初始化PoolTimedOut首败保留，只在真实pool已关闭且native gate进入后暂停/推进时钟，
+  最终1/1通过、2.90秒。不是自然Keychain重跑、也不是把native假成功；原失败/告警保持。
+
 #### 旧模型回答与结果事实的重放来源区分（2026-10-03）
 
 - 新表达策略仍失败；实际11份旧plain Assistant回答42278bytes未标来源，107/111新回答行
@@ -804,6 +811,20 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - history九项（含两新反例、现代/legacy完成字节精确）及checkpoint/明确引用两项通过。
   原634-source公开文本为0，不能冒充wrapper验收；需要修后真实request旧报告集合及新
   表达独立核对。保持原表达FAIL，源码机制不抵扣模型采用，外证据closed-assistant-provenance。
+
+- `1afc2e2cf`/同步合并`b8b71673b`正式同原task验证：锁屏期间任务未发/模型0，手动解锁
+  后沿同PID发一次；1请求/1步，实际12旧回答50331bytes顺序/多重集合/原文逐字相同，
+  10份typed source正确、2份unknown=null，全部data-only；33真实结果/源10含2/当前0不变。
+  B事实 **PASS_REPORT_ONLY**，新8074-byte正文仍带内部术语，**FAIL_PUBLIC_EXPRESSION** 保留。
+- Cmd-Q0/243.169秒（含解锁等待）、无expiry/TERM/KILL，1557events/15Turns/14effects及
+  1525前缀/14旧Turn/效果/闭库同，owner0/host指令读2；已跨60秒timer运行区间且无pairing
+  closedpool警告，但这是正常样本，不冒充修后真实阻塞producer验证。正补实际App装配+
+  held-native stage的定向barrier回归已1/1通过；同一未改表达原因不再付费循环，不改原失败/Windows结果。
+
+- 后续表达方向不能把archive ID塞当前completion证据/计数：现v2 formatter只支持当前
+  已选择结果、不会可靠改变模型叙述。应先建立只读历史结果展示的typed origin与独立reader
+  resolve，再讨论历史交付；不能以删除旧回答/regex改stdout或让旧结果变fresh制造通过。
+  这仍是开放产品工作，不是机制小回归/已装配标签即完成。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 

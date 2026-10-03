@@ -3753,6 +3753,12 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
 - history9项及checkpoint/explicit引用两项通过，实际模型采用/表达待验；原失败与Windows
   结果保持。外证据closed-assistant-provenance，不能用公开文本0的原B634 journal冒充覆盖。
 
+- `1afc2e2cf`/同步合并`b8b71673b`mac正式原B报告1请求/1步已实际采用12旧答案标签，
+  50331bytes/顺序与多重集合/typed source及unknown=null全同、33源结果/10含2/当前0保持。
+  B事实PASS，公开表达仍FAIL；不改原文/结果/失败来制造通过。Cmd-Q0/243.169秒（含锁屏
+  等待，无expiry/信号），1557events/15Turns/14effects及旧前缀/效果/闭库保持，owner0。
+  Windows未代判，原待验为该批历史状态；后续未改表达根因不付费复跑。
+
 ### pairing后台清理纳入现有宿主收尾（2026-10-03，macOS真实退出发现）
 
 - 真实Keychain堵塞时closedpool后timer仍query：App丢弃Handle、interval不接取消。仅该
@@ -3760,3 +3766,8 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   结束后join，原失败/超时语义不吞。周期与取消/在途两个小回归共3通过，App现有drain1
   通过，修后正式待验。
   外证据pairing-exit-owner；不把macOS出现的共享缺口当Windows已验。
+
+- mac正式原B样本243.169秒（含解锁等待）跨60秒且无pairing closedpool警告；实际App
+  build_channel_state注册timer→join/registry Closed0→真实pool close→native gate持续持有并
+  跨两个周期的回归1/1通过。只补test-util/cfg(test)装配入口；初编/SQLx暂停初始化首败
+  外留后调整测试时钟阶段，原断言不减。它是修后barrier证据，不冒充新的自然Keychain样本。
