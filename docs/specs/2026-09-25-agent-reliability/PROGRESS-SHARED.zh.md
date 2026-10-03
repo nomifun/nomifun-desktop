@@ -3838,3 +3838,11 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   错误拒绝或退optional，一般report schema和JSON协议不变。source账本不进current证据。
 - 新2及控制1回归、Runtime323/1ignored、原634/33source黄金1通过；正式采用/表达待验，
   原失败/Windows结果保持，外证据history-report-compact。
+
+- mac正式紧凑合同尚未到达：3个ONLY update_plan请求，模型先提出未暴露旧report后无调用，
+  守卫拒绝保持，最终任务未完成，当前1/0与source10含2分开。原前缀/19Turn/14effects不改，
+  native正常0；不把组件通过或未采用记公开报告PASS。
+- fresh纯历史报告去除多余plan模型往返，报告沿已有optional空plan验证/关闭；真实
+  needs_replan仍plan-only。全部scope/source/current/patch/process/exact/预算检查不放宽，
+  最小首红→修后单请求+stale-plan/optional/current伪证负向及Runtime323/1ignored通过。
+  新正式采用待验，外证据history-report-direct；不代判Windows或旧失败。

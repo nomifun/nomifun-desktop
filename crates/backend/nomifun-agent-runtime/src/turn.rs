@@ -2241,7 +2241,7 @@ fn synchronize_adaptive_context(
         && !patch_recovery.pending() && !patch_recovery.unresolved();
     if historical_report_only {
         upsert_instruction(&mut request.input.instructions,&mut slots.historical_report_only,
-            "The latest accepted user task is explicitly restricted to reporting already-recorded closed-turn results: no file changes, commands, process actions or new current-state checks. Only history readers and existing plan/report controls are available. The plan covers this current report task, never the old action plan. The strict report_completion schema accepts only source_turn, archive_ids, short_summary and missing_items. Select every necessary original result; the host resolves values and source counts and keeps current accounting separate. Do not submit criteria, evidence IDs, data or count fields in this mode. Missing required results remain blocked; do not invent, replay or enlarge the publication budget.".into());
+            "The latest accepted user task is explicitly restricted to reporting already-recorded closed-turn results: no file changes, commands, process actions or new current-state checks. Use only the currently advertised control. A fresh report task needs no separate update_plan; a valid report closes its optional empty plan, never the old action plan. The strict report_completion schema accepts only source_turn, archive_ids, short_summary and missing_items. Select every necessary original result; the host resolves values and source counts and keeps current accounting separate. Do not submit criteria, evidence IDs, data or count fields in this mode. Missing required results remain blocked; do not invent, replay or enlarge the publication budget. If only update_plan is advertised, a real existing replan obligation remains: settle that current plan first, not a report or an old plan.".into());
         request.input.tools.retain(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
             |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ));
         if let Some(report)=request.input.tools.iter_mut().find(|tool|tool.name==crate::completion::TOOL_NAME) {
@@ -2251,7 +2251,10 @@ fn synchronize_adaptive_context(
         }
         if adaptive.task_ledger() && long_horizon.is_some_and(|state|
             state.work_status.running_processes.is_empty() && !patch_recovery.pending() && !patch_recovery.unresolved()) {
-            let name=if long_horizon.is_some_and(|state|state.execution_plan.revision==0||state.execution_plan.needs_replan) {
+            // Completion already validates and closes an optional empty plan.
+            // Do not require a model-only planning round for a fresh read-only
+            // publication; preserve genuine stale-plan obligations.
+            let name=if long_horizon.is_some_and(|state|state.execution_plan.needs_replan) {
                 crate::planning::TOOL_NAME
             } else {crate::completion::TOOL_NAME};
             if request.input.tools.iter().any(|tool|tool.name==name) {
@@ -3602,7 +3605,7 @@ mod tests {
                 if self.required_mode {
                     assert!(request.input.tools.iter().all(|tool|matches!(tool.name.as_str(),crate::planning::TOOL_NAME|crate::completion::TOOL_NAME
                         |crate::tool_archive::LOAD|crate::tool_archive::SEARCH|crate::tool_archive::READ)),"report-only mode grants no platform tools");
-                    assert_eq!(request.input.tool_choice,ChatToolChoice::Specific {name:if step==0 {crate::planning::TOOL_NAME} else {crate::completion::TOOL_NAME}.into()});
+                    assert_eq!(request.input.tool_choice,ChatToolChoice::Specific {name:crate::completion::TOOL_NAME.into()});
                     assert_eq!(request.input.tools.len(),1,"a required control cannot compete with future phase controls");
                 }
                 if let Some(report)=report {
@@ -3614,7 +3617,13 @@ mod tests {
                         assert_eq!(report.input_schema.0["properties"]["observed_command_failure_count"]["const"],0);
                     }
                 }
-                let events=if step==0 {
+                let events=if self.required_mode {
+                    let schema=&report.expect("strict historical publication must be available at entry").input_schema.0;
+                    assert_eq!(schema["properties"]["source_turn"]["enum"][0],SOURCE);
+                    control_step("report",crate::completion::TOOL_NAME,json!({"source_turn":SOURCE,
+                        "archive_ids":[schema["properties"]["archive_ids"]["items"]["enum"][0].clone()],
+                        "short_summary":"已整理历史结果，未重新执行。","missing_items":[]}))
+                } else if step==0 {
                     control_step("plan",crate::planning::TOOL_NAME,json!({"plan":[{"step":"整理所选历史结果","status":"in_progress"}]}))
                 } else if step>1 {
                     let results=serde_json::to_string(&request.input.messages).unwrap();
@@ -3622,12 +3631,6 @@ mod tests {
                         "a historical ID must be rejected by advertised current-evidence schema or validation before publication");
                     self.rejection_seen.store(true,Ordering::SeqCst);
                     vec![Err(ChatModelError::protocol_violation("controlled end after expected invalid evidence refusal"))]
-                } else if self.required_mode {
-                    let schema=&report.unwrap().input_schema.0;
-                    assert_eq!(schema["properties"]["source_turn"]["enum"][0],SOURCE);
-                    control_step("report",crate::completion::TOOL_NAME,json!({"source_turn":SOURCE,
-                        "archive_ids":[schema["properties"]["archive_ids"]["items"]["enum"][0].clone()],
-                        "short_summary":"已整理历史结果，未重新执行。","missing_items":[]}))
                 } else {
                     let origin=report.unwrap().input_schema.0["properties"]["historical_results"]["items"]["properties"]["origin"]["enum"][0].clone();
                     assert_eq!(origin["source_turn"],SOURCE);
@@ -3657,8 +3660,28 @@ mod tests {
         let mut strict=sample.clone();strict.input.messages[0]=crate::context_lifecycle::text_message(ChatRole::User,
             format!("只依据已关闭回合的历史记录整理完整报告。不要修改任何文件，不要执行命令，不要新增当前文件检查。operation_id:{SOURCE}"));
         let published=open_session(required.clone(),Arc::new(NeverOwner)).run_turn(
-            AgentTurnRequest::new(strict,AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.unwrap();
-        assert!(published.output_text.contains("第一行 MAC-B\n第二行 after\n"));assert_eq!(required.calls.load(Ordering::SeqCst),2);
+            AgentTurnRequest::new(strict.clone(),AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.unwrap();
+        assert!(matches!(published.terminal,AgentTurnTerminal::Completed {..}));
+        assert!(published.output_text.contains("第一行 MAC-B\n第二行 after\n"));assert_eq!(required.calls.load(Ordering::SeqCst),1);
+        // A fresh report closes an optional empty plan, but must not override
+        // a real replan obligation from the current turn.
+        let strict_input=strict.input.messages[0].clone();
+        let mut archive=crate::tool_archive::ToolArchive::new("strict-replan-check".into());
+        let references=crate::history_reference::references(&strict_input,&strict.causality);
+        let resolved=crate::history_reference::load(&mut archive,&references,&History,&strict.causality,&binding(),&CancellationToken::new()).await.unwrap();
+        archive.set_references(resolved);
+        let turn_request=AgentTurnRequest::new(strict.clone(),AgentToolPlan::default(),principal(),0);
+        let scoped=crate::workspace_context::ScopedInstructions::new(&turn_request);
+        let mut adaptive=crate::adaptive::AdaptiveExecution::default();
+        adaptive.activate(crate::adaptive::LEDGER_MODULES,crate::AgentRuntimeActivationReason::HistoricalTaskCandidate,&NoopAgentEventSink).await.unwrap();
+        let mut state=LongHorizonState::default();
+        state.execution_plan.needs_replan=true;
+        let mut slots=AdaptiveContextSlots::default();
+        synchronize_adaptive_context(&mut strict,&AgentToolPlan::default(),&ChatToolChoice::Auto,&adaptive,&scoped,
+            &crate::patch_recovery::PatchRecovery::default(),Some(&archive),Some(&state),&[strict_input],1,
+            false,None,false,true,false,&Default::default(),&mut slots).unwrap();
+        assert_eq!(strict.input.tool_choice,ChatToolChoice::Specific {name:crate::planning::TOOL_NAME.into()});
+        assert_eq!(strict.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::planning::TOOL_NAME]);
         let invalid=Arc::new(Model {calls:AtomicUsize::new(0),forge_current:true,required_mode:false,rejection_seen:std::sync::atomic::AtomicBool::new(false)});
         assert!(open_session(invalid.clone(),Arc::new(NeverOwner)).run_turn(
             AgentTurnRequest::new(sample,AgentToolPlan::default(),principal(),0).with_history_port(Arc::new(History))).await.is_err());
