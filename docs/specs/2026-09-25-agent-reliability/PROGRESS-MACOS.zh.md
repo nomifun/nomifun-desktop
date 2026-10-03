@@ -1007,6 +1007,14 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
   14effects、旧1945前缀保持；native0/187.089秒/noexpiry/信号，original/owner无新操作。
   按用户完整交付要求，将strict摘要对齐普通report2048，而非要求模型删掉必要解释；
   参数48KiB/source/原值/错误/缺项保持，600字摘要不裁回归通过。首FAIL另存historical-public-v4。
+- `98e16d4c5`正式同存活解锁后发送一次：2请求/2步，33/33accepted report及completed，
+  current0/0、draft0、正文25335B/原值不丢、actualmax_tokens省略。真实分屏见#33原两行/
+  全afterhash/32B和#26父子STOP原文/143ms/errors0，但取证因锁定等待+滚动超native480，
+  runner TERM/expiredtrue、进程自行exit0仍记observerFAIL，不作normalexitPASS。
+- 源/备2059events/25Turns/14effects同/双ok，2010前缀和原效果不变。表达仍有普通摘要
+  cancel_process/reaped/elapsed_ms等工具/回执字段，不以6词门禁通过代判整体表达。
+  扩明示叙述拒绝覆盖已知工具/回执字段，一次反馈列全部，而非逐词retry；native argv/
+  hash/stdout/技术请求原文保持。定向回归通过，零模型冷读/正常退出及修后最终表达待验。
 
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
