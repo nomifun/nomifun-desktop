@@ -552,6 +552,15 @@ B09与真实Keychain物理失败未记PASS，N3/统计稳定性保持未认证�
 - 原B完整报告与公开语言仍OPEN，修后正式StepFun尚未跑；真实Keychain也未代判。完整
   首红/修后日志外置history-reference-load/run-001-tests，Windows结果不改、不增加大索引。
 
+- 正式源`ae24847f0`采用已验，但整组仍 **FAIL**：目标33条/无淘汰/原错误10已在模型前
+  加载，SEARCH/READ及计数进入实际主请求；6请求（5摘要+1主步）仍零正文查询，回答继续
+  错称文件记录缺失。不能把预加载成功当完整交付，或再加可用性文案碰运气；下一直接缺口
+  是正文取得/缺失判断的完成路径。原任务要求未改、旧操作不重发，source原绑定保持。
+- 正式Cmd-Q0/181.351秒/noexpiry/noTERM/noKILL，1286/1/1/7/14五表与源库全同、原1238
+  prefix及14effects精确同/双库integrity ok，新owner效果0。HTTP/公开回复/UI/数据库/
+  独立审计在外部history-reference-load/run-002-live；原A N1复用，B报告/表达及真实
+  Keychain仍OPEN，Windows未代验。修复已推送不代表语义Case关闭，保留本次新失败。
+
 ### 用户重开第 1 批：Keychain 风险与 native 清理失败（2026-10-02）
 
 - 范围 C05-09/10、A11/A13/A17/A18 的退出子断言。先同步远端 `513a8efcd`；本机仍为
