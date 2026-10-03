@@ -4211,3 +4211,10 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 外部`2026-10-03/windows/w276-turn-config-formal`保存首错、正式身份/输入/UI、两次配置保存、空目标请求事实、原及最终事件、临时反假设回归、actual exit1/清理日志及独立review。初始化helper/model夹具自然exit0，全部自有GUI/模型/Cargo/后代/监听0，付费0；当前正式配置采用、接受后推理前停滞及未证Runtime清理继续OPEN，唯一产品根因未定位，不追加模型/源码修复凑PASS，全面目标active。
 - 收尾正常快进远端6eceb3754/d99ef2149，已结算patch跨模型数据兼容及原exact来源/Session/未决状态的三个Windows回归3/3通过；本例无patch/tool事件，不据此宣布停滞已修。正式产物仍明确属于505ee1eb1，合并后未追加UI；44份外部文本的既有真实加密连接凭据审计0命中，无凭据入Git/日志/提示。Git仅本批短结算。
 - 首次push遇并行远端更新而被正常拒绝，随后正常合入eb45556ce明确寻址历史正文；Windows Runtime引用5/5及App历史固定root/范围6/6通过，实际模型采用/原复杂报告不由这些组件通过代判，未重跑本例。无force-push、共享历史改写或覆盖他人源码。
+
+### W277 原W250关闭结果的当前正文投影（2026-10-03；组件通过、真实采用未验）
+
+- C06/C07/C08历史数据链：针对eb45556ce/fd3305422已变更的正文投递/操作记录优先级，复用原W250的06-cancelled canonical制品，只读导出同一关闭Turn的原typed事件，不恢复或构造缺失HTTP/SSE，不调用原owner。763条canonical/463 typed事件、16条step>0已结算结果；原receipt仍cancelled/原错误标记0。host观察另计，不合成缺失结果或将提议当执行。
+- 显式跑既有owned-journal ignored回归首次1/1；旧3aad3949b完整payload投影36223bytes/16条通过。正常同步ad333dc76/3c41d3bf5后复用并加强新紧凑正文回归1/1：选中/完整结果正文16/16、遗漏0、serialized26986 bytes<=原64KiB；正文/错误/通过sources还原的原binding/turn及原插入顺序逐项相同，Assistant/Text/current_evidence=false/new_user_instruction=false，未寻址不投递。planning/control提议参数明确仅在投影省略，原archive精确READ仍逐字完整；不把它们计作已投递参数，不扩大预算或放宽原body断言。
+- 独立原事实核对：真实close结果仍STDIN_EOF/bytes0/hex空；echo退出和后续hold取消仍reaped，旧漏stdin/重复cursor首败不变。原DB SHA前后均2af42c806004e9148d85f268c4ce3f8e1c351b2d4e6960346edfa24e2b451777，原件只读/无重放，模型/正式UI/owner调用0；此组件数据投影不能代判真实请求包含全部正文、模型报告正确或完整B通过。
+- 制品外部`2026-10-03/windows/w277-historical-body-current`保存机械导出/来源SHA/原process事实、同一回归各源码阶段日志与独立review，不计多个独立样本。同步准备时本地reverse patch未适用、merge被正确阻止，首错另留；仅撤销自有旧测试段后正常同步，未覆盖远端。当前archive七项常规回归通过，owned历史项已另外显式跑通（默认组ignored不再记未跑）。自有Cargo已结束/无新GUI或进程，当前正文的Windows正式采用仍未验；W276推理前停滞/未证清理、生成步骤/字节/完整交付及跨盘/UNC/S3余项保持OPEN，全面目标active。
