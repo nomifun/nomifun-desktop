@@ -41,6 +41,7 @@ mod execution_policy;
 mod kernel;
 mod history;
 mod history_port;
+mod history_reference;
 pub use history_port::{AgentHistoryPage, AgentHistoryPort, AgentRecordedTurn};
 pub use history::{replay_closed_history, replay_closed_turn};
 mod model;
