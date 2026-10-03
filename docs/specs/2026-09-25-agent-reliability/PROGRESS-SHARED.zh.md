@@ -3738,5 +3738,8 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   合入原MINIMAL同一instruction，公开字段描述引用，默认用户语言说明动作/结果/原因。
   技术原文/标识显式例外，源值/stdout/argv/hash/PID与数字/required/enum/证据资格均不改，
   不用regex清洗、不加词表拒绝或权限。直接Assistant与structured completion共用policy。
-- 三项机制及五项邻近精确载体/回放/计数回归通过；仍需一次随原B报告的正式采用，不另开
-  大量润色复跑。Windows原结果不代判，外证据public-report-language。
+- 三项机制及五项邻近精确载体/回放/计数回归通过；`11ecee9c4`正式同原B报告一次采用，
+  1请求/1步、policy在system0一次，源33结果/10含2保持；新正文仍照抄历史引擎术语，
+  表达FAIL，不以机制通过关闭模型表达。Cmd-Q0/70.066秒无expiry/信号，1525events/
+  14Turns/14effects与原前缀/效果/闭库同，owner0。未改根因不继续付费循环，Windows
+  原结果不代判，外证据public-report-language。
