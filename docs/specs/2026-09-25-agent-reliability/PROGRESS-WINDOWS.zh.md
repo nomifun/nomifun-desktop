@@ -4247,3 +4247,23 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - A独立审查未发现新missing/contradictory装配，非修复进度；当前exact_actions文件/预声明stdin机制相对W257仍缺一次≤120秒正式采用。B历史/公开报告、C恢复和D平台分别负责独立簇，主agent唯一集成/Cargo/UI/DB写者，不将一个Case拆给多个agent。
 - D包0261d4c99和C包e8bebce49分别提交，经ba1391c7a正常合并推送。以上正式样本均冻结ba1391c7a/c9973886/f780b9a4，清理后才正常同步ae3a91c70；旧回答来源/pairing共享修复不追认为旧GUI源码或W276根因。Windows新history直接9/9、pairing timer3/3通过；App held-native barrier本机未跑，正式新源码采用未验。
 - 当前自有Cargo/GUI/夹具/后代/监听已清理；既有stdin/Stop/历史真值/Creative采用/W274活树Quit复用。旧wire缺证、LF/guard/复杂生成、Windows新正文/typed续接采用、W276/成功恢复、S3 ACK/卷UNC及其他平台余项继续OPEN；完整共享、Windows和发布认证未完成。
+
+### 全局B 中文结果尾注展示接线修复（2026-10-03；直接回归通过）
+
+- C06过程/公开结果：Runtime completion.rs plain_zh_v2生成两条固定中文失败尾注，但renderer completionOutcomeDisplayModel只识别英文，合法同Turn的exited/exit1/reaped报告投影undefined。外部B候选独立准备；A正式GUI结束/实际exit0后才应用，未改变其冻结产物。
+- 最小renderer修复加入精确中文语法及重复尾注保护，不改自由summary、canonical原文/计数、英文兼容或身份核对；同Turn真实非零/参数未执行/timeout可分类，缺失/异Turn或Session/未reaped仍只保留计数。
+- 先仅加入回归，旧实现7PASS/1FAIL（期望native_nonzero、实际undefined）正式保留；应用修复后8/8、55断言通过，bun run check:desktop-ui-boundary通过（880×600）。无额外Cargo/模型；正式新renderer尚未构建/采用，不代判W278、历史source展示、Mac自由表达或完整共享Case。仓库外`2026-10-03/windows/global-b-historical-reader`保存候选与前后日志。
+
+### 全局A 当前文件/预声明输入的正式采用首败（2026-10-03；生成FAIL保留）
+
+- C04/C05/C08一次当前规则采用：b25ca3525正式desktop/helper构建结束后才官方初始化新库/独立work/profile，仅所选加密连接内存重加密；Step5/1000000/4096/low，正式binary AF1EE4E445765A41DA81A5E7C5CF2EEADBBC64FFC1571CF714427F76187FBA89、前端f780b9a4/1280×832。初始build元数据误读dist路径为null，另存正确身份；API setup未unwrap data而生成三个空preset的组织首错留档，复用首preset纠正、无删除/重建任务。
+- 原PID13280/11:35:50Z、Session 01a1018f-ab79-7580-8597-615c55e19e52仅经正式UI发送一次两项输入，固定提交+120秒。14个真实HTTP200/完整SSE与14个原生提议逐组canonical参数全同；供应商头/凭据不记，96份外部文本审计0命中。模型先漏承诺再提错patch/native stdin shape，五次原生拒绝保持，工具未被产品改参。
+- 唯一FIRST加LF整写/真实SHA读取成立，最终FINAL加LF六字节成立；但原承诺patch没有expected_source、stdin没有append_newline。模型补真实guard/追加LF被同一承诺精确核对拒绝，随后改回无guard patch和无LF stdin并返回成功；stdin成功参数仅8bytes而要求9，未形成EOF实物或最终report。属于当前生成/遵循首败，不强制通用guard、不补LF，不以最终文件正确代判整链PASS。
+- 375canonical events、四个returned effects（write/patch/start/input）；原Bun PID47860真实running/READY/cursor6，原GUI观察器已记录其出生身份。14上游请求后本地三次预算拒绝，canonical EXECUTION_MODEL_RATE_LIMITED暂停；实际UI结束回合cancelled一次，native API实际exit0/11:42:32Z、非托盘，forwarder自然shutdown0。后代/监听0、helper内容hash不变，旧stdin短链/Stop及W274 Quit复用，不改原W250/W249/W240状态。
+- 仓库外`2026-10-03/windows/global-a-current-exact`保存首次组织错误、正式身份/输入/固定期限、原请求/完整SSE、机械参数核对、真实回执/磁盘及实际退出；未修改执行层、未复跑。B中文修复是在此GUI终态后应用，不能将41a689a00或后续共享源码冒称本例源码。
+
+### 本轮整体A/B/C/D收尾（2026-10-03；目标仍active）
+
+- B实际修复提交41a689a00，原红回归及修后8/8/boundary保持。push首先被远端更新正常拒绝，随后正常合并577ad3f44/0da91c71a历史结果公开来源；Windows定向18/18通过，ignored owned项另外1/1通过，原结果16/16/28127bytes/遗漏0、无owner调用，合并后renderer8/8通过。组件不是Windows正式模型/新UI采用，原Mac NOT_SELECTED/表达FAIL也不改PASS。
+- C只交付预部署自动采样草案（固定时钟/原OS句柄/真实lease门禁），接纳回调与真实冷启动器未接合；D只冻结迟到resize未应用的正式呈现并保存carrier候选，接口未验/未就绪，原准备盒到线停止。均未执行新样本、无产品修改或PASS，不把候选代码/说明当闭环进度。
+- 自有GUI/模型转发/Cargo/原Bun及后代/监听均已结束。仍开放：旧wire缺证与步骤/guard/LF/复杂生成；新历史正文/公开结构/typed续接及中文修复正式采用；W276和成功冷恢复；S3 ACK、跨盘/真实UNC及平台其余边界。正式活树托盘Quit W274已通过可复用，W276实际exit1仍未解释；完整共享、Windows和发布认证未完成。
