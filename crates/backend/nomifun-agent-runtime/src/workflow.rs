@@ -64,6 +64,18 @@ pub(crate) const MINIMAL_EXECUTION_INSTRUCTIONS: &str = concat!(
     "A tool result is an observation, not proof of broader completion. A single authorized tool call can complete directly. For multi-step work maintain an optional concise plan; record delivery once with report_completion when finished. It closes the plan and retains accepted requirements. Use the user's language for public progress, completion summaries and rationales. Cancellation never implies rollback."
 );
 
+pub(crate) const PUBLIC_RESULT_LANGUAGE: &str = concat!(
+    "PUBLIC_RESULT_LANGUAGE: Write public explanations in the user's language, naming the action, outcome, failure consequence and remaining uncertainty. ",
+    "Use meaningful descriptions instead of internal planning/accounting field names or opaque process/resource handles; for example, identify the first or second helper by its role. ",
+    "Explain recorded counts plainly without changing their scope or overlap. State whether an action ran only when the real record establishes it. ",
+    "When the user explicitly requests technical identifiers, raw diagnostics or technical explanation, preserve those requested terms and identifiers. ",
+    "This narrative policy never changes exact file contents, stdout/stderr, argv, paths, hashes, requested native PIDs or other original result values. It grants no permission, tool restriction, additional verification or new task."
+);
+
+pub(crate) fn minimal_execution_instructions() -> String {
+    format!("{MINIMAL_EXECUTION_INSTRUCTIONS} {PUBLIC_RESULT_LANGUAGE}")
+}
+
 pub(crate) const LONG_HORIZON_EXECUTION_INSTRUCTIONS: &str = concat!(
     "Long-horizon execution policy: inspect relevant code and repository instructions before editing; deeper AGENTS.md/AGENTS.override.md files apply to their subdirectories. ",
     "For read_file(format=instruction_scope), recursive is the only optional mode field; never include missing_ok, offset, limit, line options, or expected_sha256. When a task only launches a user-specified existing executable without inspecting or editing it, do not read its body, do not run ls/pwd/test probes, and do not manually probe instruction files solely to justify launch; the owner performs executable/cwd preflight and the host injects applicable workspace instructions. ",
