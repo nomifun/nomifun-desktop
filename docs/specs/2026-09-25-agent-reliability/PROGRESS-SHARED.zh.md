@@ -3848,3 +3848,9 @@ W266补c58378d25迟到控制在Windows的native采用：新增真实pipe/ConPTY�
   needs_replan仍plan-only。全部scope/source/current/patch/process/exact/预算检查不放宽，
   最小首红→修后单请求+stale-plan/optional/current伪证负向及Runtime323/1ignored通过。
   新正式采用待验，外证据history-report-direct；不代判Windows或旧失败。
+
+- direct正式首红定位初次AGENTS discovery对不存在空plan误抬needs_replan，2请求仍plan、
+  无模型call/无report，旧数据与效果保持、native0；不以正文宣称完成代判采用。
+  增加非空AGENTS授权read真实接线最小首红，再沿已有context空plan规则修复；已存在plan
+  或steering/recovery gate仍要求replan，规则内容/权限无变化。host2reads/modelowner0、
+  strict单请求与stale-plan及Runtime323/1ignored通过；新正式待验，证据history-report-bootstrap。
