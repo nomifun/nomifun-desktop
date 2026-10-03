@@ -4276,3 +4276,16 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 原PID29228/12:21:10Z由既有native API自然exit0/12:34:08Z，非托盘；两代本地carrier各自然shutdown0，107events/2Turns/1effect整行SHA及空workspace退出前后保持，后代/监听0。仓库外`2026-10-03/windows/global-b-historical-reader/formal-renderer`保留首败、两次输入/各自固定观察期限、真实wire/回执/像素/独立核对和实际退出；不计首发全绿或完整共享Case通过，其他分类新UI/冷读/历史模型采用不由本例覆盖。
 - 独立新历史路由3436e40c5审查无确定反例；旧片段误报的v3 footer缺口在当前SHA核对后撤回，无补丁。Windows现有两项historical_report_only加一项optional_historical_publication共3/3通过，未重复18+owned1。当前正规关闭来源的真实模型采用/晚输入组合仍未验，A生成/C恢复/D平台及W276边界保持OPEN，全面目标继续active。
 - 结算push遇远端更新正常拒绝后合并d9c2113e9/bf8cfcb3f：strict历史选择与当前计数由宿主分离，Windows新两项strict合同及更新后的单report路由1项直接通过。未重跑正式UI，以上GUI始终归5937b5bcd/9496a455，不能追认为新增strict源码的实际模型采用；原Mac首败及其当前正式状态分开保留，无force-push。
+
+### strict历史交付宿主语言一致性修复（2026-10-03；直接回归通过）
+
+- 新确定产品反例：normalize以任意旧输入含汉字选host label/rationale，持久化格式却按实际summary选。旧中文输入后，最新合法来源请求和实际short_summary为英文，会出现中文host字段与plain_en_v3；四字段合同没有model label入口。独立外部候选审核后，原正式GUI已退出才应用。
+- 最小修复只对齐最终摘要（原short_summary及既有missing_items文字）的同一格式判据，不翻译/改写模型文本，不继承旧输入语言；来源绑定、foreign/data拒绝、计数/evidence隔离、缺项blocked及既有预算不改。既有回归扩展先red（历史结果1≠Historical result1）；仅短摘要版本的混合缺项分支也red并保留，最终strict两项及现有单report路由一项通过，diff检查通过。正式模型/新源码UI未验，v1/v2及普通report不改。
+- 仓库外`2026-10-03/windows/global-shared-strict-review`保存来源SHA、候选及首红/中间红/修后直接日志；非renderer/UI规则修改，无重复全套/付费请求，不把组件通过计原复杂报告PASS。
+
+### 原W250会话当前严格报告的未准入结算（2026-10-03；仍未采用）
+
+- 当前c44d888f1正式desktop SHA EBEC5DF8C14FA597E9FEC15317425B7F44A462F146EC66F101623963FDFC186D、前端9496a455/1280×832；复用原data/work及bfc9会话，独立profile。会话ready/无active Turn、原模型step-3.7-flash保持，未尝试模型切换或绕过旧W278 409；原三项历史报告提示逐字复用，未重放原任务。
+- 正式UI填入并点击一次发送后，固定提交+120秒内没有新增接受事件/Turn/模型请求，编辑器仍保留347字。首观察器误把已有completed Turn当新终态，原工具结果后录来源明确保留；修正为排除提交前四个Turn，沿原同PID/同固定期限观察，未再点击/重启。提交HTTP结果未保存，未准入唯一原因不推断为旧409或供应商失败，模型采用不计PASS。
+- 原943events/763原前缀/4Turns/8effects/9文件整行或字节hash保持，连接密文保持；临时loopback端点经公开API恢复，合法配置revision3→5不回写。原PID76464/13:14:46Z由既有native API自然exit0，非托盘；forwarder自然shutdown0、后代/监听0，上游请求0。外部`2026-10-03/windows/global-b-original-history-current`保存冻结身份、原提示/点击/观察器首错及修正、原件核对/恢复与真实退出，不恢复或构造缺失HTTP。
+- 实例退出后才应用068a5bac8宿主语言修复。推送被正常拒绝后合入ca7682036/7143c699b/6a47066e3/c3ee7d337，保留双方进度；Windows合并后strict语言/来源两项、精确预算反馈一项、单报告路由一项通过，未追加UI。原实例始终属于c44d888f1，不追认为后续源码采用；原复杂失败、当前正式未准入、W276/恢复及S3/卷UNC余项继续OPEN，全面目标active。

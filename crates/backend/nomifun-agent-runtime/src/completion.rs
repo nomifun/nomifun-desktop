@@ -472,8 +472,11 @@ impl CompletionTracker {
         // Keep the whole current input coverage path, never import old plans
         // or use a generated criterion as proof that every requested value is present.
         crate::requirements::merge(&[],&[],inputs)?;
-        let chinese=inputs.iter().flat_map(|input|&input.content).any(|part|matches!(part,
-            nomifun_chat_model_broker::ChatContentPart::Text {text} if text.chars().any(|ch|matches!(ch as u32,0x3400..=0x9fff))));
+        // Match the durable public-format fallback without translating the
+        // model's summary or inheriting an earlier input's language.
+        let chinese=submission.short_summary.chars()
+            .chain(submission.missing_items.iter().flat_map(|item|item.chars()))
+            .any(|ch|matches!(ch as u32,0x3400..=0x9fff));
         let mut results=submission.archive_ids.iter().enumerate().map(|(index,id)|AgentHistoricalDeliveryResult {
             origin:AgentHistoricalDeliveryOrigin {source_turn:submission.source_turn.clone(),archive_id:id.clone()},
             label:if chinese {format!("历史结果 {}",index+1)} else {format!("Historical result {}",index+1)},data:None,
@@ -1546,6 +1549,32 @@ mod tests {
         assert_eq!(normalized.arguments.0["historical_results"][0]["origin"]["source_turn"],"turn:user:old:session:closed");
         assert!(normalized.arguments.0["historical_results"][0].get("data").is_none());
         assert_eq!(crate::requirements::merge(&[],&[],&inputs).unwrap()[0].source.input,0);
+        // Align host-generated language with the durable format, while
+        // preserving an English summary after an earlier Chinese input.
+        let mut latest_inputs=inputs.clone();
+        latest_inputs.push(crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,
+            "Provide a historical report using only recorded results from the closed turn turn:user:old:session:closed. Do not modify any files. Do not execute commands. No new checks. Use English.".into()));
+        let mut english=call.clone();
+        let exact_summary="The original historical results are selected.";
+        english.arguments.0["short_summary"]=serde_json::json!(exact_summary);
+        let latest=tracker.normalize_strict_historical_report(&english,&archive,&work,&latest_inputs).unwrap();
+        assert_eq!(latest.arguments.0["summary"],exact_summary,"free summary bytes must not be translated or rewritten");
+        assert_eq!(latest.arguments.0["historical_results"][0]["label"],"Historical result 1");
+        assert_eq!(latest.arguments.0["criteria"][0]["rationale"],
+            "Selected historical records are delivered without new current-state verification; selection alone does not prove complete request coverage.");
+        assert_eq!(latest.arguments.0["observed_tool_error_count"],1);
+        assert_eq!(latest.arguments.0["observed_command_failure_count"],0);
+        assert_eq!(latest.arguments.0["historical_results"][0]["origin"],normalized.arguments.0["historical_results"][0]["origin"]);
+        assert!(latest.arguments.0["criteria"][0].get("evidence_call_ids").is_none());
+        assert!(latest.arguments.0["historical_results"][0].get("data").is_none());
+        let mut missing=english.clone();
+        missing.arguments.0["missing_items"]=serde_json::json!(["原输出未交付"]);
+        let blocked=tracker.normalize_strict_historical_report(&missing,&archive,&work,&latest_inputs).unwrap();
+        assert!(blocked.arguments.0["summary"].as_str().unwrap().starts_with(exact_summary));
+        assert!(blocked.arguments.0["summary"].as_str().unwrap().contains("原输出未交付"));
+        assert_eq!(blocked.arguments.0["historical_results"][0]["label"],"历史结果 1",
+            "missing-item text is part of the durable summary's existing language fallback");
+        assert_eq!(blocked.arguments.0["criteria"][0]["disposition"],"blocked");
     }
 
     #[tokio::test]
