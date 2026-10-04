@@ -841,7 +841,7 @@ impl SpokenReplyReducer {
                 }
                 Vec::new()
             }
-            AgentStreamEvent::Plan(_)
+            AgentStreamEvent::TaskPlanChanged
             | AgentStreamEvent::ToolCall(_)
             | AgentStreamEvent::ToolGroup(_) => {
                 self.candidate.clear();

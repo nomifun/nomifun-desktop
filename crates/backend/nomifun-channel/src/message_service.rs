@@ -1035,7 +1035,7 @@ impl ChannelMessageService {
             AgentStreamEvent::Tips(_)
             | AgentStreamEvent::ToolGroup(_)
             | AgentStreamEvent::AgentStatus(_)
-            | AgentStreamEvent::Plan(_)
+            | AgentStreamEvent::TaskPlanChanged
             | AgentStreamEvent::AvailableCommands(_)
             | AgentStreamEvent::SkillSuggest(_)
             | AgentStreamEvent::CronTrigger(_)

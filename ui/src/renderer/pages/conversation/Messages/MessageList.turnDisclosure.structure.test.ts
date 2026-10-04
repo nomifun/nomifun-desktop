@@ -143,11 +143,18 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('messages.processReceipt.commandNotExecuted')).toBe(true);
   });
 
-  test('uses plan events as hard boundaries between tool receipt groups', () => {
-    const planBoundary = source.match(/if \(message\.type === 'plan'\) \{[\s\S]*?continue;[\s\S]*?\}/)?.[0] ?? '';
+  test('uses progress control receipts as boundaries between tool groups', () => {
+    const planBoundary = source.match(/if \(isTaskPlanControlReceipt\(message\)\) \{[\s\S]*?continue;[\s\S]*?\}/)?.[0] ?? '';
 
     expect(planBoundary.includes('toolList = [];')).toBe(true);
     expect(planBoundary.includes('toolSourceMessageIds = [];')).toBe(true);
   });
 
+  test('uses canonical receipt visibility without legacy plan-error matching', () => {
+    expect(source.includes("from './toolMessageVisibility'")).toBe(true);
+    expect(source.includes('isTaskPlanControlReceipt(message)')).toBe(true);
+    expect(source.includes("from './planToolVisibility'")).toBe(false);
+    expect(source.includes('isSupersededPlanToolFailure')).toBe(false);
+    expect(source.includes('PinnedPlan')).toBe(false);
+  });
 });

@@ -165,7 +165,7 @@ describe('Nomi sendbox control layout', () => {
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}')).toBe(true);
     expect(sendBoxSource.includes('sideTools={compactProductComposer')).toBe(true);
-    expect(sendBoxSource.includes('showPinnedPlan={!compactProductComposer}')).toBe(true);
+    expect(sendBoxSource.includes('taskPlan={taskPlan}')).toBe(true);
   });
 
   test('waits for passive readiness without requiring an unnecessary warmup POST', () => {

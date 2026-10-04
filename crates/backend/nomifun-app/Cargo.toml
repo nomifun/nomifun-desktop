@@ -134,6 +134,10 @@ name = "nomi_core_route_gap"
 path = "tests/nomi_core_route_gap.rs"
 
 [[test]]
+name = "conversation_task_plan"
+path = "tests/conversation_task_plan.rs"
+
+[[test]]
 name = "nomi_core_live_provider_smoke"
 path = "tests/nomi_core_live_provider_smoke.rs"
 

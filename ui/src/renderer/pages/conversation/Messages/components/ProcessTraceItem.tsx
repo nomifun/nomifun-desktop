@@ -973,7 +973,6 @@ const ProcessTraceItem: React.FC<{
           ]}
         />
       );
-    case 'plan':
     case 'available_commands':
       return null;
     default:

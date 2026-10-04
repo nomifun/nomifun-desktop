@@ -47,6 +47,7 @@ pub enum EngineProgress {
     Text(TextEventData),
     Thinking(ThinkingEventData),
     ToolCall(ToolCallEventData),
+    TaskPlanChanged,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,7 @@ impl EngineTurnOutput {
             EngineProgress::Text(data) => AgentStreamEvent::Text(data),
             EngineProgress::Thinking(data) => AgentStreamEvent::Thinking(data),
             EngineProgress::ToolCall(data) => AgentStreamEvent::ToolCall(data),
+            EngineProgress::TaskPlanChanged => AgentStreamEvent::TaskPlanChanged,
         };
         let published = self.state.emit_for_turn(self.turn, event);
         if published {

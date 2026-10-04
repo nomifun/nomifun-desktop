@@ -136,8 +136,16 @@
     "retryStarted": "Knowledge write-back retry started",
     "retryFailed": "Failed to retry knowledge write-back"
   },
-  "planTodoList": "Task queue",
+  "planTodoList": "Task list",
   "planProgress": "{{done}}/{{total}}",
+  "planBlocked": "Blocked",
+  "planPaused": "Paused",
+  "planNeedsReplan": "Plan needs updating",
+  "planPending": "Pending",
+  "planInProgress": "In progress",
+  "planCompleted": "Completed",
+  "planStopped": "Stopped",
+  "planFailed": "Failed",
   "fileChanges": "File Changes",
   "fileChangesCount": "{{count}} File Changes",
   "turnDeliverables": {

@@ -56,8 +56,7 @@ export const isGeneratingStreamMessage = (message: {
     type === 'start' ||
     type === 'thought' ||
     type === 'thinking' ||
-    type === 'tool_group' ||
-    type === 'plan'
+    type === 'tool_group'
   );
 };
 

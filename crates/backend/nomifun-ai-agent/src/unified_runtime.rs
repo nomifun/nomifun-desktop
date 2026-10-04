@@ -207,6 +207,9 @@ impl AgentEventSink for TurnProjection {
 impl TurnProjection {
     fn project(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
         let projected = match event {
+            // The host has committed the full plan. Re-read the canonical
+            // snapshot, including lifecycle and reset state, for presentation.
+            AgentEngineEvent::PlanUpdated { .. } => Some(EngineProgress::TaskPlanChanged),
             AgentEngineEvent::TurnStarted { .. } | AgentEngineEvent::ExecutionResumed { .. } => Some(EngineProgress::Started),
             AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } => {
                 Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
@@ -558,6 +561,7 @@ mod tests {
 
     struct Host {
         block_completion: AtomicBool,
+        fail_record: AtomicBool,
         events: Mutex<Vec<AgentEngineEvent>>,
         cleanup_turns: AtomicUsize,
         cleanup_sessions: AtomicUsize,
@@ -574,6 +578,7 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 block_completion: AtomicBool::new(false),
+                fail_record: AtomicBool::new(false),
                 events: Mutex::new(Vec::new()),
                 cleanup_turns: AtomicUsize::new(0),
                 cleanup_sessions: AtomicUsize::new(0),
@@ -673,6 +678,9 @@ mod tests {
             _message: &SendMessageData,
             event: &AgentEngineEvent,
         ) -> Result<(), AppError> {
+            if self.fail_record.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("canonical journal unavailable".into()));
+            }
             if matches!(
                 event,
                 AgentEngineEvent::TurnCompleted { .. }
@@ -781,6 +789,34 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn task_plan_change_is_published_only_after_its_canonical_record() {
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        let mut plan = nomifun_agent_runtime::AgentPlan::default();
+        plan.revision = 1;
+        plan.steps.push(nomifun_agent_runtime::AgentPlanStep {
+            step: "Verify".into(), status: nomifun_agent_runtime::AgentPlanStatus::Blocked,
+        });
+        let event = AgentEngineEvent::PlanUpdated { plan };
+        host.fail_record.store(true, Ordering::Release);
+        assert!(projection.emit(event.clone()).await.is_err());
+        assert!(host.events.lock().unwrap().is_empty());
+        assert!(events.try_recv().is_err(), "uncommitted progress must not be broadcast");
+        host.fail_record.store(false, Ordering::Release);
+        projection.emit(event.clone()).await.unwrap();
+        assert_eq!(host.events.lock().unwrap().as_slice(), &[event]);
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::TaskPlanChanged));
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]

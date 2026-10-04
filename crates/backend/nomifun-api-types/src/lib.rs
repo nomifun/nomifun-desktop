@@ -38,6 +38,8 @@ mod shell;
 mod skill;
 mod system;
 mod terminal;
+mod task_plan;
+pub use task_plan::*;
 mod webhook;
 mod websocket;
 

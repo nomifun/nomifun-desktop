@@ -7,7 +7,7 @@ use ts_rs::TS;
 pub use nomifun_api_types::AgentStreamErrorData as ErrorEventData;
 
 pub use session_updates::{
-    AgentStatusEventData, AvailableCommandsEventData, CronTriggerEventData, PlanEventData, SkillSuggestEventData,
+    AgentStatusEventData, AvailableCommandsEventData, CronTriggerEventData, SkillSuggestEventData,
     ThinkingEventData,
 };
 pub use tool_call::{
@@ -30,7 +30,8 @@ pub enum AgentStreamEvent {
     ToolGroup(Vec<ToolGroupEntry>),
     AgentStatus(AgentStatusEventData),
     Thinking(ThinkingEventData),
-    Plan(PlanEventData),
+    /// The canonical task-plan snapshot changed; this is not a chat message.
+    TaskPlanChanged,
     SkillSuggest(SkillSuggestEventData),
     CronTrigger(CronTriggerEventData),
     SlashCommandsUpdated(serde_json::Value),
