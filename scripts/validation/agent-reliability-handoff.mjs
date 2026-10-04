@@ -89,7 +89,12 @@ function checkManifest() {
     || !Array.isArray(manifest.files) || !manifest.files.length || manifest.files.length > 2048) {
     throw new Error('Invalid handoff manifest');
   }
-  if (git(['rev-parse', 'HEAD']).trim() !== manifest.base_commit) {
+  const currentHead = git(['rev-parse', 'HEAD']).trim();
+  const parents = git(['show', '-s', '--format=%P', 'HEAD']).trim().split(/\s+/);
+  // The recorded working-copy base remains valid in the direct commit that
+  // packages it. Every file hash below still has to match; later or unrelated
+  // history cannot silently reuse this transfer manifest.
+  if (currentHead !== manifest.base_commit && !parents.includes(manifest.base_commit)) {
     throw new Error('Handoff Git baseline differs. Compare/integrate local work explicitly; do not reset it or regenerate the manifest to hide the mismatch.');
   }
   const seen = new Set();

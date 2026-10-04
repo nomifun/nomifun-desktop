@@ -23,19 +23,6 @@ pub struct ThinkingEventData {
     pub status: Option<String>,
 }
 
-/// Data for the `Plan` event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanEventData {
-    #[serde(default)]
-    pub session_id: Option<String>,
-    /// Internal source tool call settled by this plan projection. Upstream plans
-    /// have no source tool and leave this unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_call_id: Option<String>,
-    #[serde(default)]
-    pub entries: Vec<serde_json::Value>,
-}
-
 /// Data for the `AvailableCommands` event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvailableCommandsEventData {

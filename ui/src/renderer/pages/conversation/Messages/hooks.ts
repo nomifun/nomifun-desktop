@@ -61,7 +61,7 @@ function getMessageIndexKey(message: TMessage): string | undefined {
     return `agent_status:${message.msg_id}:${backend}`;
   }
   // A msg_id identifies the owning stream segment, not a renderer row. Text,
-  // tips, plans and tool/status events can legitimately share it. Keeping a
+  // tips and tool/status events can legitimately share it. Keeping a
   // type namespace prevents a terminal error from replacing the successful
   // assistant text that preceded it (and vice versa).
   return `${message.type}:${message.msg_id}`;
@@ -313,43 +313,6 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
 
     const newIdx = list.length;
     index.msgIdIndex.set(thinkingKey, newIdx);
-    return list.concat(message);
-  }
-
-  // plan message: update content and move to end of list. Prefer exact msg_id,
-  // then fall back to the plan session id so a later turn can refresh the same
-  // visible checklist even when the backend minted a new message id.
-  if (message.type === 'plan') {
-    let existingIdx = message.msg_id ? index.msgIdIndex.get(getMessageIndexKey(message)!) : undefined;
-    if (existingIdx !== undefined && list[existingIdx]?.type !== 'plan') {
-      existingIdx = undefined;
-    }
-    if (existingIdx === undefined) {
-      const sessionId = message.content.session_id;
-      for (let i = list.length - 1; i >= 0; i--) {
-        const candidate = list[i];
-        if (candidate.type === 'plan' && candidate.content.session_id === sessionId) {
-          existingIdx = i;
-          break;
-        }
-      }
-    }
-
-    if (existingIdx !== undefined && existingIdx < list.length) {
-      const existingMsg = list[existingIdx];
-      const newList = list.slice();
-      newList.splice(existingIdx, 1);
-      const updated = { ...existingMsg, ...message, content: message.content } as TMessage;
-      newList.push(updated);
-      // Rebuild index after splice
-      const rebuilt = buildMessageIndex(newList);
-      index.msgIdIndex = rebuilt.msgIdIndex;
-      index.call_idIndex = rebuilt.call_idIndex;
-      return newList;
-    }
-    const newIdx = list.length;
-    const msgIndexKey = getMessageIndexKey(message);
-    if (msgIndexKey) index.msgIdIndex.set(msgIndexKey, newIdx);
     return list.concat(message);
   }
 

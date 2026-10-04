@@ -233,6 +233,18 @@ impl CanonicalAgentSessionOwner {
             .map_err(store_error)
     }
 
+    /// Latest runtime state is independent of transcript/event paging. Do not
+    /// hydrate the full SessionObservation for frequently refreshed progress.
+    pub async fn latest_runtime_state(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        event_name: &str,
+    ) -> Result<nomifun_agent_session::RuntimeStateObservation, AppError> {
+        self.require_owner(owner, session_id).await?;
+        self.store.latest_runtime_state(session_id, event_name).await.map_err(store_error)
+    }
+
     pub async fn events(
         &self,
         owner: &PrincipalRef,

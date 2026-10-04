@@ -448,6 +448,10 @@ export const useNomiMessage = (
             reconcileAfterStreamTerminal();
           }
           break;
+        case 'task_plan_changed':
+          // Progress is re-read by useConversationTaskPlan. It is neither a
+          // transcript item nor lifecycle authority for the busy state.
+          break;
         case 'tool_group':
           {
             // Check whether any tools are executing.

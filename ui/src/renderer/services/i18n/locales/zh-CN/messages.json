@@ -136,8 +136,16 @@
     "retryStarted": "已开始重试知识库回写",
     "retryFailed": "重试知识库回写失败"
   },
-  "planTodoList": "待办队列",
+  "planTodoList": "待办列表",
   "planProgress": "{{done}}/{{total}}",
+  "planBlocked": "受阻",
+  "planPaused": "已暂停",
+  "planNeedsReplan": "计划待更新",
+  "planPending": "待处理",
+  "planInProgress": "进行中",
+  "planCompleted": "已完成",
+  "planStopped": "已停止",
+  "planFailed": "执行失败",
   "fileChanges": "文件变更",
   "fileChangesCount": "{{count}} 个文件变更",
   "turnDeliverables": {

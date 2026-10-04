@@ -32,6 +32,8 @@ use crate::projector::reduce_agent_messages;
 mod native_checkpoint_tests;
 #[path = "native_execution_tests.rs"]
 mod native_execution_tests;
+#[path = "runtime_state_tests.rs"]
+mod runtime_state_tests;
 
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())
