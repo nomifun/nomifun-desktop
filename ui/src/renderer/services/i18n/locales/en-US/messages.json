@@ -12,6 +12,12 @@
   "toolGroupViewSteps": "View Steps",
   "toolDetailInput": "Input",
   "toolDetailOutput": "Output",
+  "delegation": {
+    "title": "Subagent tasks",
+    "activity": "Subagents: {{status}}",
+    "syncing": "Syncing subagent status",
+    "openTask": "View subtask: {{title}}"
+  },
   "toolDetailTruncated": "Output was truncated; showing retained content",
   "toolState": {
     "running": "Running",

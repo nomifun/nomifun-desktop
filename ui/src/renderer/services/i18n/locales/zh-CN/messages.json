@@ -12,6 +12,12 @@
   "toolGroupViewSteps": "查看步骤",
   "toolDetailInput": "输入",
   "toolDetailOutput": "输出",
+  "delegation": {
+    "title": "子智能体任务",
+    "activity": "子智能体：{{status}}",
+    "syncing": "正在同步子智能体状态",
+    "openTask": "查看子任务：{{title}}"
+  },
   "toolDetailTruncated": "输出已截断，当前显示已保存的内容",
   "toolState": {
     "running": "执行中",
