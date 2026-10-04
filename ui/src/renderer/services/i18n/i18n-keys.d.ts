@@ -986,6 +986,7 @@ export type I18nKey =
   | 'common.viewMoreLines'
   | 'common.website'
   | 'common.workspace'
+  | 'conversation.agentError.codes.AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED.body'
   | 'conversation.agentError.codes.INTERRUPTED_BY_RESTART.body'
   | 'conversation.agentError.codes.INTERRUPTED_BY_RESTART.title'
   | 'conversation.agentError.codes.NOMIFUN_AGENT_SESSION_INCONSISTENT.body'
