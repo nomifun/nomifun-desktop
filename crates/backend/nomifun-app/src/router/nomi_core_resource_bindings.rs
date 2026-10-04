@@ -60,6 +60,21 @@ pub(crate) fn optional_unbound_resource_kind(kind: &str) -> bool {
 
 const MAX_SESSION_KNOWLEDGE_BASES: usize = 32;
 
+/// DTO bridge for the one canonical immutable resource identity formula.
+/// Call after the final authority and configuration fields have been assigned.
+pub(crate) fn freeze_resource_definition_id(
+    resource: &mut TypedResourceBindingDto,
+) -> Result<(), nomifun_common::AppError> {
+    let definition: TypedResourceBinding = serde_json::to_value(&*resource)
+        .and_then(serde_json::from_value)
+        .map_err(|error| nomifun_common::AppError::Conflict(format!(
+            "resolved resource definition is invalid: {error}"
+        )))?;
+    resource.binding_id = nomifun_agent_contracts::resource_definition_id(&definition)
+        .map_err(|error| nomifun_common::AppError::Conflict(error.to_string()))?.as_ref().to_owned();
+    Ok(())
+}
+
 fn resource_kind_allows_multiple(kind: &str) -> bool {
     matches!(kind, "knowledge_base" | "mcp_server")
 }
@@ -482,15 +497,29 @@ impl NomiCoreResourceBindingResolverRegistry {
                     }),
                 ));
             }
-            bindings.push(TypedResourceBinding {
-                binding_id: ResourceBindingId::from(format!("{kind}:{}", resolved.resource_id)),
+            let mut binding = TypedResourceBinding {
+                binding_id: ResourceBindingId::from(""),
                 resource_kind: ResourceKind::from(kind.clone()),
                 resource_id: ResourceId::from(resolved.resource_id),
                 owner_id: owner_id.to_owned(),
                 operations,
                 connection_config_ref: resolved.connection_config_ref,
                 typed_parameters: resolved.typed_parameters,
-            });
+            };
+            if kind == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND {
+                // Every newly resolved definition has the same explicit
+                // defaults before a product owner applies its chosen policy.
+                for (key, value) in [
+                    (nomifun_agent_domain_wave1::KNOWLEDGE_ENABLED_PARAMETER, "true"),
+                    (nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_PARAMETER, "false"),
+                    (nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER, "manual"),
+                ] {
+                    binding.typed_parameters.entry(key.to_owned()).or_insert_with(|| value.to_owned());
+                }
+            }
+            binding.binding_id = nomifun_agent_contracts::resource_definition_id(&binding)
+                .map_err(|error| ResourceSelectionResolutionError::invalid(error.to_string()))?;
+            bindings.push(binding);
         }
         bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
         Ok(bindings)
@@ -1606,8 +1635,31 @@ mod tests {
             .unwrap();
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].owner_id, "owner-1");
-        assert_eq!(bindings[0].binding_id.as_ref(), "customer:customer-1");
+        assert_eq!(bindings[0].resource_kind.as_ref(), "customer");
+        assert_eq!(bindings[0].resource_id.as_ref(), "customer-1");
         assert_eq!(bindings[0].operations, BTreeSet::from(["read".into(), "write".into()]));
+    }
+
+    #[tokio::test]
+    async fn resolver_reuses_exact_definition_but_changes_identity_with_action_grants() {
+        let resolver = registry("workspace", &["read", "write"]);
+        let selections = [AgentResourceSelectionDto {
+            resource_kind: "workspace".into(), resource_id: "same-project".into(),
+        }];
+        let capabilities = BTreeSet::from(["workspace.files".to_owned()]);
+        let writable = BTreeMap::from([("workspace.files".to_owned(), BTreeSet::from([
+            ActionId::from("workspace.files/read"), ActionId::from("workspace.files/write"),
+        ]))]);
+        let read_only = BTreeMap::from([("workspace.files".to_owned(), BTreeSet::from([
+            ActionId::from("workspace.files/read"),
+        ]))]);
+        let source = resolver.resolve_selected("owner", &selections, &capabilities, &writable, &[]).await.unwrap();
+        let repeated = resolver.resolve_selected("owner", &selections, &capabilities, &writable, &[]).await.unwrap();
+        assert_eq!(source, repeated, "the producer must reuse the exact definition identity");
+        let target = resolver.resolve_selected("owner", &selections, &capabilities, &read_only, &[]).await.unwrap();
+        assert_eq!(source[0].resource_id, target[0].resource_id);
+        assert_ne!(source[0].binding_id, target[0].binding_id);
+        assert_eq!(target[0].operations, BTreeSet::from(["read".to_owned()]));
     }
 
     #[test]
@@ -1710,8 +1762,8 @@ mod tests {
             mounted
                 .iter()
                 .map(|binding| binding.resource_id.as_ref())
-                .collect::<Vec<_>>(),
-            vec!["one", "two"]
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["one", "two"])
         );
 
         let workspace_module = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID.to_owned();

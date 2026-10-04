@@ -1539,6 +1539,148 @@ async fn events_and_history_cursors_stay_stable_while_events_append() {
 }
 
 #[tokio::test]
+async fn effectful_coding_session_switches_same_workspace_to_read_only_with_new_resource_definition() {
+    use nomifun_agent_contracts::{AgentSessionId, OperationId};
+    use nomifun_agent_session::{AgentEffectState, AgentSessionStore, TurnReceiptStatus};
+    use std::collections::BTreeSet;
+    const TRUST: &str = "effectful-workspace-agent-switch";
+    const CONTENT: &str = "SOURCE_WORKSPACE_WRITE_ONCE\n";
+    const REPLY: &str = "SOURCE_WORKSPACE_WRITE_DONE";
+    const CALL: &str = "effectful-source-write";
+    async fn call(router: &axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json");
+        if method == "PUT" && path.ends_with("/agent") {
+            request = request.header("idempotency-key", uuid::Uuid::now_v7().to_string());
+        }
+        let response = router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+    let upstream = wiremock::MockServer::start().await;
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = requests.clone();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body = request.body_json::<Value>().unwrap();
+            let mut requests = captured.lock().unwrap();
+            requests.push(body.clone());
+            assert!(requests.len() <= 2, "the source must not replay a write or loop controls");
+            let (delta, finish) = if requests.len() == 1 {
+                assert!(body["tools"].as_array().unwrap().iter().any(|tool| tool["function"]["name"] == "write_file"));
+                (json!({"role":"assistant","tool_calls":[{"index":0,"id":CALL,"type":"function",
+                    "function":{"name":"write_file","arguments":json!({"path":"switch-proof.txt","content":CONTENT}).to_string()}}]}), "tool_calls")
+            } else {
+                assert!(body["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool" && message["tool_call_id"] == CALL),
+                    "the actual owner result must reach the next source model request");
+                (json!({"role":"assistant","content":REPLY}), "stop")
+            };
+            let first = json!({"id":"effectful-switch","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            let last = json!({"id":"effectful-switch","choices":[{"index":0,"delta":{},"finish_reason":finish}]});
+            wiremock::ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {first}\n\ndata: {last}\n\ndata: [DONE]\n\n"))
+        }).mount(&upstream).await;
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (status, provider) = call(&router, "POST", "/api/providers", json!({
+        "platform":"stepfun-plan","name":"Effectful workspace switch","base_url":format!("{}/v1",upstream.uri()),
+        "auth_scheme":"bearer","credentials":{"api_keys":["fixture-only"]},"enabled":true,
+        "initial_model":{"model":"workspace-switch-model","enabled":true,"capabilities":[{
+            "task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default",
+            "context_limit":1000000,"output_limit":4096
+        }]}
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let model = json!({"provider_id":provider["data"]["provider_id"],"model":"workspace-switch-model"});
+    let (status, source) = call(&router, "POST", "/api/agent-presets/from-template/coding.codex", json!({
+        "display_name":"Source writer","reuse_existing":false,"model":model,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{source}");
+    let workspace = tempfile::tempdir().unwrap();
+    let (status, created) = call(&router, "POST", "/api/agent-sessions", json!({
+        "preset_id":source["data"]["preset"]["preset_id"],"model":model,
+        "title":"Keep this effectful Session","workspace":workspace.path().to_str().unwrap(),
+        "resource_selections":[
+            {"resource_kind":"workspace","resource_id":"default-workspace"},
+            {"resource_kind":"process_session","resource_id":"managed-process-session"},
+            {"resource_kind":"project_memory","resource_id":"default-project-memory"}
+        ]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let sid = created["data"]["agent_session_id"].as_str().unwrap();
+    let session = AgentSessionId::from(sid.to_owned());
+    let store = AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
+    let source_binding = store.get_live_session(&session).await.unwrap().agent_binding;
+    let source_workspace = source_binding.typed_resource_bindings.iter()
+        .find(|binding| binding.resource_kind.as_ref() == "workspace").unwrap().clone();
+    assert_eq!(source_workspace.operations, BTreeSet::from(["read".to_owned(),"write".to_owned()]));
+    let (status, started) = call(&router, "POST", &format!("/api/agent-sessions/{sid}/turns"), json!({
+        "idempotency_key":uuid::Uuid::now_v7().to_string(),
+        "input":{"content":format!("请使用 write_file 一次创建 switch-proof.txt，正文准确为 {CONTENT}。完成这一个写入后直接回复 {REPLY}，不要读取文件、执行命令或重复写入。")}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let operation = OperationId::from(started["data"]["operation_id"].as_str().unwrap().to_owned());
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let receipt = store.read_turn_receipt(&session, &operation).await.unwrap();
+            if receipt.status == TurnReceiptStatus::Completed { break; }
+            assert_eq!(receipt.status, TurnReceiptStatus::Running, "{receipt:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("the actual source write must settle and the native Turn must complete");
+    assert_eq!(std::fs::read(workspace.path().join("switch-proof.txt")).unwrap(), CONTENT.as_bytes());
+    let source_effects = store.list_effects(&session).await.unwrap();
+    assert_eq!(source_effects.len(), 1);
+    assert_eq!(source_effects[0].state, AgentEffectState::Returned);
+    assert_eq!(source_effects[0].resource_binding_id.as_ref(), Some(&source_workspace.binding_id));
+    let source_resource_digest: String = sqlx::query_scalar(
+        "SELECT binding_digest FROM agent_session_resources WHERE session_id=? AND binding_id=?")
+        .bind(sid).bind(source_workspace.binding_id.as_ref()).fetch_one(services.database.pool()).await.unwrap();
+    let (status, target) = call(&router, "POST", "/api/agent-presets/from-template/chat.minimal", json!({
+        "display_name":"Read-only workspace target","reuse_existing":false,"model":model,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{target}");
+    let mut draft = target["data"]["draft"].clone();
+    draft["document"]["enabled_capabilities"] = json!([{
+        "capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read"]
+    }]);
+    let target_id = draft["preset_id"].as_str().unwrap().to_owned();
+    let (status, saved) = call(&router, "POST", &format!("/api/agent-presets/{target_id}/revisions"), json!({
+        "expected_current_revision":draft["current_revision"],"draft":draft,"reason":"Read-only same-workspace switch regression"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let selection = json!({"kind":"preset","preset_id":target_id});
+    let (status, preview) = call(&router, "POST", &format!("/api/agent-sessions/{sid}/agent-switch/preview"), json!({"selection":selection})).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+    let (status, switched) = call(&router, "PUT", &format!("/api/agent-sessions/{sid}/agent"), json!({
+        "selection":selection,"handoff_mode":"context_only","expected_binding_version":preview["data"]["expected_binding_version"]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "the real producer must derive a new read-only definition for the same physical workspace: {switched}");
+    assert_eq!(switched["data"]["conversation"]["conversation_id"], sid);
+    let target_binding = store.get_live_session(&session).await.unwrap().agent_binding;
+    assert_eq!(target_binding.typed_resource_bindings.len(), 1);
+    let target_workspace = &target_binding.typed_resource_bindings[0];
+    assert_eq!(target_workspace.resource_id, source_workspace.resource_id);
+    assert_eq!(target_workspace.owner_id, source_workspace.owner_id);
+    assert_eq!(target_workspace.typed_parameters, source_workspace.typed_parameters);
+    assert_eq!(target_workspace.connection_config_ref, source_workspace.connection_config_ref);
+    assert_eq!(target_workspace.operations, BTreeSet::from(["read".to_owned()]));
+    assert_ne!(target_workspace.binding_id, source_workspace.binding_id);
+    assert_eq!(store.list_effects(&session).await.unwrap(), source_effects);
+    let retained_digest: String = sqlx::query_scalar(
+        "SELECT binding_digest FROM agent_session_resources WHERE session_id=? AND binding_id=?")
+        .bind(sid).bind(source_workspace.binding_id.as_ref()).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(retained_digest, source_resource_digest);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .fetch_one(services.database.pool()).await.unwrap(), 0);
+    assert_eq!(requests.lock().unwrap().len(), 2, "switching must not replay the completed write");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn started_agent_session_switches_model_then_agent_in_place_with_segmented_history() {
     const TRUST: &str = "started-session-model-switch";
     const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";

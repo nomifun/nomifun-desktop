@@ -2852,12 +2852,37 @@ mod tests {
             Ok(mock_runtime(MockAgent::new(&options.conversation_id,Some(ConversationStatus::Running)).with_kill_error("exit not proven")))
         }.boxed()));
         registry.get_or_create_runtime("shutdown-failed",make_runtime_options("shutdown-failed")).await.unwrap();
-        assert!(registry.shutdown_and_wait().await.is_err());
+        let first = registry.shutdown_and_wait().await.unwrap_err().to_string();
+        assert!(first.contains("Session shutdown-failed: Internal error: exit not proven"),
+            "shutdown must retain the exact owner's cause: {first}");
         let original=registry.quarantined_slot("shutdown-failed").unwrap();
-        assert!(registry.shutdown_and_wait().await.is_err());
+        let retry = registry.shutdown_and_wait().await.unwrap_err().to_string();
+        assert!(retry.contains("Session shutdown-failed: Internal error: exit not proven"),
+            "an explicit retry must preserve the retained owner's failure: {retry}");
         assert!(Arc::ptr_eq(&original,&registry.quarantined_slot("shutdown-failed").unwrap()));
         assert!(registry.has_owned_runtime("shutdown-failed"));
         assert!(registry.get_or_create_runtime("shutdown-failed",make_runtime_options("shutdown-failed")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_retained_owner_diagnostics_are_bounded_and_redacted() {
+        let registry = InMemoryAgentRuntimeSessions::new(Arc::new(|options| async move {
+            Ok(mock_runtime(MockAgent::new(&options.conversation_id, Some(ConversationStatus::Running))
+                .with_kill_error(format!("exact owner rejected cleanup; Bearer fixture-hidden-secret; {}", "界".repeat(2_000)))))
+        }.boxed()));
+        for index in 0..18 {
+            let id = format!("bounded-failure-{index}");
+            registry.get_or_create_runtime(&id, make_runtime_options(&id)).await.unwrap();
+        }
+        let failure = registry.shutdown_and_wait().await.unwrap_err().to_string();
+        assert!(failure.contains("18 Agent runtime(s) did not prove shutdown"));
+        assert!(failure.contains("exact owner rejected cleanup"));
+        assert!(failure.contains("further owner failures recorded in shutdown log"));
+        assert!(!failure.contains("fixture-hidden-secret"));
+        assert!(failure.chars().count() < 18_000, "host shutdown must bound its diagnostic response");
+        assert_eq!(registry.teardown_quarantine.len(), 18,
+            "diagnostic bounds must never drop retained resource owners");
+        assert!(registry.shutdown.closed.is_cancelled());
     }
 
     #[tokio::test]

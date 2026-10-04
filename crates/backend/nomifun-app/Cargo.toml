@@ -138,6 +138,10 @@ name = "conversation_task_plan"
 path = "tests/conversation_task_plan.rs"
 
 [[test]]
+name = "nomi_core_first_turn_configuration"
+path = "tests/nomi_core_first_turn_configuration.rs"
+
+[[test]]
 name = "nomi_core_live_provider_smoke"
 path = "tests/nomi_core_live_provider_smoke.rs"
 

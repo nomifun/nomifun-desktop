@@ -1,14 +1,13 @@
 # 命令与会话可靠性共享进度
 
-更新：2026-10-04。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-10-05。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 
 ## 当前待办入口（2026-10-04重新整理）
 
 当前有限项以[实施计划的当前有限待办](IMPLEMENTATION-PLAN.zh.md#当前有限待办2026-10-04重新整理)为准，
 不再用六个粗簇作为完成计数：U1合同拒绝恢复提示、U2新版过程工具行、U3委派进度后续已正式验证关闭；
 用户进一步明确重构旧设计会话可不兼容；D1旧W250合同恢复移出本轮，不改原FAIL/409，不设计旧合同桥接。
-优先U4：当前版本全新会话在正式UI原地Agent A→B，同ID/历史/草稿，B下一请求上下文连续且按B权限执行。
-continue_task/context_only各一个短链；已有路由/Store/UI组件复用，正式采用未验。D2/D3分别是W276停滞与未证shutdown/exit1；D4对照已完成。
+U4、D2、D3当前版本整改与正式验收已完成，详见[Windows本轮记录](PROGRESS-WINDOWS.zh.md)。U4的continue_task／context_only各一条真实UI短链，同ID／草稿、B请求中的原始历史工具数据、B独立权限／完成门及无重放均验证；D2的保存→warmup→首次准入、活动冻结、真实Stop及下一配置完成已验；D3有对应owner清理成功、canonical witness和原OS句柄exit0。原W276停滞／exit1及唯一原因缺证保留，D4对照已完成。
 成功冷恢复、实际电源周期和完整专项组合暂缓；跨盘/真实UNC跳过、Mac启动原生验证待现场。
 W250旧wire、LF/guard及复杂生成失败退出重复执行队列，原FAIL/缺证继续保留，不改PASS。
 Windows fresh启动、typed续接/刷新可见性及已有非零尾注、迟到resize等限定验证已结算，机制证据直接复用。
@@ -16,11 +15,13 @@ Windows fresh启动、typed续接/刷新可见性及已有非零尾注、迟到r
 参数/输出/分类/刷新呈现已验；U3根Turn已完成但子execution活动时仍显示进度，完成1/1、真实子会话正文可打开。
 U1正式产物7d388a69e/fb65，U2/U3为b7899f09c/ee45459e；4本地请求/3原生参数逐组canonical全同，供应商请求0。
 两GUI实际API exit0/自有载体自然exit0/后代监听0，非新托盘证据；原失败保持，细节见Windows页。
-W276旧证据仅缩小Snapshot/prepare候选，host Snapshot与内部错误缺失，不能代判已修。各项剩余条件与范围见实施计划。
+W276旧证据缺少host Snapshot与首次内部错误，不能认定新样本唯一解释原失败。当前准入／清理观测已补，受控反例、锁故障和当前正式验收分别结算；其余范围仍以实施计划为准。
 原D1是较早构建冻结合同样本恢复，不是正式Agent切换失败。当前实现仅隔离旧原生工具权限/重放，
-聊天和工具结果仍可作历史数据保留；此前“switch排除旧工具Turn”不能推成“B丢全部旧正文”，U4据实际请求验收。
+聊天和工具结果只能从canonical事实作历史数据保留；本轮修复当前decoder遗漏，并以B实际HTTP请求核对原始结果，不继承系统指令、可用句柄、旧完成门或原生tool role。
 D4同原helper/19字节LF不休眠也缺ACK，显式CR对照一次准确ACK；两例身份/清理exact及原件保持，未改输入断言或产品。
 缺ACK不能直接认定为S3产品故障，原S3 FAIL保持；实际修正输入后的sleep/wake复验归暂缓，不重复零休眠对照。
+
+本轮共用资源整改使用合同层唯一`resource_definition_id`：完整最终定义的摘要决定ID，权限或参数变化生成新定义，已结算Effect的外键及定义不被删除。当前资源、KB挂载及删除保护仅取当前binding；删除中途KB专用公式，不增加历史兼容、projection上下文回退或第二账本。Session **94/94**、KB **13/13**、身份／producer／history／错误分类及真实effectful→只读路由定向回归通过，生成合同和Session／UARC／process／desktop边界通过。最终generation 7制品`68B6EE9A…`／前端`9473e998…`的U4 **20**请求、D2 **2**请求和D3 **3 owner／6 Turn**独立核账通过，供应商请求0；完整共享／Windows／发布认证仍未完成。
 
 ## 2026-10-04 用户新增：全局模型配置不降能力
 

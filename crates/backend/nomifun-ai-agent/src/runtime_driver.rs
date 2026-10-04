@@ -36,24 +36,28 @@ mod tests {
 
     struct FakeDriver {
         started: Notify,
+        run_count: AtomicUsize,
         turn_cleanup_count: AtomicUsize,
         terminal_count: AtomicUsize,
         session_cleanup_count: AtomicUsize,
         fail_turn_cleanup: AtomicBool,
         fail_terminal: AtomicBool,
         complete_without_cancel: AtomicBool,
+        cleanup_error: String,
     }
 
     impl FakeDriver {
         fn new(fail_turn_cleanup: bool) -> Self {
             Self {
                 started: Notify::new(),
+                run_count: AtomicUsize::new(0),
                 turn_cleanup_count: AtomicUsize::new(0),
                 terminal_count: AtomicUsize::new(0),
                 session_cleanup_count: AtomicUsize::new(0),
                 fail_turn_cleanup: AtomicBool::new(fail_turn_cleanup),
                 fail_terminal: AtomicBool::new(false),
                 complete_without_cancel: AtomicBool::new(false),
+                cleanup_error: "fake cleanup failed".into(),
             }
         }
     }
@@ -66,6 +70,7 @@ mod tests {
             cancellation: CancellationToken,
             _output: NomiRuntimeTurnOutput,
         ) -> Result<NomiRuntimeTurnOutcome, AppError> {
+            self.run_count.fetch_add(1, Ordering::AcqRel);
             self.started.notify_waiters();
             if self.complete_without_cancel.load(Ordering::Acquire) {
                 return Ok(NomiRuntimeTurnOutcome {model_steps:3,terminal:EngineTurnTerminal::Completed {
@@ -78,7 +83,7 @@ mod tests {
         async fn cleanup_turn(&self, _message: &SendMessageData) -> Result<(), AppError> {
             self.turn_cleanup_count.fetch_add(1, Ordering::AcqRel);
             if self.fail_turn_cleanup.load(Ordering::Acquire) {
-                return Err(AppError::Conflict("fake cleanup failed".into()));
+                return Err(AppError::Conflict(self.cleanup_error.clone()));
             }
             Ok(())
         }
@@ -174,8 +179,12 @@ mod tests {
         let runtime=HostedNomiRuntime::new(&options(),driver.clone()).unwrap();
         runtime.send_message(message("failed-receipt")).await.unwrap();
         started.await;
-        assert!(runtime.cancel().await.is_err());
-        assert!(runtime.kill_and_wait(None).await.is_err());
+        let cancellation = runtime.cancel().await.unwrap_err().to_string();
+        assert!(cancellation.contains("fixture terminal receipt unavailable"),
+            "cancel must preserve the exact terminal settlement condition: {cancellation}");
+        let shutdown = runtime.kill_and_wait(None).await.unwrap_err().to_string();
+        assert!(shutdown.contains("fixture terminal receipt unavailable"),
+            "teardown must preserve the exact terminal settlement condition: {shutdown}");
         assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire),0);
         assert_eq!(driver.turn_cleanup_count.load(Ordering::Acquire),1);
         assert!(runtime.send_message(message("must-not-restart")).await.is_err());
@@ -185,6 +194,37 @@ mod tests {
         assert_eq!(driver.terminal_count.load(Ordering::Acquire),1);
         assert_eq!(driver.turn_cleanup_count.load(Ordering::Acquire),1);
         assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire),1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_joining_first_failed_cleanup_keeps_its_cause_until_explicit_retry() {
+        let mut driver = FakeDriver::new(true);
+        driver.cleanup_error = format!("database is locked; Bearer fixture-hidden-secret; {}", "界".repeat(2_000));
+        let driver = Arc::new(driver);
+        let started = driver.started.notified();
+        let runtime = HostedNomiRuntime::new(&options(), driver.clone()).unwrap();
+        runtime.send_message(message("shutdown-during-first-cleanup")).await.unwrap();
+        started.await;
+        // This explicit shutdown starts while the Turn is still running. Its
+        // flight joins the first failing cleanup and must report that cause;
+        // it cannot count joining as permission to retry cleanup immediately.
+        let failure = runtime.kill_and_wait(None).await.unwrap_err().to_string();
+        assert!(failure.contains("Engine turn cleanup failed"));
+        assert!(failure.contains("database is locked"), "first condition disappeared: {failure}");
+        assert!(!failure.contains("fixture-hidden-secret"));
+        assert!(failure.chars().count() <= 1_100);
+        assert_eq!(driver.run_count.load(Ordering::Acquire), 1);
+        assert_eq!(driver.turn_cleanup_count.load(Ordering::Acquire), 1);
+        assert_eq!(driver.terminal_count.load(Ordering::Acquire), 0);
+        assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire), 0);
+        assert!(runtime.send_message(message("cannot-replay-while-unproven")).await.is_err());
+        driver.fail_turn_cleanup.store(false, Ordering::Release);
+        runtime.kill_and_wait(None).await.unwrap();
+        runtime.kill_and_wait(None).await.unwrap();
+        assert_eq!(driver.run_count.load(Ordering::Acquire), 1, "teardown must never replay the driver");
+        assert_eq!(driver.turn_cleanup_count.load(Ordering::Acquire), 2);
+        assert_eq!(driver.terminal_count.load(Ordering::Acquire), 1);
+        assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

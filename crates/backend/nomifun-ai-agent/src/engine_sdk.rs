@@ -215,7 +215,20 @@ struct PendingTurnSettlement {
     outcome: EngineTurnOutcome,
     cleanup_proven: bool,
     cancellation: CancellationToken,
-    failed: bool,
+    /// First settlement rejection, retained with the exact Turn until its
+    /// cleanup and terminal receipt are proven. This is diagnostic evidence,
+    /// not permission to rerun the driver or release Session resources.
+    failure: Option<String>,
+}
+
+impl PendingTurnSettlement {
+    fn remember_failure(&mut self, stage: &str, error: impl std::fmt::Display) -> String {
+        self.failure.get_or_insert_with(|| {
+            crate::protocol::send_error::sanitize_error_detail(
+                &nomi_redact::redact_secrets_owned(format!("{stage}: {error}")),
+            )
+        }).clone()
+    }
 }
 struct SharedRuntime {
     state: AgentRuntimeState,
@@ -336,15 +349,16 @@ impl AgentRuntimeControl for HostedAgentRuntime {
             *shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(PendingTurnSettlement {
                 message: message.clone(), outcome: outcome.clone(), cleanup_proven: false,
                 cancellation: requested_cancellation.clone(),
-                failed: false,
+                failure: None,
             });
             let cleanup = AssertUnwindSafe(shared.driver.cleanup_turn(&message))
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(AppError::Internal("Engine turn cleanup panicked".into())));
             if let Err(error) = cleanup {
+                let mut cause = error.to_string();
                 if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
-                    pending.failed = true;
+                    cause = pending.remember_failure("Engine turn cleanup failed", &error);
                 }
                 let suspended = AssertUnwindSafe(shared.driver.suspend_after_cleanup_failure(&message)).catch_unwind().await;
                 if matches!(suspended,Ok(Ok(true))) {
@@ -354,7 +368,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                     shared.state.emit_finish_for_turn(turn,Some(shared.state.conversation_id().to_owned()),Some(TurnStopReason::Paused));
                     return;
                 }
-                break_transport(&shared, turn, error.to_string());
+                break_transport(&shared, turn, cause);
                 return;
             }
             if requested_cancellation.is_cancelled() {
@@ -367,14 +381,20 @@ impl AgentRuntimeControl for HostedAgentRuntime {
             let record = AssertUnwindSafe(shared.driver.record_terminal(&message, &outcome))
                 .catch_unwind()
                 .await;
-            if !matches!(record, Ok(Ok(()))) {
+            let record_failure = match record {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(_) => Some("Engine terminal recording panicked".to_owned()),
+            };
+            if let Some(error) = record_failure {
+                let mut cause = error.clone();
                 if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
-                    pending.failed = true;
+                    cause = pending.remember_failure("Engine terminal receipt failed", &error);
                 }
                 break_transport(
                     &shared,
                     turn,
-                    "Engine terminal could not be recorded by its Session owner".into(),
+                    cause,
                 );
                 return;
             }
@@ -441,9 +461,10 @@ impl AgentRuntimeControl for HostedAgentRuntime {
             completion.await.map_err(AppError::Internal)?;
         }
         if !self.shared.state.is_transport_healthy() {
-            return Err(AppError::Conflict(
-                "Engine cleanup or event recording failed".into(),
-            ));
+            let cause = self.shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner())
+                .as_ref().and_then(|pending| pending.failure.clone())
+                .unwrap_or_else(|| "Engine cleanup or event recording failed".into());
+            return Err(AppError::Conflict(cause));
         }
         Ok(())
     }
@@ -500,7 +521,7 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
                 let completion = shared.active.lock().unwrap_or_else(|e|e.into_inner())
                     .as_ref().map(|turn|turn.completion.clone());
                 let retry_failed_turn = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner())
-                    .as_ref().is_some_and(|pending|pending.failed);
+                    .as_ref().is_some_and(|pending|pending.failure.is_some());
                 let driver = shared.driver.clone();
                 let settlement_owner = shared.clone();
                 let task = executor.spawn(async move {
@@ -521,7 +542,11 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
                     let pending = settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).clone();
                     if let Some(mut pending) = pending {
                         if !retry_failed_turn {
-                            return Err("Engine turn cleanup or terminal receipt remains unconfirmed".to_owned());
+                            // This flight joined the first cleanup attempt;
+                            // it is not an implicit second attempt. Surface its
+                            // original condition instead of discarding it.
+                            return Err(pending.failure.unwrap_or_else(||
+                                "Engine turn cleanup or terminal receipt remains unconfirmed".to_owned()));
                         }
                         // A new explicit teardown flight retries only the retained
                         // cleanup/receipt. The driver is never asked to run_turn again.

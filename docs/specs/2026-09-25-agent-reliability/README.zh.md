@@ -1,13 +1,11 @@
 # Agent 执行可靠性重构与验收
 
-日期：2026-09-25。状态：实施中，**尚未证明 99%**。
+本页保留2026-09-25研究起点、历史目标与失败记录；它不再提供当前实施调度或数据库版本指令，**尚未证明 99%**。
 
-最新开发交接见 [Agent Session 当前架构](../../architecture/agent-session.zh.md)，分阶段验收见
-[TEST-MATRIX.zh.md](TEST-MATRIX.zh.md)。本文保留各阶段的历史状态和失败记录，不把后来实现追写为当时已通过。
+最新开发入口只有 [Agent Session 当前架构](../../architecture/agent-session.zh.md) 和 [实施计划](IMPLEMENTATION-PLAN.zh.md)，验收结果见 [阶段交付](DELIVERY-SUMMARY.zh.md) 与两个平台进度页。2026-10-05 U4／D2／D3当前版本整改与正式验收已完成，generation 7只使用单一canonical baseline；删除了仍要求007／head6及“没有运行测试”的旧启动交接提示，避免后续误用。历史[TEST-MATRIX.zh.md](TEST-MATRIX.zh.md)不作为当前全量排程。本文不把后来实现追写为历史样本通过。
 操作系统命令、tool-call、内部端口、长会话及五类官方 Agent 的三阶段逐项 Case 基线见
 [HIGH-ORDER-OPERATIONS-CASE-CATALOG.zh.md](HIGH-ORDER-OPERATIONS-CASE-CATALOG.zh.md)；阶段一文档设计已完成，阶段二排查与阶段三修复尚未开始，该目录不是通过报告。
-用户已选择“开发优先、后续机器分阶段测试”；新增用例写好/编译通过不代表行为验收完成。
-最新补充实现见 PAUSE-RESUME-V2.zh.md 和 EVIDENCE-PIPELINE.zh.md。V2 本轮没有执行应用类型检查或行为测试，以下通过记录仅为历史快照。
+以下“开发优先、后续机器分阶段测试”及V2未测试说明均属于当时的历史阶段，当前授权、已执行验证和剩余范围以最新实施计划与进度为准。新增用例写好／编译通过仍不等于行为通过；已完成的本轮正式验证不因旧说明重开。
 
 ## 目标与不可替代的验收范围
 

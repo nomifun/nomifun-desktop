@@ -890,6 +890,225 @@ async fn full_agent_transition_persists_only_a_bounded_exact_closed_turn_handoff
     );
 }
 
+async fn settled_resource_effect_session(
+    store: &AgentSessionStore, key: &str,
+) -> AgentSessionLiveRecord {
+    let resource = |kind: &str, operation: &str| TypedResourceBinding {
+        binding_id: ResourceBindingId::from(format!("{kind}:{key}")),
+        resource_kind: ResourceKind::from(kind.to_owned()),
+        resource_id: ResourceId::from(key.to_owned()),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from([operation.to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    let mut session = live_session(session_id());
+    session.agent_binding.typed_resource_bindings = vec![
+        resource("process_session", "exec"), resource("workspace", "write"),
+        resource("project_memory", "read"),
+    ];
+    let session = store.create_session(create_request(session, key)).await.unwrap().session;
+    let ready = store.append_event(&append(&session.agent_session_id,
+        &format!("ready-{key}"), "runtime-supervisor", &format!("ready-{key}"), "session/ready",
+        &format!("session-{key}"), Some(event_id(&format!("event-opening-{key}"))), json!({})))
+        .await.unwrap().ack.unwrap().event_id;
+    let turn_id = format!("resource-turn-{key}");
+    let started = store.append_event(&append(&session.agent_session_id,
+        &format!("turn-{key}"), "session-api", &format!("turn-{key}"), "turn/started", &turn_id,
+        Some(ready), json!({"operation_id":turn_id}))).await.unwrap().ack.unwrap().event_id;
+    for (index, kind, capability, action) in [
+        (0, "workspace", "workspace.files", "workspace.files/write"),
+        (1, "process_session", "workspace.process", "workspace.process/exec"),
+    ] {
+        let operation = format!("resource-operation-{key}-{index}");
+        let tool = store.append_event(&append(&session.agent_session_id,
+            &format!("tool-{key}-{index}"), "runtime-supervisor", &format!("tool-{key}-{index}"),
+            "tool/call-started", &format!("tool-message-{key}-{index}"), Some(started.clone()),
+            json!({"operation_id":operation,"call_id":format!("call-{key}-{index}"),
+                "capability_id":capability,"action_id":action})))
+            .await.unwrap().ack.unwrap().event_id;
+        let request = EffectEventRequest {
+            agent_session_id: session.agent_session_id.clone(), effect_id: format!("effect-{key}-{index}"),
+            turn_id: OperationId::from(turn_id.clone()), operation_id: OperationId::from(operation),
+            owner_domain: "workspace".to_owned(), capability_module: CapabilityId::from(capability),
+            action_id: ActionId::from(action), resource_binding_id: Some(ResourceBindingId::from(format!("{kind}:{key}"))),
+            resource_key: Some(format!("{kind}:{key}")), input_digest: digest('7'), recorded_at: 1000 + index,
+            event_id: event_id(&format!("effect-start-{key}-{index}")), producer_id: EventProducerId::from("capability-host"),
+            idempotency_key: IdempotencyKey::from(format!("effect-{key}-{index}")),
+            correlation_id: CorrelationId::from(format!("effect-{key}-{index}")), strategy: EffectStrategy::ManagedEffect,
+            causation_event_id: Some(tool), payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+        };
+        let effect_started = store.record_effect_started(request.clone()).await.unwrap().ack.unwrap().event_id;
+        store.record_effect_terminal(EffectEventRequest {
+            event_id: event_id(&format!("effect-return-{key}-{index}")), producer_id: EventProducerId::from("owning-plugin"),
+            causation_event_id: Some(effect_started), recorded_at: 1010 + index,
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"returned":true}))), ..request
+        }, EffectTerminalState::Succeeded).await.unwrap();
+    }
+    store.append_event(&append(&session.agent_session_id, &format!("terminal-{key}"),
+        "runtime-supervisor", &format!("terminal-{key}"), "turn/completed", &turn_id,
+        Some(started), json!({}))).await.unwrap();
+    session
+}
+
+#[tokio::test]
+async fn full_agent_transition_preserves_settled_resource_facts_without_reauthorizing_dropped_resources() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let session = settled_resource_effect_session(&store, "settled-switch").await;
+    let expected = session.agent_binding.clone();
+    let effects = store.list_effects(&session.agent_session_id).await.unwrap();
+    assert_eq!(effects.len(), 2);
+    assert!(effects.iter().all(|effect| effect.state == AgentEffectState::Returned && effect.resource_binding_id.is_some()));
+    let source_resources: Vec<(String, String)> = sqlx::query_as(
+        "SELECT binding_id,binding_digest FROM agent_session_resources WHERE session_id=? AND resource_kind IN ('workspace','process_session') ORDER BY binding_id")
+        .bind(session.agent_session_id.as_ref()).fetch_all(store.test_pool()).await.unwrap();
+    let mut replacement = agent_replacement(&expected, "settled-target");
+    replacement.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() == "workspace");
+    let request = agent_switch(expected, replacement.clone(), "settled-switch");
+    let changed = store.replace_session_agent_binding(&owner(), &session.agent_session_id, request.clone()).await
+        .expect("settled effects must not prevent an idle same-Session Agent switch");
+    assert_eq!(changed.session.agent_binding, replacement);
+    assert_eq!(store.session_resources(&session.agent_session_id).await.unwrap(), replacement.typed_resource_bindings);
+    assert_eq!(store.list_effects(&session.agent_session_id).await.unwrap(), effects,
+        "switching must preserve complete canonical effect identities and observations");
+    let retained: Vec<(String, String)> = sqlx::query_as(
+        "SELECT binding_id,binding_digest FROM agent_session_resources WHERE session_id=? ORDER BY binding_id")
+        .bind(session.agent_session_id.as_ref()).fetch_all(store.test_pool()).await.unwrap();
+    assert_eq!(retained, source_resources, "keep immutable referenced facts; remove unreferenced dropped resources");
+    let foreign_key_errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(foreign_key_errors, 0);
+    let replay = store.replace_session_agent_binding(&owner(), &session.agent_session_id, request).await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.transition_ack, changed.transition_ack);
+    assert_eq!(store.list_effects(&session.agent_session_id).await.unwrap(), effects);
+    let through = store.current_cursor(&session.agent_session_id).await.unwrap().seq;
+    let child_id = session_id();
+    let base = crate::ForkContextSnapshot::new(session.agent_session_id.clone(), through,
+        AgentHandoffBindingRefV1::from(&replacement), 1, Vec::new()).unwrap();
+    let forked = store.fork_session(&session.agent_session_id, ForkRequest {
+        child_session_id: child_id.clone(), child_owner_ref: owner(), child_metadata: session.metadata.clone(),
+        child_agent_binding: replacement.clone(), parent_through_seq: through, created_at: 2000,
+        producer_id: "fork-coordinator".into(), operation_id: "settled-switch-fork".into(),
+        idempotency_key: "settled-switch-fork".into(), correlation_id: "settled-switch-fork".into(),
+        event_id: Some("settled-switch-fork-event".into()), base_payload_id: "settled-switch-fork-base".into(),
+        base_body: SessionPayloadBody::Json(StrictJsonValue(serde_json::to_value(base).unwrap())),
+        base_media_type: "application/json".to_owned(), child_initial_active_capability_ids: vec!["workspace.files".to_owned()],
+    }).await.unwrap();
+    assert!(!forked.contract.replays_tool_or_effect && !forked.contract.copies_full_transcript);
+    assert_eq!(store.session_resources(&child_id).await.unwrap(), replacement.typed_resource_bindings);
+    assert!(store.list_effects(&child_id).await.unwrap().is_empty(), "fork never copies the parent's effect ledger or retired binding grants");
+    let delete = DeleteAgentSessionCommand {
+        operation_id: "delete-settled-switch-parent".into(), agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(), requested_at: 3000,
+    };
+    store.fence_delete(&delete).await.unwrap();
+    store.complete_delete(&delete, 3100).await.unwrap();
+    assert_eq!(store.get_live_session(&child_id).await.unwrap().agent_binding, replacement);
+    assert_eq!(store.session_resources(&child_id).await.unwrap(), replacement.typed_resource_bindings);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .fetch_one(store.test_pool()).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn single_resource_replacement_preserves_settled_effect_references_and_current_authority() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let session = settled_resource_effect_session(&store, "settled-resource").await;
+    let effects = store.list_effects(&session.agent_session_id).await.unwrap();
+    let expected = session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() != "process_session");
+    let updated = store.replace_session_resource_bindings(&owner(), &session.agent_session_id,
+        &expected, replacement.clone(), "process_session").await.unwrap();
+    assert_eq!(updated.agent_binding, replacement);
+    let current = store.session_resources(&session.agent_session_id).await.unwrap();
+    assert!(!current.iter().any(|resource| resource.resource_kind.as_ref() == "process_session"));
+    assert_eq!(store.list_effects(&session.agent_session_id).await.unwrap(), effects);
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_session_resources WHERE session_id=? AND resource_kind='process_session'")
+        .bind(session.agent_session_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(retained, 1, "historical process reference remains a fact, never a current grant");
+}
+
+#[tokio::test]
+async fn agent_transition_rejects_redefining_an_existing_resource_identity_atomically() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "resource-identity-initial").await;
+    let expected = session.agent_binding;
+    let mut first = agent_replacement(&expected, "resource-identity");
+    first.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: "workspace:immutable".into(), resource_kind: "workspace".into(), resource_id: "immutable".into(),
+        owner_id: owner().principal_id, operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None, typed_parameters: BTreeMap::new(),
+    }];
+    store.replace_session_agent_binding(&owner(), &session.agent_session_id,
+        agent_switch(expected, first.clone(), "resource-identity-first")).await.unwrap();
+    let before = store.current_cursor(&session.agent_session_id).await.unwrap();
+    let mut changed = agent_replacement(&first, "resource-identity-changed");
+    changed.typed_resource_bindings[0].operations.insert("write".to_owned());
+    let result = store.replace_session_agent_binding(&owner(), &session.agent_session_id,
+        agent_switch(first.clone(), changed, "resource-identity-changed")).await;
+    assert!(matches!(result, Err(SessionStoreError::InvalidSession(message)) if message.contains("immutable resource binding")));
+    assert_eq!(store.get_live_session(&session.agent_session_id).await.unwrap().agent_binding, first);
+    assert_eq!(store.current_cursor(&session.agent_session_id).await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn session_resource_replacement_rejects_unsettled_effects_for_changed_kind() {
+    for unknown in [false, true] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let key = if unknown { "unknown-resource" } else { "pending-resource" };
+        let session = settled_resource_effect_session(&store, key).await;
+        let operation = OperationId::from(format!("unsettled-turn-{key}"));
+        let (_, turn) = store.start_turn(&session.agent_session_id, "session_api".into(),
+            format!("unsettled-turn-{key}").into(), operation.clone(),
+            StrictJsonValue(json!({"content":"Observe an effect with an unsettled outcome"}))).await.unwrap();
+        let turn_started = turn.ack.unwrap().event_id;
+        let owner_operation = format!("unsettled-operation-{key}");
+        let tool = store.append_event(&append(&session.agent_session_id, &format!("unsettled-tool-{key}"),
+            "runtime-supervisor", &format!("unsettled-tool-{key}"), "tool/call-started",
+            &format!("unsettled-message-{key}"), Some(turn_started.clone()),
+            json!({"operation_id":owner_operation,"call_id":format!("unsettled-call-{key}"),
+                "capability_id":"workspace.process","action_id":"workspace.process/exec"})))
+            .await.unwrap().ack.unwrap().event_id;
+        let request = EffectEventRequest {
+            agent_session_id: session.agent_session_id.clone(), effect_id: format!("unsettled-effect-{key}"),
+            turn_id: operation.clone(), operation_id: owner_operation.into(), owner_domain: "workspace".to_owned(),
+            capability_module: "workspace.process".into(), action_id: "workspace.process/exec".into(),
+            resource_binding_id: Some(format!("process_session:{key}").into()), resource_key: Some(key.to_owned()),
+            input_digest: digest('8'), recorded_at: 2000, event_id: format!("unsettled-effect-start-{key}").into(),
+            producer_id: "capability-host".into(), idempotency_key: format!("unsettled-effect-{key}").into(),
+            correlation_id: format!("unsettled-effect-{key}").into(),
+            strategy: if unknown { EffectStrategy::ExternalUncertainEffect } else { EffectStrategy::ManagedEffect },
+            causation_event_id: Some(tool), payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+        };
+        let started = store.record_effect_started(request.clone()).await.unwrap().ack.unwrap().event_id;
+        if unknown {
+            store.record_effect_terminal(EffectEventRequest {
+                event_id: format!("unsettled-effect-unknown-{key}").into(), producer_id: "owning-plugin".into(),
+                causation_event_id: Some(started), recorded_at: 2010, ..request
+            }, EffectTerminalState::Uncertain).await.unwrap();
+        }
+        store.append_event(&append(&session.agent_session_id, &format!("unsettled-turn-terminal-{key}"),
+            "runtime-supervisor", &format!("unsettled-turn-terminal-{key}"), "turn/failed", operation.as_ref(),
+            Some(turn_started), json!({"error":"interrupted before effect outcome was confirmed"}))).await.unwrap();
+        let expected = session.agent_binding;
+        let mut replacement = expected.clone();
+        replacement.binding_version += 1;
+        replacement.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() != "process_session");
+        assert!(matches!(store.replace_session_resource_bindings(&owner(), &session.agent_session_id,
+            &expected, replacement, "process_session").await,
+            Err(SessionStoreError::Conflict(message)) if message.contains("unsettled process_session effects")));
+        assert_eq!(store.get_live_session(&session.agent_session_id).await.unwrap().agent_binding, expected);
+        let mut unrelated = expected.clone();
+        unrelated.binding_version += 1;
+        unrelated.typed_resource_bindings.retain(|resource| resource.resource_kind.as_ref() != "project_memory");
+        store.replace_session_resource_bindings(&owner(), &session.agent_session_id,
+            &expected, unrelated, "project_memory").await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn full_agent_transition_rolls_back_on_resource_failure_and_rejects_stale_active_remote() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();

@@ -135,6 +135,11 @@ async fn shutdown_scenario(hold_writer:bool) {
         let error=tokio::time::timeout(Duration::from_secs(20),server.shutdown_all()).await
             .expect("failed shutdown must remain bounded").unwrap_err();
         println!("FIRST_SHUTDOWN_ERROR {error:#}");
+        let cause = format!("{error:#}");
+        assert!(cause.contains(&format!("Session {id}:")),
+            "host cleanup failure must identify the retained Session owner: {cause}");
+        assert!(cause.contains("locked"),
+            "host cleanup failure must preserve the original storage settlement condition: {cause}");
         assert_eq!(std::fs::read(&file).unwrap(),b"SHUTDOWN_WRITE_ONCE");
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT state FROM agent_effects WHERE session_id=?")
             .bind(id).fetch_one(&observer).await.unwrap(),"returned");

@@ -6021,6 +6021,7 @@ dependencies = [
  "base64 0.22.1",
  "nomifun-agent-contracts",
  "nomifun-db",
+ "nomifun-engine-core",
  "serde",
  "serde_json",
  "sqlx",

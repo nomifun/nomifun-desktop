@@ -6,7 +6,7 @@
       "canonical_api_inventory": "e3079ba597a2248631538342d78812738e2fc7a940f414d9cbe15c0023ee17b9",
       "canonical_schema_manifest": "6578934cb607586566c5fc719ed5a8955e13a8264b5cca73b1cd13ab3a81d154",
       "capability_catalog_entry": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168",
-      "cargo_lock": "02c6d25287f1402d54e2d9efa0e7956f830860bae315b3bb5add87620d583162",
+      "cargo_lock": "f38745408eaeb8176a5a64b111dede2b81381a9c6b445d7fa0818081ee99aec9",
       "coding_codex_native_contract": "19411e27d38cfd07f6c4375f9258dc0ba677e951ad4e76da36ea78bae9ff7faa",
       "confirmed_decision_contract": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
       "database_schema": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8",
@@ -14,7 +14,7 @@
       "official_preset_seed_manifest": "efc0b11b67187f53c6091080554607d897762ef364fef1336368827a08008b1d",
       "package_schema": "cb03f0e6ae6e74d1736879253ae9c7145d67116ed5464f346ef5435ea62ea687",
       "platform_validation_contract": "2ad5072bfff0fb80034265b1e6a93f7eb036fceeec4a4515c13075bbb828c97a",
-      "platform_validation_fixture": "2ca6368e037ed8d6b1efbfc43ad9ba9e688123173c5f8caff0628d55c09f1754",
+      "platform_validation_fixture": "07c8424a65f1cfbbf98a38b40e79e1efa230c0022fd4ad72e74729c63e8a08d1",
       "plugin_contract": "aed271dcd6570f0352d3657c657ecfbc21c4d53569c16d4a8e13443b050b3c25",
       "plugin_schema": "5d69c74023d5ad1dfdce99d8b81b3253eb86c4fda1f085de3d7a97c02744d609",
       "runtime_feature_inventory": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
@@ -24,5 +24,5 @@
       "target_first_party_inventory": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43"
     }
   },
-  "payload_digest": "4f96a3fbb86b2064176afa8775807477e25dcb4e5cf41f782fea679eb7097478"
+  "payload_digest": "e1fbb76531b6665c917fcef8643b27cb130ff0e9244f16225af0571396515655"
 }
