@@ -23,12 +23,6 @@ use nomifun_model_invoke::ModelInvokeService;
 
 use crate::factory::provider_config::{one_shot_completion, resolve_provider_config, user_message};
 
-/// READMEs can be sizeable; keep enough room that the strict-JSON overview
-/// reply (description + full readme_markdown) never gets cut mid-object —
-/// a truncated reply is guaranteed-unparseable. The prompt side also bounds
-/// the README length (see `autogen::OVERVIEW_SYSTEM`).
-const KNOWLEDGE_MAX_TOKENS: u32 = 8192;
-
 /// Provider-backed completer for knowledge autogen / snapshot compression.
 pub struct LiveKnowledgeCompleter {
     pub provider_repo: Arc<dyn IProviderRepository>,
@@ -74,7 +68,13 @@ impl LiveKnowledgeCompleter {
             &self.workspace,
         )
         .await?;
-        one_shot_completion(&cfg, system, vec![user_message(user)], KNOWLEDGE_MAX_TOKENS).await
+        one_shot_completion(
+            &cfg,
+            system,
+            vec![user_message(user)],
+            None,
+        )
+        .await
     }
 }
 

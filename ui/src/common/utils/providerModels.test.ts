@@ -106,8 +106,24 @@ describe('nested provider models', () => {
           provider_params: {},
           context_limit: undefined,
           output_limit: 16_384,
+          compaction_threshold_pct: undefined,
         },
       ],
     });
+  });
+
+  test('enabled and description saves preserve every authored task limit and inference parameter', () => {
+    const configured = row('custom-model');
+    configured.capabilities[0] = {
+      ...configured.capabilities[0]!, context_limit: 1_000_000, output_limit: 100_000,
+      compaction_threshold_pct: 90, provider_params: { reasoning_effort: 'high', temperature: 0.2 },
+    };
+    const saved = toProviderModelInput({ ...configured, enabled: false, description: 'changed' });
+    expect(saved.enabled).toBe(false);
+    expect(saved.description).toBe('changed');
+    expect(saved.capabilities[0]).toMatchObject({ context_limit: 1_000_000, output_limit: 100_000,
+      compaction_threshold_pct: 90, provider_params: { reasoning_effort: 'high', temperature: 0.2 } });
+    expect(saved.capabilities[0]).not.toHaveProperty('health');
+    expect(toProviderModelInput(row('unknown')).capabilities[0]?.context_limit).toBeUndefined();
   });
 });

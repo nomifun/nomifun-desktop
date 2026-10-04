@@ -3345,7 +3345,7 @@ mod tests {
                         task: crate::template::CreativeTemplateTextTask::Chat,
                     }),
                     instruction: "保持系列连贯".into(),
-                    max_tokens: 4096,
+                    max_tokens: Some(4096),
                 },
             },
             CreativeTemplateStep::GenerateImages {

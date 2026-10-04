@@ -47,7 +47,7 @@ function issue(
   return { code, path, message };
 }
 
-function asRecord(value: unknown, path: string, keys: readonly string[]): UnknownRecord | CreativeTemplateValidationError {
+function asRecord(value: unknown, path: string, keys: readonly string[], optionalKeys: readonly string[] = []): UnknownRecord | CreativeTemplateValidationError {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return issue('invalid-value', path, 'expected an object');
   }
@@ -55,7 +55,7 @@ function asRecord(value: unknown, path: string, keys: readonly string[]): Unknow
   const actual = Object.keys(record);
   const unknown = actual.find((key) => !keys.includes(key));
   if (unknown) return issue('unknown-field', `${path}.${unknown}`, 'field is not part of template v1');
-  const missing = keys.find((key) => !Object.prototype.hasOwnProperty.call(record, key));
+  const missing = keys.find((key) => !optionalKeys.includes(key) && !Object.prototype.hasOwnProperty.call(record, key));
   if (missing) return issue('invalid-value', `${path}.${missing}`, 'required field is missing');
   return record;
 }
@@ -334,7 +334,7 @@ function validateStep(value: unknown, path: string) {
       'model',
       'instruction',
       'maxTokens',
-    ]);
+    ], ['maxTokens']);
     if (isIssue(planning)) return planning;
     if (planning.model !== null) {
       const model = asRecord(planning.model, `${path}.planning.model`, [
@@ -358,14 +358,16 @@ function validateStep(value: unknown, path: string) {
     );
     if (instructionError) return instructionError;
     if (
-      !Number.isSafeInteger(planning.maxTokens) ||
-      (planning.maxTokens as number) < 128 ||
-      (planning.maxTokens as number) > 32_768
+      planning.maxTokens !== undefined && planning.maxTokens !== null && (
+        !Number.isSafeInteger(planning.maxTokens) ||
+        (planning.maxTokens as number) <= 0 ||
+        (planning.maxTokens as number) > 0xffff_ffff
+      )
     ) {
       return issue(
         'invalid-value',
         `${path}.planning.maxTokens`,
-        'prompt planning maxTokens must be between 128 and 32768'
+        'prompt planning maxTokens must be a positive API integer or omitted for the provider default'
       );
     }
     return null;

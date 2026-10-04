@@ -10,7 +10,8 @@ use nomifun_creation::{
 };
 use nomifun_workshop::template::{
     CreativePromptTemplateSegment, CreativeTemplateImageQuality, CreativeTemplateImageTask,
-    CreativeTemplateOutputPlan, CreativeTemplatePromptSource, CreativeTemplateStep,
+    CreativeTemplateOutputPlan, CreativeTemplatePromptPlanningSettings,
+    CreativeTemplatePromptSource, CreativeTemplateStep,
 };
 use nomifun_workshop::template_run::{
     CreativeTemplateInputValue, CreativeTemplatePromptDraft, CreativeTemplatePromptDraftStatus,
@@ -30,6 +31,24 @@ const TEMPLATE_TASK_TIMEOUT_CANCELED: &str = "WAVE3_TEMPLATE_TASK_TIMEOUT_CANCEL
 const TEMPLATE_TASK_OUTCOME_UNKNOWN: &str = "WAVE3_TEMPLATE_TASK_OUTCOME_UNKNOWN";
 const TASK_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const TASK_WAIT_LIMIT: Duration = Duration::from_secs(300);
+
+fn planner_request_params(
+    planning: &CreativeTemplatePromptPlanningSettings,
+    count: usize,
+    brief: &str,
+) -> Value {
+    let mut params = json!({
+        "system": format!(
+            "{}\nReturn only one JSON object with exactly {count} prompts. The exact schema is {{\"prompts\":[{{\"title\":\"...\",\"prompt\":\"...\"}}]}}. Do not add markdown fences, commentary, extra fields, or trailing text.",
+            planning.instruction.trim()
+        ),
+        "prompt": format!("Create {count} production-ready image prompts from the following brief.\n<brief>\n{brief}\n</brief>"),
+    });
+    if let Some(max_tokens) = planning.max_tokens {
+        params["max_tokens"] = json!(max_tokens);
+    }
+    params
+}
 
 #[derive(Clone)]
 pub(crate) struct NomiWave3TemplateRunner {
@@ -243,14 +262,7 @@ impl NomiWave3TemplateRunner {
             }
         };
         let brief = render_prompt(run, template_id)?;
-        let params = json!({
-            "system": format!(
-                "{}\nReturn only one JSON object with exactly {count} prompts. The exact schema is {{\"prompts\":[{{\"title\":\"...\",\"prompt\":\"...\"}}]}}. Do not add markdown fences, commentary, extra fields, or trailing text.",
-                planning.instruction.trim()
-            ),
-            "prompt": format!("Create {count} production-ready image prompts from the following brief.\n<brief>\n{brief}\n</brief>"),
-            "max_tokens": planning.max_tokens,
-        });
+        let params = planner_request_params(planning, count, &brief);
         self.create_and_wait(
             run,
             entry,
@@ -797,6 +809,23 @@ mod tests {
         CreativeTemplateVisibility,
     };
 
+    #[test]
+    fn planner_request_omits_unset_token_limit_and_preserves_explicit_values() {
+        let mut planning = CreativeTemplatePromptPlanningSettings {
+            model: None,
+            instruction: "Keep the series coherent".into(),
+            max_tokens: None,
+        };
+        let params = planner_request_params(&planning, 2, "A city at sunrise");
+        assert!(params.get("max_tokens").is_none());
+        assert!(params["prompt"].as_str().unwrap().contains("A city at sunrise"));
+        for max_tokens in [1, 127, 32_769, u32::MAX] {
+            planning.max_tokens = Some(max_tokens);
+            let params = planner_request_params(&planning, 2, "A city at sunrise");
+            assert_eq!(params["max_tokens"], max_tokens);
+        }
+    }
+
     async fn seed_provider(database: &nomifun_db::Database) -> String {
         let provider_id = ProviderId::new().into_string();
         sqlx::query(
@@ -899,7 +928,7 @@ mod tests {
                                 task: CreativeTemplateTextTask::Chat,
                             }),
                             instruction: "Keep the series coherent".into(),
-                            max_tokens: 4096,
+                            max_tokens: Some(4096),
                         },
                     },
                     CreativeTemplateStep::GenerateImages {

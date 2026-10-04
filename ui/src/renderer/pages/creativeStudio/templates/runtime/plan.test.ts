@@ -75,6 +75,20 @@ describe('template task planning', () => {
     expect(String(input.parameters.system).includes('Return only one JSON object')).toBe(true);
   });
 
+  test('omits provider-default planning limits and retains explicit old or large ceilings', () => {
+    for(const maxTokens of [undefined,null,1,4096,100_000,0xffff_ffff]) {
+      const run=createTemplateRunFixture(true);
+      const step=run.templateSnapshot.steps.find(step=>step.kind==='draft-prompts');
+      if(step?.kind!=='draft-prompts')throw new Error('missing planner');
+      step.planning.maxTokens=maxTokens;
+      const entry=buildTemplateTaskPlan(run.templateSnapshot,[IDS.task,IDS.task2,IDS.task3],()=>IDS.result2)[0];
+      if(entry.kind!=='planner')throw new Error('missing planner entry');
+      const input=createPlannerTaskInput(run,entry);
+      if(maxTokens==null)expect(input.parameters).not.toHaveProperty('max_tokens');
+      else expect(input.parameters.max_tokens).toBe(maxTokens);
+    }
+  });
+
   test('accepts only exact JSON planner output and assigns canonical review drafts', () => {
     const run = createTemplateRunFixture(true);
     const ids = [IDS.draft1, IDS.draft2];

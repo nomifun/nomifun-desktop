@@ -64,7 +64,8 @@ fn classify(code: &str) -> Option<(ChatModelErrorCode, ChatRetryDirective, &'sta
             Retry::Never,
             "provider rejected request authentication or permission",
         ),
-        "invalid_request_error" | "invalid_argument" | "INVALID_ARGUMENT" | "invalid_prompt" => (
+        "invalid_request_error" | "invalid_argument" | "INVALID_ARGUMENT" | "invalid_prompt"
+        | "unsupported_value" | "invalid_value" => (
             Code::InvalidRequest,
             Retry::Never,
             "provider rejected the request parameters",

@@ -419,7 +419,7 @@ impl IdmmBypassModelPort for ModelInvokeBypassPort {
             &config,
             system,
             vec![nomifun_ai_agent::factory::provider_config::user_message(prompt)],
-            600,
+            None,
             max_output_bytes,
         )
         .await

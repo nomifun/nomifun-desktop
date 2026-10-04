@@ -34,7 +34,6 @@ const DEFAULT_GENERATION: CreativeTemplateImageGenerationSettings = {
 const defaultPromptPlanning = (copy: CreativeTemplateTranslationCopy) => ({
   model: null,
   instruction: copy.planningInstruction,
-  maxTokens: 4096,
 });
 
 const textVariable = (

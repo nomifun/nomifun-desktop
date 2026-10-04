@@ -31,6 +31,8 @@
   "reasoningEffort": {
     "label": "Reasoning for this conversation",
     "auto": "Auto",
+    "none": "None",
+    "minimal": "Minimal",
     "low": "Low",
     "medium": "Medium",
     "high": "High",
@@ -143,6 +145,9 @@
       "unknown_upstream": "Upstream"
     },
     "codes": {
+      "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED": {
+        "body": "This conversation’s saved agent configuration is incompatible with the current configuration. Confirm a compatible configuration through the conversation’s agent selector, or start a new conversation. Existing records are preserved."
+      },
       "INTERRUPTED_BY_RESTART": {
         "title": "Task interrupted by app exit",
         "body": "The app exited while this task was still running, so it could not finish. The conversation is available again — resend the request to retry."

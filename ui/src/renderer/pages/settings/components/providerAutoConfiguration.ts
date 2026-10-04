@@ -347,7 +347,7 @@ export const applyProviderCompatibilityMode = (
           contentEndpoint: '',
           realtimeEndpoint: '',
           allowCrossOriginCredentials: false,
-          providerParamsJson: '',
+          providerParamsJson: capability.providerParamsJson,
           outputLimit: capability.outputLimit,
         };
       }),
@@ -375,7 +375,7 @@ export const applyProviderCompatibilityMode = (
             contentEndpoint: '',
             realtimeEndpoint: '',
             allowCrossOriginCredentials: false,
-            providerParamsJson: '',
+            providerParamsJson: capability.providerParamsJson,
             outputLimit: capability.outputLimit,
           };
         }
@@ -405,7 +405,7 @@ export const applyProviderCompatibilityMode = (
               contentEndpoint: '',
               realtimeEndpoint: '',
               allowCrossOriginCredentials: false,
-              providerParamsJson: '',
+              providerParamsJson: capability.providerParamsJson,
             }
           : {}),
         // A transport switch must not replace a configured model limit with
@@ -451,10 +451,10 @@ export const applyProviderAutoConfiguration = (
               contentEndpoint: '',
               realtimeEndpoint: '',
               allowCrossOriginCredentials: false,
-              providerParamsJson: '',
+              providerParamsJson: capability.providerParamsJson,
             }
           : {}),
-        ...(capability.outputLimit === undefined && detection.outputLimit !== undefined
+        ...(capability.outputLimit === undefined && capability.outputLimitSource !== 'user' && detection.outputLimit !== undefined
           ? { outputLimit: detection.outputLimit }
           : {}),
       };

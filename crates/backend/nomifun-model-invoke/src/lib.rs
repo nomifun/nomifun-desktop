@@ -20,7 +20,6 @@ pub mod chat_executor;
 pub mod error;
 pub mod default_model;
 pub mod manifest;
-mod media_prompt;
 pub mod realtime;
 pub mod materialize;
 pub mod resolve;

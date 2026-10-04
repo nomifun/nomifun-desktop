@@ -174,7 +174,8 @@ pub use office::{
 pub use plugin_platform::*;
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
-    FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus, ModelInfo,
+    FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus,
+    ModelContextLimitKind, ModelInfo, ModelTokenLimitSources,
     ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
     ProbeProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
     ProviderHealthCheckResponse, ProviderReachability, ProviderResponse, UpdateProviderRequest,
@@ -183,7 +184,7 @@ pub use provider_connection::{
     ProviderConnectionInput, ProviderConnectionResponse, SaveProviderConnectionRequest,
 };
 pub use provider_model::{
-    CapabilityHealth, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
+    CapabilityHealth, MODEL_CONTEXT_LIMIT_KIND_PARAM, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
     ProviderModelInput, ProviderModelKeyRequest, ProviderModelResponse, SaveProviderModelRequest,
     validate_model_traits_unique,
 };

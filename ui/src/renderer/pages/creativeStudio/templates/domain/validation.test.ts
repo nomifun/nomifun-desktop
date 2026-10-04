@@ -99,6 +99,16 @@ describe('template v1 validation and parser', () => {
     };
     expect(validateTemplateDefinition(template).ok).toBe(true);
 
+    for (const maxTokens of [undefined, null, 1, 4096, 100_000, 1_000_000, 0xffff_ffff]) {
+      planner.planning.maxTokens = maxTokens;
+      expect(validateTemplateDefinition(template).ok).toBe(true);
+    }
+    for (const maxTokens of [-1, 1.5, 0x1_0000_0000]) {
+      planner.planning.maxTokens = maxTokens;
+      expect(validateTemplateDefinition(template).ok).toBe(false);
+    }
+    delete planner.planning.maxTokens;
+    expect(validateTemplateDefinition(template).ok).toBe(true);
     planner.planning.maxTokens = 0;
     const invalidTokens = validateTemplateDefinition(template);
     expect(invalidTokens.ok).toBe(false);

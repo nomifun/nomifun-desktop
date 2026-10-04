@@ -286,7 +286,9 @@ pub struct CreativeTemplateTextModelBinding {
 pub struct CreativeTemplatePromptPlanningSettings {
     pub model: Option<CreativeTemplateTextModelBinding>,
     pub instruction: String,
-    pub max_tokens: u32,
+    /// Omitted limits leave output length to the selected provider/model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 impl CreativeTemplatePromptPlanningSettings {
@@ -301,9 +303,9 @@ impl CreativeTemplatePromptPlanningSettings {
             2_000,
             true,
         )?;
-        if !(128..=32_768).contains(&self.max_tokens) {
+        if self.max_tokens == Some(0) {
             return Err(format!(
-                "{path}.maxTokens must be between 128 and 32768"
+                "{path}.maxTokens must be a positive 32-bit integer when specified"
             ));
         }
         Ok(())
@@ -997,7 +999,7 @@ mod tests {
                         task: CreativeTemplateTextTask::Chat,
                     }),
                     instruction: "保持系列连贯".into(),
-                    max_tokens: 4096,
+                    max_tokens: Some(4096),
                 },
             },
             CreativeTemplateStep::GenerateImages {
@@ -1025,8 +1027,46 @@ mod tests {
             "chat"
         );
         if let CreativeTemplateStep::DraftPrompts { planning, .. } = &mut definition.steps[0] {
-            planning.max_tokens = 0;
+            planning.max_tokens = Some(0);
         }
         assert!(definition.validate().unwrap_err().contains("maxTokens"));
+    }
+
+    #[test]
+    fn prompt_planning_preserves_provider_default_and_explicit_positive_token_limits() {
+        for value in [
+            serde_json::json!({"model": null, "instruction": ""}),
+            serde_json::json!({"model": null, "instruction": "", "maxTokens": null}),
+        ] {
+            let planning: CreativeTemplatePromptPlanningSettings = serde_json::from_value(value).unwrap();
+            planning.validate("planning").unwrap();
+            assert_eq!(planning.max_tokens, None);
+            assert!(serde_json::to_value(&planning).unwrap().get("maxTokens").is_none());
+        }
+        for max_tokens in [1, 127, 128, 32_768, 32_769, u32::MAX] {
+            let planning: CreativeTemplatePromptPlanningSettings = serde_json::from_value(
+                serde_json::json!({"model": null, "instruction": "", "maxTokens": max_tokens}),
+            ).unwrap();
+            planning.validate("planning").unwrap();
+            assert_eq!(planning.max_tokens, Some(max_tokens));
+            assert_eq!(serde_json::to_value(&planning).unwrap()["maxTokens"], max_tokens);
+        }
+    }
+
+    #[test]
+    fn prompt_planning_rejects_zero_and_invalid_token_limits() {
+        let zero: CreativeTemplatePromptPlanningSettings = serde_json::from_value(
+            serde_json::json!({"model": null, "instruction": "", "maxTokens": 0}),
+        ).unwrap();
+        assert!(zero.validate("planning").unwrap_err().contains("maxTokens"));
+        for max_tokens in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            assert!(serde_json::from_value::<CreativeTemplatePromptPlanningSettings>(
+                serde_json::json!({"model": null, "instruction": "", "maxTokens": max_tokens}),
+            ).is_err());
+        }
     }
 }

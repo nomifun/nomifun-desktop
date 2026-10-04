@@ -21,10 +21,11 @@ interface FetchedModelOption {
   traits: ModelTrait[];
   /**
    * Context window the provider's own catalog declared. Absent when it declared
-   * none — the app then falls back to its 200k assumption, so a real value here
-   * is the only thing that calibrates compaction correctly.
+   * none — this client never fabricates a universal window.
    */
   contextLimit?: number;
+  outputLimit?: number;
+  contextLimitKind?: 'input_only' | 'combined';
 }
 
 interface UseModeModelListOptions {
@@ -108,6 +109,12 @@ const useModeModeList = (options: UseModeModelListOptions) => {
           // Only present when the provider's own catalog declares a window.
           ...(model.context_limit && model.context_limit > 0
             ? { contextLimit: model.context_limit }
+            : {}),
+          ...(model.output_limit && model.output_limit > 0
+            ? { outputLimit: model.output_limit }
+            : {}),
+          ...(['input_only','combined'].includes(model.token_limit_sources?.context_limit_kind ?? '')
+            ? { contextLimitKind: model.token_limit_sources?.context_limit_kind }
             : {}),
         }));
         if (options.platform.includes('gemini')) {

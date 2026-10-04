@@ -360,6 +360,8 @@ pub enum ChatToolChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
+    None,
+    Minimal,
     Low,
     Medium,
     High,
@@ -372,6 +374,8 @@ pub enum ReasoningEffort {
 impl ReasoningEffort {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -500,7 +504,8 @@ impl ChatModelInput {
         if !self.tools.is_empty() || !matches!(self.tool_choice, ChatToolChoice::None) {
             required.insert(ChatModelFeature::ToolCalls);
         }
-        if self.reasoning.is_some() {
+        if self.reasoning.as_ref().is_some_and(|reasoning| reasoning.effort != Some(ReasoningEffort::None)
+            || reasoning.summary != ReasoningSummary::None || reasoning.max_reasoning_tokens.is_some()) {
             required.insert(ChatModelFeature::Reasoning);
         }
         if !matches!(self.prompt_cache, PromptCachePolicy::Disabled) {
