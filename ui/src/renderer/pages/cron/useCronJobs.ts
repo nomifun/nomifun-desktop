@@ -15,7 +15,7 @@ import { parseConversationId, type ConversationId, type CronJobId } from '@/comm
 import { emitter } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { repairCronJobTimeZones } from '@renderer/pages/cron/repairCronJobTimeZone';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
 const isJobErrorLike = (job: ICronJob): boolean => {
   return job.state.last_status === 'error' || job.state.last_status === 'missed';
@@ -302,7 +302,7 @@ export function useCronJobsMap() {
   const [jobsMap, setJobsMap] = useState<Map<ConversationId, ICronJob[]>>(new Map());
   const [loading, setLoading] = useState(true);
   const pendingRef = useRef<CronJobChanges | null>(null);
-  const unreadStorageKey = browserStorageGenerationKey('cron-unread');
+  const unreadStorageKey = agentBrowserStorageGenerationKey('cron-unread');
   // Track conversations with unread cron executions (red dot indicator)
   const [unreadConversations, setUnreadConversations] = useState<Set<ConversationId>>(() => {
     // Restore only from the current backend dataset generation. The old

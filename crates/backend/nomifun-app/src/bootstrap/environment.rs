@@ -328,9 +328,18 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
         });
     }
 
-    let plugin_clean_start =
-        nomifun_db::requires_unified_plugin_clean_start(pool).await?;
-    let lineage_current = if plugin_clean_start {
+    let agent_clean_cut = match nomifun_db::requires_agent_store_clean_cut(pool).await {
+        Ok(required) => required,
+        Err(error) => {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                "database Agent Store cutover identity could not be verified: {error}"
+            )));
+        }
+    };
+    // The DB owner performs the recognized Agent-only cutover in one
+    // transaction. Keep the non-Agent installation identity checks below;
+    // the current Agent schema contract applies after that commit.
+    let lineage_current = if agent_clean_cut {
         false
     } else {
         match nomifun_db::validate_known_migration_lineage_prefix(pool).await {
@@ -775,33 +784,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_accepts_a_checksum_matching_prefix_for_forward_migration() {
+    async fn probe_rejects_an_unrecognized_agent_store_lineage() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nomifun-backend.db");
         let database = nomifun_db::init_database(&path).await.unwrap();
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 4")
+        // Keep the current schema valid so rejection comes from the unknown
+        // receipt lineage rather than bypassing its generation CHECK.
+        sqlx::query("UPDATE _sqlx_migrations SET version = 6")
             .execute(database.pool())
             .await
             .unwrap();
-        sqlx::query("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort_v2")
-            .execute(database.pool())
-            .await
-            .unwrap();
-        sqlx::query(
-            "UPDATE schema_metadata SET migration_head = 2, \
-             canonical_schema_manifest_digest = \
-             'd6fcfed0f24fac2e3045e1a920e36b2d6a3751f7adb2d59de363e171e20e6b1f' \
-             WHERE singleton_key = 'canonical'",
-        )
-        .execute(database.pool())
-        .await
-        .unwrap();
+        assert!(
+            !nomifun_db::requires_agent_store_clean_cut(database.pool())
+                .await
+                .unwrap()
+        );
         database.close().await;
 
-        assert_eq!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::Current
-        );
+        match probe_existing_v3_database(&path).await.unwrap() {
+            ExistingV3DatabaseProbe::RequiresRepair(reason) => {
+                assert!(reason.contains("migration lineage"), "{reason}");
+            }
+            other => panic!("unknown Agent lineage must fail closed: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -42,7 +42,6 @@ const selectionValue = (selection: GuidAgentSelection): string =>
 export default function GuidDefaultAgentSetting({ library }: Props) {
   const { t } = useTranslation();
   const [storedDefault, setStoredDefault] = useConfig('guid.defaultAgentSelection');
-  const [legacySelection] = useConfig('guid.agentSelection');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const feedbackId = useId();
@@ -91,7 +90,7 @@ export default function GuidDefaultAgentSetting({ library }: Props) {
     [options]
   );
   const configuredSelection = normalizeGuidAgentSelection(
-    storedDefault ?? legacySelection
+    storedDefault
   );
   const configuredValue = selectionValue(configuredSelection);
   const fallbackValue = selectionValue(DEFAULT_GUID_AGENT_SELECTION);
@@ -102,7 +101,7 @@ export default function GuidDefaultAgentSetting({ library }: Props) {
       : '';
   const effectiveOption = optionByValue.get(effectiveValue);
   const configuredDefaultUnavailable =
-    (storedDefault !== undefined || legacySelection !== undefined)
+    storedDefault !== undefined
     && !optionByValue.has(configuredValue);
 
   const save = async (value: string) => {

@@ -105,7 +105,7 @@ installation-token boundary and do not inherit the internal host claim.
 
 ## Canonical Remote Ingress
 
-The Fresh-v4 host mounts two projections of the same installation-token
+The canonical Nomi host mounts two projections of the same installation-token
 authenticated Remote contract:
 
 - `/mcp`: Streamable-HTTP MCP with exactly `open`, `turn`, `observe`, `cancel`;

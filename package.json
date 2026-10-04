@@ -3,7 +3,9 @@
   "private": true,
   "version": "0.7.6",
   "license": "Apache-2.0",
-  "workspaces": ["ui"],
+  "workspaces": [
+    "ui"
+  ],
   "scripts": {
     "dev": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 5173 && bun scripts/kill-stale-dev.mjs && bun scripts/run-dev.mjs",
     "dev:web": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 5173 8787 && NOMI_CHANNEL=dev concurrently -k -n api,ui -c blue,magenta \"cargo run -p nomifun-web -- --port 8787 --api-only --insecure-no-auth\" \"bun run --filter=./ui dev:web\"",
@@ -35,7 +37,7 @@
     "test:nomi-core-live-provider": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs",
     "test:agent-reliability-report": "node --test scripts/validation/agent-reliability-report.test.mjs",
     "check:agent-reliability": "node scripts/validation/agent-reliability-report.mjs",
-    "check": "bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:unified-plugin-boundary && bun run check:agent-vocabulary && bun run help --check",
+    "check": "bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:agent-session-boundary && bun run check:unified-plugin-boundary && bun run check:agent-vocabulary && bun run help --check",
     "typecheck": "bun run --filter=./ui typecheck",
     "check:desktop-ui-boundary": "bun scripts/check-desktop-ui-boundary.mjs",
     "check:i18n": "bun scripts/generate-i18n-types.mjs --self-test && bun scripts/generate-i18n-types.mjs --check",
@@ -55,7 +57,8 @@
     "gen:i18n": "bun scripts/generate-i18n-types.mjs",
     "clean": "bun scripts/prune-build.mjs --release",
     "bump": "bun scripts/bump-version.mjs",
-    "help": "bun scripts/help.mjs"
+    "help": "bun scripts/help.mjs",
+    "check:agent-session-boundary": "bun scripts/check-agent-session-boundary.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.2",

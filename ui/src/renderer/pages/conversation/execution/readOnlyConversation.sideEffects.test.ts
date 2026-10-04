@@ -11,9 +11,7 @@ import { ipcBridge } from '@/common';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
-import { MessageListProvider } from '../Messages/hooks';
-import * as localCron from '../platforms/nomi/localCronCommands';
-import { NomiMessageBufferStore } from '../platforms/nomi/nomiMessageBuffer';
+import { MessageListProvider, useMessageList } from '../Messages/hooks';
 import { useNomiMessage } from '../platforms/nomi/useNomiMessage';
 
 const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000971');
@@ -27,8 +25,8 @@ afterEach(() => {
 });
 
 // Exercise the actual hook and capture its transport callback; do not restate
-// its read-only predicates in the test. Both modes receive the same live events.
-async function mountTranscript(readOnly: boolean) {
+// its authority predicates in the test. Every transcript shares this consumer.
+async function mountTranscript() {
   let onStream: ((message: IResponseMessage) => void) | undefined;
   spyOn(ipcBridge.conversation.responseStream, 'on').mockImplementation((listener) => {
     onStream = listener;
@@ -49,14 +47,12 @@ async function mountTranscript(readOnly: boolean) {
     method: 'GET', path: '/api/conversations/fixture', status: 404, body: { code: 'NOT_FOUND' },
   }));
   const persist = spyOn(ipcBridge.conversation.update, 'invoke').mockResolvedValue(true);
-  const process = spyOn(localCron, 'processLocalCronResponse').mockResolvedValue({
-    systemResponses: [],
-  });
-  const append = spyOn(NomiMessageBufferStore.prototype, 'append');
-  const replace = spyOn(NomiMessageBufferStore.prototype, 'replace');
-  const hook = renderHook(() => useNomiMessage(conversationId, { readOnly }), { wrapper });
-  await waitFor(() => expect(hook.result.current.hasHydratedRunningState).toBe(true));
-  await act(async () => { hook.result.current.setWaitingResponse(true); });
+  const hook = renderHook(() => ({
+    runtime: useNomiMessage(conversationId),
+    messages: useMessageList(),
+  }), { wrapper });
+  await waitFor(() => expect(hook.result.current.runtime.hasHydratedRunningState).toBe(true));
+  await act(async () => { hook.result.current.runtime.setWaitingResponse(true); });
   const emit = async (message: Pick<IResponseMessage, 'type' | 'data'>) => {
     await act(async () => {
       onStream!({ ...message, conversation_id: conversationId, msg_id: messageId });
@@ -64,27 +60,26 @@ async function mountTranscript(readOnly: boolean) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   };
-  return { hook, emit, persist, process, append, replace };
+  return { hook, emit, persist };
 }
 
 describe('read-only execution transcript side effects', () => {
-  for (const readOnly of [false, true]) {
-    test('readOnly=' + readOnly + ': live metrics render without mutating frozen Session extra', async () => {
-      const { hook, emit, persist } = await mountTranscript(readOnly);
+    test('live metrics render without mutating frozen Session extra', async () => {
+      const { hook, emit, persist } = await mountTranscript();
       await emit({ type: 'turn_metrics', data: { input_tokens: 3, output_tokens: 5 } });
-      expect(hook.result.current.tokenUsage?.total_tokens).toBe(8);
+      expect(hook.result.current.runtime.tokenUsage?.total_tokens).toBe(8);
       expect(persist).not.toHaveBeenCalled();
     });
 
-    test('readOnly=' + readOnly + ': text buffering and legacy post-process respect mode', async () => {
-      const { emit, append, replace, process } = await mountTranscript(readOnly);
-      await emit({ type: 'content', data: 'legacy response' });
+    test('renders canonical text replacements without rewriting on finish', async () => {
+      const { hook, emit, persist } = await mountTranscript();
+      await emit({ type: 'content', data: 'first fragment' });
       await emit({ type: 'text', data: { content: 'replacement', replace: true } });
       await emit({ type: 'finish', data: undefined });
-      expect(append).toHaveBeenCalledTimes(readOnly ? 0 : 1);
-      expect(replace).toHaveBeenCalledTimes(readOnly ? 0 : 1);
-      expect(process).toHaveBeenCalledTimes(readOnly ? 0 : 1);
-      if (!readOnly) expect(process).toHaveBeenCalledWith(conversationId, 'replacement');
+      const answer = hook.result.current.messages.find(message => message.type === 'text');
+      expect(answer?.type).toBe('text');
+      if (answer?.type !== 'text') throw new Error('expected text projection');
+      expect(answer.content.content).toBe('replacement');
+      expect(persist).not.toHaveBeenCalled();
     });
-  }
 });

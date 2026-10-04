@@ -43,7 +43,7 @@ import './styles/modal-contract.css';
 import { configService } from '@/common/config/configService';
 import { application } from '@/common/adapter/ipcBridge';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
-import { initializeBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { initializeAgentBrowserStorageGeneration, initializeBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 configService.initialize().catch((err) => {
   console.error('Failed to initialize config:', err);
 });
@@ -117,11 +117,11 @@ const Main = () => {
     void Promise.all([
       application.systemInfo
         .invoke()
-        // A fresh/legacy backend may briefly omit the generation. The storage
-        // initializer owns that recoverable fallback; only real runtime
-        // failures should reach the application error state below.
+        // Physical dataset identity preserves domain preferences. Agent state
+        // additionally requires the current backend's canonical generation.
         .then((info) => {
           initializeBrowserStorageGeneration(info?.storageGeneration);
+          initializeAgentBrowserStorageGeneration(info?.agentDataGeneration);
         })
         .catch((err) => {
           console.error('Failed to initialize browser storage generation:', err);

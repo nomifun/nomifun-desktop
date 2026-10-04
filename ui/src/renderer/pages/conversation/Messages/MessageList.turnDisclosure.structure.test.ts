@@ -150,8 +150,4 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(planBoundary.includes('toolSourceMessageIds = [];')).toBe(true);
   });
 
-  test('suppresses only legacy synthetic plan-tool failures with a persisted plan projection', () => {
-    expect(source.includes("from './planToolVisibility'")).toBe(true);
-    expect(source.includes('isSupersededPlanToolFailure(message, journalSources.slice(i + 1))')).toBe(true);
-  });
 });

@@ -19,19 +19,4 @@ describe('execution transcript capability boundary', () => {
     expect(source.match(/hideSendBox/g)?.length ?? 0).toBe(1);
   });
 
-  test('disables Nomi persistence and local command side effects', () => {
-    const messageSource = readSource(new URL('../platforms/nomi/useNomiMessage.ts', import.meta.url));
-
-    // These assert the SHAPE of the read-only guards rather than a verbatim
-    // source line: pinning the exact expression drifted once already, when
-    // startLegacyPostProcess grew additional generation/terminal conditions
-    // around an unchanged `readOnly` short-circuit. The behavioural contract is
-    // covered by readOnlyConversation.sideEffects.test.ts; these checks only
-    // keep the guards from being deleted outright.
-    const postProcessGuard = messageSource.slice(
-      messageSource.indexOf('const startLegacyPostProcess')
-    );
-    expect(postProcessGuard.slice(0, 400).includes('readOnly')).toBe(true);
-    expect(messageSource.includes('ipcBridge.conversation.update.invoke')).toBe(false);
-  });
 });

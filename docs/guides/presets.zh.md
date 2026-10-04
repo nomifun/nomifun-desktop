@@ -125,16 +125,10 @@ Session Open 读取已保存 Snapshot，不在每个 Turn 中重新选择 latest
 canonical JSON。服务端负责 owner 检查、Catalog resolve、ContributionLock、Revision/
 Snapshot digest 和 typed failure。
 
-## 旧路径处理
+## 实现边界
 
-旧 `/presets`、`/settings/agent-presets`、`/settings/agent` 和旧 `/api/presets` 不再
-是产品 API。迁移窗口内的 UI 深层链接只能一次性跳转到 `/agent`；它们不能继续加载
-旧编辑器、旧服务或双读写链。当前工作树仍有部分迁移 redirect、旧 consumer 和
-generated inventory residual，详见：
-
-- [`GLOBAL-CLOSURE-TODO.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md)
-- [`DECISIONS.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md)
-- [`05-system-capability-replacement-foundation.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md)
+Agent revision、Snapshot、Session 与 Module 授权的当前实现见
+[Agent Session 架构](../architecture/agent-session.zh.md)。
 
 Plugin 的创建、预览、安装、配置和 Backup 请见
 [`Unified Plugin Core`](../specs/2026-09-22-unified-plugin-core/README.zh.md)。

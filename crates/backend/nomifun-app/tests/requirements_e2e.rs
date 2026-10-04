@@ -233,8 +233,6 @@ async fn seed_canonical_agent_session(
             event_id: nomifun_agent_contracts::EventId::from(format!("{key}:ready")),
             producer_id: EventProducerId::from("runtime_supervisor"),
             idempotency_key: IdempotencyKey::from(format!("{key}:ready")),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("session/ready".to_owned()),
                 kind_version: 1,

@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::primitives::{
     AgentSessionId, CanonicalErrorCode, CanonicalSchemaRef, CorrelationId, EventId,
-    EventProducerId, IdempotencyKey, ProjectionReducerId, RuntimeBindingId, StrictJsonValue,
+    EventProducerId, IdempotencyKey, ProjectionReducerId, StrictJsonValue,
     VersionString,
 };
 use crate::session::SessionPayloadId;
@@ -70,7 +70,6 @@ pub enum SessionEventCorrelationRule {
     Message,
     ToolCall,
     Effect,
-    RuntimeBinding,
     Compaction,
     Fork,
     Optional,
@@ -80,7 +79,6 @@ pub enum SessionEventCorrelationRule {
 #[serde(rename_all = "snake_case")]
 pub enum SessionEventIdempotencyRule {
     ProducerScopedRequired,
-    RuntimeBindingSequenceRequired,
     EffectScopedRequired,
     OperationScopedRequired,
     DiagnosticBestEffort,
@@ -225,10 +223,6 @@ pub struct SessionEventAppend {
     pub event_id: EventId,
     pub producer_id: EventProducerId,
     pub idempotency_key: IdempotencyKey,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_binding_id: Option<RuntimeBindingId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_producer_seq: Option<u64>,
     pub semantic_event: SemanticSessionEventDraft,
 }
 
@@ -240,10 +234,6 @@ pub struct SessionEventRecord {
     pub event_id: EventId,
     pub producer_id: EventProducerId,
     pub idempotency_key: IdempotencyKey,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_binding_id: Option<RuntimeBindingId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_producer_seq: Option<u64>,
     pub kind: SessionEventKind,
     pub kind_version: u32,
     pub correlation_id: CorrelationId,
@@ -266,24 +256,6 @@ pub struct SessionEventAck {
     pub event_id: EventId,
     pub seq: u64,
     pub cursor: SessionEventCursor,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeEventEnvelope {
-    pub runtime_binding_id: RuntimeBindingId,
-    pub producer_seq: u64,
-    pub event_id: EventId,
-    pub idempotency_key: IdempotencyKey,
-    pub semantic_event: SemanticSessionEventDraft,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeEventAck {
-    pub runtime_binding_id: RuntimeBindingId,
-    pub committed_producer_seq: u64,
-    pub session_event_ack: SessionEventAck,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

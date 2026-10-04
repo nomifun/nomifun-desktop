@@ -138,8 +138,6 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
                 "w155-call-{turn_no}"
             )),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: nomifun_agent_contracts::SessionEventKind("tool/call-started".to_owned()),
                 kind_version: 1,
@@ -189,8 +187,6 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
                 "w155-result-{turn_no}"
             )),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: nomifun_agent_contracts::SessionEventKind(
                     "tool/result-recorded".to_owned(),
@@ -237,8 +233,6 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
                 "w155-failed-{turn_no}"
             )),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: nomifun_agent_contracts::SessionEventKind("turn/failed".to_owned()),
                 kind_version: 1,

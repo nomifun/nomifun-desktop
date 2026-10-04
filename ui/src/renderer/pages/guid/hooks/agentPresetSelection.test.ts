@@ -141,7 +141,7 @@ describe('Guid Agent selection contract', () => {
     ).toBe(true);
     expect(
       selectionUtils.includes("configService.get('guid.agentSelection')")
-    ).toBe(true);
+    ).toBe(false);
     expect(selection.includes(".set('guid.agentSelection', selection)")).toBe(false);
     expect(selection.includes(".set('guid.defaultAgentSelection'")).toBe(false);
     expect(

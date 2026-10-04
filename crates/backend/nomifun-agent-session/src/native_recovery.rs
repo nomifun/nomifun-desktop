@@ -149,7 +149,7 @@ impl AgentSessionStore {
         let identity = format!("native-recovery-blocked:{}:{}:{next_fence}", session_id.as_ref(), operation_id.as_ref());
         let diagnostic = SessionEventAppend {
             agent_session_id: session_id.clone(), event_id: identity.clone().into(), producer_id: "runtime_supervisor".into(),
-            idempotency_key: identity.into(), runtime_binding_id: None, runtime_producer_seq: None,
+            idempotency_key: identity.into(),
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: SessionEventKind("runtime/execution-recovery-blocked".into()), kind_version: 1,
                 correlation_id: operation_id.as_ref().into(), causation_event_id: Some(row.2.clone().into()),

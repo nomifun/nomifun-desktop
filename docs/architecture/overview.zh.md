@@ -74,13 +74,13 @@ NomiFun 围绕一个核心原则构建：**一份 Rust 后端、两种宿主形�
    crates/backend/nomifun-app/src/router/  — assembled in create_router()
    middlewares: trace, body-limit, CORS, auth, CSRF, rate-limit, response wrapper
 4. Conversation service
-   crates/backend/nomifun-conversation/src/service.rs
+   crates/backend/nomifun-conversation/src/canonical_session_owner.rs
    persists the message, looks up the conversation's bound agent
 5. Agent seam
    crates/backend/nomifun-ai-agent  — the only backend crate that sees nomi-*
-   AgentRuntimeRegistry 复用该 Conversation 的进程内 runtime
+   runtime session handles 复用该 Conversation 的进程内 runtime
 6. Agent turn
-   nomi-agent  drives the engine: providers (anthropic/openai/bedrock/vertex),
+   nomifun-agent-runtime drives the engine: providers (anthropic/openai/bedrock/vertex),
    tools (bash/read/write/...), MCP servers, skills, plan/confirm/output sinks
    内置 nomi agent 是唯一的会话引擎；该回合在进程内完成，
    不存在可供移交会话的子 agent CLI

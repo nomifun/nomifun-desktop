@@ -1,6 +1,6 @@
 import '../../../../../test/setup-dom.ts';
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
-import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { uuidv7 } from '@/common/utils';
@@ -11,6 +11,7 @@ import { parseProviderId } from '@/common/types/ids';
 import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 import { useGuidInput } from './useGuidInput';
 import { useGuidAgentSelection } from './useGuidAgentSelection';
+import { ipcBridge } from '@/common';
 
 const templates = ['chat.minimal', 'assistant.general', 'creative-studio.default'].map(template_key => ({ template_key })) as OfficialPresetTemplate[];
 const stablePreset = {
@@ -18,8 +19,12 @@ const stablePreset = {
   source: 'user', display_name: 'Release reviewer', bound_target_count: 0,
   current_stable_revision: { preset_id: '0190f5fe-7c00-7a00-8000-000000000101', revision: 1, revision_digest: 'a'.repeat(64) },
 } as AgentPresetSummary;
-beforeEach(() => { configService.reset(); setBrowserStorageGeneration(uuidv7()); });
-afterEach(() => { cleanup(); sessionStorage.clear(); configService.reset(); });
+beforeEach(() => {
+  configService.reset(); setBrowserStorageGeneration(uuidv7());
+  spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(() => () => {});
+  spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
+});
+afterEach(() => { cleanup(); mock.restore(); sessionStorage.clear(); configService.reset(); });
 
 function mountDraft(
   initialEntry = '/guid',
@@ -71,7 +76,6 @@ test('new Guid conversations use the workbench default without persisting draft-
     kind: 'preset',
     presetId: stablePreset.preset_id,
   });
-  expect(configService.get('guid.agentSelection')).toBeUndefined();
 });
 
 test.each(['image', 'video', 'music'] as const)('%s draft survives page unmount with text, files, workspace, Agent, references and parameters', mode => {

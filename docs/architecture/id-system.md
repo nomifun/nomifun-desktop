@@ -214,8 +214,8 @@ CREATE INDEX idx_cron_job_runs_cron_job_id
     ON cron_job_runs(cron_job_id);
 ```
 
-`messages.conversation_id` logically targets
-`conversations.conversation_id`; `cron_job_runs.cron_job_id` logically targets
+`agent_messages.agent_session_id` logically targets
+`agent_sessions.agent_session_id`; `cron_job_runs.cron_job_id` logically targets
 `cron_jobs.cron_job_id`. Neither relationship is declared to SQLite.
 
 Do not store both `conversation_id` and `conversation_row_id`, or any equivalent

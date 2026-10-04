@@ -30,7 +30,7 @@ describe('turn process state', () => {
       getToolMessagesProcessState([
         {
           type: 'tool_group',
-          content: [{ call_id: 'call-1', name: 'Edit', description: '', render_output_as_markdown: false, status: 'Canceled' }],
+          content: [{ call_id: 'call-1', name: 'Edit', description: '', status: 'Canceled' }],
         } as any,
       ])
     ).toBe('canceled');

@@ -186,8 +186,6 @@ const refreshConversations = () => {
     .then((result) => {
       const items = result?.items;
       if (items && Array.isArray(items)) {
-        // Legacy rows from the pre-provider-probe health check flow are hidden
-        // from normal history. New health checks must not create conversations.
         // Companion conversations — the desktop bubble, the chat tab, AND every
         // IM-channel turn — all share ONE per-companion session that lives in
         // 桌面伙伴→伙伴→聊天, never in this work conversation list. Hide every
@@ -222,9 +220,8 @@ const refreshConversations = () => {
             clearGenerating(conversation.id);
           }
         }
-        // Use ALL conversation IDs (including legacy health-check rows) so the
-        // responseStream listener recognises them as known and doesn't
-        // trigger an infinite refreshConversations loop.
+        // Track every listed Session so events for dedicated Companion/SSH
+        // surfaces do not trigger a redundant work-list refresh.
         conversation_idsState = new Set(items.map((conversation) => conversation.id));
         emitStoreChange();
         return;

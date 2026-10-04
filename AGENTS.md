@@ -27,6 +27,24 @@
 - If a relevant command is unavailable or platform-specific, report what was
   not run and why. It is not a repository-wide commit blocker for unrelated
   changes.
+
+## Canonical Agent Session
+
+- AgentSession, Turn, Event, Payload and Effect are the sole Agent fact chain.
+  Conversation APIs and Message projections use the same Session identity.
+- Runtime context must read typed canonical events and payloads. Do not restore
+  projection-to-context fallback, old transcript readers, dual writes, lossy
+  field mirrors, legacy draft import, or a second checkpoint/binding ledger.
+- Retire replaced code, schema fields, DTOs, fixtures, tests and design documents
+  in the same change. Use Git history for superseded designs; do not retain
+  archived plans as current development inputs or generator requirements.
+- Preserve explicit current-generation Agent/model transitions and native
+  checkpoint safety. These are not authorization to import retired Agent data.
+- Agent clean cut clears Agent data while preserving non-Agent configuration;
+  unknown or partial database lineage must fail closed without conversion.
+- Read `docs/architecture/agent-session.zh.md` before changing Session storage
+  or content. Run `bun run check:agent-session-boundary` and the affected
+  canonical history, reset and consumer tests.
 - Repository scripts and GitHub Actions may be used when they are useful and
   maintainable; no workflow-presence audit is required for ordinary changes.
 

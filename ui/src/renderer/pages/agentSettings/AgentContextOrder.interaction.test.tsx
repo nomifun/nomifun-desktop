@@ -5,9 +5,10 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
-import type { PluginDraftDetail } from '@/common/types/pluginPlatform';
+import * as pluginLaunch from '../plugins/pluginConversationLaunch';
+import { ipcBridge } from '@/common';
 import { SWRConfig } from 'swr';
 import { asCapabilityId, asPackageId, createEmptyAgentPresetDocument, placeCapability, type AgentPresetDocument, type CapabilityCatalogItem, type CapabilityModuleCatalogItem } from '@/common/types/agentPlatform';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
@@ -32,19 +33,22 @@ const moduleOf = (value: CapabilityCatalogItem): CapabilityModuleCatalogItem => 
   required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 });
 const initial = (): AgentPresetDocument => ({ ...createEmptyAgentPresetDocument(), enabled_capabilities: catalog.map(value => ({ capability: value.capability })) });
-function mount(document = initial(), currentCatalog = catalog, disabled = false, kind: 'context' | 'middleware' = 'context') {
+function mount(document = initial(), currentCatalog = catalog, disabled = false, kind: 'context' | 'middleware' = 'context', onOpenAuthor?: (destination: string) => void) {
   let current = document;
   const Harness = () => {
     const [value, setValue] = useState(document);
-    return <AgentContextOrder document={value} catalog={currentCatalog} disabled={disabled} kind={kind} onChange={next => { current = next; setValue(next); }} />;
+    return <AgentContextOrder document={value} catalog={currentCatalog} disabled={disabled} kind={kind} onOpenAuthor={onOpenAuthor} onChange={next => { current = next; setValue(next); }} />;
   };
-  const Creator = () => <div>Draft {useParams().id}</div>;
+  const Creator = () => <div>Authoring {new URLSearchParams(useLocation().search).get('pluginIntent')}</div>;
   return { ...render(<I18nextProvider i18n={i18n}><MemoryRouter><Routes>
-    <Route path='/' element={<Harness />} /><Route path='/plugins/create/:id' element={<Creator />} />
+    <Route path='/' element={<Harness />} /><Route path='/guid' element={<Creator />} />
   </Routes></MemoryRouter></I18nextProvider>), state: () => current };
 }
 beforeEach(() => {
   (window as typeof window & { __backendPort?: number }).__backendPort = 11451;
+  spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(() => () => {});
+  spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
+  spyOn(ipcBridge.mode.listProviders, 'invoke').mockResolvedValue([]);
 });
 afterEach(() => {
   delete (window as typeof window & { __backendPort?: number }).__backendPort;
@@ -167,9 +171,12 @@ test('execution stages come from the host and unknown selected extensions remain
   expect(result.state().enabled_capabilities).toEqual(original.enabled_capabilities);
 });
 
-test('ordinary user creates one check draft from an empty list without saving or changing selection', async () => {
-  let finish!: (draft: PluginDraftDetail) => void;
-  const create = spyOn(pluginPlatform.drafts.create, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+test('ordinary user launches one check authoring conversation without saving or changing selection', async () => {
+  let finish!: () => void;
+  const create = spyOn(pluginLaunch, 'launchPluginConversation').mockImplementation(async navigate => {
+    await new Promise<void>(resolve => { finish = resolve; });
+    await navigate('/guid?pluginIntent=check');
+  });
   const save = spyOn(pluginPlatform.drafts.save, 'invoke');
   const document = createEmptyAgentPresetDocument();
   const result = mount(document, [], false, 'middleware'), view = within(result.container);
@@ -177,27 +184,27 @@ test('ordinary user creates one check draft from an empty list without saving or
   const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
   fireEvent.click(button); fireEvent.click(button);
   expect(create).toHaveBeenCalledTimes(1);
-  expect(create.mock.calls[0]).toEqual([{ template: 'agent.before_tool' }]);
+  expect(create.mock.calls[0][1]).toEqual({ template: 'agent.before_tool' });
   expect((button as HTMLButtonElement).disabled).toBe(true);
-  await act(async () => { finish({ summary: { draft_id: 'check-draft' } } as PluginDraftDetail); });
-  expect(view.getByText('Draft check-draft')).toBeTruthy();
+  await act(async () => { finish(); });
+  expect(view.getByText('Authoring check')).toBeTruthy();
   expect(save).not.toHaveBeenCalled();
   expect(result.state()).toEqual(document);
 });
 
-test('failed check draft creation is visible and retries only on another explicit click', async () => {
-  const create = spyOn(pluginPlatform.drafts.create, 'invoke').mockRejectedValue(new Error('offline'));
+test('failed authoring launch is visible and retries only on another explicit click', async () => {
+  const create = spyOn(pluginLaunch, 'launchPluginConversation').mockRejectedValue(new Error('offline'));
   const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware'), view = within(result.container);
   fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   await waitFor(() => expect(view.getByText(en.middlewareOrder.createFailed)).toBeTruthy());
   expect(create).toHaveBeenCalledTimes(1);
   await act(async () => { fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool })); });
   expect(create).toHaveBeenCalledTimes(2);
-  expect(view.queryByText(/Draft /)).toBeNull();
+  expect(view.queryByText(/Authoring /)).toBeNull();
 });
 
 test('disabled editor cannot create a check and Context does not offer the execution template', () => {
-  const create = spyOn(pluginPlatform.drafts.create, 'invoke');
+  const create = spyOn(pluginLaunch, 'launchPluginConversation');
   const result = mount(createEmptyAgentPresetDocument(), [], true, 'middleware'), view = within(result.container);
   const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
   expect((button as HTMLButtonElement).disabled).toBe(true);
@@ -208,9 +215,9 @@ test('disabled editor cannot create a check and Context does not offer the execu
   expect(within(context.container).queryByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeNull();
 });
 
-test('remote WebUI cannot create a Plugin draft from Agent settings', () => {
+test('remote WebUI cannot launch Plugin authoring from Agent settings', () => {
   delete (window as typeof window & { __backendPort?: number }).__backendPort;
-  const create = spyOn(pluginPlatform.drafts.create, 'invoke');
+  const create = spyOn(pluginLaunch, 'launchPluginConversation');
   const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
   const button = within(result.container).getByRole('button', {
     name: en.middlewareOrder.createBeforeTool,
@@ -220,15 +227,20 @@ test('remote WebUI cannot create a Plugin draft from Agent settings', () => {
   expect(create).not.toHaveBeenCalled();
 });
 
-test('a late check draft response cannot navigate after the editor unmounts', async () => {
-  let finish!: (draft: PluginDraftDetail) => void;
-  const create = spyOn(pluginPlatform.drafts.create, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
-  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
+test('a late authoring launch cannot navigate after the editor unmounts', async () => {
+  let finish!: () => void;
+  const create = spyOn(pluginLaunch, 'launchPluginConversation').mockImplementation(async navigate => {
+    await new Promise<void>(resolve => { finish = resolve; });
+    await navigate('/guid?pluginIntent=late');
+  });
+  const open = mock(() => {});
+  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware', open);
   fireEvent.click(within(result.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   result.unmount();
   const next = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
-  await act(async () => { finish({ summary: { draft_id: 'old-draft' } } as PluginDraftDetail); });
-  expect(within(next.container).queryByText('Draft old-draft')).toBeNull();
+  await act(async () => { finish(); });
+  expect(open).not.toHaveBeenCalled();
+  expect(within(next.container).queryByText('Authoring late')).toBeNull();
   expect(within(next.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeTruthy();
   expect(create).toHaveBeenCalledTimes(1);
 });

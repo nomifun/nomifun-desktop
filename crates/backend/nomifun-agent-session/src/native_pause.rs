@@ -81,7 +81,7 @@ pub(super) fn native_control_event(session: &AgentSessionId, operation: &Operati
     identity: String, kind: &str, started: EventId, payload: Value) -> SessionEventAppend {
     SessionEventAppend {
         agent_session_id: session.clone(), event_id: identity.clone().into(), producer_id: "runtime_supervisor".into(),
-        idempotency_key: identity.into(), runtime_binding_id: None, runtime_producer_seq: None,
+        idempotency_key: identity.into(),
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: SessionEventKind(kind.into()), kind_version: 1, correlation_id: operation.as_ref().into(),
             causation_event_id: Some(started), payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
@@ -147,7 +147,7 @@ impl AgentSessionStore {
         }
         let event = SessionEventAppend {
             agent_session_id: session.clone(), event_id: new_event_id(), producer_id: "session_api".into(),
-            idempotency_key: key.into(), runtime_binding_id: None, runtime_producer_seq: None,
+            idempotency_key: key.into(),
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: SessionEventKind("turn/steer-accepted".into()), kind_version: 1,
                 correlation_id: request.operation_id.as_ref().into(), causation_event_id: Some(row.0.into()),
@@ -174,7 +174,7 @@ impl AgentSessionStore {
         let mut tx = self.pool.begin().await?;
         require_live_session_tx(&mut tx, session.as_ref()).await?;
         let row = sqlx::query_as::<_, StoredEventRow>(
-            "SELECT session_id,seq,event_id,producer_id,idempotency_key,runtime_binding_id,runtime_producer_seq, \
+            "SELECT session_id,seq,event_id,producer_id,idempotency_key, \
              kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events \
              WHERE session_id=? AND correlation_id=? AND kind='turn/paused' AND seq<=? \
              ORDER BY seq DESC LIMIT 1",
@@ -333,7 +333,7 @@ impl AgentSessionStore {
             sequence += 1;
             let key = format!("runtime-progress:{}:{}:{sequence}",session.as_ref(),request.operation_id.as_ref());
             self.append_event_tx(&mut tx, &native_control_event(session,&request.operation_id,key,"runtime/progress-recorded",row.0.clone().into(),
-                json!({"runtime_binding_id":format!("nomi:{}",session.as_ref()),"producer_seq":sequence,"event":observation.0})),None).await?;
+                json!({"producer_seq":sequence,"event":observation.0})),None).await?;
             if observation.0.get("event").and_then(Value::as_str) == Some("tool_outcome_reconciled") {
                 self.project_reconciled_invocation_tx(&mut tx,session,&request.operation_id,&row.0,&observation.0,pause.revision).await?;
             }
@@ -343,7 +343,7 @@ impl AgentSessionStore {
         let digest = digest_bytes(&bytes);
         let key = format!("runtime-progress:{}:{}:{sequence}",session.as_ref(),request.operation_id.as_ref());
         let checkpoint_ack = required_ack(self.append_event_tx(&mut tx,&native_control_event(session,&request.operation_id,key,"runtime/progress-recorded",row.0.clone().into(),
-            json!({"runtime_binding_id":format!("nomi:{}",session.as_ref()),"producer_seq":sequence,"event":{"event":"execution_checkpoint_saved","step":prepared.checkpoint_state.0.get("model_steps"),"revision":revision,"digest":digest}})),None).await?)?;
+            json!({"producer_seq":sequence,"event":{"event":"execution_checkpoint_saved","step":prepared.checkpoint_state.0.get("model_steps"),"revision":revision,"digest":digest}})),None).await?)?;
         sqlx::query("UPDATE agent_turns SET native_checkpoint_json=?,native_checkpoint_digest=?,native_checkpoint_revision=?,native_checkpoint_seq=? WHERE session_id=? AND operation_id=?")
             .bind(String::from_utf8(bytes).map_err(|_| SessionStoreError::InvalidPayload("checkpoint UTF-8".into()))?).bind(digest.as_ref())
             .bind(as_i64(revision,"checkpoint revision")?).bind(as_i64(checkpoint_ack.seq,"checkpoint cursor")?)

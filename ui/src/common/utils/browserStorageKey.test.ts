@@ -8,10 +8,12 @@ import { describe, expect, test } from 'bun:test';
 import { conversationTarget, parseConversationId, terminalTarget } from '@/common/types/ids';
 import {
   BROWSER_STORAGE_GENERATION_STORAGE_KEY,
+  agentBrowserStorageGenerationKey,
   browserStorageGenerationKey,
   browserStorageKey,
   getBrowserStorageGeneration,
   initializeBrowserStorageGeneration,
+  initializeAgentBrowserStorageGeneration,
   isCanonicalBrowserStorageGeneration,
   sessionStorageKey,
   setBrowserStorageGeneration,
@@ -39,6 +41,50 @@ function createStorage(initial?: string): BrowserStoragePersistence {
 }
 
 describe('browser storage keys', () => {
+  test('an Agent-only generation cut isolates content while preserving domain preferences', () => {
+    const storage = createStorage();
+    setBrowserStorageGeneration(CANONICAL_GENERATION);
+    initializeAgentBrowserStorageGeneration(6);
+    const conversation = conversationTarget('0190f5fe-7c00-7a00-8000-000000000001');
+    const terminal = terminalTarget('0190f5fe-7c00-7a00-8000-000000000001');
+    const agentKeys = [
+      sessionStorageKey('draft', conversation),
+      sessionStorageKey('command-queue', conversation),
+      sessionStorageKey('workspace-preview', conversation),
+      agentBrowserStorageGenerationKey('guid-draft:input'),
+      agentBrowserStorageGenerationKey('conversation-creation-draft:guid'),
+      agentBrowserStorageGenerationKey('agent-editor:owner'),
+      agentBrowserStorageGenerationKey('plugin-launch:pending'),
+    ];
+    const terminalKey = sessionStorageKey('workspace-preview', terminal);
+    const preferenceKey = browserStorageGenerationKey('provider-and-theme-preferences');
+    for (const key of agentKeys) storage.setItem(key, 'old Agent content');
+    storage.setItem(terminalKey, 'terminal tabs');
+    storage.setItem(preferenceKey, 'provider and theme');
+    // Pre-clean-cut global keys did not contain any Agent generation segment.
+    storage.setItem(browserStorageGenerationKey('guid-draft:input'), 'unscoped old draft');
+
+    initializeAgentBrowserStorageGeneration(7);
+    const currentKeys = [
+      sessionStorageKey('draft', conversation),
+      sessionStorageKey('command-queue', conversation),
+      sessionStorageKey('workspace-preview', conversation),
+      agentBrowserStorageGenerationKey('guid-draft:input'),
+      agentBrowserStorageGenerationKey('conversation-creation-draft:guid'),
+      agentBrowserStorageGenerationKey('agent-editor:owner'),
+      agentBrowserStorageGenerationKey('plugin-launch:pending'),
+    ];
+    for (const key of currentKeys) expect(storage.getItem(key)).toBeNull();
+    expect(getBrowserStorageGeneration()).toBe(CANONICAL_GENERATION);
+    expect(storage.getItem(sessionStorageKey('workspace-preview', terminal))).toBe('terminal tabs');
+    expect(storage.getItem(browserStorageGenerationKey('provider-and-theme-preferences'))).toBe('provider and theme');
+  });
+
+  test('does not manufacture an Agent generation from a missing or malformed backend value', () => {
+    for (const value of [undefined, null, '', '7', 0, -1, 1.5, Infinity]) {
+      expect(() => initializeAgentBrowserStorageGeneration(value)).toThrow(TypeError);
+    }
+  });
   test('includes schema version and entity namespace', () => {
     setBrowserStorageGeneration('01900000-0000-7000-8000-000000000000');
     const conversationKey = sessionStorageKey(

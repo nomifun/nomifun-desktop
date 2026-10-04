@@ -38,7 +38,7 @@ pub use desktop::{
 pub use nomifun_auth::AuthPolicy;
 pub use router::engine_session_host::{AdmittedEngineSession, EngineSessionHost, EngineTurnReceipt};
 pub use router::engine_journal::{EngineJournalWrite, EngineTurnJournal};
-pub use router::engine_history::{EngineHistoryRecord, EngineHistoryTurn, EngineHistoryWindow, EngineHistoryMessage, EngineMessageHistoryWindow};
+pub use router::engine_history::{EngineHistoryRecord, EngineHistoryTurn, EngineHistoryWindow, CanonicalContextMessage, CanonicalContextRole};
 pub use router::engine_model_facts::{EngineModelLimits, EngineRouteCandidateFacts, EngineRouteModelFacts};
 pub use router::engine_kernel_session::EngineKernelSession;
 pub use router::engine_skills::SelectedSkills as SelectedEngineSkills;

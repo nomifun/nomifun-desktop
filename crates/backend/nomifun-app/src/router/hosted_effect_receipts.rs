@@ -290,8 +290,6 @@ impl HostedEffectReceipts {
                 event_id: event_id.clone(),
                 producer_id: EventProducerId::from("capability_host"),
                 idempotency_key: IdempotencyKey::from(call_identity),
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
                 semantic_event: SemanticSessionEventDraft {
                     kind: SessionEventKind("tool/call-started".to_owned()),
                     kind_version: 1,
@@ -409,8 +407,6 @@ impl HostedEffectReceipts {
                     event_id: EventId::from(result_identity.clone()),
                     producer_id: EventProducerId::from("capability_host"),
                     idempotency_key: IdempotencyKey::from(result_identity),
-                    runtime_binding_id: None,
-                    runtime_producer_seq: None,
                     semantic_event: SemanticSessionEventDraft {
                         kind: SessionEventKind("tool/result-recorded".to_owned()),
                         kind_version: 1,

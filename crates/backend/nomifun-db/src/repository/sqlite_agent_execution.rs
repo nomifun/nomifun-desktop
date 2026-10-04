@@ -4388,59 +4388,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         Ok(exact.rows_affected() == 1)
     }
 
-    async fn mark_conversation_cleanup_completed(
-        &self,
-        execution_id: &str,
-        conversation_id: &str,
-        completed_at: i64,
-    ) -> Result<bool, DbError> {
-        let cleanup = PendingConversationCleanup {
-            link_id: sqlx::query_scalar(
-                "SELECT id FROM conversation_execution_links \
-                 WHERE execution_id = ? AND conversation_id = ? \
-                   AND relation = 'attempt' AND active = 0 \
-                   AND cleanup_completed_at IS NULL \
-                 ORDER BY updated_at, id LIMIT 1",
-            )
-            .bind(execution_id)
-            .bind(conversation_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .unwrap_or_default(),
-            execution_id: execution_id.to_owned(),
-            user_id: sqlx::query_scalar(
-                "SELECT execution.user_id FROM agent_executions execution \
-                 WHERE execution.execution_id = ?",
-            )
-            .bind(execution_id)
-            .fetch_one(&self.pool)
-            .await?,
-            step_id: String::new(),
-            attempt_id: String::new(),
-            conversation_id: conversation_id.to_owned(),
-        };
-        // Keep the historical method useful for callers that only have the
-        // old identity tuple, while routing the actual acknowledgement
-        // through the exact-generation fence.
-        let exact = sqlx::query_as::<_, (String, String)>(
-            "SELECT step_id, attempt_id FROM conversation_execution_links \
-             WHERE id = ?",
-        )
-        .bind(cleanup.link_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some((step_id, attempt_id)) = exact else {
-            return Ok(false);
-        };
-        let cleanup = PendingConversationCleanup {
-            step_id,
-            attempt_id,
-            ..cleanup
-        };
-        self.mark_conversation_cleanup_completed_exact(&cleanup, completed_at)
-            .await
-    }
-
     async fn mark_conversation_cleanup_completed_exact(
         &self,
         cleanup: &PendingConversationCleanup,

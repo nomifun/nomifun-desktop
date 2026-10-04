@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::preset::{AgentBindingValue, PresetRevisionRef, ResolvedSnapshotRef};
 use crate::primitives::{
-    AgentSessionId, ArtifactId, CanonicalErrorCode, DigestHex, EventId, LogicalArtifactRef,
-    OperationId, PrincipalRef, RemoteBindingId, RuntimeBindingId, VersionString,
+    AgentSessionId, ArtifactId, CanonicalErrorCode, DigestHex, LogicalArtifactRef,
+    OperationId, PrincipalRef, RemoteBindingId, VersionString,
 };
 
 pub type SessionPayloadId = ArtifactId;
@@ -363,64 +363,6 @@ pub enum SessionPayloadBody {
     Base64(String),
     Json(crate::primitives::StrictJsonValue),
     ArtifactRef(LogicalArtifactRef),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeCheckpointBinding {
-    pub runtime_binding_id: RuntimeBindingId,
-    pub locator: LogicalArtifactRef,
-    pub runtime_bound_event_id: EventId,
-    pub protocol_version: VersionString,
-    pub resolved_snapshot_ref: ResolvedSnapshotRef,
-    pub through_seq: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointExactMatch {
-    RuntimeBoundEvent,
-    ProtocolVersion,
-    Snapshot,
-    ThroughSeq,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointDiscardReason {
-    Missing,
-    Corrupt,
-    RuntimeBoundEventMismatch,
-    ProtocolMismatch,
-    SnapshotMismatch,
-    ThroughSeqMismatch,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointBuildIdentitySource {
-    RuntimeBoundEvent,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointRehydrateSource {
-    ExactSnapshot,
-    LatestCompletedCompaction,
-    SubsequentCanonicalEvents,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeCheckpointContract {
-    pub contract_version: VersionString,
-    pub binding: RuntimeCheckpointBinding,
-    pub required_exact_matches: Vec<CheckpointExactMatch>,
-    pub actual_runtime_build_source: CheckpointBuildIdentitySource,
-    pub discard_on: Vec<CheckpointDiscardReason>,
-    pub rehydrate_from: Vec<CheckpointRehydrateSource>,
-    pub checkpoint_converter_allowed: bool,
-    pub incompatible_executor_error: CanonicalErrorCode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

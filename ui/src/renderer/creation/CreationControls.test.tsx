@@ -1,6 +1,6 @@
 import '../../../test/setup-dom.ts';
 import { cleanup, fireEvent, render, within } from '@testing-library/react';
-import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
@@ -20,6 +20,7 @@ import creationMessages from '@/renderer/services/i18n/locales/zh-CN/creation.js
 import { emptyCreationDraft } from './useCreationDraft';
 import { buildCreationRequest } from './submission';
 import type { CreationDraft } from './types';
+import { ipcBridge } from '@/common';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { creation: creationMessages } } } });
@@ -27,8 +28,10 @@ let assetList: ReturnType<typeof spyOn<typeof creativeAssetClient, 'list'>>;
 beforeEach(() => {
   setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000105');
   assetList = spyOn(creativeAssetClient, 'list').mockResolvedValue({ items: [], total: 0 });
+  spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(() => () => {});
+  spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
 });
-afterEach(() => { cleanup(); assetList.mockRestore(); });
+afterEach(() => { cleanup(); assetList.mockRestore(); mock.restore(); });
 const providerId = parseProviderId('0190f5fe-7c00-7a00-8000-000000000105');
 const presetId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000104');
 

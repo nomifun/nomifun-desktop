@@ -4,7 +4,7 @@ import type { CreationDraft, CreationParameters, SubmitCreationRequest } from '.
 import { capabilityFor, filesForCreation, inputsForMode } from './types';
 import type { ImageGenerationModelOption } from './parameters/image';
 import { creationImageSizePolicy, creationVideoInputRoles, normalizeCreationParameters } from './parameterPolicy';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
 /** Freeze the actual provider payload at admission, independently of the chat model. */
 export function buildCreationRequest(draft: CreationDraft, prompt: string, presetId: AgentPresetId, files: string[] = [], option?: ImageGenerationModelOption): SubmitCreationRequest {
@@ -35,7 +35,7 @@ export function buildCreationRequest(draft: CreationDraft, prompt: string, prese
 
 type PendingAttempt = { fingerprint: string; key: string };
 const attempts = new Map<string, PendingAttempt[]>();
-const attemptStorageKey = (scope: string) => browserStorageGenerationKey(`creation-admission:${scope}`);
+const attemptStorageKey = (scope: string) => agentBrowserStorageGenerationKey(`creation-admission:${scope}`);
 function readAttempts(storageKey: string): PendingAttempt[] {
   const cached = attempts.get(storageKey);
   if (cached) return cached;

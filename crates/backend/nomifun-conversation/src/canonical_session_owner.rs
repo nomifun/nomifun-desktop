@@ -1,12 +1,13 @@
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId,
+    AgentBindingValue, AgentHandoffBindingRefV1, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId,
     CorrelationId, DeleteAgentSessionCommand, EventId, EventProducerId, IdempotencyKey,
     OperationId, PrincipalRef, ReasoningEffort, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor,
     SessionEventKind, SessionEventPayloadRef, SessionPayloadBody, StrictJsonValue,
 };
 use nomifun_agent_session::{
-    AgentSessionStore, CreateSessionRequest, DeleteResult, ForkRequest, ForkResult,
+    AgentSessionStore, CreateSessionRequest, DeleteResult, ForkContextSnapshot, ForkRequest, ForkResult,
     MessageProjection, SessionEventPage, SessionObservation, SessionStoreError, TurnReceipt,
+    canonical_context_messages,
 };
 use nomifun_common::AppError;
 use serde_json::{Value, json};
@@ -186,8 +187,6 @@ impl CanonicalAgentSessionOwner {
             event_id: EventId::from(format!("ready:{key}")),
             producer_id: EventProducerId::from("runtime_supervisor"),
             idempotency_key: IdempotencyKey::from(format!("{key}:ready")),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("session/ready".to_owned()),
                 kind_version: 1,
@@ -393,10 +392,31 @@ impl CanonicalAgentSessionOwner {
         idempotency_key: &str,
         created_at: i64,
     ) -> Result<ForkResult, AppError> {
-        let parent = self.require_owner(owner, parent_session_id).await?;
         let key = scoped_key(owner, idempotency_key, parent_session_id.as_ref())?;
         let producer = EventProducerId::from("session_api");
         let event_key = IdempotencyKey::from(format!("{key}:fork"));
+        if let Some(receipt) = self.store.existing_fork_receipt(owner, parent_session_id,
+            parent_through_seq, title.as_deref(), &producer, &event_key).await.map_err(store_error)? {
+            return Ok(receipt);
+        }
+        let parent = self.require_owner(owner, parent_session_id).await?;
+        let facts = self.store.chat_causality_facts(parent_session_id, &OperationId::from("fork-context"))
+            .await.map_err(store_error)?;
+        if parent_through_seq > facts.head.last_seq {
+            return Err(AppError::Conflict("fork cursor is ahead of its committed parent events".into()));
+        }
+        let before_seq = parent_through_seq.checked_add(1)
+            .ok_or_else(|| AppError::Conflict("fork cursor is exhausted".into()))?;
+        let context_floor = facts.events.iter().filter(|event| event.kind.0 == "context/cleared" && event.seq <= parent_through_seq)
+            .map(|event| event.seq).max().unwrap_or(0);
+        let mut messages = facts.fork_context.as_ref().map(|snapshot| snapshot.base_context(context_floor))
+            .transpose().map_err(store_error)?.unwrap_or_default();
+        messages.extend(canonical_context_messages(&facts.events, &facts.event_payloads,
+            context_floor, parent_through_seq, before_seq).map_err(store_error)?);
+        let depth = facts.fork_context.as_ref().map_or(0, |snapshot| snapshot.fork_depth)
+            .checked_add(1).ok_or_else(|| AppError::Conflict("fork ancestry depth is exhausted".into()))?;
+        let base = ForkContextSnapshot::new(parent_session_id.clone(), parent_through_seq,
+            AgentHandoffBindingRefV1::from(&parent.agent_binding), depth, messages).map_err(store_error)?;
         let active_capability_ids = self
             .store
             .active_capability_ids(parent_session_id)
@@ -421,10 +441,8 @@ impl CanonicalAgentSessionOwner {
             correlation_id: CorrelationId::from(format!("fork:{key}")),
             event_id: Some(EventId::from(format!("forked:{key}"))),
             base_payload_id: ArtifactId::from(format!("fork-base:{key}")),
-            base_body: SessionPayloadBody::Json(StrictJsonValue(json!({
-                "parent_agent_session_id": parent_session_id,
-                "parent_through_seq": parent_through_seq,
-            }))),
+            base_body: SessionPayloadBody::Json(StrictJsonValue(serde_json::to_value(base)
+                .map_err(|error| AppError::Internal(error.to_string()))?)),
             base_media_type: "application/json".to_owned(),
             child_initial_active_capability_ids: active_capability_ids,
         };
@@ -618,6 +636,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fork_context_survives_parent_deletion_and_clear_context_drops_inherited_base() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let owner_service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let parent = owner_service.open(owner(), binding(), None, Vec::new(), "fork-parent", 1).await.unwrap();
+        let turn = owner_service.start_turn(&owner(), &parent.session.agent_session_id,
+            "parent-input", json!({"content":"keep accepted parent input"})).await.unwrap();
+        owner_service.cancel(&owner(), &parent.session.agent_session_id, "cancel-parent").await.unwrap();
+        let cursor = owner_service.store.current_cursor(&parent.session.agent_session_id).await.unwrap();
+        let fork = owner_service.fork(&owner(), &parent.session.agent_session_id,
+            cursor.seq, None, "fork-child", 2).await.unwrap();
+        let command = match owner_service.fence_delete(&owner(), &parent.session.agent_session_id,
+            "delete-parent", 3).await.unwrap() {
+            PreparedAgentSessionDelete::Fenced(command) => command,
+            PreparedAgentSessionDelete::AlreadyDeleted(_) => panic!("parent unexpectedly deleted"),
+        };
+        owner_service.complete_fenced_delete(&command, 3).await.unwrap();
+        let child_id = &fork.child_session.agent_session_id;
+        let facts = owner_service.store.chat_causality_facts(child_id, &turn.operation_id).await.unwrap();
+        let base = facts.fork_context.unwrap();
+        assert_eq!(base.parent_agent_session_id, parent.session.agent_session_id);
+        assert_eq!(base.messages[0].content, "keep accepted parent input");
+        assert_eq!(base.source_binding, AgentHandoffBindingRefV1::from(&binding()));
+        let child_cursor = owner_service.store.current_cursor(child_id).await.unwrap();
+        let grandchild = owner_service.fork(&owner(), child_id, child_cursor.seq, None, "fork-grandchild", 4).await.unwrap();
+        let grandchild_facts = owner_service.store.chat_causality_facts(&grandchild.child_session.agent_session_id,
+            &turn.operation_id).await.unwrap();
+        assert_eq!(grandchild_facts.fork_context.unwrap().messages[0].content, "keep accepted parent input");
+        let ready = facts.events.iter().find(|event| event.kind.0 == "session/ready").unwrap();
+        owner_service.store.append_event(&SessionEventAppend {
+            agent_session_id: child_id.clone(), event_id: "clear-child".into(), producer_id: "session_api".into(),
+            idempotency_key: "clear-child".into(), semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("context/cleared".into()), kind_version: 1,
+                correlation_id: child_id.as_ref().into(), causation_event_id: Some(ready.event_id.clone()),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"operation_id":"clear-child"}))),
+            },
+        }).await.unwrap();
+        let cleared_cursor = owner_service.store.current_cursor(child_id).await.unwrap();
+        let cleared_fork = owner_service.fork(&owner(), child_id, cleared_cursor.seq, None, "fork-cleared-child", 5).await.unwrap();
+        let cleared_facts = owner_service.store.chat_causality_facts(&cleared_fork.child_session.agent_session_id,
+            &turn.operation_id).await.unwrap();
+        assert!(cleared_facts.fork_context.unwrap().messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fork_replay_uses_the_first_receipt_after_binding_changes_rename_and_parent_deletion() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let owner_service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let parent = owner_service.open(owner(), binding(), None, Vec::new(), "receipt-parent", 1).await.unwrap();
+        let parent_id = &parent.session.agent_session_id;
+        let cursor = owner_service.store.current_cursor(parent_id).await.unwrap();
+        let first = owner_service.fork(&owner(), parent_id, cursor.seq,
+            Some("First title".into()), "stable-fork", 2).await.unwrap();
+        owner_service.store.update_session_metadata(&owner(), &first.child_session.agent_session_id,
+            nomifun_agent_session::UpdateAgentSessionMetadata {
+                title: Some("Renamed child".into()), archived: None, pinned: None,
+            }).await.unwrap();
+        let mut next_binding = binding();
+        next_binding.binding_version += 1;
+        next_binding.preset_revision_ref.preset_id = "next-preset".into();
+        next_binding.resolved_snapshot_ref.snapshot_id = "next-snapshot".into();
+        owner_service.store.replace_session_agent_binding(&owner(), parent_id,
+            nomifun_agent_session::ReplaceSessionAgentBinding {
+                expected: binding(), replacement: next_binding,
+                previous_agent_label: "First Agent".into(), next_agent_label: "Next Agent".into(),
+                transition_id: Uuid::now_v7().to_string().into(), request_digest: "c".repeat(64).into(),
+                idempotency_key: "switch-parent-agent".into(), handoff_mode: nomifun_agent_contracts::AgentHandoffMode::ContextOnly,
+                handoff: None, initial_active_capability_ids: Vec::new(),
+            }).await.unwrap();
+        let replay = owner_service.fork(&owner(), parent_id, cursor.seq,
+            Some("First title".into()), "stable-fork", 999).await.unwrap();
+        assert_eq!(replay.child_session.agent_session_id, first.child_session.agent_session_id);
+        assert_eq!(replay.child_session.metadata.title.as_deref(), Some("Renamed child"));
+        assert_eq!(replay.contract, first.contract);
+        assert_eq!(replay.fork_ack, first.fork_ack);
+        assert_eq!(replay.child_cursor, first.child_cursor);
+        assert!(matches!(owner_service.fork(&owner(), parent_id, cursor.seq + 1,
+            Some("First title".into()), "stable-fork", 4).await, Err(AppError::Conflict(_))));
+        assert!(matches!(owner_service.fork(&owner(), parent_id, cursor.seq,
+            Some("Changed title".into()), "stable-fork", 4).await, Err(AppError::Conflict(_))));
+        let foreign = PrincipalRef { principal_kind: "user".into(), principal_id: "another-owner".into() };
+        let key = IdempotencyKey::from(format!("{}:fork", scoped_key(&owner(), "stable-fork", parent_id.as_ref()).unwrap()));
+        assert!(owner_service.store.existing_fork_receipt(&foreign, parent_id, cursor.seq,
+            Some("First title"), &EventProducerId::from("session_api"), &key).await.is_err());
+        assert!(matches!(owner_service.fork(&foreign, parent_id, cursor.seq,
+            Some("First title".into()), "stable-fork", 4).await, Err(AppError::Forbidden(_))));
+        let command = match owner_service.fence_delete(&owner(), parent_id, "delete-receipt-parent", 5).await.unwrap() {
+            PreparedAgentSessionDelete::Fenced(command) => command,
+            PreparedAgentSessionDelete::AlreadyDeleted(_) => panic!("parent unexpectedly deleted"),
+        };
+        owner_service.complete_fenced_delete(&command, 5).await.unwrap();
+        let replay = owner_service.fork(&owner(), parent_id, cursor.seq,
+            Some("First title".into()), "stable-fork", 6).await.unwrap();
+        assert_eq!(replay.child_session.agent_session_id, first.child_session.agent_session_id);
+        assert_eq!(replay.contract, first.contract);
+        assert_eq!(replay.fork_ack, first.fork_ack);
+        assert_eq!(replay.child_cursor, first.child_cursor);
+    }
+
+    #[tokio::test]
     async fn one_owner_covers_open_turn_steer_cancel_fork_delete_and_replay() {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let owner_service = CanonicalAgentSessionOwner::from_pool(database.pool().clone())
@@ -711,7 +828,7 @@ mod tests {
                 &owner(),
                 &opened.session.agent_session_id,
                 "steer-1",
-                json!({"text":"add tests"}),
+                json!({"content":"add tests"}),
             )
             .await
             .unwrap();
@@ -721,7 +838,7 @@ mod tests {
                 &owner(),
                 &opened.session.agent_session_id,
                 "steer-1",
-                json!({"text":"add tests"}),
+                json!({"content":"add tests"}),
             )
             .await
             .unwrap()

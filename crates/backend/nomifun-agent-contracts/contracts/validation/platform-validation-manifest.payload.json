@@ -1,8 +1,8 @@
 {
   "manifest_version": "1.0.0",
-  "confirmed_decision_contract_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848",
-  "canonical_schema_manifest_digest": "c3178210ab3fe410ffd6929acea9a07dcc9809bec1a924c11aaf1fdda768d65c",
-  "cargo_lock_digest": "14c5605100c633d73421824176e955b8d9cc77a8c7ed6176fec002c46d86f6b3",
+  "confirmed_decision_contract_digest": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
+  "canonical_schema_manifest_digest": "6578934cb607586566c5fc719ed5a8955e13a8264b5cca73b1cd13ab3a81d154",
+  "cargo_lock_digest": "02c6d25287f1402d54e2d9efa0e7956f830860bae315b3bb5add87620d583162",
   "official_preset_seed_manifest_digest": "efc0b11b67187f53c6091080554607d897762ef364fef1336368827a08008b1d",
   "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
   "coding_codex_native_contract_digest": "19411e27d38cfd07f6c4375f9258dc0ba677e951ad4e76da36ea78bae9ff7faa",
@@ -127,15 +127,6 @@
     }
   ],
   "decision_fixture_refs": {
-    "d025_snapshot_compatibility": {
-      "fixture_envelope": {
-        "artifact_id": "d025_compatibility_fixture_reference",
-        "normalized_relative_path": "contracts/validation/d025-compatibility-fixture-reference.envelope.json",
-        "digest": "d2cc6a0a88cd89fac5e407306ae41b03747fba7a7a78c745398a8aea96dfe780"
-      },
-      "compatible_exact_case_id": "compatible_exact_full_ceiling",
-      "executor_unavailable_case_id": "executor_unavailable_read_only_explicit_fork"
-    },
     "d026_request_admission_ordering": {
       "artifact_id": "d026_request_admission_ordering_fixture",
       "normalized_relative_path": "contracts/remote/d026-request-admission-ordering.fixture.json",

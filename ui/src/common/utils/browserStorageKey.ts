@@ -33,6 +33,20 @@ export type BrowserStoragePersistence = Pick<Storage, 'getItem' | 'setItem' | 'r
 const KEY_ROOT = 'nomifun';
 let storageGeneration: string | null = null;
 let provisionalStorageGeneration: string | null = null;
+let agentDataGeneration: number | null = null;
+
+/** Initialize only from the authenticated current backend's canonical schema. */
+export function initializeAgentBrowserStorageGeneration(value: unknown): void {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new TypeError('Agent data generation must be a positive integer from system info');
+  }
+  agentDataGeneration = value as number;
+}
+
+function agentGenerationSegment(): string {
+  if (agentDataGeneration === null) throw new Error('Agent browser storage generation has not been initialized');
+  return encodeSegment(`agent-data:${agentDataGeneration}`);
+}
 
 /**
  * Sets the identity of the currently mounted backend dataset.
@@ -157,6 +171,18 @@ export function browserStorageGenerationKey(feature: BrowserStorageFeature): str
   ].join('|');
 }
 
+/** Agent drafts and launch state also expire at an Agent-only clean cut. */
+export function agentBrowserStorageGenerationKey(feature: BrowserStorageFeature): string {
+  return `${browserStorageGenerationKey(feature)}|${agentGenerationSegment()}`;
+}
+
+const AGENT_ENTITIES = new Set<BrowserStorageEntityKind>([
+  'conversation', 'agent-session', 'agent-preset', 'agent', 'preset', 'preset-tag',
+  'resolved-snapshot', 'message', 'remote-binding', 'execution', 'execution-participant',
+  'execution-step', 'execution-attempt', 'execution-template', 'execution-template-participant',
+  'conversation-artifact', 'persisted-artifact', 'creation-task', 'channel-session',
+]);
+
 function encodeSegment(value: string): string {
   return `${value.length}:${value}`;
 }
@@ -179,14 +205,16 @@ export function browserStorageKey(
   entityId: string
 ): string {
   const generation = getBrowserStorageGeneration();
-  return [
+  const segments = [
     KEY_ROOT,
     `v${BROWSER_STORAGE_SCHEMA_VERSION}`,
     encodeSegment(generation),
     encodeSegment(feature),
     encodeSegment(entityKind),
     encodeSegment(String(entityId)),
-  ].join('|');
+  ];
+  if (AGENT_ENTITIES.has(entityKind) || feature === 'companion-turn-delivery') segments.push(agentGenerationSegment());
+  return segments.join('|');
 }
 
 export function sessionStorageKey(feature: BrowserStorageFeature, target: SessionTarget): string {

@@ -37,7 +37,7 @@
 ## 当前实施入口
 
 Agent Capability Platform v2 的当前文档入口是
-[`../specs/2026-08-28-agent-capability-platform-v2/README.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/README.zh.md)，
+[Agent Session 当前架构](../architecture/agent-session.zh.md)，
 当前任务状态以
-[`../specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md)
+[Agent Session 当前架构](../architecture/agent-session.zh.md)
 为准。

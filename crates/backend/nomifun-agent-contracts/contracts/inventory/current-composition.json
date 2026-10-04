@@ -1,19 +1,18 @@
 {
   "schema_version": "2.0.0",
-  "inventory_id": "car.in-process-engine-composition.v2",
+  "inventory_id": "canonical-agent-composition",
   "evidence_kind": "source_inventory_not_execution_evidence",
-  "historical_inventory_ref": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/inventory/current-composition.json",
-  "status_source": "docs/specs/2026-09-06-coding-agent-runtime-internalization/STATUS.zh.md",
+  "status_source": "docs/architecture/agent-session.zh.md",
   "roots": [
     {
       "owner": "NomiCoreApplication",
       "path": "crates/backend/nomifun-app/src/bootstrap/nomi_core.rs",
-      "responsibility": "Compose the shared product host; accept source-integrated Engine registrations before assembly freezes."
+      "responsibility": "Compose the one official Nomi Runtime and canonical Session owner before admission opens."
     },
     {
       "owner": "CanonicalAgentSessionOwner",
       "path": "crates/backend/nomifun-conversation/src/canonical_session_owner.rs",
-      "responsibility": "Expose the product-facing command/query facade over the sole generation-5 AgentSession Store; no Conversation rows, Message rows, or second Session authority remain."
+      "responsibility": "Expose the product-facing command/query facade over the sole current canonical AgentSession Store; no Conversation rows, Message rows, or second Session authority remain."
     },
     {
       "owner": "AgentSessionStore",
@@ -46,14 +45,6 @@
       "responsibility": "Keep shared domain adapters independent from the deleted external Wrapper."
     }
   ],
-  "retired_sources": [
-    "nomifun-agent-platform",
-    "nomifun-codex-runtime",
-    "retired parallel Agent-root coordinator and external Wrapper assembly",
-    "RuntimeStartTurnBrokerBridge",
-    "external executor hello/command/release wire contracts"
-  ],
-  "retirement_status": "source_removed_unvalidated",
   "preserved_contracts": [
     "Kernel authority",
     "persisted snapshot and checkpoint compatibility",

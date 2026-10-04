@@ -9,12 +9,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = realpathSync(fileURLToPath(new URL('../../', import.meta.url)));
 const manifestPath = 'docs/specs/2026-09-25-agent-reliability/handoff-manifest.json';
-const roots = new Set(['Cargo.toml', 'Cargo.lock', 'package.json', 'README.md', 'README.zh-CN.md', 'scripts/scripts.json', 'ui/src/common/protocolBindings/TurnStopReason.ts']);
+const roots = new Set(['AGENTS.md', 'Cargo.toml', 'Cargo.lock', 'package.json', 'README.md', 'README.zh-CN.md', 'scripts/scripts.json', 'ui/test/setup-dom.ts']);
 const crates = new Set([
   'nomifun-agent-contracts', 'nomifun-agent-domain-wave5', 'nomifun-agent-runtime',
   'nomifun-agent-session', 'nomifun-ai-agent', 'nomifun-app', 'nomifun-chat-model-broker',
   'nomifun-db', 'nomifun-engine-core', 'nomifun-model-invoke',
-  'nomifun-channel',
+  'nomifun-channel', 'nomifun-conversation', 'nomifun-api-types', 'nomifun-system', 'nomifun-companion',
 ]);
 
 function allowed(path) {
@@ -22,6 +22,11 @@ function allowed(path) {
     || path.split('/').some((part) => !part || part === '.' || part === '..')
     || path.includes(':') || path === manifestPath) return false;
   if (roots.has(path)) return true;
+  if (path.startsWith('ui/src/')) return /\.(?:ts|tsx|css|json)$/.test(path);
+  if (path.startsWith('docs/architecture/')) return /\.md$/.test(path);
+  if (path === 'docs/reviews/2026-10-04-agent-session-clean-cut.zh.md') return true;
+  if (/^scripts\/(?:check-agent-session-boundary|check-uarc-boundary|check-agent-vocabulary|check-unified-plugin-boundary|gate-agent-v2)\.mjs$/.test(path)) return true;
+  if (/^scripts\/validation\/(?:agent-architecture-(?:inventory|manifest)|retired-agent-capability-ids)\.json$/.test(path)) return true;
   if (path.startsWith('docs/specs/2026-09-25-agent-reliability/')) return /\.md$/.test(path);
   if (/^scripts\/validation\/(agent-reliability-[\w.-]+|probe-stepfun-tool-schema(?:\.test)?|run-nomi-core-live-provider-smoke)\.mjs$/.test(path)) return true;
   const parts = path.split('/');
@@ -64,7 +69,7 @@ function writeManifest() {
     purpose: 'source-transfer-integrity-only-not-test-evidence',
     generated_at: new Date().toISOString(),
     base_commit: git(['rev-parse', 'HEAD']).trim(),
-    test_status: 'deferred-for-staged-validation-see-DEVELOPMENT-HANDOFF.zh.md',
+    test_status: 'not-asserted-by-source-transfer-manifest',
     files: paths.map(describe),
   };
   const output = withinRoot(resolve(root, manifestPath));

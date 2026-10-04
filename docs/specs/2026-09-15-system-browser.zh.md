@@ -3,7 +3,7 @@
 > **能力身份已被 2026-09-16 统一能力重构方案取代。** 已登录 Chrome 仍可作为受控 Provider，
 > 但不再是与内嵌 Browser 并列的独立 Agent Capability；两者共享 `browser` Module 的 Action
 > 授权，由 Resource Binding 选择 Provider。本文保留连接、授权、隔离和平台实现证据。
-> 新目标见 [Agent 能力模型重构 §7](2026-09-16-agent-capability-product-redesign.zh.md)“Browser 产品模型纠正”。
+> 新目标见 [Agent Session 当前架构](../architecture/agent-session.zh.md)“Browser 产品模型纠正”。
 
 状态：WINDOWS IMPLEMENTED AND TEMPORARY-CHROME CONFORMANCE VERIFIED / PERSONAL DATA NOT ACCESSED。
 

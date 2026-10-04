@@ -94,18 +94,6 @@ const EXPECTED_CORE_TABLES = [
   'plugins',
 ];
 
-const HISTORICAL_PLUGIN_DOCS = [
-  'docs/specs/2026-08-28-agent-capability-platform-v2/02-capability-catalog-and-agent-presets.zh.md',
-  'docs/specs/2026-08-28-agent-capability-platform-v2/03-target-architecture.zh.md',
-  'docs/specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md',
-  'docs/specs/2026-09-06-coding-agent-runtime-internalization/README.zh.md',
-  'docs/specs/2026-09-06-coding-agent-runtime-internalization/CODING-EXTENSIONS-2026-09-13.zh.md',
-  'docs/reviews/audit-progress.zh.md',
-  'docs/reviews/2026-09-12-runtime-protocol.zh.md',
-  'docs/reviews/2026-09-12-cleanup-proof.zh.md',
-  'docs/reviews/2026-09-15-agent-session-view-retirement.zh.md',
-];
-
 const normalize = (path) => path.replaceAll('\\', '/');
 
 function workspacePaths() {
@@ -195,13 +183,6 @@ export function auditUnifiedPluginBoundary(paths = workspacePaths()) {
     }
   }
 
-  for (const path of HISTORICAL_PLUGIN_DOCS) {
-    const source = readFileSync(resolve(ROOT, path), 'utf8');
-    if (!/(?:归档边界|Plugin 退役边界|Plugin 条款已由 Unified Plugin Core 取代)/.test(source)) {
-      failures.push(`historical Plugin document is not explicitly archived: ${path}`);
-    }
-  }
-
   const baselinePath = resolve(ROOT, 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql');
   if (!existsSync(baselinePath)) failures.push('missing canonical database baseline');
   else {
@@ -249,7 +230,7 @@ export function auditUnifiedPluginBoundary(paths = workspacePaths()) {
     failures.push('retired CandidateTestReceiptId still exists');
   }
   const agentStoreSchema = readFileSync(
-    resolve(ROOT, 'crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql'),
+    resolve(ROOT, 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql'),
     'utf8',
   );
   if (/idx_agent_presets_ui_plugin|ui_binding\.selection\.plugin_id/.test(agentStoreSchema)) {

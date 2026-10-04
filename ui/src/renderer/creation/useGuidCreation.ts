@@ -15,9 +15,7 @@ import { useGenerationModel } from './useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from './submission';
 import { submitCreation } from './client';
 import type { CreationMode } from './types';
-import { readLegacyCreationDraft, acknowledgeLegacyCreationDraft } from './legacyDraftImport';
-import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
 export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }) {
   // Generation admission is fully frozen by the Creative Studio Agent and its
@@ -32,9 +30,6 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
   const [loading, setLoading] = useState(false);
   const sending = useRef(false);
   const pendingSession = useRef<ConversationId | null>(null);
-  const latest = useRef({ input, creation });
-  latest.current = { input, creation };
-  const importing = useRef<string | null>(null);
   const isCreative = agent.selection.kind === 'template' && agent.selection.templateKey === 'creative-studio.default';
   const selectMode = useCallback((mode: CreationMode) => {
     agent.setSelection({ kind: 'template', templateKey: 'creative-studio.default' });
@@ -61,24 +56,6 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       void navigate({ pathname: location.pathname, search: params.toString(), hash: location.hash }, { replace: true, state: location.state });
     }
   }, [location.key, location.search]);
-  useEffect(() => {
-    const mode = creation.draft.mode;
-    if (!mode || mode === 'music' || input.trim() || importing.current === mode) return;
-    const legacy = readLegacyCreationDraft(mode);
-    if (!legacy) return;
-    importing.current = mode;
-    void Promise.all(legacy.referenceAssetIds.map(id => creativeAssetClient.get(id))).then(assets => {
-      if (latest.current.input.trim() || latest.current.creation.draft.mode !== mode) return;
-      const previousDraft = latest.current.creation.draft;
-      const parameters = legacy.workbenchKind === 'image'
-        ? { quality: legacy.parameters.quality, width: legacy.parameters.width, height: legacy.parameters.height, aspect: legacy.parameters.aspectRatio, count: legacy.parameters.count }
-        : { aspect: legacy.parameters.aspect, seconds: Number(legacy.parameters.duration), resolution: legacy.parameters.resolution, count: legacy.parameters.taskCount };
-      const imported = { ...previousDraft, pendingPrompt: legacy.prompt, models: { ...previousDraft.models, [mode]: legacy.model }, parameters: { ...previousDraft.parameters, [mode]: parameters }, references: assets.map(asset => ({ asset_id: asset.id, kind: asset.kind, title: asset.title, role: 'reference' as const, url: asset.thumbnailUrl || asset.originalUrl })) };
-      sessionStorage.setItem(creationDraftStorageKey('guid'), JSON.stringify(imported));
-      latest.current.creation.update(() => imported);
-      acknowledgeLegacyCreationDraft(mode, legacy.source);
-    }).catch(error => Message.warning(`旧草稿保留，导入失败：${error instanceof Error ? error.message : String(error)}`)).finally(() => { importing.current = null; });
-  }, [creation.draft.mode]);
   const send = useCallback(async () => {
     if (sending.current) return;
     if (!model.ready) { Message.error('请选择可用的生成模型'); return; }
@@ -91,7 +68,7 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       if (resources.missingKinds.length) throw new Error('创意工坊所需资源尚未就绪，请刷新后重试');
       const preset = await prepareOfficialAgent(template, '创意工坊');
       const request = buildCreationRequest(creation.draft, input, preset.preset_id, files, model.selected);
-      const pendingSessionKey = browserStorageGenerationKey('creation-guid-pending-session');
+      const pendingSessionKey = agentBrowserStorageGenerationKey('creation-guid-pending-session');
       if (!pendingSession.current) {
         const stored = sessionStorage.getItem(pendingSessionKey);
         if (stored) pendingSession.current = parseConversationId(stored);

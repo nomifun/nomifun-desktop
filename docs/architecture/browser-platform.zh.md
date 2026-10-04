@@ -3,7 +3,7 @@
 > 当前源码仍按 Conversation BrowserWorkspace 工作；该产品模型已进入整改计划。
 > 目标是删除“会话浏览器”专属入口，把底层 Workspace 作为任意获授权 AgentSession 的
 > Browser Resource，并将 attached Chrome 收敛为同一 `browser` Module 的 Provider。
-> 实施范围见 [能力模型重构 §7](../specs/2026-09-16-agent-capability-product-redesign.zh.md)“Browser 产品模型纠正”。
+> 实施范围见 [Agent Session 当前架构](agent-session.zh.md)“Browser 产品模型纠正”。
 
 状态：Browser Workspace v2 实施中。[批准的设计](../specs/2026-09-13-browser-workspace-v2.zh.md)定义完整目标，[实施记录](../specs/2026-09-13-browser-workspace-v2-progress.zh.md)列出已取得的证据与剩余工作。
 
@@ -194,8 +194,7 @@ Provider 变化不会静默重选。调用方是 Knowledge service principal，�
 Headless 渲染最多同时运行 2 个任务，总在途/排队上限 16，排队最多 30 秒，以支持既有的四来源并发抓取。
 取消保留任务所有权直至 join；清理失败或执行 panic 在释放并发槽前关闭准入、取消其余任务，保留失败记录供 shutdown 报错。
 启动恢复任务在 Kernel/Provider 装配完成后开始。测试引擎已验证实际 Knowledge 快照落库；真实 Chrome 已验证私网来源被阻断且
-不回退 HTTP，但公网渲染的正向验收仍受本机 Fake-IP DNS 阻断。Fresh-v4 AgentSession 没有 ConversationId，不能伪造
-BrowserWorkspaceKey；该宿主不声明 Browser owner，相关 Role binding 不加载或持久化，调用明确返回 RoleProviderNotBound。
+不回退 HTTP，但公网渲染的正向验收仍受本机 Fake-IP DNS 阻断。
 
 ## 系统浏览器运行期间的绘制状态
 
@@ -238,8 +237,6 @@ managed adapter 的 vault 写回与策略装饰钩子、应用到浏览器的持
 已物理移除。低层 BrowserTool 的保存协调器、启动导入、导航后写回和 bootstrap 密钥入口也已删除，浏览器引擎不再导出
 共享 vault 模块或读写/路径 API。旧磁盘往返和独立引擎内存身份导入测试也已退役；系统浏览器直接附着既有会话，
 不依赖这些导入功能。新原生交互与匿名后台链路不从旧共享身份仓库导入，运行时没有旧 Profile reader 或迁移路径。
-
-Fresh-v4 的失效 Browser RoleRuntime、独立 Hub 构造、旧 Profile/Cookie 读取与续租代码已删除。该宿主在接入通过验收的 v2 owner 前明确保持 Browser host ports 未配置；这不影响 Nomi 会话的原生 Workspace 接入，也不代表后台 Headless 替代已完成。
 
 无生产调用的知识库 Hub 渲染适配器 `BrowserFetcher` 及其专属租约/队列测试已物理删除，不再从 Agent crate 导出。
 HTML→Markdown 转换由现有 Knowledge `rendered_content_to_page` 负责，转换、截断和缺少 Provider 不回退 HTTP 的行为

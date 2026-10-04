@@ -107,7 +107,7 @@ Tauri 外壳采用**反向 IPC**：是 SPA 调用操作系统外壳，绝不反�
 
 ## 会话回合 —— 进程内的 nomi 引擎
 
-会话只有一个引擎：内置的 `nomi`。接缝 crate `nomifun-ai-agent` 持有 Agent 工厂和 `AgentRuntimeRegistry`；后者按 Conversation 缓存唯一的进程内 runtime handle。一个回合完整地在后端进程内执行，没有需要握手、也没有需要移交会话的子 agent CLI。
+会话只有一个引擎：内置的 `nomi`。接缝 crate `nomifun-ai-agent` 持有 Agent 工厂和 `runtime session handles`；后者按 Conversation 缓存唯一的进程内 runtime handle。一个回合完整地在后端进程内执行，没有需要握手、也没有需要移交会话的子 agent CLI。
 
 进程内的流量如下：
 
@@ -115,7 +115,7 @@ Tauri 外壳采用**反向 IPC**：是 SPA 调用操作系统外壳，绝不反�
 SPA ──HTTP/WS──▶ nomifun-conversation ──▶ nomifun-ai-agent::AgentService
                                                       │
                                                       ▼
-                                          nomi-agent engine turn
+                                          nomifun-agent-runtime turn
                                             （providers / tools / MCP）
                                                       │
                                                       ▼
@@ -159,7 +159,7 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 
 ## Canonical Remote 入口
 
-Fresh-v4 host 对同一个安装令牌认证的 Remote contract 提供两种投影：
+canonical Nomi host 对同一个安装令牌认证的 Remote contract 提供两种投影：
 
 - `/mcp`：Streamable-HTTP MCP，精确包含 `open`、`turn`、`observe`、`cancel`；
 - `/api/remote/*`：同四操作的 REST 形式。

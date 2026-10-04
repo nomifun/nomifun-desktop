@@ -129,13 +129,12 @@ impl EngineSessionHost {
         let digest = digest_payload(&state).map_err(error)?;
         let metadata = AgentEngineEvent::ExecutionCheckpointSaved { step: 0, revision: 1, digest };
         let sequence = prefix.len() as u64 + 1;
-        let payload = serde_json::json!({"runtime_binding_id":format!("nomi:{}",lease.session_id().as_ref()),"producer_seq":sequence,"event":metadata});
+        let payload = serde_json::json!({"producer_seq":sequence,"event":metadata});
         bytes += serde_json::to_vec(&payload).map_err(error)?.len() + 256;
         let identity = format!("runtime-progress:{}:{}:{sequence}", lease.session_id().as_ref(), lease.operation_id().as_ref());
         let saved = store.save_native_checkpoint(&SessionEventAppend {
             agent_session_id: lease.session_id().clone(), event_id: identity.clone().into(), producer_id: "runtime_supervisor".into(),
-            idempotency_key: identity.into(), runtime_binding_id: None, runtime_producer_seq: None,
-            semantic_event: SemanticSessionEventDraft { kind: SessionEventKind("runtime/progress-recorded".into()), kind_version: 1,
+            idempotency_key: identity.into(), semantic_event: SemanticSessionEventDraft { kind: SessionEventKind("runtime/progress-recorded".into()), kind_version: 1,
                 correlation_id: lease.operation_id().as_ref().into(), causation_event_id: Some(receipt.root_message_id().into()),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)) },
         }, nomifun_agent_session::NativeCheckpointWrite {

@@ -5,10 +5,7 @@ identifier and schema refactor. It is not an active development task entry.
 The authoritative working documents are currently written in Chinese; start
 with [`README.zh.md`](README.zh.md).
 
-For current Agent Capability Platform v2 work, read the
-[document entry](../specs/2026-08-28-agent-capability-platform-v2/README.zh.md)
-and the
-[current closure TODO](../specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md).
+For current Current Agent Session behavior is documented in [Agent Session architecture](../architecture/agent-session.md).
 
 This is not the repository-wide contributor standard. For current mandatory
 rules, read [Data and Identifier Standards](../contributing/data-and-identifier-standards.md)

@@ -14,7 +14,6 @@ type ConversationListItem = Pick<TChatConversation, 'execution_step_id' | 'extra
 export const isOrdinaryWorkConversation = (conversation: ConversationListItem): boolean => {
   const extra = conversation.extra as
     | {
-        is_health_check?: boolean;
         companion_session?: boolean;
         companion_id?: CompanionId;
         channel_platform?: string;
@@ -30,7 +29,6 @@ export const isOrdinaryWorkConversation = (conversation: ConversationListItem): 
   const isSshHostConversation = !!extra?.ssh_host_id;
   const isExecutionAttemptTranscript = Boolean(conversation.execution_step_id);
   return (
-    extra?.is_health_check !== true &&
     !isCompanionConversation &&
     !isSshHostConversation &&
     !isExecutionAttemptTranscript

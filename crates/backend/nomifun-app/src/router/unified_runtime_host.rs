@@ -256,15 +256,14 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_plugin_bindings.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_effect_scope.rs"),
                     include_str!("../../../nomifun-agent-session/src/store.rs"),
+                    include_str!("../../../nomifun-agent-session/src/context_snapshot.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_checkpoint.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_execution.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_pause.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_effect_reconciliation.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_recovery.rs"),
                     include_str!("../../../nomifun-agent-session/src/projector.rs"),
-                    include_str!("../../../nomifun-db/migrations/005_native_execution_checkpoints.sql"),
-                    include_str!("../../../nomifun-db/migrations/006_native_execution_leases.sql"),
-                    include_str!("../../../nomifun-db/migrations/007_native_pause_resume.sql"),
+                    include_str!("../../../nomifun-db/migrations/001_canonical_baseline.sql"),
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
@@ -818,19 +817,13 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let history_budget = (8 * 1024 * 1024usize)
             .checked_sub(bytes.saturating_add(handoff_bytes))
             .ok_or_else(|| error("current message and Agent handoff exceed the host context budget"))?;
-        let replayed = super::unified_runtime_history::load(
+        let history = super::unified_runtime_history::load(
             self.session_host.read_history(&admitted, 32).await?,
             self.session_host.as_ref(), &admitted,
+            history_budget,
         ).await?;
-        let rows = if replayed.is_none() && history_budget > 0 {
-            self.session_host.read_message_history(&admitted, 4096, history_budget).await?.messages
-        } else { Vec::new() };
-        let mut messages = super::unified_runtime_history::project_messages(rows, history_budget)?;
-        let mut prior_task = None;
-        if let Some(replayed) = replayed {
-            messages = replayed.messages;
-            prior_task = replayed.prior_task;
-        }
+        let mut messages = history.messages;
+        let prior_task = history.prior_task;
         if let Some(text) = handoff_context {
             messages.push(ChatMessage {
                 role: ChatRole::Assistant,
@@ -1335,6 +1328,7 @@ mod build_identity_tests {
             "../../../nomifun-file/src/workspace_write.rs",
             "../../../nomifun-file/src/vcs_stage.rs",
             "../../../nomifun-agent-session/src/store.rs",
+            "../../../nomifun-agent-session/src/context_snapshot.rs",
             "../../../nomifun-agent-contracts/src/native_execution.rs",
             "../../../nomifun-agent-runtime/src/checkpoint.rs",
             "../../../nomifun-agent-runtime/src/recovery.rs",
@@ -1349,9 +1343,7 @@ mod build_identity_tests {
             "../../../nomifun-agent-session/src/native_effect_reconciliation.rs",
             "../../../nomifun-agent-session/src/native_recovery.rs",
             "../../../nomifun-agent-session/src/projector.rs",
-            "../../../nomifun-db/migrations/005_native_execution_checkpoints.sql",
-            "../../../nomifun-db/migrations/006_native_execution_leases.sql",
-            "../../../nomifun-db/migrations/007_native_pause_resume.sql",
+            "../../../nomifun-db/migrations/001_canonical_baseline.sql",
         ] {
             assert!(
                 source.contains(&format!("include_str!(\"{required}\")")),

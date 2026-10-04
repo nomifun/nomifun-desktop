@@ -1,6 +1,6 @@
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import { uuidv7 } from '@/common/utils';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 import { readGuidDefaultAgentSelection } from '../guid/hooks/agentSelectionUtils';
 import type { NavigateFunction } from 'react-router-dom';
 
@@ -17,7 +17,7 @@ export interface PluginLaunchIntent {
   template?: 'agent.before_tool';
 }
 const memory = new Map<string, PluginLaunchIntent>();
-const key = (token: string) => browserStorageGenerationKey(`plugin-launch:${token}`);
+const key = (token: string) => agentBrowserStorageGenerationKey(`plugin-launch:${token}`);
 const ttl = 24 * 60 * 60 * 1000;
 
 export function readPluginLaunchIntent(token: string, owner: string): PluginLaunchIntent | null {

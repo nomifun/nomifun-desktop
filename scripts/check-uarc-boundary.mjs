@@ -18,9 +18,9 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const INVENTORY_PATH =
-  'docs/specs/2026-09-16-unified-agent-overhaul/UARC-001-INVENTORY.json';
+  'scripts/validation/agent-architecture-inventory.json';
 const MANIFEST_PATH =
-  'docs/specs/2026-09-16-unified-agent-overhaul/TASK-MANIFEST.json';
+  'scripts/validation/agent-architecture-manifest.json';
 const SOURCE_EXTENSIONS = new Set(['.json', '.rs', '.sql', '.toml', '.ts', '.tsx']);
 
 const normalizePath = (path) => path.replaceAll('\\', '/');
@@ -346,7 +346,7 @@ function scanGroup(group, productionPaths) {
 
 function validateInventorySchema(inventory, manifest) {
   invariant(inventory.schema_version === '1.0.0', 'inventory schema_version must be 1.0.0');
-  invariant(inventory.inventory_kind === 'uarc-baseline-inventory', 'unexpected inventory_kind');
+  invariant(inventory.inventory_kind === 'agent-architecture-inventory', 'unexpected inventory_kind');
   invariant(inventory.source?.barrier_commit, 'source.barrier_commit is required');
   invariant(Array.isArray(inventory.legacy_reachability), 'legacy_reachability must be an array');
   invariant(Array.isArray(inventory.storage_ownership), 'storage_ownership must be an array');
@@ -394,7 +394,7 @@ function validateInventorySchema(inventory, manifest) {
 
 function validateManifestSchema(manifest) {
   invariant(manifest.schema_version === '1.0.0', 'manifest schema_version must be 1.0.0');
-  invariant(manifest.manifest_kind === 'uarc-task-manifest', 'unexpected manifest_kind');
+  invariant(manifest.manifest_kind === 'agent-architecture-manifest', 'unexpected manifest_kind');
   invariant(Array.isArray(manifest.states) && manifest.states.includes('complete'),
     'manifest states must include complete');
   invariant(Array.isArray(manifest.platform_states), 'manifest platform_states must be an array');

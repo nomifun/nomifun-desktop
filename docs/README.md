@@ -28,7 +28,7 @@ override the current architecture or contributor standards.
 | Community expectations | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) |
 | Report a security issue | [../SECURITY.md](../SECURITY.md) |
 | Release notes and release process | [../CHANGELOG.md](../CHANGELOG.md), [../RELEASING.md](../RELEASING.md) |
-| Continue Agent Capability Platform v2 work | [Document entry](specs/2026-08-28-agent-capability-platform-v2/README.zh.md), [current closure TODO](specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md) |
+| Understand Agent sessions, logs and content | [Current Agent Session architecture](architecture/agent-session.md) |
 
 ## Current Documentation
 

@@ -1,8 +1,4 @@
--- UARC generation-5 canonical database baseline.
--- Fresh installations create only the final schema; historical Agent tables
--- are authenticated and removed by the one-time Rust cutover for existing data.
-
-PRAGMA foreign_keys = ON;
+-- Canonical generation 7: one complete fresh schema and native Agent history contract.
 
 CREATE TABLE agent_bindings (
     target_kind TEXT NOT NULL,
@@ -15,9 +11,13 @@ CREATE TABLE agent_deletion_audits (
     audit_id TEXT PRIMARY KEY CHECK (trim(audit_id) <> ''),
     agent_session_id TEXT NOT NULL,
     owner_ref_json TEXT NOT NULL CHECK (json_valid(owner_ref_json)),
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('effect', 'resource_cleanup')),
+    target_kind TEXT NOT NULL CHECK (
+        target_kind IN ('effect', 'resource_cleanup')
+    ),
     target_id TEXT NOT NULL CHECK (trim(target_id) <> ''),
-    authority TEXT NOT NULL CHECK (authority = 'installation_owner_manual_override'),
+    authority TEXT NOT NULL CHECK (
+        authority = 'installation_owner_manual_override'
+    ),
     risk_acknowledged INTEGER NOT NULL CHECK (risk_acknowledged = 1),
     reason_digest TEXT NOT NULL CHECK (length(reason_digest) = 64),
     recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0),
@@ -37,9 +37,15 @@ CREATE TABLE agent_effects (
     resource_binding_id TEXT,
     resource_key TEXT,
     input_digest TEXT NOT NULL CHECK (length(input_digest) = 64),
-    strategy TEXT NOT NULL CHECK (strategy IN ('managed_effect', 'external_uncertain_effect')),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'returned', 'rejected', 'cancelled', 'unknown')),
-    bounded_observation_json TEXT CHECK (bounded_observation_json IS NULL OR json_valid(bounded_observation_json)),
+    strategy TEXT NOT NULL CHECK (
+        strategy IN ('managed_effect', 'external_uncertain_effect')
+    ),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'returned', 'rejected', 'cancelled', 'unknown')
+    ),
+    bounded_observation_json TEXT CHECK (
+        bounded_observation_json IS NULL OR json_valid(bounded_observation_json)
+    ),
     started_event_id TEXT NOT NULL,
     terminal_event_id TEXT,
     created_at INTEGER NOT NULL,
@@ -48,15 +54,15 @@ CREATE TABLE agent_effects (
         ON UPDATE RESTRICT ON DELETE CASCADE,
     FOREIGN KEY (session_id, turn_id) REFERENCES agent_turns (session_id, turn_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
-    FOREIGN KEY (session_id, resource_binding_id) REFERENCES agent_session_resources (session_id, binding_id)
+    FOREIGN KEY (session_id, resource_binding_id)
+        REFERENCES agent_session_resources (session_id, binding_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY (started_event_id) REFERENCES agent_events (event_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY (terminal_event_id) REFERENCES agent_events (event_id)
         ON UPDATE RESTRICT ON DELETE SET NULL,
     CHECK (
-        (state = 'pending' AND terminal_event_id IS NULL AND settled_at IS NULL)
-        OR
+        (state = 'pending' AND terminal_event_id IS NULL AND settled_at IS NULL) OR
         (state <> 'pending' AND terminal_event_id IS NOT NULL AND settled_at IS NOT NULL)
     )
 ) STRICT;
@@ -67,8 +73,6 @@ CREATE TABLE agent_events (
     event_id TEXT NOT NULL UNIQUE,
     producer_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
-    runtime_binding_id TEXT,
-    runtime_producer_seq INTEGER CHECK (runtime_producer_seq IS NULL OR runtime_producer_seq >= 1),
     kind TEXT NOT NULL,
     kind_version INTEGER NOT NULL CHECK (kind_version >= 1),
     correlation_id TEXT NOT NULL,
@@ -77,7 +81,6 @@ CREATE TABLE agent_events (
     payload_id TEXT,
     PRIMARY KEY (session_id, seq),
     UNIQUE (producer_id, idempotency_key),
-    UNIQUE (runtime_binding_id, runtime_producer_seq),
     CHECK (inline_json IS NULL OR payload_id IS NULL),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
         ON UPDATE RESTRICT ON DELETE CASCADE,
@@ -479,8 +482,7 @@ CREATE TABLE agent_payloads (
     body BLOB,
     object_ref TEXT,
     CHECK (
-        (storage_kind = 'inline' AND body IS NOT NULL AND object_ref IS NULL)
-        OR
+        (storage_kind = 'inline' AND body IS NOT NULL AND object_ref IS NULL) OR
         (storage_kind = 'object' AND body IS NULL AND object_ref = 'objects/' || digest)
     ),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
@@ -541,18 +543,10 @@ CREATE TABLE agent_session_heads (
     status TEXT NOT NULL,
     active_turn_id TEXT,
     active_set_generation INTEGER NOT NULL CHECK (active_set_generation >= 0),
-    runtime_checkpoint_locator TEXT,
-    runtime_checkpoint_digest TEXT CHECK (runtime_checkpoint_digest IS NULL OR length(runtime_checkpoint_digest) = 64),
-    runtime_bound_event_id TEXT,
-    runtime_protocol_version TEXT,
-    snapshot_digest TEXT CHECK (snapshot_digest IS NULL OR length(snapshot_digest) = 64),
-    checkpoint_through_seq INTEGER CHECK (checkpoint_through_seq IS NULL OR checkpoint_through_seq >= 0),
     last_seq INTEGER NOT NULL CHECK (last_seq >= 0),
     unread_count INTEGER NOT NULL CHECK (unread_count >= 0),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
-        ON UPDATE RESTRICT ON DELETE CASCADE,
-    FOREIGN KEY (runtime_bound_event_id) REFERENCES agent_events (event_id)
-        ON UPDATE RESTRICT ON DELETE SET NULL
+        ON UPDATE RESTRICT ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE agent_session_resources (
@@ -561,9 +555,13 @@ CREATE TABLE agent_session_resources (
     resource_kind TEXT NOT NULL CHECK (trim(resource_kind) <> ''),
     resource_id TEXT NOT NULL CHECK (trim(resource_id) <> ''),
     owner_id TEXT NOT NULL CHECK (trim(owner_id) <> ''),
-    operations_json TEXT NOT NULL CHECK (json_valid(operations_json) AND json_type(operations_json) = 'array'),
+    operations_json TEXT NOT NULL CHECK (
+        json_valid(operations_json) AND json_type(operations_json) = 'array'
+    ),
     connection_config_ref TEXT,
-    typed_parameters_json TEXT NOT NULL CHECK (json_valid(typed_parameters_json) AND json_type(typed_parameters_json) = 'object'),
+    typed_parameters_json TEXT NOT NULL CHECK (
+        json_valid(typed_parameters_json) AND json_type(typed_parameters_json) = 'object'
+    ),
     binding_digest TEXT NOT NULL CHECK (length(binding_digest) = 64),
     PRIMARY KEY (session_id, binding_id),
     FOREIGN KEY (session_id) REFERENCES agent_sessions (agent_session_id)
@@ -584,7 +582,13 @@ CREATE TABLE agent_sessions (
     fork_base_payload_id TEXT,
     next_seq INTEGER,
     created_at INTEGER,
-    deleted_at INTEGER,
+    deleted_at INTEGER, reasoning_effort TEXT
+    CHECK (
+        reasoning_effort IS NULL OR (
+            state <> 'deleted' AND
+            reasoning_effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+        )
+    ),
     CHECK (
         (state IN ('live', 'deleting') AND agent_binding_json IS NOT NULL
             AND archived IS NOT NULL AND pinned IS NOT NULL
@@ -608,7 +612,9 @@ CREATE TABLE agent_turns (
     idempotency_key TEXT NOT NULL CHECK (trim(idempotency_key) <> ''),
     source_message_id TEXT,
     admission_json TEXT CHECK (admission_json IS NULL OR json_valid(admission_json)),
-    state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'completed', 'failed', 'cancelled', 'interrupted')),
+    state TEXT NOT NULL CHECK (
+        state IN ('accepted', 'running', 'completed', 'failed', 'cancelled', 'interrupted')
+    ),
     result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
     error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json)),
     started_event_id TEXT,
@@ -616,6 +622,18 @@ CREATE TABLE agent_turns (
     accepted_at INTEGER NOT NULL,
     started_at INTEGER,
     finished_at INTEGER,
+    native_checkpoint_json TEXT CHECK (native_checkpoint_json IS NULL OR json_valid(native_checkpoint_json)),
+    native_checkpoint_digest TEXT CHECK (native_checkpoint_digest IS NULL OR length(native_checkpoint_digest) = 64),
+    native_checkpoint_revision INTEGER NOT NULL DEFAULT 0 CHECK (native_checkpoint_revision >= 0),
+    native_checkpoint_seq INTEGER CHECK (native_checkpoint_seq IS NULL OR native_checkpoint_seq >= 0),
+    execution_fence INTEGER NOT NULL DEFAULT 0 CHECK (execution_fence >= 0),
+    execution_owner TEXT,
+    execution_generation INTEGER NOT NULL DEFAULT 0 CHECK (execution_generation >= 0),
+    execution_lease_until INTEGER NOT NULL DEFAULT 0 CHECK (execution_lease_until >= 0),
+    native_pause_revision INTEGER NOT NULL DEFAULT 0 CHECK (native_pause_revision >= 0),
+    native_pause_json TEXT CHECK (native_pause_json IS NULL OR json_valid(native_pause_json)),
+    native_pause_requested_json TEXT CHECK (native_pause_requested_json IS NULL OR json_valid(native_pause_requested_json)),
+    native_budget_json TEXT CHECK (native_budget_json IS NULL OR json_valid(native_budget_json)),
     PRIMARY KEY (session_id, turn_id),
     UNIQUE (session_id, operation_id),
     UNIQUE (session_id, idempotency_key),
@@ -626,8 +644,7 @@ CREATE TABLE agent_turns (
     FOREIGN KEY (terminal_event_id) REFERENCES agent_events (event_id)
         ON UPDATE RESTRICT ON DELETE SET NULL,
     CHECK (
-        (state IN ('accepted', 'running') AND terminal_event_id IS NULL AND finished_at IS NULL)
-        OR
+        (state IN ('accepted', 'running') AND terminal_event_id IS NULL AND finished_at IS NULL) OR
         (state IN ('completed', 'failed', 'cancelled', 'interrupted')
             AND terminal_event_id IS NOT NULL AND finished_at IS NOT NULL)
     )
@@ -2469,85 +2486,6 @@ CREATE TABLE plugin_artifacts (
     CHECK (has_ui = 1 OR has_service = 1)
 );
 
-CREATE TABLE plugins (
-    plugin_id                    TEXT PRIMARY KEY CHECK (
-        length(plugin_id) = 36
-        AND lower(plugin_id) = plugin_id
-        AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id                TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
-        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    package_id                   TEXT NOT NULL CHECK (
-        length(package_id) BETWEEN 1 AND 160
-        AND package_id = lower(package_id)
-        AND package_id NOT GLOB '*[^a-z0-9._-]*'
-    ),
-    name                         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
-    description                  TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 4096),
-    enabled                      INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    trashed_at_ms                INTEGER CHECK (trashed_at_ms IS NULL OR trashed_at_ms > 0),
-    active_artifact_digest       TEXT NOT NULL REFERENCES plugin_artifacts(artifact_digest) ON DELETE RESTRICT,
-    previous_artifact_digest     TEXT REFERENCES plugin_artifacts(artifact_digest) ON DELETE RESTRICT,
-    data_generation              TEXT NOT NULL CHECK (
-        length(data_generation) = 36
-        AND lower(data_generation) = data_generation
-        AND data_generation GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    previous_data_generation     TEXT CHECK (
-        previous_data_generation IS NULL OR (
-            length(previous_data_generation) = 36
-            AND lower(previous_data_generation) = previous_data_generation
-            AND previous_data_generation GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(previous_data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    revision                     INTEGER NOT NULL CHECK (revision > 0),
-    config_json                  TEXT NOT NULL CHECK (json_valid(config_json) AND json_type(config_json) = 'object'),
-    last_error                   TEXT,
-    created_at_ms                INTEGER NOT NULL CHECK (created_at_ms > 0),
-    updated_at_ms                INTEGER NOT NULL CHECK (updated_at_ms > 0),
-    UNIQUE (owner_user_id, package_id),
-    CHECK (previous_artifact_digest IS NULL OR previous_artifact_digest <> active_artifact_digest),
-    CHECK (previous_data_generation IS NULL OR previous_data_generation <> data_generation),
-    CHECK (trashed_at_ms IS NULL OR enabled = 0)
-);
-
-CREATE TABLE plugin_drafts (
-    draft_id            TEXT PRIMARY KEY CHECK (
-        length(draft_id) = 36
-        AND lower(draft_id) = draft_id
-        AND draft_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(draft_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
-        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    plugin_id           TEXT REFERENCES plugins(plugin_id) ON DELETE SET NULL CHECK (
-        plugin_id IS NULL OR (
-            length(plugin_id) = 36 AND lower(plugin_id) = plugin_id
-            AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    base_revision       INTEGER CHECK (base_revision IS NULL OR base_revision > 0),
-    revision            INTEGER NOT NULL CHECK (revision > 0),
-    name                TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
-    workspace_path      TEXT NOT NULL CHECK (length(workspace_path) BETWEEN 1 AND 4096),
-    messages_json       TEXT NOT NULL CHECK (json_valid(messages_json) AND json_type(messages_json) = 'array'),
-    status              TEXT NOT NULL CHECK (status IN ('ready', 'generating', 'failed')),
-    last_error          TEXT,
-    created_at_ms       INTEGER NOT NULL CHECK (created_at_ms > 0),
-    updated_at_ms       INTEGER NOT NULL CHECK (updated_at_ms > 0),
-    CHECK ((plugin_id IS NULL AND base_revision IS NULL) OR plugin_id IS NOT NULL)
-);
-
 CREATE TABLE plugin_credential_bindings (
     owner_user_id   TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
         length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
@@ -2570,6 +2508,53 @@ CREATE TABLE plugin_credential_bindings (
     ),
     updated_at_ms   INTEGER NOT NULL CHECK (updated_at_ms > 0),
     PRIMARY KEY (owner_user_id, plugin_id, slot)
+);
+
+CREATE TABLE "plugin_drafts" (
+    draft_id TEXT PRIMARY KEY CHECK (
+        length(draft_id) = 36 AND lower(draft_id) = draft_id
+        AND draft_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(draft_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    owner_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
+        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
+        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    plugin_id TEXT REFERENCES plugins(plugin_id) ON DELETE SET NULL CHECK (
+        plugin_id IS NULL OR (length(plugin_id) = 36 AND lower(plugin_id) = plugin_id
+            AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*')
+    ),
+    base_revision INTEGER CHECK (base_revision IS NULL OR base_revision > 0),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
+    workspace_path TEXT NOT NULL CHECK (length(workspace_path) BETWEEN 1 AND 4096),
+    imported_context_json TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(imported_context_json) AND json_type(imported_context_json) = 'object'),
+    status TEXT NOT NULL CHECK (status IN ('ready', 'failed')),
+    last_error TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms > 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    source_conversation_id TEXT CHECK (
+        source_conversation_id IS NULL OR (length(source_conversation_id) = 36
+            AND lower(source_conversation_id) = source_conversation_id
+            AND source_conversation_id GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(source_conversation_id, '-', '') NOT GLOB '*[^0-9a-f]*')
+    ),
+    source_message_id TEXT CHECK (
+        source_message_id IS NULL OR (length(source_message_id) = 36
+            AND lower(source_message_id) = source_message_id
+            AND source_message_id GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(source_message_id, '-', '') NOT GLOB '*[^0-9a-f]*')
+    ),
+    source_operation_key TEXT CHECK (source_operation_key IS NULL OR length(source_operation_key) BETWEEN 1 AND 512),
+    source_request_digest TEXT CHECK (source_request_digest IS NULL OR (
+        length(source_request_digest) = 64 AND source_request_digest NOT GLOB '*[^0-9a-f]*'
+    )),
+    verification_json TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(verification_json) AND json_type(verification_json) = 'object'),
+    CHECK ((plugin_id IS NULL AND base_revision IS NULL) OR plugin_id IS NOT NULL)
 );
 
 CREATE TABLE plugin_grants (
@@ -2703,9 +2688,69 @@ CREATE TABLE plugin_mutations (
     expected_revision       INTEGER CHECK (expected_revision IS NULL OR expected_revision > 0),
     error                   TEXT,
     created_at_ms           INTEGER NOT NULL CHECK (created_at_ms > 0),
-    updated_at_ms           INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    updated_at_ms           INTEGER NOT NULL CHECK (updated_at_ms > 0), draft_association_json TEXT CHECK (
+    draft_association_json IS NULL OR (
+        json_valid(draft_association_json) AND json_type(draft_association_json) = 'object'
+        AND json_type(draft_association_json, '$.draft_id') IS 'text'
+        AND length(json_extract(draft_association_json, '$.draft_id')) = 36
+        AND lower(json_extract(draft_association_json, '$.draft_id')) = json_extract(draft_association_json, '$.draft_id')
+        AND json_extract(draft_association_json, '$.draft_id') GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(json_extract(draft_association_json, '$.draft_id'), '-', '') NOT GLOB '*[^0-9a-f]*'
+        AND json_type(draft_association_json, '$.expected_revision') IS 'integer'
+        AND json_extract(draft_association_json, '$.expected_revision') > 0
+    )
+),
     UNIQUE (owner_user_id, plugin_id)
 );
+
+CREATE TABLE plugins (
+    plugin_id                    TEXT PRIMARY KEY CHECK (
+        length(plugin_id) = 36
+        AND lower(plugin_id) = plugin_id
+        AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    owner_user_id                TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
+        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
+        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    package_id                   TEXT NOT NULL CHECK (
+        length(package_id) BETWEEN 1 AND 160
+        AND package_id = lower(package_id)
+        AND package_id NOT GLOB '*[^a-z0-9._-]*'
+    ),
+    name                         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
+    description                  TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 4096),
+    enabled                      INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    trashed_at_ms                INTEGER CHECK (trashed_at_ms IS NULL OR trashed_at_ms > 0),
+    active_artifact_digest       TEXT NOT NULL REFERENCES plugin_artifacts(artifact_digest) ON DELETE RESTRICT,
+    previous_artifact_digest     TEXT REFERENCES plugin_artifacts(artifact_digest) ON DELETE RESTRICT,
+    data_generation              TEXT NOT NULL CHECK (
+        length(data_generation) = 36
+        AND lower(data_generation) = data_generation
+        AND data_generation GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    previous_data_generation     TEXT CHECK (
+        previous_data_generation IS NULL OR (
+            length(previous_data_generation) = 36
+            AND lower(previous_data_generation) = previous_data_generation
+            AND previous_data_generation GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(previous_data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    revision                     INTEGER NOT NULL CHECK (revision > 0),
+    config_json                  TEXT NOT NULL CHECK (json_valid(config_json) AND json_type(config_json) = 'object'),
+    last_error                   TEXT,
+    created_at_ms                INTEGER NOT NULL CHECK (created_at_ms > 0),
+    updated_at_ms                INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    UNIQUE (owner_user_id, package_id),
+    CHECK (previous_artifact_digest IS NULL OR previous_artifact_digest <> active_artifact_digest),
+    CHECK (previous_data_generation IS NULL OR previous_data_generation <> data_generation),
+    CHECK (trashed_at_ms IS NULL OR enabled = 0)
+);
+
 CREATE TABLE product_agent_selections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_user_id TEXT NOT NULL CHECK (
@@ -2763,7 +2808,8 @@ CREATE TABLE "provider_model_capabilities" (
     health_checked_at              INTEGER,
     created_at                     INTEGER NOT NULL,
     updated_at                     INTEGER NOT NULL, output_limit INTEGER
-    CHECK (output_limit IS NULL OR output_limit > 0),
+    CHECK (output_limit IS NULL OR output_limit > 0), compaction_threshold_pct INTEGER
+    CHECK (compaction_threshold_pct IS NULL OR compaction_threshold_pct BETWEEN 50 AND 95),
     UNIQUE (provider_id, model, task),
     CHECK (task IN (
         'chat', 'realtime_conversation', 'image_generation', 'image_edit',
@@ -2962,7 +3008,7 @@ CREATE TABLE requirements (
 
 CREATE TABLE schema_metadata (
     singleton_key TEXT PRIMARY KEY CHECK (singleton_key = 'canonical'),
-    data_generation INTEGER NOT NULL CHECK (data_generation = 6),
+    data_generation INTEGER NOT NULL CHECK (data_generation = 7),
     root_instance_id TEXT NOT NULL,
     migration_head INTEGER NOT NULL CHECK (migration_head >= 1),
     seed_manifest_digest TEXT NOT NULL CHECK (length(seed_manifest_digest) = 64),
@@ -3303,130 +3349,239 @@ CREATE TABLE workshop_assets (
         )
     ));
 
-INSERT INTO "agent_metadata" (id, agent_id, icon, name, name_i18n, description, description_i18n, backend, agent_type, agent_source, agent_source_info, source_key, enabled, command, args, env, native_skills_dirs, behavior_policy, yolo_id, agent_capabilities, auth_methods, config_options, available_modes, available_models, available_commands, sort_order, created_at, updated_at) VALUES (20, '0190f5fe-7c00-7a00-8000-000000000114', '/api/assets/logos/brand/nomi.svg', 'Nomi', NULL, NULL, NULL, NULL, 'nomi', 'internal', '{}', 'agent_builtin_nomi', 1, NULL, '[]', '[]', '[".nomi/skills"]', '{}', 'yolo', NULL, NULL, NULL, NULL, NULL, NULL, 100, 1789741863859, 1789741863859);
-
-INSERT INTO "requirement_display_sequence" (id, singleton_key, last_no) VALUES (1, 'requirements', 0);
-
-INSERT INTO "schema_metadata" (singleton_key, data_generation, root_instance_id, migration_head, seed_manifest_digest, canonical_schema_manifest_digest, projection_schema_version) VALUES ('canonical', 6, 'main-sqlite-agent-store', 1, '9cafc5df531a50ad4b63000a21938588d7ebada7010ff20a80449687f089fa1b', '00056199f1d6f9d9f79f285f3b32924993b8f39efd50ba9af0cc07c622adb65f', 1);
-
-INSERT INTO "system_settings" (id, singleton_key, language, notification_enabled, cron_notification_enabled, command_queue_enabled, save_upload_to_workspace, updated_at) VALUES (1, 'system', 'en-US', 1, 0, 0, 0, 1789741863859);
-
--- Physical indexes are workload access paths, not a mirror of every logical reference.
--- Keep each table within five total SQLite B-trees (including UNIQUE auto-indexes);
--- the runtime schema contract below rejects budget regressions.
 CREATE INDEX idx_agent_bindings_preset ON agent_bindings(json_extract(agent_binding_json, '$.preset_revision_ref.preset_id'));
+
 CREATE INDEX idx_agent_deletion_audits_session_time ON agent_deletion_audits(agent_session_id, recorded_at, audit_id);
+
 CREATE UNIQUE INDEX idx_agent_effects_resource_unsettled ON agent_effects(owner_domain, resource_key) WHERE state IN ('pending', 'unknown') AND resource_key IS NOT NULL;
+
 CREATE INDEX idx_agent_effects_session_turn ON agent_effects(session_id, turn_id, created_at);
+
 CREATE INDEX idx_agent_events_correlation ON agent_events(session_id, correlation_id, seq);
+
 CREATE INDEX idx_agent_executions_owner_updated ON agent_executions(user_id, updated_at DESC);
+
 CREATE INDEX idx_agent_executions_status_lease ON agent_executions(status, lease_expires_at);
+
 CREATE INDEX idx_agent_messages_sequence ON agent_messages(session_id, first_seq, last_seq);
+
 CREATE INDEX idx_agent_payloads_session ON agent_payloads(session_id);
+
 CREATE INDEX idx_agent_presets_owner_active ON agent_presets(json_extract(owner_ref_json, '$.user_id'), preset_id) WHERE retired_at_ms IS NULL;
+
 CREATE INDEX idx_agent_runtime_snapshots_revision ON agent_runtime_snapshots( json_extract(content_json, '$.preset_revision_ref.preset_id'), json_extract(content_json, '$.preset_revision_ref.revision'), json_extract(content_json, '$.preset_revision_ref.revision_digest') );
+
 CREATE INDEX idx_agent_session_resources_session_kind ON agent_session_resources(session_id, resource_kind, binding_id);
+
 CREATE INDEX idx_agent_sessions_owner_state ON agent_sessions(owner_ref_json, state);
+
 CREATE INDEX idx_agent_turns_session_state ON agent_turns(session_id, state, accepted_at);
+
 CREATE INDEX idx_channel_inbound_receipts_channel_plugin_id ON channel_inbound_receipts(channel_plugin_id);
+
 CREATE INDEX idx_channel_pairing_codes_channel_plugin_id ON channel_pairing_codes(channel_plugin_id);
+
 CREATE INDEX idx_channel_plugins_companion_id ON channel_plugins(companion_id);
+
 CREATE INDEX idx_channel_session_bindings_user_id ON channel_session_bindings(channel_user_id);
+
 CREATE INDEX idx_channel_sessions_channel_plugin_id ON channel_sessions(channel_plugin_id);
+
 CREATE INDEX idx_channel_sessions_channel_user_id ON channel_sessions(channel_user_id);
+
 CREATE INDEX idx_channel_sessions_conversation_id ON channel_sessions(conversation_id);
+
 CREATE INDEX idx_channel_users_channel_plugin_id ON channel_users(channel_plugin_id);
+
 CREATE INDEX idx_conversation_execution_links_conversation_id ON conversation_execution_links(conversation_id, relation, active, updated_at DESC);
+
 CREATE INDEX idx_conversation_execution_links_execution_id ON conversation_execution_links(execution_id, relation, active, step_id, attempt_id);
+
 CREATE INDEX idx_cpp_conversation_state ON channel_pending_prompts(conversation_id, state, id);
+
 CREATE INDEX idx_cpp_plugin_chat ON channel_pending_prompts(channel_plugin_id, chat_id, state);
+
 CREATE INDEX idx_cpp_session ON channel_pending_prompts(channel_session_id);
+
 CREATE INDEX idx_creation_tasks_conversation ON creation_tasks(conversation_id, submitted_at, creation_task_id) WHERE conversation_id IS NOT NULL;
+
 CREATE INDEX idx_creation_tasks_live ON creation_tasks(submitted_at, creation_task_id) WHERE status IN ('queued', 'running') AND deleted_at IS NULL;
+
 CREATE INDEX idx_creation_tasks_live_project ON creation_tasks(project_id, submitted_at, creation_task_id) WHERE status IN ('queued', 'running') AND node_id IS NOT NULL;
+
 CREATE INDEX idx_creation_tasks_live_provider ON creation_tasks(provider_id, model, submitted_at, creation_task_id) WHERE status IN ('queued', 'running');
+
 CREATE INDEX idx_creative_agent_proposal_receipts_project ON creative_studio_agent_proposal_receipts(project_id);
+
 CREATE UNIQUE INDEX idx_creative_agent_sessions_conversation ON creative_studio_agent_sessions(conversation_id);
+
 CREATE INDEX idx_creative_agent_sessions_project ON creative_studio_agent_sessions(project_id);
+
 CREATE UNIQUE INDEX idx_creative_agent_sessions_session ON creative_studio_agent_sessions(session_id);
+
 CREATE INDEX idx_creative_studio_projects_updated ON creative_studio_projects(updated_at DESC, id DESC);
+
 CREATE INDEX idx_creative_studio_templates_category ON creative_studio_templates(category, updated_at DESC, id DESC);
+
 CREATE INDEX idx_creative_studio_templates_updated ON creative_studio_templates(updated_at DESC, id DESC);
+
 CREATE INDEX idx_creative_template_runs_status ON creative_studio_template_runs(status, updated_at DESC, id DESC);
+
 CREATE INDEX idx_creative_template_runs_template_id ON creative_studio_template_runs(template_id, updated_at DESC, id DESC);
+
 CREATE INDEX idx_cron_job_runs_cron_job_id ON cron_job_runs(cron_job_id);
+
 CREATE INDEX idx_cron_jobs_next_run ON cron_jobs(enabled, next_run_at);
+
 CREATE INDEX idx_cron_jobs_owner_conversation ON cron_jobs(user_id, conversation_id, created_at);
+
 CREATE INDEX idx_cron_run_reservations_cron_job_id ON cron_run_reservations(cron_job_id, status, created_at_ms, id);
+
 CREATE INDEX idx_cron_run_reservations_projection ON cron_run_reservations(status, job_projection_state, created_at_ms);
+
 CREATE INDEX idx_cs_agent_capability_receipts_agent ON cs_agent_capability_receipts(cs_agent_id, capability_id, created_at DESC);
+
 CREATE INDEX idx_cs_audit_agent_time ON cs_audit_events(cs_agent_id, created_at);
+
 CREATE INDEX idx_cs_channel_bindings_agent ON cs_channel_bindings(cs_agent_id);
+
 CREATE UNIQUE INDEX idx_cs_channel_bindings_plugin ON cs_channel_bindings(channel_plugin_id);
+
 CREATE INDEX idx_cs_dialogues_agent ON cs_dialogues(cs_agent_id, last_activity);
+
 CREATE INDEX idx_cs_dialogues_channel_user ON cs_dialogues(channel_user_id);
+
 CREATE UNIQUE INDEX idx_cs_dialogues_identity ON cs_dialogues(channel_plugin_id, channel_user_id, chat_id);
+
 CREATE INDEX idx_cs_handoffs_agent_status ON cs_handoffs(cs_agent_id, status, created_at DESC);
+
 CREATE INDEX idx_cs_messages_dialogue ON cs_messages(cs_dialogue_id, id);
+
 CREATE INDEX idx_cs_notes_agent ON cs_notes(cs_agent_id);
+
 CREATE INDEX idx_execution_events_unpublished ON agent_execution_events(execution_id, sequence) WHERE published_at IS NULL;
+
 CREATE INDEX idx_execution_participants_execution_id ON agent_execution_participants(execution_id, retired_in_revision, participant_id);
+
 CREATE INDEX idx_execution_participants_provider_id ON agent_execution_participants(provider_id, retired_in_revision, execution_id);
+
 CREATE INDEX idx_execution_steps_execution_id ON agent_execution_steps(execution_id, superseded_in_revision, step_id);
+
 CREATE INDEX idx_execution_templates_user_id ON agent_execution_templates(user_id);
+
 CREATE INDEX idx_knowledge_binding_bases_knowledge_base_id ON knowledge_binding_bases(knowledge_base_id);
+
 CREATE INDEX idx_knowledge_entries_knowledge_base_id ON knowledge_entries(knowledge_base_id, parent_entry_id, deleted_at, name);
+
 CREATE INDEX idx_knowledge_entry_provenance_source_item_id ON knowledge_entry_provenance(knowledge_source_item_id, relationship, knowledge_entry_id);
+
 CREATE INDEX idx_knowledge_source_items_knowledge_source_id ON knowledge_source_items(knowledge_source_id, state, ordinal, knowledge_source_item_id);
+
 CREATE INDEX idx_knowledge_sources_default_parent_entry_id ON knowledge_sources(default_parent_entry_id) WHERE default_parent_entry_id IS NOT NULL;
+
 CREATE INDEX idx_knowledge_sources_knowledge_base_id ON knowledge_sources(knowledge_base_id, state, created_at, knowledge_source_id);
+
 CREATE INDEX idx_knowledge_tree_operations_knowledge_base_id ON knowledge_tree_operations(knowledge_base_id, created_at, operation_id);
+
 CREATE INDEX idx_knowledge_tree_operations_pending_events ON knowledge_tree_operations(event_status, committed_at, operation_id) WHERE event_status = 'pending';
+
 CREATE INDEX idx_knowledge_tree_operations_recovery ON knowledge_tree_operations(state, created_at, operation_id) WHERE state <> 'committed';
+
 CREATE INDEX idx_nomi_remote_sessions_remote_binding_id ON nomi_remote_sessions(remote_binding_id);
+
 CREATE INDEX idx_nomi_wave1_memory_receipts_agent_session_id ON nomi_wave1_memory_action_receipts(agent_session_id);
+
 CREATE INDEX idx_nomi_wave1_memory_receipts_orphan_sweep ON nomi_wave1_memory_action_receipts(updated_at, agent_session_id);
+
 CREATE INDEX idx_nomi_wave4_receipts_agent_session_id ON nomi_wave4_action_receipts(agent_session_id);
+
 CREATE INDEX idx_nomi_wave4_receipts_orphan_sweep ON nomi_wave4_action_receipts(updated_at, agent_session_id);
+
 CREATE INDEX idx_plugin_artifacts_package_id ON plugin_artifacts(package_id, version, created_at_ms DESC);
-CREATE INDEX idx_plugins_owner_updated ON plugins(owner_user_id, updated_at_ms DESC, plugin_id);
-CREATE INDEX idx_plugins_active_artifact ON plugins(active_artifact_digest);
-CREATE INDEX idx_plugin_drafts_owner_updated ON plugin_drafts(owner_user_id, updated_at_ms DESC, draft_id);
+
 CREATE INDEX idx_plugin_credential_bindings_credential_id ON plugin_credential_bindings(credential_id);
+
+CREATE INDEX idx_plugin_drafts_owner_updated ON plugin_drafts(owner_user_id, updated_at_ms DESC, draft_id);
+
+CREATE INDEX idx_plugin_drafts_source_conversation ON plugin_drafts(owner_user_id, source_conversation_id);
+
+CREATE UNIQUE INDEX idx_plugin_drafts_source_operation
+    ON plugin_drafts(owner_user_id, source_operation_key) WHERE source_operation_key IS NOT NULL;
+
 CREATE INDEX idx_plugin_grants_permission ON plugin_grants(owner_user_id, permission, granted);
-CREATE INDEX idx_plugin_mutations_recovery ON plugin_mutations(phase, created_at_ms, mutation_id);CREATE INDEX idx_provider_model_capabilities_task ON provider_model_capabilities(task, provider_id, model);
+
+CREATE INDEX idx_plugin_mutations_recovery ON plugin_mutations(phase, created_at_ms, mutation_id);
+
+CREATE INDEX idx_plugins_active_artifact ON plugins(active_artifact_digest);
+
+CREATE INDEX idx_plugins_owner_updated ON plugins(owner_user_id, updated_at_ms DESC, plugin_id);
+
+CREATE INDEX idx_provider_model_capabilities_task ON provider_model_capabilities(task, provider_id, model);
+
 CREATE INDEX idx_requirement_pre_effect_abandon_owner_conversation ON requirement_pre_effect_abandon_guards(owner_conversation_id) WHERE owner_conversation_id IS NOT NULL;
+
 CREATE INDEX idx_requirement_pre_effect_abandon_owner_terminal ON requirement_pre_effect_abandon_guards(owner_terminal_id) WHERE owner_terminal_id IS NOT NULL;
+
 CREATE UNIQUE INDEX idx_requirement_pre_effect_abandon_requirement_id ON requirement_pre_effect_abandon_guards(requirement_id);
+
 CREATE INDEX idx_requirement_tags_paused_requirement_id ON requirement_tags(paused_requirement_id);
+
 CREATE INDEX idx_requirements_tag_order ON requirements(tag, sort_seq);
+
 CREATE INDEX idx_ssh_hosts_user_id ON ssh_hosts(user_id);
+
 CREATE INDEX idx_tag_settings_webhook_id ON tag_settings(webhook_id);
+
 CREATE INDEX idx_template_participants_provider_id ON agent_execution_template_participants(provider_id, template_id);
+
 CREATE INDEX idx_template_participants_template_id ON agent_execution_template_participants(template_id, template_participant_id);
+
 CREATE INDEX idx_terminal_sessions_user_id ON terminal_sessions(user_id);
+
 CREATE INDEX idx_workshop_assets_live_library_kind ON workshop_assets(in_library, kind, updated_at DESC, id DESC) WHERE deleted_at IS NULL;
+
 CREATE INDEX idx_workshop_assets_live_updated ON workshop_assets(updated_at DESC, id DESC) WHERE deleted_at IS NULL;
+
 CREATE INDEX idx_workshop_assets_pending_content_deletion ON workshop_assets(deleted_at, asset_id) WHERE deleted_at IS NOT NULL AND content_deleted_at IS NULL;
+
 CREATE UNIQUE INDEX uq_channel_plugins_type_bot_key ON channel_plugins(type, bot_key) WHERE bot_key IS NOT NULL;
+
 CREATE UNIQUE INDEX uq_cron_run_reservations_scheduled_occurrence ON cron_run_reservations(cron_job_id, schedule_revision, planned_at_ms) WHERE trigger_kind = 'scheduled';
+
 CREATE UNIQUE INDEX uq_cs_handoffs_active_dialogue ON cs_handoffs(cs_dialogue_id) WHERE status IN ('pending', 'claimed');
+
 CREATE UNIQUE INDEX uq_knowledge_bindings_target_companion_id ON knowledge_bindings(target_companion_id) WHERE target_kind = 'companion' AND target_companion_id IS NOT NULL;
+
 CREATE UNIQUE INDEX uq_knowledge_bindings_target_conversation_id ON knowledge_bindings(target_conversation_id) WHERE target_kind = 'conversation' AND target_conversation_id IS NOT NULL;
+
 CREATE UNIQUE INDEX uq_knowledge_bindings_target_terminal_id ON knowledge_bindings(target_terminal_id) WHERE target_kind = 'terminal' AND target_terminal_id IS NOT NULL;
+
 CREATE UNIQUE INDEX uq_knowledge_bindings_target_workpath ON knowledge_bindings(target_workpath) WHERE target_kind = 'workpath' AND target_workpath IS NOT NULL;
+
 CREATE UNIQUE INDEX uq_knowledge_entries_live_portable_path ON knowledge_entries(knowledge_base_id, portable_rel_path) WHERE deleted_at IS NULL;
+
 CREATE UNIQUE INDEX uq_knowledge_entries_live_rel_path ON knowledge_entries(knowledge_base_id, rel_path) WHERE deleted_at IS NULL;
+
 CREATE UNIQUE INDEX uq_knowledge_entry_provenance_entry_id ON knowledge_entry_provenance(knowledge_entry_id);
+
 CREATE UNIQUE INDEX uq_knowledge_entry_provenance_managed_source_item ON knowledge_entry_provenance(knowledge_source_item_id) WHERE relationship = 'managed';
+
 CREATE UNIQUE INDEX uq_knowledge_source_items_live_normalized_url ON knowledge_source_items(knowledge_source_id, normalized_url) WHERE state <> 'removed';
+
 CREATE UNIQUE INDEX uq_knowledge_source_items_live_ordinal ON knowledge_source_items(knowledge_source_id, ordinal) WHERE state <> 'removed';
+
 CREATE UNIQUE INDEX uq_knowledge_sources_live_kind ON knowledge_sources(knowledge_base_id, kind) WHERE state <> 'removed';
+
 CREATE UNIQUE INDEX uq_requirements_active_conversation_owner ON requirements(owner_conversation_id) WHERE status = 'in_progress' AND owner_conversation_id IS NOT NULL;
+
 CREATE UNIQUE INDEX uq_requirements_active_terminal_owner ON requirements(owner_terminal_id) WHERE status = 'in_progress' AND owner_terminal_id IS NOT NULL;
+
 CREATE UNIQUE INDEX uq_terminal_turn_admissions_exact_claim ON terminal_turn_admissions( terminal_id, pty_epoch, requirement_id, claim_generation );
+
 CREATE UNIQUE INDEX uq_terminal_turn_admissions_requirement_claim ON terminal_turn_admissions(requirement_id, claim_generation);
+
 CREATE UNIQUE INDEX uq_workshop_assets_prompt_library_identity ON workshop_assets( json_extract(origin, '$.prompt_library_source'), json_extract(origin, '$.prompt_library_id') ) WHERE kind = 'text' AND deleted_at IS NULL AND json_type(origin, '$.prompt_library_source') = 'text' AND json_type(origin, '$.prompt_library_id') = 'text';
+
 CREATE TRIGGER channel_inbound_receipts_identity_immutable
 BEFORE UPDATE OF
     operation_key,
@@ -3632,39 +3787,26 @@ BEGIN
     SELECT RAISE(ABORT, 'Plugin Artifacts are immutable');
 END;
 
-CREATE TRIGGER trg_plugins_identity_immutable
-BEFORE UPDATE ON plugins
-WHEN NEW.plugin_id IS NOT OLD.plugin_id
-  OR NEW.owner_user_id IS NOT OLD.owner_user_id
-  OR NEW.package_id IS NOT OLD.package_id
-  OR NEW.created_at_ms IS NOT OLD.created_at_ms
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin identity is immutable');
-END;
-
-CREATE TRIGGER trg_plugins_revision_monotonic
-BEFORE UPDATE ON plugins
-WHEN NEW.revision <> OLD.revision + 1
-  OR NEW.updated_at_ms < OLD.updated_at_ms
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin revision must advance exactly once');
-END;
-
-CREATE TRIGGER trg_plugin_drafts_identity_immutable
-BEFORE UPDATE ON plugin_drafts
-WHEN NEW.draft_id IS NOT OLD.draft_id
-  OR NEW.owner_user_id IS NOT OLD.owner_user_id
-  OR NEW.created_at_ms IS NOT OLD.created_at_ms
-  OR NEW.updated_at_ms < OLD.updated_at_ms
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin Draft identity is immutable and time is monotonic');
-END;
-
 CREATE TRIGGER trg_plugin_credential_bindings_updated_at_monotonic
 BEFORE UPDATE ON plugin_credential_bindings
 WHEN NEW.updated_at_ms < OLD.updated_at_ms
 BEGIN
     SELECT RAISE(ABORT, 'Plugin Credential binding time is monotonic');
+END;
+
+CREATE TRIGGER trg_plugin_drafts_clear_base_before_plugin_delete
+BEFORE DELETE ON plugins
+BEGIN
+    UPDATE plugin_drafts SET base_revision = NULL, revision = revision + 1 WHERE plugin_id = OLD.plugin_id;
+END;
+
+CREATE TRIGGER trg_plugin_drafts_identity_immutable
+BEFORE UPDATE ON plugin_drafts
+WHEN NEW.draft_id IS NOT OLD.draft_id OR NEW.owner_user_id IS NOT OLD.owner_user_id
+    OR NEW.created_at_ms IS NOT OLD.created_at_ms OR NEW.updated_at_ms < OLD.updated_at_ms
+    OR NEW.imported_context_json IS NOT OLD.imported_context_json
+BEGIN
+    SELECT RAISE(ABORT, 'Plugin Draft identity, imported history and time are immutable');
 END;
 
 CREATE TRIGGER trg_plugin_grants_artifact_guard
@@ -3708,6 +3850,25 @@ WHEN NEW.mutation_id IS NOT OLD.mutation_id
 BEGIN
     SELECT RAISE(ABORT, 'Plugin mutation identity is immutable and time is monotonic');
 END;
+
+CREATE TRIGGER trg_plugins_identity_immutable
+BEFORE UPDATE ON plugins
+WHEN NEW.plugin_id IS NOT OLD.plugin_id
+  OR NEW.owner_user_id IS NOT OLD.owner_user_id
+  OR NEW.package_id IS NOT OLD.package_id
+  OR NEW.created_at_ms IS NOT OLD.created_at_ms
+BEGIN
+    SELECT RAISE(ABORT, 'Plugin identity is immutable');
+END;
+
+CREATE TRIGGER trg_plugins_revision_monotonic
+BEFORE UPDATE ON plugins
+WHEN NEW.revision <> OLD.revision + 1
+  OR NEW.updated_at_ms < OLD.updated_at_ms
+BEGIN
+    SELECT RAISE(ABORT, 'Plugin revision must advance exactly once');
+END;
+
 CREATE TRIGGER trg_requirements_absorb_done_cancelled
 BEFORE UPDATE OF status ON requirements
 FOR EACH ROW
@@ -4372,3 +4533,9 @@ BEGIN
     WHERE json_extract(NEW.origin, '$.prompt_library_source') = 'preset'
       AND json_type(NEW.origin, '$.prompt_catalog_id') IS NOT NULL;
 END;
+
+INSERT INTO "agent_metadata" (id, agent_id, icon, name, name_i18n, description, description_i18n, backend, agent_type, agent_source, agent_source_info, source_key, enabled, command, args, env, native_skills_dirs, behavior_policy, yolo_id, agent_capabilities, auth_methods, config_options, available_modes, available_models, available_commands, sort_order, created_at, updated_at) VALUES (20, '0190f5fe-7c00-7a00-8000-000000000114', '/api/assets/logos/brand/nomi.svg', 'Nomi', NULL, NULL, NULL, NULL, 'nomi', 'internal', '{}', 'agent_builtin_nomi', 1, NULL, '[]', '[]', '[".nomi/skills"]', '{}', 'yolo', NULL, NULL, NULL, NULL, NULL, NULL, 100, 1789741863859, 1789741863859);
+
+INSERT INTO "requirement_display_sequence" (id, singleton_key, last_no) VALUES (1, 'requirements', 0);
+
+INSERT INTO "system_settings" (id, singleton_key, language, notification_enabled, cron_notification_enabled, command_queue_enabled, save_upload_to_workspace, updated_at) VALUES (1, 'system', 'en-US', 1, 0, 0, 0, 1789741863859);

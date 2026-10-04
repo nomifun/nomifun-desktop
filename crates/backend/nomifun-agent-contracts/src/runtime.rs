@@ -1,4 +1,4 @@
-//! Shared Kernel authority and persisted snapshot/checkpoint compatibility.
+//! Shared Kernel authority and persisted snapshot compatibility.
 //! The retired external executor's hello, command and native-action wire
 //! protocol is deliberately absent. RuntimeProfileKind below is a persisted
 //! snapshot compatibility tag, not the list of registered Engine families.
@@ -10,10 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::package::{CapabilityRef, PackageRef, SkillRef};
 use crate::preset::ResolvedSnapshotRef;
-use crate::session::{CheckpointDiscardReason, RuntimeCheckpointBinding};
 use crate::{
     ActionId, AgentSessionId, CanonicalErrorCode, CapabilityId, ConnectionConfigRef, DigestHex,
-    EventId, McpServerId, McpToolKey, ModelRouteId, PackageId, PrincipalRef, ResourceBindingId,
+    McpServerId, McpToolKey, ModelRouteId, PackageId, PrincipalRef, ResourceBindingId,
     RuntimeFeatureId, SkillId, TypedResourceBindings, VersionString,
 };
 
@@ -93,34 +92,6 @@ pub enum RuntimeAuthorityDecision {
         failed_check: RuntimeAuthorityCheckKind,
         error_code: CanonicalErrorCode,
     },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeCheckpointValidationInput {
-    pub checkpoint: RuntimeCheckpointBinding,
-    pub referenced_runtime_build_digest: DigestHex,
-    pub expected_runtime_bound_event_id: EventId,
-    pub expected_runtime_build_digest: DigestHex,
-    pub expected_protocol_version: VersionString,
-    pub expected_snapshot_ref: ResolvedSnapshotRef,
-    pub expected_through_seq: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum RuntimeCheckpointValidationResult {
-    ExactMatch,
-    Mismatch {
-        mismatches: Vec<CheckpointDiscardReason>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeCheckpointMismatchFixture {
-    pub input: RuntimeCheckpointValidationInput,
-    pub result: RuntimeCheckpointValidationResult,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

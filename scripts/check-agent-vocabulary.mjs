@@ -30,13 +30,6 @@ const SOURCE_EXTENSIONS = new Set([
 const RETIRED_TERM =
   /agent[-_ ]?cluster|\bfleet(?:s|[_-]?[a-z0-9]+)*\b|orch[_-]?(?:run|fleet|workspace)/i;
 
-function isDeletionManifest(path) {
-  return path.endsWith('.json') && [
-    'crates/backend/nomifun-agent-contracts/contracts/deletion/',
-    'crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/',
-  ].some((prefix) => path.startsWith(prefix));
-}
-
 // These exact implementation and wire identities previously exposed two
 // delegation stacks to configuration/model callers. Internal deployment
 // classes such as `LocalDelegateTool` remain valid; only the retired public
@@ -167,16 +160,6 @@ for (const path of workspacePaths()) {
 
 function invariant(condition, message) {
   if (!condition) violations.push(`architecture invariant: ${message}`);
-}
-
-invariant(isDeletionManifest('crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/domain-wave-3-creative-multimodal.json'),
-  'archived deletion manifests describe removed code, not live identities');
-for (const path of [
-  'crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/schemas.json',
-  'crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/active.rs',
-  'crates/backend/nomifun-app/src/deletion/active.json',
-]) {
-  invariant(!isDeletionManifest(path), `deletion exclusion is too broad: ${path}`);
 }
 
 for (const retiredSample of ['/api/fleets', 'fleet_members', 'FleetList']) {

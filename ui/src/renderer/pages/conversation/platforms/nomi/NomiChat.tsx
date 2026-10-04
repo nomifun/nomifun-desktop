@@ -85,7 +85,7 @@ const NomiChat: React.FC<{
   // companion's single session (which also absorbs every IM-channel turn and can
   // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
   const historyPaging = useMessageLstCache(conversation_id);
-  const turnActivity = useNomiMessage(conversation_id, { readOnly });
+  const turnActivity = useNomiMessage(conversation_id);
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });

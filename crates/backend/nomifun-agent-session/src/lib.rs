@@ -7,7 +7,8 @@
 
 #![forbid(unsafe_code)]
 
-mod checkpoint;
+mod snapshot_compatibility;
+mod context_snapshot;
 mod error;
 mod history_tool_projection;
 mod projector;
@@ -15,7 +16,8 @@ mod registry;
 mod store;
 mod types;
 
-pub use checkpoint::{evaluate_snapshot_compatibility, validate_checkpoint};
+pub use snapshot_compatibility::evaluate_snapshot_compatibility;
+pub use context_snapshot::{CanonicalContextMessage, CanonicalContextRole, ForkContextSnapshot, canonical_context_messages};
 pub use error::SessionStoreError;
 pub use store::{
     AgentSessionStore, MAX_EVENT_PAGE_SIZE, MAX_INLINE_JSON_BYTES, MAX_SESSION_PAYLOAD_BYTES,

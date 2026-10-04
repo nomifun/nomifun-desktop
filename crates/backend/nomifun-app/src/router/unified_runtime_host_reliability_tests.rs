@@ -462,7 +462,6 @@ async fn steering_cleanup_retry_cannot_acknowledge_completed_root_as_cancelled()
     store.append_turn_terminal(&SessionEventAppend {
         agent_session_id: fixture.host.options.conversation_id.clone().into(), event_id: completion_id,
         producer_id:"session_api".into(), idempotency_key:"fixture-completed-before-poll".into(),
-        runtime_binding_id:None, runtime_producer_seq:None,
         semantic_event:SemanticSessionEventDraft { kind:SessionEventKind("turn/completed".into()), kind_version:1,
             correlation_id:"cleanup-retry-turn".into(), causation_event_id:Some(started.event_id),
             payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"model_steps":0,"finish_reason":ChatFinishReason::Completed}))),

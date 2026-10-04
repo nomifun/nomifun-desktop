@@ -45,7 +45,7 @@ This document is the map. The sibling documents drill into the parts:
                         ┌─────────────────────────────────────┐
                         │  nomifun-app  (binary nomicore)     │
                         │  composition root · axum router     │
-                        │  Fresh-v4 host · AgentPlatform      │
+                        │  canonical Nomi host · AgentPlatform      │
                         │  /api · /ws · /mcp · /api/remote    │
                         └─────────────────────────────────────┘
                           │                       │
@@ -81,13 +81,13 @@ in the diagram. The trace below names the real types and files that participate.
    crates/backend/nomifun-app/src/router/  — assembled in create_router()
    middlewares: trace, body-limit, CORS, auth, CSRF, rate-limit, response wrapper
 4. Conversation service
-   crates/backend/nomifun-conversation/src/service.rs
+   crates/backend/nomifun-conversation/src/canonical_session_owner.rs
    persists the message, looks up the conversation's bound agent
 5. Agent seam
    crates/backend/nomifun-ai-agent  — the primary backend bridge to nomi-*
-   AgentRuntimeRegistry reuses this Conversation's in-process runtime
+   runtime session handles reuses this Conversation's in-process runtime
 6. Agent turn
-   nomi-agent  drives the engine: providers (anthropic/openai/bedrock/vertex),
+   nomifun-agent-runtime drives the engine: providers (anthropic/openai/bedrock/vertex),
    tools (bash/read/write/...), MCP servers, skills, plan/confirm/output sinks
    The built-in nomi agent is the only conversation engine; the turn runs
    in-process, with no child agent CLI to hand the conversation off to
@@ -162,10 +162,10 @@ The desktop also has an optional LAN WebUI listener controlled by Tauri commands
 from the loopback listener used by the desktop's own webview.
 
 The desktop and web binaries both select the coordinator-approved canonical
-host, call `FreshV4Host::compose`, and serve its router in-process. The web host
+host, call `NomiCoreApplication::compose`, and serve its router in-process. The web host
 adds the SPA fallback and first-run admin provisioning.
 
-The Fresh-v4 router exposes installation-token authenticated canonical Remote
+The canonical Nomi router exposes installation-token authenticated canonical Remote
 operations at `/mcp` and `/api/remote/*`. They are mounted by
-[`bootstrap/canonical_host.rs`](../../crates/backend/nomifun-app/src/bootstrap/canonical_host.rs)
+[`bootstrap/nomi_core.rs`](../../crates/backend/nomifun-app/src/bootstrap/nomi_core.rs)
 and use explicit AgentSession IDs rather than the legacy Gateway registry.

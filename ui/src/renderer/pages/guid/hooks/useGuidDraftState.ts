@@ -1,12 +1,12 @@
 import { useCallback, useRef, useState, type Dispatch, type SetStateAction } from 'react';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
 // Drafts belong to the renderer session, not to the lifetime of the welcome page.
 // Keep a memory fallback when browser storage is unavailable or full.
 const drafts = new Map<string, unknown>();
 
 export function useGuidDraftState<T>(field: string, initial: T | (() => T)): [T, Dispatch<SetStateAction<T>>] {
-  const key = browserStorageGenerationKey(`guid-draft:${field}`);
+  const key = agentBrowserStorageGenerationKey(`guid-draft:${field}`);
   const [value, setValue] = useState<T>(() => {
     if (drafts.has(key)) return drafts.get(key) as T;
     try {

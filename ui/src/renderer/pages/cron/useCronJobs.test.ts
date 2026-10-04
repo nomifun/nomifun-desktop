@@ -60,7 +60,7 @@ function fixture() {
   const refresh = spyOn(emitter, 'emit').mockReturnValue(false);
   const key = 'r78-cron-unread-fixture';
   const spies = [
-    spyOn(storageKeys, 'browserStorageGenerationKey').mockReturnValue(key),
+    spyOn(storageKeys, 'agentBrowserStorageGenerationKey').mockReturnValue(key),
     spyOn(ipcBridge.cron.listJobs, 'invoke').mockImplementation(lists.invoke),
     spyOn(ipcBridge.cron.listJobsByConversation, 'invoke').mockImplementation(lists.invoke),
     spyOn(ipcBridge.cron.listRuns, 'invoke').mockImplementation(runs.invoke),

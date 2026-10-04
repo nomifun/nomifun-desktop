@@ -46,38 +46,7 @@ pub struct ConfirmedDecisionContractDigestRef(pub DigestHex);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct D025FixtureEnvelopeReference {
-    pub fixture_envelope: LogicalArtifactRef,
-    pub compatible_exact_case_id: String,
-    pub executor_unavailable_case_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct D025FixtureCaseReference {
-    pub case_id: String,
-    pub expected_result_variant: String,
-}
-
-/// Reference-only payload for the Runtime-owned D-025 contract. The input and
-/// result types remain defined in `crate::runtime`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct D025FixtureContractReferencePayload {
-    pub schema_version: VersionString,
-    pub input_contract_type: String,
-    pub result_contract_type: String,
-    pub checkpoint_mismatch_fixture: LogicalArtifactRef,
-    pub required_cases: Vec<D025FixtureCaseReference>,
-}
-
-pub type D025FixtureContractReference =
-    ArtifactEnvelope<D025FixtureContractReferencePayload>;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct DecisionFixtureEnvelopeReferences {
-    pub d025_snapshot_compatibility: D025FixtureEnvelopeReference,
     pub d026_request_admission_ordering: LogicalArtifactRef,
     pub d026_validation_outcomes: LogicalArtifactRef,
     pub d027_terminal_drain: LogicalArtifactRef,

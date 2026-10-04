@@ -80,7 +80,7 @@ describe('Guid workbench Agent launch behavior', () => {
       configKeys.includes(
         "'guid.agentSelection': GuidAgentSelectionPreference | undefined;"
       )
-    ).toBe(true);
+    ).toBe(false);
     expect(
       configKeys.includes(
         "'guid.defaultAgentSelection': GuidAgentSelectionPreference | undefined;"

@@ -120,7 +120,7 @@ pub trait ICronRepository: Send + Sync {
     /// Session relation.
     ///
     /// Implementations must authenticate and lock either the canonical
-    /// `agent_sessions` row or the retained legacy `conversations` row, then
+    /// live `agent_sessions` row, then
     /// commit `cron_jobs.conversation_id` in the same transaction. Legacy
     /// targets additionally commit `conversations.cron_job_id`; canonical
     /// targets intentionally have no mutable back-reference. The bind is a

@@ -32,15 +32,6 @@ pub enum SessionStoreError {
     InvalidPayload(String),
     #[error("{INVALID_SESSION}: {0}")]
     InvalidSession(String),
-    #[error(
-        "runtime sequence gap for {runtime_binding_id}: committed={committed_producer_seq}, expected={expected}, actual={actual}"
-    )]
-    RuntimeSequenceGap {
-        runtime_binding_id: String,
-        committed_producer_seq: u64,
-        expected: u64,
-        actual: u64,
-    },
     #[error("session conflict: {0}")]
     Conflict(String),
     #[error("native checkpoint deferred until current effects are settled")]

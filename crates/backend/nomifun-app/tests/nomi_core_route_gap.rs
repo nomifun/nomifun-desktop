@@ -468,8 +468,6 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
         event_id:nomifun_agent_contracts::EventId::from("settlement-http-tool-call"),
         producer_id:nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
         idempotency_key:nomifun_agent_contracts::IdempotencyKey::from("settlement-http-tool-call"),
-        runtime_binding_id:None,
-        runtime_producer_seq:None,
         semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
             kind:nomifun_agent_contracts::SessionEventKind("tool/call-started".to_owned()),
             kind_version:1,
@@ -489,8 +487,6 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
         event_id:nomifun_agent_contracts::EventId::from("settlement-http-tool-result"),
         producer_id:nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
         idempotency_key:nomifun_agent_contracts::IdempotencyKey::from("settlement-http-tool-result"),
-        runtime_binding_id:None,
-        runtime_producer_seq:None,
         semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
             kind:nomifun_agent_contracts::SessionEventKind("tool/result-recorded".to_owned()),
             kind_version:1,
@@ -637,8 +633,6 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(
             "settlement-events-tool-call",
         ),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("tool/call-started".to_owned()),
             kind_version: 1,
@@ -660,8 +654,6 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(
             "settlement-events-tool-result",
         ),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("tool/result-recorded".to_owned()),
             kind_version: 1,
@@ -683,8 +675,6 @@ async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart(
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(
             "settlement-events-turn-failed",
         ),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("turn/failed".to_owned()),
             kind_version: 1,
@@ -944,8 +934,6 @@ async fn append_settlement_events(
         event_id: nomifun_agent_contracts::EventId::from(format!("tool-call-{suffix}")),
         producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!("tool-call-{suffix}")),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("tool/call-started".to_owned()),
             kind_version: 1,
@@ -968,8 +956,6 @@ async fn append_settlement_events(
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
             "tool-result-{suffix}"
         )),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("tool/result-recorded".to_owned()),
             kind_version: 1,
@@ -992,8 +978,6 @@ async fn append_settlement_events(
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
             "turn-failed-{suffix}"
         )),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("turn/failed".to_owned()),
             kind_version: 1,
@@ -1112,8 +1096,6 @@ async fn messages_forward_cursor_keeps_truncated_and_appended_projections() {
             idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
                 "{kind}-{suffix}"
             )),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: nomifun_agent_contracts::SessionEventKind(kind.to_owned()),
                 kind_version: 1,
@@ -1183,8 +1165,6 @@ async fn messages_forward_cursor_keeps_truncated_and_appended_projections() {
         event_id: nomifun_agent_contracts::EventId::from("turn-failed-one"),
         producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from("turn-failed-one"),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("turn/failed".to_owned()),
             kind_version: 1,
@@ -1417,8 +1397,6 @@ async fn events_and_history_cursors_stay_stable_while_events_append() {
         event_id: nomifun_agent_contracts::EventId::from("turn-completed-two"),
         producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
         idempotency_key: nomifun_agent_contracts::IdempotencyKey::from("turn-completed-two"),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
             kind: nomifun_agent_contracts::SessionEventKind("turn/completed".to_owned()),
             kind_version: 1,
@@ -2057,8 +2035,6 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
                     "handoff-progress:{}:{index}",
                     handoff_operation.as_ref()
                 )),
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
                 semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                     kind: nomifun_agent_contracts::SessionEventKind(
                         "runtime/progress-recorded".to_owned(),
@@ -2096,8 +2072,6 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
                     "handoff-terminal:{}",
                     handoff_operation.as_ref()
                 )),
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
                 semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                     kind: nomifun_agent_contracts::SessionEventKind("turn/completed".to_owned()),
                     kind_version: 1,
