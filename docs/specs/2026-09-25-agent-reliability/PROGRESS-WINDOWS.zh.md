@@ -4371,3 +4371,10 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 新仓库外驱动，完全移除实际sleep/power/token/wake调用，原Bun helper逐字相同、ConPTY80×24/lease10s/expire_on_idle=false/deadline=None及local owner复用。原S3源码/两个EXE的SHA及mtime前后保持；生产process runtime库源未变（be2→当前仅测试/helper文件变动）。原19bytes AFTER_REAL_S3_ONCE+LF在零休眠下write Ok，原父子及精确FILETIME仍活，但5秒仅回显/ACK无，驱动PID56724实际exit2；保持原LF失败，不改字节断言。
 - 显式独立--zero-sleep-cr对照，只将本例最后一个输入字节改CR（不自动回退原样本）；同helper、同policy，得到count1/root精确/text相同的真实ACK，PID5088实际exit0。两例cancel reaped/父子原句柄终止/shutdown exact，未执行电源周期、无模型/UI。由此证明缺ACK不依赖休眠，并支持cooked输入行结束符的夹具解释；不足以证明旧实际S3无其他问题或把WIN-015改PASS。
 - 缓存首前置因root多改SDK特征被拒、外部cwd离线build因未读仓库镜像缓存exit101，均未执行驱动并保留；恢复原manifest/lock、独立复制依赖缓存、沿仓库现有配置离线构建2.79秒，未下载或修改原缓存/产品。外部`2026-10-04/windows/remaining-d4-zero-sleep`保存原件保护、首准备错误、源码/binary、两组真实owner/句柄/write/poll/ACK/清理及actual terminal/verification。零休眠归因对照从队列关闭，原W272 FAIL保留、实际修正输入的S3复验归P2暂缓；自有驱动/父子/Cargo已结束。
+
+### 用户澄清旧合同与当前Agent切换边界（2026-10-04；排程纠正）
+
+- 原D1具体为10月2日W250/bfc9较早构建的冻结合同会话：W278先换模型遇409，后续原模型追加输入同样409；未执行正式Agent A→B。它是重构过程中的旧合同样本，不能笼统声称整个重构前会话，也不能拿它证明当前Agent切换失败。
+- 用户明确全新设计优先、旧设计可不兼容；旧合同恢复移出本轮，保留原失败/拒绝/证据，不改PASS或添加兼容层。当前新设计的合法续接及Agent原地切换仍必须验，新增有限项U4，不依赖W250准入。
+- 当前正式Agent选择器已走preview→PUT /agent；nomi_core_route_gap.rs:1564同Session集成覆盖同ID/名称、next_turn、binding+1、历史两回答及handoff进入目标请求、无旧tool role。unified_runtime_history保留普通正文并把旧工具活动作数据，旧原生replay floor用于权限/执行隔离；此前把floor描述成“旧正文带不走”过强，予以纠正。live smoke另建Session不是原地切换证据。
+- U4正式完成条件：当前版本新建会话，经实际UI切A→B，同ID/历史/草稿保持；continue_task和context_only各一短链，B实际请求有应保留数据并按新权限继续，不继承A指令/完成门槛/进程句柄、不重放旧动作。现仅源码/既有组件审查，未新增Cargo/UI/模型，正式未验；下一步优先此项，再按新证据推进D2/D3，原长耗时/环境边界保持。
