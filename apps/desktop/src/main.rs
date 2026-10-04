@@ -352,6 +352,21 @@ fn default_data_dir() -> PathBuf {
     nomifun_app::bootstrap::resolve_startup_data_root(requested)
 }
 
+fn desktop_browser_profile_store(
+    data_dir: &std::path::Path,
+) -> std::result::Result<
+    nomifun_browser_platform::runtime::BrowserProfileStore,
+    Box<dyn std::error::Error>,
+> {
+    // Tauri installs the profile store before DesktopServer initializes its
+    // database. Prepare only the directory; the backend still validates the
+    // data identity, and BrowserProfileStore still rejects links/reparse roots.
+    std::fs::create_dir_all(data_dir)?;
+    Ok(nomifun_browser_platform::runtime::BrowserProfileStore::new(
+        data_dir.to_path_buf(),
+    )?)
+}
+
 #[cfg(target_os = "macos")]
 struct ExplicitDesktopDataRoot(bool);
 
@@ -2982,9 +2997,7 @@ fn main() -> std::process::ExitCode {
                     browser_surface::host::DesktopBrowserHost::new(app_handle.clone()),
                 ))
                 .with_profile_store(
-                    nomifun_browser_platform::runtime::BrowserProfileStore::new(
-                        data_dir.clone(),
-                    )?,
+                    desktop_browser_profile_store(&data_dir)?,
                 ),
             ));
             #[cfg(target_os = "macos")]
@@ -3000,9 +3013,7 @@ fn main() -> std::process::ExitCode {
                         ),
                     ))
                     .with_profile_store(
-                        nomifun_browser_platform::runtime::BrowserProfileStore::new(
-                            data_dir.clone(),
-                        )?,
+                        desktop_browser_profile_store(&data_dir)?,
                     ),
                 )),
                 Err(error) => {
@@ -3420,6 +3431,34 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_browser_profile_store_initializes_a_fresh_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("new").join("data");
+        assert!(!data.exists());
+        super::desktop_browser_profile_store(&data).unwrap();
+        assert!(data.is_dir());
+    }
+
+    #[test]
+    fn desktop_browser_profile_store_keeps_existing_file_and_junction_roots_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"preserve").unwrap();
+        assert!(super::desktop_browser_profile_store(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"preserve");
+        #[cfg(windows)]
+        {
+            let target = root.path().join("target");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::write(target.join("keep"), b"preserve").unwrap();
+            let link = root.path().join("link");
+            junction::create(&target, &link).unwrap();
+            assert!(super::desktop_browser_profile_store(&link).is_err());
+            assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"preserve");
+        }
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn receipt_loss_fixture_is_exact_key_scoped_and_preserves_real_authenticated_fetch() {

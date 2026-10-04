@@ -4342,3 +4342,8 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 源码已明确第二外部批次/真实失败会提升控制面，仅修正外部载体先沿原ID/cursor poll。新受限Session、PID56968的唯一正式样本8真实请求/8组原生参数与canonical全同：Bun PID11060、1秒时限、四次原游标poll，实际timed_out/reaped、清理187ms/无错误；随后计划只覆盖剩余resize/report，同原process_id一次132×43返回control_applied=false/PROCESS_ALREADY_TERMINATED，原终态保持，无重启/stdin/文件修改。
 - report已接纳、Turn completed；实际Tauri像素交付原准备输出/PID、超时清理和迟到拒绝，宿主中文固定尾注2调用未成功/1命令失败。不可当前引用的resize ID保留unverified说明；17次自动AGENTS读取另记，不声称没有其他读取。仅此正式子断言PASS，不代判完整WIN-010、最新模型默认值/409文案UI或整体目标。原API exit0/后代监听0，carrier仅自有强制清理exit-1，不当Quit证据。
 - B本次真实409已取，但无新准入/模型；943events/4Turns/8effects/9files及原763条前缀逐行/字节SHA保持，密文SHA不变，原端点已恢复（revision+2），PID69884/API及转发均exit0，后代监听0。原W250/W249缺历史wire、生成/LF/guard/复杂交付、新历史/typed采用、W276旧失败和其余Windows边界仍开放。文案修复c1dc3d962已推送；完整制品在`global-b-history-resume`及`global-d-resize-resume/corrected-short`，自有GUI/Cargo/夹具均已清理。
+
+### Windows全新数据根启动顺序修复（2026-10-04；组件已验，正式修后待验）
+
+- 同步5aef3c560会话可读性，55项新定向UI及boundary通过；正式frontend fb65ea76及desktop A90A44E3…均构建成功。首次官方Tauri启动全新data/work/profile，PID35248自然exit101：profile store在后端创建data目录之前初始化，真实错误ProfileCleanupUnavailable；模型0/后代监听0，首失败留外部`global-current-ui-adoption`，不代判typed续接。
+- 最小修复在desktop profile store初始化前创建目录，继续原Store的file/junction拒绝及后端身份校验，不改退出入口、权限或旧数据。新缺失目录回归首红1PASS/1FAIL、修后2/2，NTFS junction及普通文件原件保持。Windows/Mac入口共用准备函数，Mac原生未验；正式修后fresh启动及typed/UI仍待本次后续验证。
