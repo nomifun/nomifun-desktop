@@ -6,9 +6,10 @@ import { MemoryRouter } from 'react-router-dom';
 import type { IMessageText, IMessageThinking, IMessageToolCall, IMessageToolGroup } from '@/common/chat/chatLib';
 import { parseConversationId } from '@/common/types/ids';
 import ProcessTraceItem from './ProcessTraceItem';
+import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: {} } } });
+await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale } } } });
 const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000051');
 
 afterEach(cleanup);
@@ -89,16 +90,24 @@ describe('replayed process trace', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
-  test('private thinking content is replaced by one neutral analysis status', () => {
+  test('returned thinking has an open Markdown body that remains readable after completion', () => {
     const item: IMessageThinking = {
       id: 'thinking', type: 'thinking', conversation_id: conversationId,
       position: 'left', created_at: 1,
       content: { content: 'Earlier result\nCalling the file tool', status: 'thinking' },
     };
-    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
-    expect(container.textContent).toContain('Analyzing the request');
-    expect(container.textContent).not.toContain('Earlier result');
-    expect(container.textContent).not.toContain('Calling the file tool');
+    const view = (completed = false) => <MemoryRouter><I18nextProvider i18n={i18n}>
+      <ProcessTraceItem item={item} stateOverride={completed ? 'completed' : undefined} />
+    </I18nextProvider></MemoryRouter>;
+    const { container, rerender } = render(view());
+    const text = () => container.querySelector('[data-thinking-process-body] .markdown-shadow')?.shadowRoot?.textContent ?? '';
+    expect(text()).toContain('Earlier result');
+    expect(text()).toContain('Calling the file tool');
+    expect(container.querySelector('[data-thinking-process-header]')?.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[data-thinking-process-header]')?.textContent).toBe('Thinking...');
+    rerender(view(true));
+    expect(text()).toContain('Earlier result');
+    expect(container.querySelector('[data-thinking-process-header]')?.getAttribute('aria-expanded')).toBe('true');
   });
 
   test('a rehydrated tool row opens its saved input and output', () => {
@@ -190,9 +199,9 @@ describe('replayed process trace', () => {
     };
     const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
     const active = container.querySelector('.turn-process-trace__row--current-activity');
-    expect(active?.textContent).toContain('second_tool');
-    expect(active?.textContent).not.toContain('first_tool');
-    expect(container.querySelector('.turn-process-trace__row--completed')?.textContent).toContain('first_tool');
+    expect(active?.closest('[data-tool-call-id]')?.getAttribute('data-tool-call-id')).toBe('second');
+    expect(active?.textContent).toContain('working now');
+    expect(container.querySelector('.turn-process-trace__row--completed')?.closest('[data-tool-call-id]')?.getAttribute('data-tool-call-id')).toBe('first');
     const settled = render(
       <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>
     );
@@ -244,23 +253,74 @@ describe('replayed process trace', () => {
     expect(container.textContent).toContain('targeted test');
   });
 
-  test('identical completed operations render once with their repeat count', () => {
-    const item: IMessageToolGroup = {
-      id: 'repeated-tools', type: 'tool_group', conversation_id: conversationId,
-      position: 'left', created_at: 5,
-      content: [0, 1, 2].map((index) => ({
+  test('distinct calls with identical labels retain their own inspectable input and output', () => {
+    const item = {
+      id: 'repeated-tools', type: 'tool_summary' as const, created_at: 5, sourceMessageIds: [],
+      messages: [0, 1, 2].map<IMessageToolCall>((index) => ({
+        id: `search-${index}`, type: 'tool_call', conversation_id: conversationId, created_at: 5,
+        content: {
         call_id: `search-${index}`,
         name: 'search_code',
         description: 'searched code',
-        status: 'Success' as const,
-        render_output_as_markdown: false,
+        status: 'completed',
+        args: { query: `query-${index}` },
+        output: `result-${index}`, artifacts: [],
+        },
       })),
     };
     const { container } = render(
       <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
     );
 
-    expect(container.querySelectorAll('.turn-process-trace__row')).toHaveLength(1);
-    expect(container.textContent).toContain('3 times');
+    const rows = container.querySelectorAll('[data-tool-call-id]');
+    expect(rows).toHaveLength(3);
+    expect(container.textContent).not.toContain('3 times');
+    rows.forEach((row, index) => {
+      fireEvent.click(row.querySelector('button')!);
+      expect(row.textContent).toContain(`query-${index}`);
+      expect(row.textContent).toContain(`result-${index}`);
+      expect(row.querySelectorAll('button')).toHaveLength(1);
+    });
+  });
+
+  test('failed calls in the journal are individually visible with a short diagnostic', () => {
+    const item: IMessageToolGroup = {
+      id: 'visible-failures', type: 'tool_group', conversation_id: conversationId,
+      position: 'left', created_at: 5,
+      content: [0, 1].map((index) => ({
+        call_id: `failure-${index}`, name: 'create_draft', description: 'create_draft', status: 'Error' as const,
+        render_output_as_markdown: false,
+        result_display: JSON.stringify({ code: 'PLUGIN_NOT_FOUND', message: `Missing plugin-${index}` }),
+      })),
+    };
+    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>);
+    const rows = container.querySelectorAll('[data-tool-call-id]');
+    expect(rows).toHaveLength(2);
+    rows.forEach((row, index) => {
+      expect(row.querySelector('.turn-process-trace__diagnostic')?.textContent).toContain(`Missing plugin-${index}`);
+      expect(row.querySelector('.turn-process-trace-detail')).toBeNull();
+      fireEvent.click(row.querySelector('button')!);
+      expect(row.querySelector('.turn-process-trace-detail')?.textContent).toContain(String(item.content[index].result_display));
+      expect(row.querySelectorAll('button')).toHaveLength(1);
+    });
+  });
+
+  test('retry attempts retain separate call identities and outputs in journal order', () => {
+    const first: IMessageToolCall = { id: 'retry-first', type: 'tool_call', conversation_id: conversationId,
+      created_at: 1, content: { call_id: 'root-call', name: 'read_file', status: 'error',
+        args: { path: 'first.txt' }, output: 'first failure', artifacts: [],
+        retry: { retry_group_id: 'root-call', attempt_no: 1 } } };
+    const next: IMessageToolCall = { ...first, id: 'retry-next', created_at: 2,
+      content: { ...first.content, call_id: 'next-call', status: 'completed', output: 'second result',
+        retry: { retry_group_id: 'root-call', retry_of_call_id: 'root-call', attempt_no: 2 } } };
+    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem
+      item={{ type: 'tool_summary', id: 'retry-stage', created_at: 1, sourceMessageIds: [], messages: [first, next] }}
+      variant='receipt' /></I18nextProvider>);
+    const rows = container.querySelectorAll('[data-tool-call-id]');
+    expect(Array.from(rows, (row) => row.getAttribute('data-tool-call-id'))).toEqual(['root-call', 'next-call']);
+    expect(rows[1].textContent).toContain('Attempt 2');
+    rows.forEach((row) => fireEvent.click(row.querySelector('button')!));
+    expect(rows[0].textContent).toContain('first failure');
+    expect(rows[1].textContent).toContain('second result');
   });
 });

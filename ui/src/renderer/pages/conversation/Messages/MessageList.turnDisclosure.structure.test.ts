@@ -44,10 +44,10 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes("'position' in item && item.position === 'right'")).toBe(false);
   });
 
-  test('renders chronological journal receipts without legacy process cards', () => {
+  test('renders tools directly in the journal without a group receipt disclosure', () => {
     expect(source.includes('renderProcessTraceItem(')).toBe(true);
     expect(source.includes('renderJournalProcessItem')).toBe(true);
-    expect(source.includes('journal-receipt-')).toBe(true);
+    expect(source.includes("layoutKind === 'tool' ? 'receipt' : 'list'")).toBe(true);
     expect(source.includes('<TurnProcessReceipt')).toBe(true);
     expect(source.includes('MessageToolGroupSummary')).toBe(false);
     expect(source.includes('defaultExpanded={true}')).toBe(false);
@@ -148,8 +148,6 @@ describe('MessageList turn completion disclosure structure', () => {
 
     expect(planBoundary.includes('toolList = [];')).toBe(true);
     expect(planBoundary.includes('toolSourceMessageIds = [];')).toBe(true);
-    expect(planBoundary.includes('diffsChanges = [];')).toBe(true);
-    expect(planBoundary.includes('diffsSourceMessageIds = [];')).toBe(true);
   });
 
   test('suppresses only legacy synthetic plan-tool failures with a persisted plan projection', () => {

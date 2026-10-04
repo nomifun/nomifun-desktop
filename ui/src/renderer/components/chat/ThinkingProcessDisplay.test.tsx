@@ -4,10 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, mock, spyOn, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { cleanup, fireEvent, render } from '@testing-library/react';
+import { afterEach } from 'bun:test';
 
 import ThinkingProcessDisplay from './ThinkingProcessDisplay';
+
+afterEach(cleanup);
 
 describe('ThinkingProcessDisplay', () => {
   test('renders a header-only live activity without inventing thinking content', () => {
@@ -48,6 +52,23 @@ describe('ThinkingProcessDisplay', () => {
     expect(html.includes('已检查上下文')).toBe(true);
   });
 
+  test('a phase with no elapsed time keeps its status and body without starting a clock', () => {
+    const interval = spyOn(globalThis, 'setInterval');
+    const formatTime = mock(() => '9 seconds');
+    try {
+      const page = render(<ThinkingProcessDisplay state='running' variant='process' showElapsedTime={false}
+        runningFallbackLabel='Thinking' content='Full phase reasoning' formatElapsedTime={formatTime} />);
+      expect(page.getByRole('button').textContent).toBe('Thinking');
+      expect(page.getByRole('button').getAttribute('aria-expanded')).toBe('true');
+      expect(page.container.textContent).toContain('Full phase reasoning');
+      expect(formatTime).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      page.unmount();
+    } finally {
+      interval.mockRestore();
+    }
+  });
+
   test('applies the configured body length and completed excerpt without discarding content', () => {
     const html = renderToStaticMarkup(
       <ThinkingProcessDisplay
@@ -62,5 +83,21 @@ describe('ThinkingProcessDisplay', () => {
     expect(html.includes('data-thinking-body-length="compact"')).toBe(true);
     expect(html.includes('思考完成 · 检查了关键路径')).toBe(true);
     expect(html.includes('完整思考内容')).toBe(true);
+  });
+
+  test('preserves manual thinking expansion across streaming completion and resets for a new identity', () => {
+    const view = (state: 'running' | 'completed', identityKey = 'step-1') =>
+      <ThinkingProcessDisplay state={state} identityKey={identityKey} variant='process' content='Full reasoning' />;
+    const page = render(view('running'));
+    const toggle = page.getByRole('button');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    page.rerender(view('completed'));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-controls')).toBe(page.container.querySelector('[data-thinking-process-body]')?.id);
+    page.rerender(view('completed', 'step-2'));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(page.container.textContent).toContain('Full reasoning');
   });
 });

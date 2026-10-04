@@ -12,6 +12,15 @@
   "toolGroupViewSteps": "查看步骤",
   "toolDetailInput": "输入",
   "toolDetailOutput": "输出",
+  "toolDetailTruncated": "输出已截断，当前显示已保存的内容",
+  "toolState": {
+    "running": "执行中",
+    "completed": "已结束",
+    "failed": "未成功",
+    "canceled": "已取消",
+    "notExecuted": "未执行",
+    "skipped": "已跳过"
+  },
   "toolRetryCount": "已重试 {{count}} 次",
   "toolRetryAttempt": "第 {{number}} 次尝试",
   "toolDetailLoading": "加载中...",

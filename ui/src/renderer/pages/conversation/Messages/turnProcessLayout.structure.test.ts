@@ -55,7 +55,7 @@ describe('turn process continuous work journal layout', () => {
     expect(disclosureSource.includes("item.running && 'turn-process-disclosure--live'")).toBe(true);
   });
 
-  test('uses the turn lifecycle to set the default work journal expansion', () => {
+  test('opens the running journal and collapses it after completion', () => {
     expect(disclosureSource.includes('hasProcessItems && !defaultCollapsed')).toBe(true);
     expect(modelSource.includes('defaultCollapsed: false')).toBe(true);
     expect(modelSource.includes("defaultCollapsed: state !== 'running'")).toBe(true);
@@ -77,27 +77,27 @@ describe('turn process continuous work journal layout', () => {
     expect(modelSource.includes("entry.role === 'metadata'")).toBe(true);
   });
 
-  test('renders public progress as prose while keeping private reasoning summarized', () => {
+  test('renders public progress and returned thinking as prose', () => {
     expect(processTraceSource.includes("case 'text':")).toBe(true);
     expect(processTraceSource.includes("data-testid='process-narration'")).toBe(true);
     expect(processTraceSource.includes('<MarkdownView')).toBe(true);
     expect(processTraceSource.includes('Private reasoning omitted')).toBe(true);
-    expect(processTraceSource.includes('<MessageThinking')).toBe(false);
+    expect(processTraceSource.includes('<MessageThinking')).toBe(true);
     expect(messageListSource.includes('isHiddenProcessItem')).toBe(true);
     expect(messageListSource.includes("item.type !== 'thinking' && item.type !== 'text'")).toBe(true);
   });
 
   test('uses an unbounded document flow with compact muted receipt rows', () => {
     const bodyRule = cssRuleFor('.turn-process-disclosure__body');
-    expect(bodyRule.includes('gap: 14px')).toBe(true);
-    expect(bodyRule.includes('padding: 14px 0 4px')).toBe(true);
+    expect(bodyRule.includes('gap: 16px')).toBe(true);
+    expect(bodyRule.includes('padding: 16px 0 8px')).toBe(true);
     expect(bodyRule.includes('overflow: visible')).toBe(true);
     expect(bodyRule.includes('max-height')).toBe(false);
     expect(bodyRule.includes('overflow-y: auto')).toBe(false);
     expect(bodyRule.includes('border-bottom')).toBe(false);
     expect(
       cssRuleFor('.turn-process-disclosure__body .turn-process-trace__row').includes(
-        'color: var(--color-text-3'
+        'color: var(--color-text-2'
       )
     ).toBe(true);
     expect(
@@ -107,8 +107,8 @@ describe('turn process continuous work journal layout', () => {
     ).toBe(true);
 
     const receiptBodyRule = cssRuleFor('.turn-process-receipt__body');
-    expect(receiptBodyRule.includes('max-height: min(360px, 42vh)')).toBe(true);
-    expect(receiptBodyRule.includes('overflow-y: auto')).toBe(true);
+    expect(receiptBodyRule.includes('max-height')).toBe(false);
+    expect(receiptBodyRule.includes('overflow: visible')).toBe(true);
   });
 
   test('lets Markdown control public-progress whitespace instead of inheriting pre-wrap', () => {

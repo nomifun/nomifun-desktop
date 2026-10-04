@@ -117,7 +117,7 @@ test('completed history starts collapsed and preserves manual expansion on refre
   expect(page.queryByText('thinking')).toBeNull();
 });
 
-test('stream updates preserve a manual collapse until the turn resumes', () => {
+test('stream updates preserve manual collapse and a resumed task opens by default', () => {
   const page = render(view(true));
   const toggle = page.getByRole('button', { name: 'Collapse thinking process' });
   expect(toggle.getAttribute('aria-expanded')).toBe('true');

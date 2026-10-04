@@ -19,13 +19,13 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('messages.toolDetailOutput')).toBe(true);
   });
 
-  test('renders public narration as prose and thinking as a neutral status', () => {
+  test('renders public narration and returned thinking as readable prose', () => {
     expect(source.includes('ThinkingStreamPanel')).toBe(false);
     expect(source.includes('useStreamingThinkingText')).toBe(false);
     expect(source.includes('shouldAutoCollapseThinkingStreamPanel')).toBe(false);
     expect(source.includes('turn-process-thinking-stream')).toBe(false);
     expect(source.includes("case 'thinking':")).toBe(true);
-    expect(source.includes('<MessageThinking')).toBe(false);
+    expect(source.includes('<MessageThinking')).toBe(true);
     expect(source.includes("data-testid='process-narration'")).toBe(true);
     expect(source.includes('getPublicProcessNarration')).toBe(true);
     expect(source.includes('<MarkdownView')).toBe(true);

@@ -53,6 +53,8 @@ const canonicalMcpOriginHash = /^[a-z2-7]{16}$/;
  */
 export const formatToolDisplayName = (value: unknown): string => {
   const fullName = toDisplayText(value).trim();
+  const platformAlias = fullName.match(/^platform__([a-z0-9_]+)__[a-f0-9]{20}$/);
+  if (platformAlias) return `platform/${platformAlias[1]}`;
   if (!fullName.startsWith('mcp__')) return fullName;
 
   const segments = fullName.split('__');

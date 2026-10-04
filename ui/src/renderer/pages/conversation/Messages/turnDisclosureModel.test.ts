@@ -334,7 +334,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(result).toEqual([{ type: 'item', id: 'user' }]);
   });
 
-  test('collapses stale running process steps after a closed turn has a final answer', () => {
+  test('settles stale running process steps after a closed turn has a final answer', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user', 'user', { createdAt: 1000 }),
@@ -559,7 +559,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['tool', 'assistant-text']);
   });
 
-  test('collapses a completed process-only segment once the next request closes it', () => {
+  test('settles a completed process-only segment once the next request closes it', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),

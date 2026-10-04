@@ -18,8 +18,8 @@ describe('MessageThinking expansion', () => {
     expect(source.includes("state={isDone ? 'completed' : 'running'}")).toBe(true);
   });
 
-  test('collapses completed process thinking by default while keeping live thinking open', () => {
-    expect(sharedSource.includes("const defaultExpanded = expanded ?? (isProcessVariant ? !isDone : true);")).toBe(true);
+  test('keeps live and completed process thinking open by default', () => {
+    expect(sharedSource.includes('const defaultExpanded = expanded ?? true;')).toBe(true);
     expect(sharedSource.includes('useState(() => defaultExpanded)')).toBe(true);
     expect(sharedSource.includes('onExpandedChange?.(nextExpanded)')).toBe(true);
     expect(sharedSource.includes('useState(!isDone)')).toBe(false);
