@@ -44,8 +44,8 @@ import { allSupportedExts } from '@renderer/services/FileService';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import { getConversationInputHistory, isCaretOnFirstLine } from '@/renderer/utils/chat/messageHistory';
-import PinnedPlan from '@renderer/pages/conversation/Messages/components/PinnedPlan';
-import { derivePinnedPlan } from '@renderer/pages/conversation/Messages/components/pinnedPlanModel';
+import TaskPlanBar from '@renderer/pages/conversation/components/TaskPlanBar';
+import type { TaskPlanSnapshot } from '@/common/protocolBindings/TaskPlanSnapshot';
 import Composer, { ComposerSendButton } from '../Composer';
 import { StopButtonPortal } from './StopButtonPortal';
 
@@ -208,8 +208,8 @@ const SendBox: React.FC<{
   selectedWorkspaceItems?: FileSelectionItem[];
   onSelectedWorkspaceItemsChange?: (items: FileSelectionItem[]) => void;
   bottomHint?: React.ReactNode;
-  /** Conversation-only: render the compact plan strip inside the input panel status row. */
-  showPinnedPlan?: boolean;
+  /** Canonical task progress, independent of the transcript window. */
+  taskPlan?: TaskPlanSnapshot | null;
 }> = ({
   onSend,
   onStop,
@@ -247,7 +247,7 @@ const SendBox: React.FC<{
   selectedWorkspaceItems,
   onSelectedWorkspaceItemsChange,
   bottomHint,
-  showPinnedPlan = false,
+  taskPlan,
 }) => {
   const conversationContext = useConversationContextSafe();
   const { t, i18n } = useTranslation();
@@ -264,7 +264,6 @@ const SendBox: React.FC<{
   const latestInputRef = useLatestRef(input);
   const setInputRef = useLatestRef(setInput);
   const messageList = useMessageList();
-  const pinnedPlan = useMemo(() => (showPinnedPlan ? derivePinnedPlan(messageList) : null), [messageList, showPinnedPlan]);
   const [historyNavigationIndex, setHistoryNavigationIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<string | null>(null);
   const [replyQuote, setReplyQuote] = useState<ReplyQuote | null>(null);
@@ -1414,12 +1413,12 @@ const SendBox: React.FC<{
 
   return (
     <div className={`relative ${className ?? ''}`}>
-      {pinnedPlan && (
+      {taskPlan?.plan && taskPlan.plan.steps.length > 0 && (
         <div
           className='absolute left-1/2 bottom-[calc(100%+8px)] -translate-x-1/2 z-30'
-          data-testid='sendbox-plan-anchor'
+          data-testid='sendbox-task-plan-anchor'
         >
-          <PinnedPlan plan={pinnedPlan} active={Boolean(loading || isLoading)} />
+          <TaskPlanBar key={taskPlan.turn_id} snapshot={taskPlan} />
         </div>
       )}
       <Composer

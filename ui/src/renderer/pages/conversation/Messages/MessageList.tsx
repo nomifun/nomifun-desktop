@@ -75,7 +75,7 @@ import {
   type TurnGateInfo,
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
-import { isInternalInstructionToolCall, isSupersededPlanToolFailure } from './planToolVisibility';
+import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from './toolMessageVisibility';
 import type { MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 import { useExecutionSafe } from '../execution/ExecutionContext';
@@ -710,11 +710,6 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         return <MessageToolGroup message={message}></MessageToolGroup>;
       case 'agent_status':
         return <MessageAgentStatus message={message}></MessageAgentStatus>;
-      case 'plan':
-        // Plans render in the docked PinnedPlan bar, not inline — they're
-        // filtered out of processedList above. This guard keeps the switch
-        // exhaustive (the `never` default below would otherwise error).
-        return null;
       case 'thinking':
         return <MessageThinking message={message}></MessageThinking>;
       case 'available_commands':
@@ -804,24 +799,14 @@ const MessageList: React.FC<{
       // Skip hidden and available_commands messages
       if (message.hidden) continue;
       if (isInternalInstructionToolCall(message)) continue;
-      if (
-        message.type === 'tool_call' &&
-        message.content.name === 'update_plan' &&
-        isSupersededPlanToolFailure(message, journalSources.slice(i + 1))
-      ) {
-        continue;
-      }
-      if (message.type === 'available_commands') continue;
-      // Plans are no longer rendered inline — they surface in the docked
-      // PinnedPlan bar above the composer, which reads the raw list directly.
-      // A plan also closes the preceding tool receipt. Without this boundary,
-      // update_plan and the next unrelated file operation are merged and a
-      // failure can be labelled with the later operation's target.
-      if (message.type === 'plan') {
+      // A progress declaration closes the preceding group without adding a
+      // duplicate plan card or merging unrelated operations across it.
+      if (isTaskPlanControlReceipt(message)) {
         toolList = [];
         toolSourceMessageIds = [];
         continue;
       }
+      if (message.type === 'available_commands') continue;
       // Connection-handshake status banners (connecting/connected/authenticated/
       // session_active) are implementation noise: never render them as chat
       // items, and never let them fragment the tool-execution trace below.

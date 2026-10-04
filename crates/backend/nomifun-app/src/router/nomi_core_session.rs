@@ -7952,6 +7952,7 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route("/api/agent-sessions/{agent_session_id}/execution/resume", post(native_execution_control::resume))
         .route("/api/agent-sessions/{agent_session_id}/execution/effects", get(native_execution_control::effects))
         .route("/api/agent-sessions/{agent_session_id}/execution/reconcile", post(native_execution_control::reconcile))
+        .route("/api/agent-sessions/{agent_session_id}/task-plan", get(conversation_task_plan::get))
         .route(
             "/api/agent-sessions/{agent_session_id}/message-history",
             get(get_nomi_core_agent_session_message_history),
@@ -13228,6 +13229,9 @@ async fn decorate_agent_transition_template_keys(
         }
     }
 }
+
+#[path = "conversation_task_plan.rs"]
+mod conversation_task_plan;
 
 async fn get_nomi_core_agent_session_message_history(
     State(state): State<NomiCoreAgentApiState>,

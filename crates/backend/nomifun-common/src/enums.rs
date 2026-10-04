@@ -58,7 +58,6 @@ pub enum MessageType {
     ToolGroup,
     AgentStatus,
     Permission,
-    Plan,
     Thinking,
     AvailableCommands,
     SkillSuggest,

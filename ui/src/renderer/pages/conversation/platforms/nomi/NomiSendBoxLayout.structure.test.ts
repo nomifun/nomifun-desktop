@@ -140,7 +140,7 @@ describe('Nomi sendbox control layout', () => {
       selectorSource.indexOf('{reasoningControl}')
     );
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
-    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running)')).toBe(true);
+    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice)')).toBe(true);
   });
 
   test('switches the current AgentSession in place instead of navigating back to Guid', () => {
@@ -165,7 +165,7 @@ describe('Nomi sendbox control layout', () => {
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}')).toBe(true);
     expect(sendBoxSource.includes('sideTools={compactProductComposer')).toBe(true);
-    expect(sendBoxSource.includes('showPinnedPlan={!compactProductComposer}')).toBe(true);
+    expect(sendBoxSource.includes('taskPlan={taskPlan}')).toBe(true);
   });
 
   test('waits for passive readiness without requiring an unnecessary warmup POST', () => {

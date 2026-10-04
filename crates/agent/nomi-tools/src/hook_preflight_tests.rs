@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::{
     Tool, ToolExecutionContext, apply_patch::ApplyPatchTool, bash::BashTool, edit::EditTool,
     exec_command::ExecCommandTool, file_cache::{FileStateCache, file_mtime_ms}, glob::GlobTool,
-    grep::GrepTool, process_store::ProcessStore, read::ReadTool, update_plan::UpdatePlanTool,
+    grep::GrepTool, process_store::ProcessStore, read::ReadTool,
     write::WriteTool, write_stdin::WriteStdinTool,
 };
 
@@ -105,7 +105,7 @@ async fn hook_preflight_patch_validates_whole_batch_without_mutation() {
 }
 
 #[tokio::test]
-async fn hook_preflight_reads_searches_and_plan_only_validate_inputs() {
+async fn hook_preflight_reads_and_searches_only_validate_inputs() {
     let root = tempfile::tempdir().unwrap();
     let cache = cache();
     let reader = ReadTool::new(Some(cache.clone()), Some(root.path().to_path_buf()));
@@ -119,9 +119,6 @@ async fn hook_preflight_reads_searches_and_plan_only_validate_inputs() {
     let grep = GrepTool::new(root.path().to_path_buf());
     grep.preflight_hook(&json!({"pattern":"needle"}), &context()).await.unwrap();
     assert!(grep.preflight_hook(&json!({"pattern":"needle", "context_lines":-1}), &context()).await.is_err());
-    let plan = UpdatePlanTool::new();
-    plan.preflight_hook(&json!({"plan":[{"step":"verify", "status":"pending"}]}), &context()).await.unwrap();
-    assert!(plan.preflight_hook(&json!({"plan":[]}), &context()).await.is_err());
 }
 
 #[tokio::test]

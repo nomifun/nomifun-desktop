@@ -68,6 +68,7 @@ import type {
   TProviderWithModel,
 } from '../config/storage';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
+import type { TaskPlanSnapshot } from '../protocolBindings/TaskPlanSnapshot';
 import { parsePreviewSnapshotId } from '../types/ids';
 import {
   fromProviderResponse,
@@ -1046,6 +1047,10 @@ export const conversation = {
   },
   clearContext: httpPost<void, { conversation_id: ConversationId }>(
     (p) => `/api/agent-sessions/${p.conversation_id}/clear-context`
+  ),
+  taskPlan: httpGet<TaskPlanSnapshot, { conversation_id: ConversationId }>(
+    (p) => `/api/agent-sessions/${p.conversation_id}/task-plan`,
+    { timeoutMs: 4_000 }
   ),
   sendMessage: {
     provider: () => {},
