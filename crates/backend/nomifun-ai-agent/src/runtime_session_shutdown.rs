@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::{AgentRuntimeSessions, InMemoryAgentRuntimeSessions};
 
 type Completion = Shared<BoxFuture<'static, Result<(), String>>>;
+const MAX_SHUTDOWN_FAILURE_DETAILS: usize = 16;
 
 struct Flight {
     completion: Completion,
@@ -119,21 +120,40 @@ async fn drain(registry: &InMemoryAgentRuntimeSessions) -> Result<(), String> {
             async move {
                 // This uses the existing per-Session gate and exact-slot teardown.
                 // Failed exits retain the slot and its workspace lease in quarantine.
-                let result=registry.terminate_owned_runtime(&id,None).await;
-                if result.is_err() {tracing::warn!(conversation_id=%id,stage="owned_runtime_teardown","Agent runtime shutdown did not prove cleanup; exact owner and quarantine retained");}
-                result
+                let result = registry.terminate_owned_runtime(&id, None).await;
+                if result.is_ok() {
+                    tracing::info!(conversation_id=%id,stage="owned_runtime_teardown",
+                        "Agent runtime shutdown proved cleanup");
+                }
+                result.map_err(|error| {
+                    // The retained owner is the only authority for cleanup.
+                    // Preserve its cause instead of reducing every failure to
+                    // a count that makes fast rejection look like a timeout.
+                    let cause = crate::protocol::send_error::sanitize_error_detail(
+                        &nomi_redact::redact_secrets_owned(error.to_string()),
+                    );
+                    tracing::warn!(conversation_id=%id,stage="owned_runtime_teardown",error=%cause,
+                        "Agent runtime shutdown did not prove cleanup; exact owner and quarantine retained");
+                    format!("Session {id}: {cause}")
+                })
             }
         })
         .buffer_unordered(16);
     let mut failures = 0usize;
+    let mut details = Vec::new();
     while let Some(result) = results.next().await {
-        if result.is_err() {
+        if let Err(error) = result {
             failures += 1;
+            if details.len() < MAX_SHUTDOWN_FAILURE_DETAILS {
+                details.push(error);
+            }
         }
     }
     if failures != 0 {
         return Err(format!(
-            "{failures} Agent runtime(s) did not prove shutdown"
+            "{failures} Agent runtime(s) did not prove shutdown: {}{}",
+            details.join("; "),
+            if failures > details.len() { "; further owner failures recorded in shutdown log" } else { "" },
         ));
     }
     // active_runtime_count deliberately hides quarantine and empty builds.

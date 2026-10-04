@@ -449,6 +449,21 @@ struct ConversationRuntimeHost {
 }
 
 impl ConversationRuntimeHost {
+    fn preparation_error(&self, root: &str, stage: &'static str, error: AppError) -> AppError {
+        // Preserve the first preparation failure even if subsequent cleanup
+        // cannot prove settlement. Never log input, credentials or raw options.
+        tracing::warn!(
+            agent_session_id = self.options.conversation_id.as_str(),
+            root_message_id = root,
+            opened_snapshot_id = self.snapshot_ref.snapshot_id.as_ref(),
+            opened_snapshot_digest = self.snapshot_ref.snapshot_digest.as_ref(),
+            stage,
+            error = %nomi_redact::redact_secrets_owned(error.to_string()),
+            "Nomi Turn preparation failed",
+        );
+        error
+    }
+
     fn root<'a>(&self, message: &'a SendMessageData) -> &'a str {
         message
             .source_message_id
@@ -488,6 +503,7 @@ impl ConversationRuntimeHost {
         message: &SendMessageData,
         cancellation: CancellationToken,
     ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
+        let root = self.root(message).to_owned();
         let mut preparation = self.preparation.lock().await;
         if preparation.as_ref().is_some_and(|flight| !*flight.done.borrow()) {
             return Err(error("another Turn preparation still owns admission"));
@@ -503,7 +519,11 @@ impl ConversationRuntimeHost {
             host.admit_preparation_owned(&message, cancellation).await
         });
         drop(preparation);
-        task.await.map_err(|error| AppError::Internal(format!("Turn preparation task failed: {error}")))?
+        task.await.map_err(|error| self.preparation_error(
+            &root,
+            "preparation_task",
+            AppError::Internal(format!("Turn preparation task failed: {error}")),
+        ))?
     }
 
     async fn wait_preparation(&self, root: &str) -> Result<(), AppError> {
@@ -526,14 +546,31 @@ impl ConversationRuntimeHost {
         cancellation: CancellationToken,
     ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
         let root = self.root(message);
+        tracing::info!(
+            agent_session_id = self.options.conversation_id.as_str(),
+            root_message_id = root,
+            opened_snapshot_id = self.snapshot_ref.snapshot_id.as_ref(),
+            opened_snapshot_digest = self.snapshot_ref.snapshot_digest.as_ref(),
+            stage = "receipt_read",
+            "Nomi Turn preparation started",
+        );
         let mut admitted = self.session_host.read_turn_receipt(
             &self.options,
             &self.binding,
             &self.snapshot_ref,
             message,
-        ).await?;
+        ).await.map_err(|error| self.preparation_error(root, "receipt_read", error))?;
         let operation = admitted.operation_id().to_owned();
-        let journal = self.session_host.claim_journal(&admitted, cancellation.clone()).await?;
+        let journal = self.session_host.claim_journal(&admitted, cancellation.clone()).await
+            .map_err(|error| self.preparation_error(root, "native_claim", error))?;
+        tracing::info!(
+            agent_session_id = self.options.conversation_id.as_str(),
+            root_message_id = root,
+            operation_id = operation.as_str(),
+            execution_generation = journal.generation(),
+            stage = "native_claim",
+            "Nomi Turn preparation acquired native authority",
+        );
         let epoch = i64::try_from(journal.generation()).map_err(error)?;
         let mut active = self.active.lock().await;
         if active.is_some() {
@@ -559,15 +596,20 @@ impl ConversationRuntimeHost {
         drop(active);
         // Publish the exact journal before the next awaited budget/read so
         // storage errors and cancellation cannot discard a committed claim.
-        journal.refresh_budget().await?;
+        journal.refresh_budget().await
+            .map_err(|error| self.preparation_error(root, "budget_refresh", error))?;
         if cancellation.is_cancelled() { return Ok(admitted); }
-        admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await?;
-        journal.validate_receipt(&admitted)?;
+        admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await
+            .map_err(|error| self.preparation_error(root, "receipt_revalidate", error))?;
+        journal.validate_receipt(&admitted)
+            .map_err(|error| self.preparation_error(root, "claim_revalidate", error))?;
         if cancellation.is_cancelled() { return Ok(admitted); }
         // EngineKernelSession retains its own partial-open state before any
         // owner can fail, so leaving ActiveTurn installed is intentional.
-        self.resources.open_turn(&admitted, journal)?;
-        self.restore_recovery_steering().await?;
+        self.resources.open_turn(&admitted, journal)
+            .map_err(|error| self.preparation_error(root, "resource_open", error))?;
+        self.restore_recovery_steering().await
+            .map_err(|error| self.preparation_error(root, "recovery_restore", error))?;
         Ok(admitted)
     }
 
@@ -725,7 +767,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         // Credentials, enabled state, transport and health remain live fences.
         let facts = self.session_host.capture_turn_model_configuration(
             &admitted, &self.model_configuration,
-        ).await?;
+        ).await.map_err(|error| self.preparation_error(root, "model_configuration", error))?;
         let patch_recovery = super::runtime_patch_recovery::load(
             self.session_host.as_ref(),
             &admitted,

@@ -1,6 +1,6 @@
 # Windows 命令与会话可靠性进度
 
-更新：2026-10-03。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-10-05。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 用户2026-09-30已收敛为简单系统命令、步骤、过程状态和结果可靠性；活动范围以最新实施计划为准。
 旧675＋82、2,374槽保留为历史全产品参考，不再领取其全部余项。共享根因及已有Windows修复保留。
 
@@ -4378,3 +4378,19 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 用户明确全新设计优先、旧设计可不兼容；旧合同恢复移出本轮，保留原失败/拒绝/证据，不改PASS或添加兼容层。当前新设计的合法续接及Agent原地切换仍必须验，新增有限项U4，不依赖W250准入。
 - 当前正式Agent选择器已走preview→PUT /agent；nomi_core_route_gap.rs:1564同Session集成覆盖同ID/名称、next_turn、binding+1、历史两回答及handoff进入目标请求、无旧tool role。unified_runtime_history保留普通正文并把旧工具活动作数据，旧原生replay floor用于权限/执行隔离；此前把floor描述成“旧正文带不走”过强，予以纠正。live smoke另建Session不是原地切换证据。
 - U4正式完成条件：当前版本新建会话，经实际UI切A→B，同ID/历史/草稿保持；continue_task和context_only各一短链，B实际请求有应保留数据并按新权限继续，不继承A指令/完成门槛/进程句柄、不重放旧动作。现仅源码/既有组件审查，未新增Cargo/UI/模型，正式未验；下一步优先此项，再按新证据推进D2/D3，原长耗时/环境边界保持。
+
+### U4／D2／D3直接实施与正式验收结算（2026-10-05；本轮完成）
+
+- 本轮从`296dc899f`基线的generation 7完成U4、D2、D3当前实现整改及限定正式验收。使用全新Agent Session数据，没有导入退役会话或恢复兼容路径；原W276和本轮各次首失败分别保留，不追改为PASS，也不据此宣布共享／Windows全部Case或发布认证完成。
+- 最终正式custom-protocol EXE SHA-256为`68B6EE9AA76BCDFE598B78C81572DC1F24377FDA4ECE9ADFAD000908BAC0607A`，前端`9473e998-945d-41cc-804f-903be22e1749`，绑定冻结的 **21个源码文件**；generator write/check同步`Cargo.lock` digest及 **3个生成文件**。最终制品用于05 U4与06 D2正式链，外部源码快照及SHA核对保持不变；编译器非法指令／AV与夹具未提供UUIDv7 key的日志继续保留。
+- U4工具正文整改只在唯一canonical context decoder中配对历史call/result：核对cause、Session、correlation、operation及typed result call ID，以历史数据的Assistant文本进入目标Agent，不继承旧tool role、系统指令、权限、完成门槛或checkpoint。decoder **8/8**、App history **15/15**、自包含fork **1/1**通过；旧shape继续拒绝。MCP resource事实只含`owner_returned`时仅保留settlement，不补造正文；历史媒体只保留文本并标记省略。
+- 资源定义ID唯一源为`nomifun-agent-contracts::resource_definition_id`，中途wave1／KB专用公式已删除。所有持久资源在最终operations、root和policy确定后生成ID；Store原子保留历史Effect引用的不可变定义，拒绝同ID重定义，当前authority仅来自当前binding。KB挂载和删除保护共用当前selection过滤。Store **94/94**、KB **13/13**、错误分类 **4/4**、contracts身份 **3/3**、resolver **16/16**、最终workspace身份 **1/1**、真实effectful→同物理workspace只读Agent路由 **1/1**通过；旧settled Effect引用保持，未重新赋予旧资源权限。
+- D2公开API的create→保存模型配置→warmup→首次send回归 **1/1**通过，覆盖native claim、预算和实际wire、活动Turn冻结、幂等及后继采用。受控对照只临时禁用Snapshot变化时关闭旧warmup host的保护，得到首次Turn模型请求0的红结果；还原保护后绿色，原源码恢复记录保持。prepare分阶段观测保留首次内部错误及打开的Snapshot身份。该对照证明当前保护必要，不能替代原W276缺失的实际host Snapshot／首次内部cause。
+- D3真实SQLite写锁回归曾暴露首个shutdown flight丢失内部原因，SDK现保存exact Turn首次脱敏有界失败，registry传递exact Session原因；未确认继续保留原owner、quarantine及资源绑定。真实首flight记录`Engine journal`的SQLite `code 5 / database is locked`，解锁后显式重试同owner证明cleanup，未重放Turn或已完成写入。SDK **5/5**、registry **4/4**、desktop shutdown **2/2**通过；timeout、kill与最终PID消失均未被当作cleanup proof。
+- U4正式`05-u4-formal`的`continue_task`与`context_only`两条链均完成真实UI A→B切换：同Session ID、草稿、历史问题与回答保持，B首次实际请求含精确原工具正文，仅使用B系统指令和当前只读工具；独立回读文件，没有继承A完成要求或旧可用过程句柄，也没有重放旧写入／命令。共 **20次实际本地HTTP模型请求**；每mode **10个模型提议调用＝6个owner调用＋4个engine control**，另有 **18次内部指令读取**，故每mode实际canonical调用总数 **28**，不能把内部读取漏报。每mode两个returned Effects、完整源文件字节、fresh read及外键完整性均核对通过，真实供应商请求0。[U4独立核验](C:/Users/rika0/code/temp/nomifun-agent-reliability/phase-2-3/2026-10-04/windows/remaining-u4-d2-d3-formal/05-u4-formal/verification.json)保存两mode与六张UI截图hash。
+- D2成功正式载体为`06-d2-formal`。按save→warmup→实际UI首次发送取得native claim generation **5**、初始fence **0**及真实owner live lease；fence 0是合法初始执行，不能误判未claim。首回合实际预算／wire为 **65536／2048／low**，持有响应时保存后继配置仍保持原回合冻结；约28秒由真实UI Stop断流，夹具未释放或伪造完成。随后同Session的下一真实UI回合采用 **1000000／4096／high**并completed，两份实际wire、0夹具错误、供应商请求0，首回合唯一cancelled及完整新回答通过核验。[D2独立核验](C:/Users/rika0/code/temp/nomifun-agent-reliability/phase-2-3/2026-10-04/windows/remaining-u4-d2-d3-formal/06-d2-formal/verification.json)与active／saved-active／final canonical证据分别保存。
+- D3当前正式退出闭环：05原OS句柄持有的PID **31892**由已有原生API自然 **exit0**，观察器未kill，后代和监听均 **0**。独立核验精确对应CT、CO、D2三个当前owner的`owned_runtime_teardown`成功日志，以及六个Turn各自带operation／execution epoch的canonical `host_cleanup_proven`；其中D2首回合cancelled，其余五回合completed。退出后的proof、实物和事件核对通过，[D3清理核验](C:/Users/rika0/code/temp/nomifun-agent-reliability/phase-2-3/2026-10-04/windows/remaining-u4-d2-d3-formal/05-u4-formal/cleanup-verification.json)同时绑定actual native exit和原owner证据。此为原生API退出验收，不扩写为新托盘点击证据。
+- 首失败不覆盖：`01-u4-formal`初始plan不符合工具表，1次请求；`03-u4-formal`A六请求完成后UI切换409，真实SQLite FK `1811`被误归unsupported；`04-u4-formal`A六请求完成后，same physical workspace从read/write收窄read却复用same definition ID，UI切换400。三例各自首错误、原请求／草稿及自然API退出证据保留，均不改首次全绿。修复分别处理Effect引用、准确错误分类与最终资源定义ID，05证明当前两条切换链实际采用。
+- `02-d2-formal`曾把初始fence必须大于0写成oracle条件，错误拒绝实际generation5／fence0／live lease；本例到120秒生产deadline自动retry，被受控夹具明确拒绝，随后暂停并真实UI结束。原失败 **2次请求**、oracle首错和fixture拒绝保持，不能当真实Stop及时断流PASS；06是独立成功载体，没有删掉02或延长其原期限取绿。
+- 原W276的HTTP200／claim0、反复7～9ms快速拒绝、quarantine及actual exit1继续作为历史失败保存；旧首次prepare／cleanup内部原因与实际host Snapshot缺失，唯一原始根因仍未证。本轮已修并验证当前保护、具体原因保留、同owner显式重试和当前正式normal exit，不能把本轮SQLite锁因或新样本成功说成原W276唯一因果。完整共享／Windows矩阵、真实供应商、长稳、恢复、电源周期与原暂缓／跳过边界不由这三项关闭。
+- 仓库外总证据位于[remaining-u4-d2-d3-formal](C:/Users/rika0/code/temp/nomifun-agent-reliability/phase-2-3/2026-10-04/windows/remaining-u4-d2-d3-formal)：`00-causal-control`、`01／03／04-u4-formal`及`02-d2-formal`原失败保持；`05-u4-formal`、`06-d2-formal`分别结算成功，构建身份、harness、原wire、canonical、UI截图与清理proof相互独立保存。本轮U4、D2、D3从当前有限实施队列关闭，历史FAIL与全部Case未认证边界保持。

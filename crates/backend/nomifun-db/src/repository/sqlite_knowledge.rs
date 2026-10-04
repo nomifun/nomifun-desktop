@@ -16,6 +16,21 @@ impl SqliteKnowledgeRepository {
     }
 }
 
+// Resource rows can outlive their selection to preserve historical Effect
+// references. Only the current canonical Agent binding grants membership.
+// Both the consumer view and the delete fence use this exact predicate.
+const CURRENT_AGENT_KNOWLEDGE_RESOURCES_SQL: &str = "\
+    FROM agent_sessions sessions \
+    JOIN json_each(sessions.agent_binding_json, '$.typed_resource_bindings') selected \
+    JOIN agent_session_resources resources \
+      ON resources.session_id = sessions.agent_session_id \
+     AND resources.binding_id = json_extract(selected.value, '$.binding_id') \
+     AND resources.resource_kind = json_extract(selected.value, '$.resource_kind') \
+     AND resources.resource_id = json_extract(selected.value, '$.resource_id') \
+     AND resources.owner_id = json_extract(selected.value, '$.owner_id') \
+    WHERE sessions.state = 'live' AND resources.resource_kind = 'knowledge_base' \
+      AND resources.resource_id = ?";
+
 
 /// Map a binding `target_kind` to the `knowledge_bindings` column that carries
 /// its `target_id`. Returns `None` for an unrecognized kind so callers can
@@ -192,13 +207,10 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
             return Err(DbError::NotFound(format!("knowledge base {id}")));
         }
 
-        let session_consumers: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) \
-             FROM agent_session_resources resources \
-             JOIN agent_sessions sessions ON sessions.agent_session_id = resources.session_id \
-             WHERE sessions.state = 'live' AND resources.resource_kind = 'knowledge_base' \
-               AND resources.resource_id = ?",
-        )
+        let consumers_query = format!(
+            "SELECT COUNT(DISTINCT resources.session_id) {CURRENT_AGENT_KNOWLEDGE_RESOURCES_SQL}"
+        );
+        let session_consumers: i64 = sqlx::query_scalar(&consumers_query)
         .bind(id)
         .fetch_one(&mut *transaction)
         .await?;
@@ -482,16 +494,14 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
         &self,
         kb_id: &str,
     ) -> Result<Vec<(String, bool)>, DbError> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT resources.session_id, \
-                    CASE WHEN json_extract(resources.typed_parameters_json, '$.knowledge_enabled') = 'false' \
+        let consumers_query = format!(
+            "SELECT DISTINCT resources.session_id, \
+                    CASE WHEN json_extract(selected.value, '$.typed_parameters.knowledge_enabled') = 'false' \
                          THEN 0 ELSE 1 END \
-             FROM agent_session_resources resources \
-             JOIN agent_sessions sessions ON sessions.agent_session_id = resources.session_id \
-             WHERE sessions.state = 'live' AND resources.resource_kind = 'knowledge_base' \
-               AND resources.resource_id = ? \
-             ORDER BY resources.session_id",
-        )
+             {CURRENT_AGENT_KNOWLEDGE_RESOURCES_SQL} \
+             ORDER BY resources.session_id"
+        );
+        let rows: Vec<(String, i64)> = sqlx::query_as(&consumers_query)
         .bind(kb_id)
         .fetch_all(&self.pool)
         .await?;
@@ -709,6 +719,91 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// An Agent transition retains historical resource identities for Effect
+    /// references, while only the current canonical binding selects a base.
+    async fn seed_current_and_retired_knowledge_resources()
+        -> (crate::database::Database, SqliteKnowledgeRepository)
+    {
+        let db = init_database_memory().await.unwrap();
+        let repo = SqliteKnowledgeRepository::new(db.pool().clone());
+        repo.insert_base(&make_base(KB_A)).await.unwrap();
+        repo.insert_base(&make_base(KB_B)).await.unwrap();
+        seed_agent_session(db.pool(), CONVERSATION_ID).await;
+        let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
+        let mut current = None;
+        for (binding_id, kb_id, enabled) in [
+            ("knowledge_base:retired", KB_A, "true"),
+            ("knowledge_base:current", KB_B, "false"),
+        ] {
+            let binding = serde_json::json!({
+                "binding_id": binding_id, "resource_kind": "knowledge_base",
+                "resource_id": kb_id, "owner_id": installation_owner,
+                "operations": ["read"],
+                "typed_parameters": {"knowledge_enabled": enabled}
+            });
+            let digest = nomifun_agent_contracts::digest_payload(&binding).unwrap();
+            sqlx::query(
+                "INSERT INTO agent_session_resources \
+                 (session_id, binding_id, resource_kind, resource_id, owner_id, \
+                  operations_json, typed_parameters_json, binding_digest) \
+                 VALUES (?, ?, 'knowledge_base', ?, ?, '[\"read\"]', ?, ?)",
+            )
+            .bind(CONVERSATION_ID).bind(binding_id).bind(kb_id).bind(&installation_owner)
+            .bind(binding["typed_parameters"].to_string()).bind(digest.as_ref())
+            .execute(db.pool()).await.unwrap();
+            if kb_id == KB_B { current = Some(binding); }
+        }
+        let binding = serde_json::json!({
+            "preset_revision_ref": {
+                "preset_id": OTHER_CONVERSATION_ID, "revision": 1,
+                "revision_digest": "a".repeat(64)
+            },
+            "resolved_snapshot_ref": {
+                "snapshot_id": "resolved:current-knowledge-agent",
+                "snapshot_digest": "b".repeat(64)
+            },
+            "typed_resource_bindings": [current.unwrap()], "binding_version": 2
+        });
+        sqlx::query("UPDATE agent_sessions SET agent_binding_json = ? WHERE agent_session_id = ?")
+            .bind(binding.to_string()).bind(CONVERSATION_ID)
+            .execute(db.pool()).await.unwrap();
+        (db, repo)
+    }
+
+    #[tokio::test]
+    async fn canonical_knowledge_consumers_ignore_retired_resource_rows() {
+        let (db, repo) = seed_current_and_retired_knowledge_resources().await;
+        assert!(repo.list_agent_sessions_using_kb(KB_A).await.unwrap().is_empty(),
+            "historical Effect resource identities must not reauthorize a retired Knowledge base");
+        assert_eq!(repo.list_agent_sessions_using_kb(KB_B).await.unwrap(),
+            vec![(CONVERSATION_ID.to_owned(), false)],
+            "a current disabled selection remains visible with its exact disposition");
+        assert_eq!(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_session_resources WHERE session_id = ?",
+        ).bind(CONVERSATION_ID).fetch_one(db.pool()).await.unwrap(), 2,
+            "consumer filtering must not delete historical resource identities");
+    }
+
+    #[tokio::test]
+    async fn canonical_knowledge_deletion_ignores_retired_but_rejects_current_resources() {
+        let (db, repo) = seed_current_and_retired_knowledge_resources().await;
+        repo.delete_base(KB_A).await.expect("a retired resource row must not block Knowledge base deletion");
+        assert!(repo.get_base(KB_A).await.unwrap().is_none());
+        assert!(matches!(repo.delete_base(KB_B).await, Err(DbError::Conflict(_))),
+            "a current selection protects the base even when Knowledge retrieval is disabled");
+        sqlx::query(
+            "UPDATE agent_sessions SET agent_binding_json = \
+             json_set(agent_binding_json, '$.typed_resource_bindings', json('[]')) \
+             WHERE agent_session_id = ?",
+        ).bind(CONVERSATION_ID).execute(db.pool()).await.unwrap();
+        assert!(repo.list_agent_sessions_using_kb(KB_B).await.unwrap().is_empty());
+        repo.delete_base(KB_B).await.expect("removing the canonical selection must release its delete blocker");
+        assert_eq!(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_session_resources WHERE session_id = ?",
+        ).bind(CONVERSATION_ID).fetch_one(db.pool()).await.unwrap(), 2,
+            "retired referential identities remain available after unmount and base deletion");
     }
 
     #[tokio::test]

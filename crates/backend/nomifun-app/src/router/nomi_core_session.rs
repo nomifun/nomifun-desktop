@@ -4669,7 +4669,6 @@ fn freeze_selected_workspace(
             "workspace" => {
                 has_workspace_resource = true;
                 resource.resource_id = resource_id.clone();
-                resource.binding_id = format!("workspace:{resource_id}");
                 resource
                     .typed_parameters
                     .insert("workspace_root".to_owned(), canonical.to_owned());
@@ -4681,14 +4680,17 @@ fn freeze_selected_workspace(
             }
             _ => {}
         }
+        if matches!(resource.resource_kind.as_str(), "workspace" | "process_session") {
+            super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
+        }
     }
 
     // A project directory is also the process cwd for Agents that do not expose
     // workspace file Actions. Keep a zero-operation workspace identity so the
     // Session can freeze that cwd without manufacturing any file authority.
     if !has_workspace_resource {
-        binding.typed_resource_bindings.push(TypedResourceBindingDto {
-            binding_id: format!("workspace:{resource_id}"),
+        let mut workspace = TypedResourceBindingDto {
+            binding_id: String::new(),
             resource_kind: "workspace".to_owned(),
             resource_id,
             owner_id: owner_id.to_owned(),
@@ -4698,11 +4700,11 @@ fn freeze_selected_workspace(
                 "workspace_root".to_owned(),
                 canonical.to_owned(),
             )]),
-        });
-        binding
-            .typed_resource_bindings
-            .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+        };
+        super::nomi_core_resource_bindings::freeze_resource_definition_id(&mut workspace)?;
+        binding.typed_resource_bindings.push(workspace);
     }
+    binding.typed_resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
 
     Ok(canonical.to_owned())
 }
@@ -6079,6 +6081,25 @@ mod session_boundary_tests {
             .resource_id
             .as_ref()
             .starts_with("selected-workspace-"));
+    }
+
+    #[test]
+    fn selected_workspace_identity_includes_final_grants_and_is_stable_on_refreeze() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut source: AgentBindingValueDto = serde_json::from_value(
+            serde_json::to_value(frozen_binding(&std::env::temp_dir().to_string_lossy(), OWNER_ID)).unwrap(),
+        ).unwrap();
+        freeze_selected_workspace(&mut source, OWNER_ID, &directory.path().to_string_lossy(), WorkspaceDirectoryCheck::Create).unwrap();
+        let mut target = source.clone();
+        target.typed_resource_bindings[0].operations.remove("write");
+        freeze_selected_workspace(&mut target, OWNER_ID, &directory.path().to_string_lossy(), WorkspaceDirectoryCheck::Runtime).unwrap();
+        assert_eq!(source.typed_resource_bindings[0].resource_id, target.typed_resource_bindings[0].resource_id);
+        assert_eq!(source.typed_resource_bindings[0].typed_parameters, target.typed_resource_bindings[0].typed_parameters);
+        assert_ne!(source.typed_resource_bindings[0].binding_id, target.typed_resource_bindings[0].binding_id,
+            "freezing the same physical root must not overwrite a narrower Agent's definition identity");
+        let expected = target.typed_resource_bindings.clone();
+        freeze_selected_workspace(&mut target, OWNER_ID, &directory.path().to_string_lossy(), WorkspaceDirectoryCheck::Runtime).unwrap();
+        assert_eq!(target.typed_resource_bindings, expected, "identical final definitions reuse their identities");
     }
 
     #[test]
@@ -10845,6 +10866,7 @@ fn freeze_agent_session_knowledge_policy(
             nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
             eagerness.to_owned(),
         );
+        super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
     }
     Ok(())
 }
@@ -11032,6 +11054,7 @@ async fn update_nomi_core_agent_session_knowledge(
             nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
             eagerness.to_owned(),
         );
+        super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
     }
     let mut replacement_dto = current_dto;
     replacement_dto.typed_resource_bindings.retain(|resource| {
@@ -11488,6 +11511,27 @@ mod agent_switch_resource_tests {
             vec!["computer".to_owned(), "workspace".to_owned()]
         );
     }
+
+    #[test]
+    fn agent_switch_storage_failure_is_not_an_unsupported_session() {
+        let error = super::agent_switch_store_error(
+            nomifun_agent_session::SessionStoreError::Sqlite(sqlx::Error::Protocol(
+                "foreign key condition rejected the transition".to_owned(),
+            )),
+        );
+        assert_eq!(error.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_ne!(error.code, "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED");
+        assert!(error.message.contains("foreign key condition"));
+    }
+
+    #[test]
+    fn agent_switch_active_turn_preserves_its_specific_blocker() {
+        let error = super::agent_switch_store_error(
+            nomifun_agent_session::SessionStoreError::Conflict("active Turn".to_owned()),
+        );
+        assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.code, "AGENT_SESSION_TURN_ACTIVE");
+    }
 }
 
 async fn agent_switch_recovery_blocker(
@@ -11897,6 +11941,7 @@ async fn prepare_agent_session_switch(
                     nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
                     "manual".to_owned(),
                 );
+                super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
             }
         }
     }
@@ -12137,7 +12182,11 @@ fn agent_switch_store_error(error: nomifun_agent_session::SessionStoreError) -> 
         nomifun_agent_session::SessionStoreError::InvalidPayload(_) => {
             "AGENT_SESSION_HANDOFF_SOURCE_INVALID"
         }
-        _ => "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED",
+        // An unexpected storage/contract failure is not evidence that this
+        // Session kind cannot switch Agents. Preserve the common typed error
+        // classification instead of translating an internal cause to a
+        // misleading product blocker.
+        _ => return agent_session_store_error(error).into(),
     };
     NomiCoreApiError::with_details(StatusCode::CONFLICT, code, message, Value::Null)
 }

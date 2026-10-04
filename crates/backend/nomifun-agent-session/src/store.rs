@@ -1402,9 +1402,10 @@ impl AgentSessionStore {
     ///
     /// This is the mutable-resource counterpart to model replacement: the
     /// immutable Preset revision/Snapshot stay exact, every other resource
-    /// binding is byte-for-byte preserved, and the denormalized
-    /// `agent_session_resources` projection changes in the same transaction as
-    /// `agent_binding_json`. Active turns and Remote bindings remain immutable.
+    /// binding is byte-for-byte preserved. Current authority comes only from
+    /// `agent_binding_json`; immutable resource definitions referenced by
+    /// canonical effects survive replacement as historical facts.
+    /// Active turns and Remote bindings remain immutable.
     pub async fn replace_session_resource_bindings(
         &self,
         owner: &PrincipalRef,
@@ -1482,6 +1483,17 @@ impl AgentSessionStore {
                 "wait for the active Turn before changing Session resources".to_owned(),
             ));
         }
+        let unsettled: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_effects AS effect \
+             JOIN agent_session_resources AS resource \
+                 ON resource.session_id=effect.session_id AND resource.binding_id=effect.resource_binding_id \
+             WHERE effect.session_id=? AND resource.resource_kind=? AND effect.state IN ('pending','unknown'))",
+        ).bind(session_id.as_ref()).bind(resource_kind).fetch_one(&mut *tx).await?;
+        if unsettled != 0 {
+            return Err(SessionStoreError::Conflict(format!(
+                "AgentSession has unsettled {resource_kind} effects; settle them before changing this resource kind",
+            )));
+        }
         let result = sqlx::query(
             "UPDATE agent_sessions SET agent_binding_json = ? \
              WHERE agent_session_id = ? AND state = 'live' AND agent_binding_json = ?",
@@ -1497,28 +1509,17 @@ impl AgentSessionStore {
                     .to_owned(),
             ));
         }
-        sqlx::query(
-            "DELETE FROM agent_session_resources WHERE session_id = ? AND resource_kind = ?",
-        )
-        .bind(session_id.as_ref())
-        .bind(resource_kind)
-        .execute(&mut *tx)
-        .await?;
-        let replacements = replacement
-            .typed_resource_bindings
-            .iter()
-            .filter(|resource| resource.resource_kind.as_ref() == resource_kind)
-            .cloned()
-            .collect::<Vec<_>>();
-        insert_session_resources_tx(&mut tx, session_id, owner, &replacements).await?;
+        replace_session_resource_definitions_tx(
+            &mut tx, session_id, owner, &replacement.typed_resource_bindings,
+        ).await?;
         let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
         tx.commit().await?;
         Ok(updated)
     }
 
     /// Atomically transition a local idle AgentSession to one complete,
-    /// host-resolved Agent binding. Binding JSON, the denormalized resource
-    /// projection, optional bounded handoff payload, transition audit event,
+    /// host-resolved Agent binding. Current binding JSON, immutable resource
+    /// definitions, optional bounded handoff payload, transition audit event,
     /// and the next active capability generation
     /// commit or roll back together.
     pub async fn replace_session_agent_binding(
@@ -1790,11 +1791,7 @@ impl AgentSessionStore {
                 "Agent replacement lost its compare-and-swap boundary".to_owned(),
             ));
         }
-        sqlx::query("DELETE FROM agent_session_resources WHERE session_id = ?")
-            .bind(session_id.as_ref())
-            .execute(&mut *tx)
-            .await?;
-        insert_session_resources_tx(
+        replace_session_resource_definitions_tx(
             &mut tx,
             session_id,
             owner,
@@ -1964,16 +1961,12 @@ impl AgentSessionStore {
         &self,
         session_id: &AgentSessionId,
     ) -> Result<Vec<TypedResourceBinding>, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
-        let rows = sqlx::query_as::<_, StoredResourceRow>(
-            "SELECT binding_id, resource_kind, resource_id, owner_id, operations_json, \
-                    connection_config_ref, typed_parameters_json \
-             FROM agent_session_resources WHERE session_id = ? ORDER BY binding_id",
-        )
-        .bind(session_id.as_ref())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(resource_from_row).collect()
+        // Historical effect references retain definitions in the registry.
+        // They cannot select resources or restore a prior Agent's authority.
+        let mut current = require_live_session(&self.pool, session_id.as_ref()).await?
+            .agent_binding.typed_resource_bindings;
+        current.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+        Ok(current)
     }
 
     pub async fn read_events(
@@ -4689,6 +4682,7 @@ struct StoredResourceRow {
     operations_json: String,
     connection_config_ref: Option<String>,
     typed_parameters_json: String,
+    binding_digest: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -5114,6 +5108,21 @@ async fn insert_session_resources_tx(
         let operations_json = serde_json::to_string(&binding.operations)?;
         let typed_parameters_json = serde_json::to_string(&binding.typed_parameters)?;
         let binding_digest = digest_payload(binding)?;
+        let existing = sqlx::query_as::<_, StoredResourceRow>(
+            "SELECT binding_id,resource_kind,resource_id,owner_id,operations_json, \
+                    connection_config_ref,typed_parameters_json,binding_digest \
+             FROM agent_session_resources WHERE session_id=? AND binding_id=?",
+        ).bind(session_id.as_ref()).bind(binding.binding_id.as_ref())
+            .fetch_optional(&mut **tx).await?;
+        if let Some(existing) = existing {
+            if resource_from_row(existing)? != *binding {
+                return Err(SessionStoreError::InvalidSession(format!(
+                    "Session {} immutable resource binding {} cannot be redefined",
+                    session_id.as_ref(), binding.binding_id.as_ref(),
+                )));
+            }
+            continue;
+        }
         sqlx::query(
             "INSERT INTO agent_session_resources (\
                 binding_id, session_id, resource_kind, resource_id, owner_id, \
@@ -5137,6 +5146,25 @@ async fn insert_session_resources_tx(
         .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+/// Synchronize one active selection without deleting immutable definitions
+/// still referenced by canonical effects. This registry never selects tools,
+/// permissions or cleanup owners; the current Agent binding does that.
+async fn replace_session_resource_definitions_tx(
+    tx: &mut Transaction<'_, Sqlite>, session_id: &AgentSessionId,
+    owner: &PrincipalRef, bindings: &[TypedResourceBinding],
+) -> Result<(), SessionStoreError> {
+    insert_session_resources_tx(tx, session_id, owner, bindings).await?;
+    let selected = serde_json::to_string(bindings)?;
+    sqlx::query(
+        "DELETE FROM agent_session_resources AS resource WHERE resource.session_id=? \
+         AND NOT EXISTS (SELECT 1 FROM json_each(?) AS current \
+             WHERE json_extract(current.value,'$.binding_id')=resource.binding_id) \
+         AND NOT EXISTS (SELECT 1 FROM agent_effects AS effect \
+             WHERE effect.session_id=resource.session_id AND effect.resource_binding_id=resource.binding_id)",
+    ).bind(session_id.as_ref()).bind(selected).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -6649,7 +6677,8 @@ async fn record_deletion_audit_tx(
 }
 
 fn resource_from_row(row: StoredResourceRow) -> Result<TypedResourceBinding, SessionStoreError> {
-    Ok(TypedResourceBinding {
+    let recorded_digest = row.binding_digest;
+    let binding = TypedResourceBinding {
         binding_id: ResourceBindingId::from(row.binding_id),
         resource_kind: ResourceKind::from(row.resource_kind),
         resource_id: ResourceId::from(row.resource_id),
@@ -6657,7 +6686,13 @@ fn resource_from_row(row: StoredResourceRow) -> Result<TypedResourceBinding, Ses
         operations: serde_json::from_str(&row.operations_json)?,
         connection_config_ref: row.connection_config_ref.map(ConnectionConfigRef::from),
         typed_parameters: serde_json::from_str(&row.typed_parameters_json)?,
-    })
+    };
+    if digest_payload(&binding)?.as_ref() != recorded_digest {
+        return Err(SessionStoreError::InvalidSession(
+            "immutable resource binding differs from its recorded digest".to_owned(),
+        ));
+    }
+    Ok(binding)
 }
 
 fn build_payload_record(
