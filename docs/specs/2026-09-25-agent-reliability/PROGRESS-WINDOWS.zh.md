@@ -4332,5 +4332,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 ### B原会话提交拒绝与恢复提示（2026-10-04；文案修复、正式新UI未验）
 
 - 冻结e869桌面/前端及原data/work、step-3.7-flash，原PID69884；正式UI一次原347字历史问题已捕获POST409原响应字段/178B摘要及可见toast：CONFLICT/AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED。accepted/新Turn/模型0；这是本次拒绝的直接证据，不反推旧HTTP，更不解释W250原漏stdin。首次观察器等待输入到期时未发送任务，后续只重新挂接同PID；首次实际提交后的120秒边界未重置。OPTIONS取body的观察器错误另存，不抹去已取得的真实POST正文。
-- 当前源码展示层未映射该结构化拒绝，中文UI泄露内部英文合同说明、缺少恢复操作提示。最小修复仅对精确原生标签给中英文兼容配置/Agent切换或新会话提示，通用冲突/引用中的标签保持原文；不改变合同门禁、模型、权限、任务或原记录。
+- 当前源码展示层未映射该结构化拒绝，中文UI直接展示内部英文合同说明、缺少恢复操作提示。最小修复仅对精确原生标签给中英文兼容配置/Agent切换或新会话提示，通用冲突/引用中的标签保持原文；不改变合同门禁、模型、权限、任务或原记录。
 - 修前新回归1PASS/2FAIL，修后及相邻provider回归5/5，i18n与desktop boundary通过。新renderer未构建/正式采用，保留FIXED_PENDING_RETEST；历史正文/模型采用仍未验。用户要求长耗时先不测，本轮不扩展编译或其他专项。
+
+### 短验证结算（2026-10-04；D迟到resize正式子链通过）
+
+- 用户取消问题诊断时间盒，随后要求耗时太长先不测。冷恢复/sleep/重启及最新完整产物重建暂缓，未验不改PASS。正常同步81b7b76f5；模型默认值/per-attempt改动在Windows跑已有UI63/63、broker output_3/3、Runtime context_threshold8/8及desktop boundary，不扩展Agnes视频、全套或真实模型认证；制品`global-model-defaults-short`。
+- D复用同代e869正式desktop/helper/data（未被新migration011升级），前端fd8cbb7e/1280×832，保留首载体错误：官方三个POST200后API ready误当live，修正只读判断且不重建该Session；原进程start后计划控制未暴露，载体在poll前停止，原PID56600/API exit0，未resize/报告，不计通过。
+- 源码已明确第二外部批次/真实失败会提升控制面，仅修正外部载体先沿原ID/cursor poll。新受限Session、PID56968的唯一正式样本8真实请求/8组原生参数与canonical全同：Bun PID11060、1秒时限、四次原游标poll，实际timed_out/reaped、清理187ms/无错误；随后计划只覆盖剩余resize/report，同原process_id一次132×43返回control_applied=false/PROCESS_ALREADY_TERMINATED，原终态保持，无重启/stdin/文件修改。
+- report已接纳、Turn completed；实际Tauri像素交付原准备输出/PID、超时清理和迟到拒绝，宿主中文固定尾注2调用未成功/1命令失败。不可当前引用的resize ID保留unverified说明；17次自动AGENTS读取另记，不声称没有其他读取。仅此正式子断言PASS，不代判完整WIN-010、最新模型默认值/409文案UI或整体目标。原API exit0/后代监听0，carrier仅自有强制清理exit-1，不当Quit证据。
+- B本次真实409已取，但无新准入/模型；943events/4Turns/8effects/9files及原763条前缀逐行/字节SHA保持，密文SHA不变，原端点已恢复（revision+2），PID69884/API及转发均exit0，后代监听0。原W250/W249缺历史wire、生成/LF/guard/复杂交付、新历史/typed采用、W276旧失败和其余Windows边界仍开放。文案修复c1dc3d962已推送；完整制品在`global-b-history-resume`及`global-d-resize-resume/corrected-short`，自有GUI/Cargo/夹具均已清理。
