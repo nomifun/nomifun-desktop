@@ -4356,3 +4356,18 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - PID55832实际API exit0，后代/监听0；同原句柄的本地模型carrier自然exit0，上游0。外部`global-current-ui-adoption/fixed-run`保留身份/请求/SSE/typed事件/精确消息link/像素/退出；首次startup及setup错误分别存原目录。不将API退出当新托盘证据，W274继续复用。
 - B合法短路径调查无新的已实现正文导入入口：fork要求父旧binding且不复制原tool journal；Agent switch设transition floor排除旧工具Turn，新child也拒绝父Session显式地址。故不fork后重发取绿、不改合同门禁；完整旧正文实际模型采用仍待兼容执行器或受授权的来源导入方案，c1dc新恢复文案的正式拒绝UI尚未验。冷恢复/S3/系统重启/跨盘UNC及原生成/字节/完整交付残余继续保留。
 - 结算825e89d43首次push被远端正常拒绝；清理后合入a85b57a9a委派进度新UI，合并0a5e79d62已推送，原7d388a69e/fb65样本身份不追改。只补新delegation model/progress/live组件20/20及desktop boundary；未启动委派模型或新版正式UI，外部merged-delegation-component.log留存，不重跑原已验机制。源码/文档已正常同步、自有进程0。
+
+### U1/U2/U3有限待办正式关闭（2026-10-04；本地模型与正式Tauri）
+
+- U1：复用7d388a69e/CD3CCDDC…/fb65/1280×832，原data/work及新profile，PID19756/07:15:51Z。Computer Use一次只检查兼容性的输入，真实POST409/CONFLICT/178B；中文恢复指引实际可见，原输入保留，未接纳Turn。仅公开API临时本地拒绝端点、无上游；模型0，原943events/763前缀/4Turns/8effects/9files及密文hash逐项保持，端点恢复/revision+2。实际API exit0、后代监听0，本地载体自然exit0；正式拒绝提示由FIXED_PENDING_RETEST改为已验，不关闭旧正文准入或W250根因。
+- U2：同实例原真实read_file行按真实call_id核对，输入path及完整18bytes回执JSON与canonical完全一致；真实刷新像素保持公开文件/hash/旧EOF0。随后统一构建b7899f09c/1AE256CB…/ee45459e（frontend35秒、Cargo47秒），正式新库/独立work/profile，PID51236/07:31:03Z。唯一非零样本两请求/两提议，实际bun exit1、stdout U2_NATIVE_EXIT_ONE加LF19bytes、cursor/retained19/drop0/reaped/errors空；report接纳并completed。新版行显示“已结束，退出码1”，参数/输出详情及中文非零尾注明确，刷新默认折叠后公开正文保持。只关闭这组新版呈现，不代判全部错误分类/原复杂生成。
+- U3：同冻结b789产物、同新库下一Turn，一次原有live-smoke单marker委派。真实公告动态agent/delegate函数，parallel/tasks1/synthesize=false；根Turn completed而实际子execution running时，会话活动卡/计时/0/1及真实子任务按钮可见。子真实SSE在本地受控等待后释放，execution/step/attempt completed、1/1，父/子公开各唯一NOMIFUN_AGENT_COLLABORATION_LIVE_OK；可打开真实只读子会话正文并返回。lead/child/execution身份及三组原生参数逐组canonical全同，四份实际请求/SSE保持，父110events/2Turns/2effects、子30events/1Turn/0effects；workspace空。此有限项关闭，不扩委派角色/多任务或真实供应商生成认证。
+- 首次准备误传Session DTO没有的delegation_policy，原API422/脚本JSON解码失败留档；捕获明确拒绝后只纠正夹具字段，复用唯一Provider/预设、仅创建一个Session，未改产品schema或增权。U1只读查询列名首错、异步刷新过早DOM文本的观察器首错分别保持；原PNG实际像素另独立核对，不将不完整DOM当事实。已验55/20组件及boundary复用，无生产源码修改。PID51236实际API exit0、后代监听0，载体原exec句柄自然exit0；不当新托盘证据，W274直接复用。
+- 外部`2026-10-04/windows/remaining-u1-contract-ui`及`remaining-u2-u3-formal`保存产物身份、首次组织错误、实际参数/回执/事件、PNG、公开history、独立verification及退出清理。U1/U2/U3从活动队列移除；D1合法历史兼容路径、D2/D3旧Runtime归因、D4 S3_ACK及暂缓/跳过边界保持，完整共享/Windows/发布认证未完成。
+- D2/D3只读原505ee1eb1证据新增区别：/turns200已意味着Runtime admission及task spawn成功，claim0不能写执行器未启动；退出teardown每次7～9ms快速失败，旧日志只记stage缺内部AppError。原save old→warmup→send不同于旧反假设顺序，opening/ready a519…与accepted f2f0…支持旧host Snapshot复用的可证伪候选；实际host Snapshot/首次prepare/cleanup错误缺失，仍不认定旧唯一原因，不改执行层。
+
+### D4零休眠输入归因对照（2026-10-04；对照完成，原S3首败保持）
+
+- 新仓库外驱动，完全移除实际sleep/power/token/wake调用，原Bun helper逐字相同、ConPTY80×24/lease10s/expire_on_idle=false/deadline=None及local owner复用。原S3源码/两个EXE的SHA及mtime前后保持；生产process runtime库源未变（be2→当前仅测试/helper文件变动）。原19bytes AFTER_REAL_S3_ONCE+LF在零休眠下write Ok，原父子及精确FILETIME仍活，但5秒仅回显/ACK无，驱动PID56724实际exit2；保持原LF失败，不改字节断言。
+- 显式独立--zero-sleep-cr对照，只将本例最后一个输入字节改CR（不自动回退原样本）；同helper、同policy，得到count1/root精确/text相同的真实ACK，PID5088实际exit0。两例cancel reaped/父子原句柄终止/shutdown exact，未执行电源周期、无模型/UI。由此证明缺ACK不依赖休眠，并支持cooked输入行结束符的夹具解释；不足以证明旧实际S3无其他问题或把WIN-015改PASS。
+- 缓存首前置因root多改SDK特征被拒、外部cwd离线build因未读仓库镜像缓存exit101，均未执行驱动并保留；恢复原manifest/lock、独立复制依赖缓存、沿仓库现有配置离线构建2.79秒，未下载或修改原缓存/产品。外部`2026-10-04/windows/remaining-d4-zero-sleep`保存原件保护、首准备错误、源码/binary、两组真实owner/句柄/write/poll/ACK/清理及actual terminal/verification。零休眠归因对照从队列关闭，原W272 FAIL保留、实际修正输入的S3复验归P2暂缓；自有驱动/父子/Cargo已结束。
