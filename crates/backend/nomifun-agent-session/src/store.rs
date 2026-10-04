@@ -55,6 +55,10 @@ pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 mod native_checkpoint;
 pub use native_checkpoint::{NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_CHECKPOINT_BYTES};
 
+#[path = "runtime_state.rs"]
+mod runtime_state;
+pub use runtime_state::RuntimeStateObservation;
+
 #[path = "native_execution.rs"]
 mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};

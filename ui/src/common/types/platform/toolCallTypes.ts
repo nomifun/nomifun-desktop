@@ -6,11 +6,6 @@
 
 import type { PersistedArtifactId } from '@/common/types/ids';
 
-/** Shared base — every session update notification carries a session id. */
-interface BaseSessionUpdate {
-  session_id: string;
-}
-
 export interface PersistedToolArtifact {
   id: PersistedArtifactId;
   kind: 'image' | 'audio' | 'video' | 'text' | 'file';
@@ -21,16 +16,4 @@ export interface PersistedToolArtifact {
   relative_path: string;
   size_bytes: number;
   sha256: string;
-}
-
-/** Plan session update */
-export interface PlanUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'plan';
-    entries: Array<{
-      content: string;
-      status: 'pending' | 'in_progress' | 'completed';
-      priority?: 'low' | 'medium' | 'high';
-    }>;
-  };
 }

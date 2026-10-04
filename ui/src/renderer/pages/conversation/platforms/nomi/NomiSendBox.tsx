@@ -73,6 +73,7 @@ import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } fro
 import { creationTasksKey, submitCreation } from '@/renderer/creation/client';
 import { mutate as mutateSWR } from 'swr';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
+import { useConversationTaskPlan } from './useConversationTaskPlan';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -156,6 +157,7 @@ const NomiSendBox: React.FC<{
   compactProductComposer = false,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
+  const taskPlan = useConversationTaskPlan(conversation_id, turnActivity.running);
   const { t } = useTranslation();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
@@ -849,7 +851,7 @@ const NomiSendBox: React.FC<{
         sideTools={compactProductComposer ? undefined : capabilityControls}
         prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
         data-testid='nomi-sendbox'
-        showPinnedPlan={!compactProductComposer}
+        taskPlan={taskPlan}
         value={content}
         onChange={handleContentChange}
         selectedWorkspaceItems={atPath}

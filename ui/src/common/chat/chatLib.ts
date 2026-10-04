@@ -5,7 +5,6 @@
  */
 
 import type {
-  PlanUpdate,
   PersistedToolArtifact,
 } from '@/common/types/platform/toolCallTypes';
 import type { OfficialPresetKey } from '@/common/types/agentPlatform';
@@ -38,7 +37,6 @@ type TMessageType =
   | 'tool_call'
   | 'tool_group'
   | 'agent_status'
-  | 'plan'
   | 'thinking'
   | 'available_commands';
 
@@ -608,14 +606,6 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
     : mergePreferredWriteback(primary, secondary);
 };
 
-export type IMessagePlan = IMessage<
-  'plan',
-  {
-    session_id: string;
-    entries: PlanUpdate['update']['entries'];
-  }
->;
-
 export type IMessageThinking = IMessage<
   'thinking',
   {
@@ -647,7 +637,6 @@ export type TMessage =
   | IMessageToolCall
   | IMessageToolGroup
   | IMessageAgentStatus
-  | IMessagePlan
   | IMessageThinking
   | IMessageAvailableCommands;
 
@@ -1093,19 +1082,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         content: normalizeAgentStatusContent(message.data),
       };
     }
-    case 'plan': {
-      return {
-        id: uuid(),
-        type: 'plan',
-        msg_id: message.msg_id,
-        ...turnIdentity,
-        position: 'left',
-        conversation_id: message.conversation_id,
-        created_at,
-        status: message.status,
-        content: message.data as any,
-      };
-    }
     case 'thinking': {
       const data = isObject(message.data) ? message.data : { content: message.data };
       const duration = finiteNumber(data.duration) ?? finiteNumber(data.duration_ms);
@@ -1279,19 +1255,6 @@ export const composeMessage = (
     }
     // If no existing tool call found, add new one
     return pushMessage(message);
-  }
-
-  if (message.type === 'plan') {
-    for (let i = 0, len = list.length; i < len; i++) {
-      const msg = list[i];
-      if (msg.type === 'plan' && msg.content.session_id === message.content.session_id) {
-        // Create new object instead of mutating original
-        const merged = { ...msg.content, ...message.content };
-        return updateMessage(i, { ...msg, content: merged });
-      }
-    }
-    return pushMessage(message);
-    // If no existing plan found, add new one
   }
 
   // Handle thinking message merging — only merge contiguous streaming chunks

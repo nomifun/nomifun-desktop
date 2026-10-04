@@ -40,13 +40,13 @@ const textMessage = (
 
 describe('message visibility across batching and conversation switches', () => {
   test('replaying a functional batch against the same snapshot never reuses a mutated index', () => {
-    const plan: TMessage = {
-      id: 'plan',
+    const status: TMessage = {
+      id: 'status',
       msg_id: parseMessageId('0190f5fe-7c00-7a00-8000-000000000041'),
       conversation_id: conversationA,
-      type: 'plan',
+      type: 'agent_status',
       position: 'left',
-      content: { session_id: 'plan-session', entries: [] },
+      content: { backend: 'nomi', status: 'preparing' },
     };
     const tip: TMessage = {
       id: 'tip',
@@ -56,16 +56,16 @@ describe('message visibility across batching and conversation switches', () => {
       position: 'center',
       content: { content: 'updated tip', type: 'success' },
     };
-    const snapshot = [plan, tip];
-    const pending = { current: [{ message: tip, add: false }, { message: plan, add: false }] };
+    const snapshot = [status, tip];
+    const pending = { current: [{ message: tip, add: false }, { message: status, add: false }] };
     drainPendingMessageUpdates(pending, (updater) => {
       const first = updater(snapshot);
-      expect(first).toEqual([tip, plan]);
+      expect(first).toEqual([status, tip]);
       // React may replay an updater without committing its earlier result.
       expect(updater(snapshot)).toEqual(first);
       expect(updater(snapshot)).toEqual(first);
     });
-    expect(snapshot).toEqual([plan, tip]);
+    expect(snapshot).toEqual([status, tip]);
     expect(pending.current).toEqual([]);
   });
 
