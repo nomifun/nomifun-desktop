@@ -4355,3 +4355,4 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 正式message-history两条公开text各有真实不同ID/同Turn/finish/hidden=false，尾段continuation_of_message_id精确指首段。实际UI及Ctrl+R刷新后均公开显示两段，不被完成态过程折叠吞掉；参数/事件/历史JSON及两次PNG已独立核对，不拼造正文或链接。这里只关闭真实typed续接及刷新可见性，不代判完整过程工具行布局、历史旧正文/模型采用或共享全量。
 - PID55832实际API exit0，后代/监听0；同原句柄的本地模型carrier自然exit0，上游0。外部`global-current-ui-adoption/fixed-run`保留身份/请求/SSE/typed事件/精确消息link/像素/退出；首次startup及setup错误分别存原目录。不将API退出当新托盘证据，W274继续复用。
 - B合法短路径调查无新的已实现正文导入入口：fork要求父旧binding且不复制原tool journal；Agent switch设transition floor排除旧工具Turn，新child也拒绝父Session显式地址。故不fork后重发取绿、不改合同门禁；完整旧正文实际模型采用仍待兼容执行器或受授权的来源导入方案，c1dc新恢复文案的正式拒绝UI尚未验。冷恢复/S3/系统重启/跨盘UNC及原生成/字节/完整交付残余继续保留。
+- 结算825e89d43首次push被远端正常拒绝；清理后合入a85b57a9a委派进度新UI，合并0a5e79d62已推送，原7d388a69e/fb65样本身份不追改。只补新delegation model/progress/live组件20/20及desktop boundary；未启动委派模型或新版正式UI，外部merged-delegation-component.log留存，不重跑原已验机制。源码/文档已正常同步、自有进程0。
