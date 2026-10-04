@@ -82,7 +82,7 @@ const errorMessage = (
   }) as TMessage;
 
 describe('conversation error isolation red-team contracts', () => {
-  test('historical local provenance refusals retain their failure with local ownership', () => {
+  test('diagnostic prose cannot replace a persisted error classification', () => {
     const detail = 'Conflict: Nomi Plugin Tool Kernel admission failed: capability CapabilityId("workspace.process") exact provenance drifted: Revision contribution lock does not match the materialized target';
     const original = errorMessage('local-provenance', messageId(9), 400, 'The upstream Agent failed');
     if (original.type !== 'tips') throw new Error('expected error tip');
@@ -92,10 +92,10 @@ describe('conversation error isolation red-team contracts', () => {
     const normalized = normalizeDbMessage(persisted);
     if (normalized.type !== 'tips') throw new Error('expected error tip');
     expect(normalized.content.type).toBe('error');
-    expect(normalized.content.error?.code).toBe('NOMIFUN_SESSION_CONFIGURATION_CHANGED');
-    expect(normalized.content.error?.ownership).toBe('nomifun');
-    expect(normalized.content.error?.retryable).toBe(false);
-    expect(normalized.content.error?.resolution).toEqual({kind:'start_new_session',target:'new_conversation'});
+    expect(normalized.content.error?.code).toBe('UNKNOWN_UPSTREAM_ERROR');
+    expect(normalized.content.error?.ownership).toBe('unknown_upstream');
+    expect(normalized.content.error?.retryable).toBe(true);
+    expect(normalized.content.error?.resolution).toBeUndefined();
     expect(normalized.content.error?.detail).toBe(detail);
     expect(normalized.turn_id).toBe(persisted.turn_id);
     expect(normalized.conversation_id).toBe(persisted.conversation_id);
@@ -133,26 +133,36 @@ describe('conversation error isolation red-team contracts', () => {
     }
   });
 
-  test('historical engine guard failures are no longer presented as unknown upstream faults', () => {
-    const old = errorMessage('old-guard', messageId(9), 400, 'The upstream Agent failed');
-    if (old.type !== 'tips') throw new Error('expected error tip');
-    const persisted = {
-      ...old,
-      content: {
-        ...old.content,
-        error: {
-          message: 'The upstream Agent failed',
-          code: 'UNKNOWN_UPSTREAM_ERROR',
-          ownership: 'unknown_upstream',
-          detail: 'model step limit of 32 exceeded',
+  test('engine guard diagnostic text preserves the stored code and ownership', () => {
+    for (const detail of [
+      'model step limit of 32 exceeded',
+      'execution plan remains unresolved;',
+      'failed patch targets have not been re-observed;',
+      'processes remain running;',
+      'completion account is missing or stale;',
+      'completion account contains blocked work;',
+      'model emitted tool-call markup as text',
+    ]) {
+      const original = errorMessage('guard-diagnostic', messageId(9), 400, 'The upstream Agent failed');
+      if (original.type !== 'tips') throw new Error('expected error tip');
+      const persisted = {
+        ...original,
+        content: {
+          ...original.content,
+          error: {
+            message: 'The upstream Agent failed',
+            code: 'UNKNOWN_UPSTREAM_ERROR',
+            ownership: 'unknown_upstream',
+            detail,
+          },
         },
-      },
-    } as TMessage;
-    const normalized = normalizeDbMessage(persisted);
-    expect(normalized.type).toBe('tips');
-    if (normalized.type !== 'tips') throw new Error('expected error tip');
-    expect(normalized.content.error?.code).toBe('NOMIFUN_TASK_INCOMPLETE');
-    expect(normalized.content.error?.ownership).toBe('nomifun');
+      } as TMessage;
+      const normalized = normalizeDbMessage(persisted);
+      if (normalized.type !== 'tips') throw new Error('expected error tip');
+      expect(normalized.content.error?.code).toBe('UNKNOWN_UPSTREAM_ERROR');
+      expect(normalized.content.error?.ownership).toBe('unknown_upstream');
+      expect(normalized.content.error?.detail).toBe(detail);
+    }
   });
   test('a terminal newest-window refresh keeps persisted older pages in chronological position', () => {
     const olderA = textMessage('persisted-older-a', messageId(1), 100, 'older a');

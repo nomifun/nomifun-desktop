@@ -1,10 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STORE_DATA_GENERATION: u32 = 6;
-pub const AGENT_STORE_MIGRATION_HEAD: u32 = 7;
+pub const AGENT_STORE_DATA_GENERATION: u32 = 7;
+pub const AGENT_STORE_MIGRATION_HEAD: u32 = 1;
 pub const AGENT_STORE_PROJECTION_SCHEMA_VERSION: u32 = 1;
-pub const AGENT_STORE_BASELINE_SQL: &str = include_str!("../schema/0001_agent_store.sql");
+pub const AGENT_STORE_BASELINE_SQL: &str = include_str!("../../nomifun-db/migrations/001_canonical_baseline.sql");
 pub const CHAT_ROUTE_RECORD_JSON_SCHEMA: &str =
     include_str!("../schema/chat-route-record.v1.json");
 
@@ -43,7 +43,7 @@ pub fn agent_store_schema_manifest_payload() -> AgentStoreSchemaManifestPayload 
         migration_head: AGENT_STORE_MIGRATION_HEAD,
         projection_schema_version: AGENT_STORE_PROJECTION_SCHEMA_VERSION,
         baseline_logical_path:
-            "crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql".to_owned(),
+            "crates/backend/nomifun-db/migrations/001_canonical_baseline.sql".to_owned(),
         tables: TABLES
             .iter()
             .map(|(table_name, owner, fact_class, reset_scope)| SchemaTableContract {
@@ -61,23 +61,19 @@ pub fn agent_store_schema_manifest_payload() -> AgentStoreSchemaManifestPayload 
 }
 const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
     ("schema_metadata", "platform.schema", "fact", SchemaResetScope::Preserve),
-    ("plugin_packages", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
-    ("plugin_mounts", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
-    ("plugin_configs", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
-    ("plugin_states", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugins", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugin_artifacts", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugin_credential_bindings", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugin_grants", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
+    ("plugin_library_state", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
     ("installation_role_bindings", "platform.capability-registry", "fact", SchemaResetScope::Preserve),
-    ("capability_definitions", "platform.capability-registry", "fact", SchemaResetScope::Preserve),
-    ("capability_catalog_entries", "platform.capability-registry", "fact", SchemaResetScope::Preserve),
-    ("skill_instructions", "platform.skill-catalog", "fact", SchemaResetScope::Preserve),
     ("mcp_servers", "plugin.mcp-connectors", "fact", SchemaResetScope::Preserve),
-    ("mcp_tool_materializations", "plugin.mcp-connectors", "fact", SchemaResetScope::Preserve),
     ("agent_preset_templates", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_presets", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_preset_revisions", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_preset_contribution_locks", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_bindings", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("remote_bindings", "plugin.remote-ingress", "configuration", SchemaResetScope::AgentData),
-    ("installation_auth", "plugin.remote-ingress", "fact", SchemaResetScope::Preserve),
     ("providers", "platform.chat-model-broker", "configuration", SchemaResetScope::Preserve),
     ("provider_models", "platform.chat-model-broker", "configuration", SchemaResetScope::Preserve),
     ("provider_connections", "platform.chat-model-broker", "configuration", SchemaResetScope::Preserve),
@@ -162,58 +158,7 @@ mod tests {
             .iter()
             .map(|(name, _, _, _)| (*name).to_owned())
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn capability_tables_use_stable_ids_and_package_provenance() {
-        let database = Connection::open_in_memory().expect("in-memory SQLite");
-        database
-            .execute_batch(AGENT_STORE_BASELINE_SQL)
-            .expect("Agent Store baseline");
-        for (table, expected) in [
-            (
-                "capability_definitions",
-                vec![
-                    "capability_id",
-                    "package_id",
-                    "package_version",
-                    "manifest_json",
-                    "manifest_digest",
-                ],
-            ),
-            (
-                "capability_catalog_entries",
-                vec![
-                    "capability_id",
-                    "contribution_id",
-                    "entry_json",
-                    "entry_digest",
-                ],
-            ),
-            (
-                "mcp_tool_materializations",
-                vec![
-                    "server_id",
-                    "canonical_tool_key",
-                    "schema_hash",
-                    "capability_id",
-                    "materialization_revision",
-                    "package_id",
-                    "package_version",
-                ],
-            ),
-        ] {
-            let sql = format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid");
-            let actual = database
-                .prepare(&sql)
-                .expect("table-info query")
-                .query_map([], |row| row.get::<_, String>(0))
-                .expect("table-info rows")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("column names");
-            assert_eq!(actual, expected, "{table}");
-        }
+        assert!(expected.is_subset(&actual), "every declared table must exist in the shared database");
     }
 
     #[test]
@@ -289,7 +234,7 @@ mod tests {
             assert!(agent_tables.contains(required), "{required} must reset");
         }
         for preserved in [
-            "plugin_packages",
+            "plugins",
             "mcp_servers",
             "providers",
             "provider_models",
@@ -383,7 +328,8 @@ mod tests {
         assert_eq!(
             columns,
             [
-                ("role_id".to_owned(), 1),
+                ("id".to_owned(), 1),
+                ("role_id".to_owned(), 0),
                 ("role_contract_ref_json".to_owned(), 0),
                 ("provider_mount_id".to_owned(), 0),
                 ("binding_version".to_owned(), 0),
@@ -396,6 +342,12 @@ mod tests {
             })
             .expect("role binding row count");
         assert_eq!(row_count, 0);
+        let insert = "INSERT INTO installation_role_bindings(role_id,role_contract_ref_json,provider_mount_id,binding_version,updated_at) VALUES (?1,?2,'mount-a',?3,1)";
+        let reference = r#"{"key":{"role_id":"chat.model"}}"#;
+        database.execute(insert, rusqlite::params!["chat.model", reference, 1]).unwrap();
+        assert!(database.execute(insert, rusqlite::params!["chat.model", reference, 2]).is_err(), "one role cannot have two provider selections");
+        assert!(database.execute("UPDATE installation_role_bindings SET binding_version=0", []).is_err(), "binding versions must be positive");
+        assert!(database.execute(insert, rusqlite::params!["different.role", reference, 1]).is_err(), "contract identity must match the selected role");
     }
 
     #[test]

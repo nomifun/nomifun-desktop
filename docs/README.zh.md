@@ -18,6 +18,7 @@
 | 接入 provider、本地模型并配置故障转移 | [guides/model-routing.zh.md](guides/model-routing.zh.md) |
 | 使用无限画布、工作台、素材与模板创作 | [guides/creative-studio.zh.md](guides/creative-studio.zh.md) |
 | 连接小智 ESP32 机器人 | [guides/xiaozhi-robot.zh.md](guides/xiaozhi-robot.zh.md) |
+| 理解 Agent 会话 日志和内容 | [Agent Session 当前架构](architecture/agent-session.zh.md) |
 | 理解当前架构 | [architecture/overview.zh.md](architecture/overview.zh.md) |
 | 构建或打包项目 | [contributing/building-and-packaging.zh.md](contributing/building-and-packaging.zh.md) |
 | 查询参数、环境变量或 API 分组 | [reference/](reference/) |

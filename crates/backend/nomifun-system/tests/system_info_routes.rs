@@ -125,6 +125,7 @@ async fn test_system_info_returns_all_fields() {
             .is_some_and(|s| !s.is_empty())
     );
     assert!(data["platform"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(data["agent_data_generation"], nomifun_agent_contracts::AGENT_STORE_DATA_GENERATION);
     assert!(data["arch"].as_str().is_some_and(|s| !s.is_empty()));
 }
 
@@ -159,6 +160,7 @@ async fn test_system_info_snake_case_keys() {
     assert!(data.get("work_dir").is_some());
     assert!(data.get("log_dir").is_some());
     assert!(data.get("storage_generation").is_some());
+    assert!(data.get("agent_data_generation").is_some());
     assert!(data.get("cacheDir").is_none());
     assert!(data.get("workDir").is_none());
     assert!(data.get("logDir").is_none());

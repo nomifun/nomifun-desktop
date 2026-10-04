@@ -18,7 +18,7 @@ Execution 前可复用的一组输入，实例化时一次性解析成 Participa
 回读。v3 只为新数据提供该模型，不把旧配置行迁入新数据集，也不恢复历史配置间的
 引用、继承或双状态。
 
-这次收敛不是改名补丁。数据库、Repository、HTTP、Gateway 工具、事件、前端状态和恢复逻辑必须在同一版本切到唯一模型；v3 发布时通过完整 managed-dataset reset 退出旧代际，不保留旧表、旧路由、旧事件、逐行迁移器或双读 fallback。
+数据库、Repository、HTTP、工具、事件、前端状态和恢复逻辑共用唯一 AgentExecution 模型。Session 与日志的数据代际切换遵守 [Agent Session 架构](agent-session.zh.md) 的 Agent-only clean cut，不迁移旧 Agent 数据或保留双读。
 
 ## 2. 统一词汇与旧概念映射
 

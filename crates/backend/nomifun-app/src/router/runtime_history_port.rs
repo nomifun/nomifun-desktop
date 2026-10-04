@@ -1,8 +1,8 @@
-//! Scoped read-only adapter; Conversation owns rows and the Runtime owns its codec.
+//! Scoped read-only adapter for canonical AgentSession history and one Runtime codec.
 use super::super::engine_session_host::{EngineSessionHost, EngineTurnReceipt};
 use nomifun_chat_model_broker::{ChatCausality, ChatContentPart, ChatMessage, ChatRole};
 use nomifun_agent_runtime::{
-    AgentEngineError, AgentEngineEvent, AgentHistoryPage, AgentHistoryPort, AgentRecordedTurn,
+    AgentEngineError, AgentHistoryPage, AgentHistoryPort, AgentRecordedTurn,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -123,26 +123,9 @@ impl HistoryPort {
         if content.is_empty() {
             return Err(invalid());
         }
-        let mut events = Vec::new();
-        for record in turn.records {
-            let value: Value = serde_json::from_str(&record.event_json).map_err(|_| invalid())?;
-            if matches!(
-                value.get("event").and_then(Value::as_str),
-                Some(
-                    "host_tool_dispatch"
-                        | "host_tool_settled"
-                        | "host_resource_dispatch"
-                        | "host_resource_settled"
-                        | "host_process_dispatch"
-                        | "host_process_quiescent"
-                        | "host_cleanup_proven"
-                )
-            ) {
-                continue;
-            }
-            events.push(serde_json::from_value::<AgentEngineEvent>(value).map_err(|_| invalid())?);
-        }
-        super::super::unified_runtime_history::project_interrupted_terminal(&mut events, &turn.receipt_status);
+        let events = super::super::unified_runtime_history::decode_turn_events(
+            turn.records, &turn.receipt_status, turn.unstarted_terminal,
+        ).map_err(|_| invalid())?.unwrap_or_default();
         Ok(AgentHistoryPage {
             has_older: window.has_older,
             turn: Some(AgentRecordedTurn {

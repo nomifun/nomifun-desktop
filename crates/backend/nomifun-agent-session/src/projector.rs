@@ -39,12 +39,6 @@ pub(crate) fn initial_head(session_id: &AgentSessionId) -> SessionHeadProjection
         status: "opening".to_owned(),
         active_turn_id: None,
         active_set_generation: 0,
-        runtime_checkpoint_locator: None,
-        runtime_checkpoint_digest: None,
-        runtime_bound_event_id: None,
-        runtime_protocol_version: None,
-        snapshot_digest: None,
-        checkpoint_through_seq: None,
         last_seq: 0,
         unread_count: 0,
     }
@@ -113,27 +107,6 @@ pub(crate) fn reduce_head(
                 ));
             }
             head.active_set_generation = generation;
-        }
-        "runtime/bound" => {
-            head.runtime_bound_event_id = Some(event.event_id.0.clone());
-            head.runtime_protocol_version = optional_string(payload, "protocol_version");
-            head.snapshot_digest = snapshot_digest(payload);
-            head.checkpoint_through_seq = Some(event.seq);
-        }
-        "runtime/checkpointed" => {
-            head.runtime_checkpoint_locator = checkpoint_locator(payload);
-            head.runtime_checkpoint_digest = checkpoint_digest(payload);
-            head.runtime_bound_event_id = optional_string(payload, "runtime_bound_event_id")
-                .or_else(|| head.runtime_bound_event_id.clone());
-            head.runtime_protocol_version = optional_string(payload, "protocol_version")
-                .or_else(|| head.runtime_protocol_version.clone());
-            head.snapshot_digest =
-                snapshot_digest(payload).or_else(|| head.snapshot_digest.clone());
-            head.checkpoint_through_seq =
-                optional_u64(payload, "through_seq").or(head.checkpoint_through_seq);
-        }
-        "runtime/binding-discarded" => {
-            clear_checkpoint(head);
         }
         _ => {}
     }
@@ -374,9 +347,6 @@ fn apply_projection_semantics(
             document.state = optional_u64(payload, "generation")
                 .map(|generation| format!("generation_{generation}"));
         }
-        "runtime/bound" => document.state = Some("bound".to_owned()),
-        "runtime/checkpointed" => document.state = Some("checkpointed".to_owned()),
-        "runtime/binding-discarded" => document.state = Some("discarded".to_owned()),
         "compaction/completed" => document.state = Some("completed".to_owned()),
         "session/forked" => document.state = Some("forked".to_owned()),
         _ => {}
@@ -523,7 +493,6 @@ fn copy_references(
         "artifact_ref",
         "locator",
         "response_id",
-        "runtime_binding_id",
         "snapshot_digest",
         "effect_id",
         "resource_binding_ids",
@@ -546,15 +515,6 @@ fn copy_references(
 
 const MAX_SUMMARY_STRING_BYTES: usize = 1024;
 const MAX_REFERENCE_BYTES: usize = 4096;
-
-fn clear_checkpoint(head: &mut SessionHeadProjection) {
-    head.runtime_checkpoint_locator = None;
-    head.runtime_checkpoint_digest = None;
-    head.runtime_bound_event_id = None;
-    head.runtime_protocol_version = None;
-    head.snapshot_digest = None;
-    head.checkpoint_through_seq = None;
-}
 
 fn required_u64(value: &Value, field: &str) -> Result<u64, SessionStoreError> {
     optional_u64(value, field).ok_or_else(|| {
@@ -609,34 +569,4 @@ fn optional_u64(value: &Value, field: &str) -> Option<u64> {
 
 fn optional_string(value: &Value, field: &str) -> Option<String> {
     value.get(field).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn snapshot_digest(value: &Value) -> Option<String> {
-    optional_string(value, "snapshot_digest").or_else(|| {
-        value
-            .get("resolved_snapshot_ref")
-            .and_then(|snapshot| snapshot.get("snapshot_digest"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    })
-}
-
-fn checkpoint_locator(value: &Value) -> Option<String> {
-    optional_string(value, "locator").or_else(|| {
-        value
-            .get("locator")
-            .and_then(|locator| locator.get("normalized_relative_path"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    })
-}
-
-fn checkpoint_digest(value: &Value) -> Option<String> {
-    optional_string(value, "digest").or_else(|| {
-        value
-            .get("locator")
-            .and_then(|locator| locator.get("digest"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    })
 }

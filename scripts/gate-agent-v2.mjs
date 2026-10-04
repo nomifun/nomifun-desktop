@@ -1,6 +1,4 @@
-// Only contract generation/integrity remains from the historical stage gate.
-// Wrapper-era C1-C9/AP-7 evidence does not certify the in-process multi-Engine
-// product. Retired commands fail before spawning tools or writing reports.
+// Validate the current canonical Agent contracts and generated artifacts.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -10,10 +8,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 if (args.length !== 1 || args[0] !== 'contract-closure') {
   console.error(
-    'Only contract-closure remains supported. Historical AP-7/C1-C9 and --self-test ' +
-    'were retired with the external Wrapper host; they cannot produce CAR acceptance. ' +
-    'See docs/specs/2026-09-06-coding-agent-runtime-internalization/' +
-    '07-validation-release-and-cutover.zh.md for the current, separately required evidence.'
+    'Usage: gate-agent-v2.mjs contract-closure; see docs/architecture/agent-session.zh.md.'
   );
   process.exit(2);
 }
@@ -30,23 +25,16 @@ const requiredFiles = [
   'crates/backend/nomifun-agent-contracts/src/runtime.rs',
   'crates/backend/nomifun-agent-contracts/src/engine_features.rs',
   'crates/backend/nomifun-agent-contracts/contracts/inventory/current-composition.json',
-  'crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/README.md',
   'crates/backend/nomifun-agent-contracts/src/session.rs',
   'crates/backend/nomifun-agent-contracts/src/event.rs',
-  'crates/backend/nomifun-agent-contracts/src/deletion.rs',
   'crates/backend/nomifun-agent-contracts/src/validation.rs',
   'crates/backend/nomifun-agent-contracts/src/manifest.rs',
   'crates/backend/nomifun-agent-contracts/src/bin/agent-v2-contract.rs',
   'crates/backend/nomifun-agent-contracts/src/schema.rs',
-  'crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql',
+  'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql',
   'crates/backend/nomifun-agent-contracts/contracts/generated/schemas.json',
   'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-agent-store-schema-manifest.envelope.json',
   'crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json',
-  'crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json',
-  'docs/specs/2026-08-28-agent-capability-platform-v2/C0-WRITE-MANIFESTS.json',
-  'docs/specs/2026-08-28-agent-capability-platform-v2/README.zh.md',
-  'docs/specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md',
-  'docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md',
 ];
 
 function run(command, commandArgs) {

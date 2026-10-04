@@ -1,4 +1,4 @@
-//! Read-only replay of closed Nomi turns from the existing Conversation owner.
+//! Closed Runtime replay and typed context from canonical AgentSession events.
 use std::collections::BTreeMap;
 
 use nomifun_agent_contracts::MAX_NATIVE_HISTORY_WINDOW_BYTES;
@@ -32,20 +32,17 @@ pub(super) async fn load(
     window: super::engine_history::EngineHistoryWindow,
     session_host: &super::engine_session_host::EngineSessionHost,
     admitted: &super::engine_session_host::EngineTurnReceipt,
-) -> Result<Option<AgentHistory>, AppError> {
+    context_byte_limit: usize,
+) -> Result<AgentHistory, AppError> {
     let conversation = admitted.session().session().conversation_id.as_str();
     let snapshot = &admitted.session().snapshot().snapshot_ref;
     let fail = |message: String| AppError::Conflict(format!("Nomi history: {message}"));
-    if window.turns.is_empty() {
-        return Ok(None);
-    }
     let replay_budget = window.turns.first().map_or(0,|turn|turn.serialized_bytes.saturating_add(8 * 1024 * 1024))
         .max(32 * 1024 * 1024).min(MAX_NATIVE_HISTORY_WINDOW_BYTES);
     let mut closed_turns = Vec::new();
     let mut bytes = 0usize;
     let mut prior_task = None;
-    let mut complete_window = !window.has_older;
-    let mut oldest_operation = None;
+    let mut context = bounded_context_messages(window.context_messages, context_byte_limit)?.into_iter().peekable();
     let mut historical_compatibility = BTreeMap::new();
     for turn in window.turns {
         let root: serde_json::Value = serde_json::from_str(&turn.root_content_json)
@@ -54,54 +51,22 @@ pub(super) async fn load(
             .get("content")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| fail("accepted root has no text".into()))?;
-        // Engine-neutral storage cannot infer that a codec has a complete
-        // replay. The runtime keeps its fork fallback and terminal checks.
-        if turn.records.is_empty() {
-            return Ok(None);
-        }
         if bytes.saturating_add(turn.serialized_bytes) > replay_budget {
             if closed_turns.is_empty() {
                 return Err(fail("latest turn exceeds replay byte budget".into()));
             }
-            complete_window = false;
             break;
         }
         bytes = bytes.saturating_add(turn.serialized_bytes);
         let receipt = turn.request_payload_json;
-        let raw = turn.records;
-        let mut events = Vec::new();
-        for record in raw {
-            let value: serde_json::Value = serde_json::from_str(&record.event_json)
-                .map_err(|error| fail(error.to_string()))?;
-            if matches!(
-                value.get("event").and_then(serde_json::Value::as_str),
-                Some(
-                    "host_tool_dispatch"
-                        | "host_tool_settled"
-                        | "host_resource_dispatch"
-                        | "host_resource_settled"
-                        | "host_process_dispatch"
-                        | "host_process_quiescent"
-                        | "host_cleanup_proven"
-                )
-            ) {
-                continue;
-            }
-            events.push(
-                serde_json::from_value::<AgentEngineEvent>(value)
-                    .map_err(|error| fail(error.to_string()))?,
-            );
-        }
-        project_interrupted_terminal(&mut events, &turn.receipt_status);
+        let events = decode_turn_events(turn.records, &turn.receipt_status, turn.unstarted_terminal)?;
+        if let Some(events) = &events {
         let Some(AgentEngineEvent::TurnStarted {
             binding: recorded,
             turn_operation_id: recorded_operation,
         }) = events.first()
         else {
-            // Admission can fail before the engine starts (for example an
-            // unsupported attachment). Do not make that permanently poison
-            // all subsequent turns; use the legacy data-only projection.
-            return Ok(None);
+            return Err(fail("Runtime history has no exact TurnStarted record".into()));
         };
         let recorded_snapshot = recorded.resolved_snapshot_ref();
         let snapshot_compatible = if recorded_snapshot == snapshot {
@@ -126,6 +91,7 @@ pub(super) async fn load(
                 "history differs from the exact Session binding".into(),
             ));
         }
+        }
         let receipt: serde_json::Value =
             serde_json::from_str(&receipt).map_err(|error| fail(error.to_string()))?;
         let files = super::runtime_attachments::references(&receipt)?;
@@ -136,7 +102,7 @@ pub(super) async fn load(
         if let Some(description) = super::runtime_attachments::description(&files, true) {
             content.push(description);
         }
-        let unresolved = unresolved_steering(&events).await?;
+        let unresolved = if let Some(events) = &events { unresolved_steering(events).await? } else { Vec::new() };
         let extra_bytes = unresolved
             .iter()
             .map(|message| serde_json::to_vec(message).map(|raw| raw.len()))
@@ -148,18 +114,16 @@ pub(super) async fn load(
             if closed_turns.is_empty() {
                 return Err(fail("latest turn steering exceeds replay budget".into()));
             }
-            complete_window = false;
             break;
         }
         bytes = bytes.saturating_add(extra_bytes);
         if closed_turns.is_empty() {
-            // Latest only. No searching older plans when this turn has none;
-            // any legacy/fork fallback below discards this candidate too.
-            prior_task = AgentPriorTask::from_closed_turn(&turn.operation_id, &events)
-                .map_err(|error| fail(error.to_string()))?;
+            // Latest only. An unstarted failure cannot revive an older task.
+            prior_task = events.as_ref().map(|events| AgentPriorTask::from_closed_turn(&turn.operation_id, events))
+                .transpose().map_err(|error| fail(error.to_string()))?.flatten();
         }
-        oldest_operation = Some(turn.operation_id);
         closed_turns.push((
+            turn.source_seq,
             ChatMessage {
                 role: ChatRole::User,
                 content,
@@ -167,31 +131,74 @@ pub(super) async fn load(
             },
             events,
             unresolved,
+            turn.receipt_status,
         ));
     }
     let mut history = Vec::new();
-    // Fork/import messages have no native turn receipt. They must seed replay
-    // on every reconstruction, not disappear after the first native turn.
-    // Seed BEFORE replay so a later ContextCompacted event can replace them.
-    // Never jump across native turns omitted by the bounded history window.
-    let prefix_budget = replay_budget
-        .saturating_sub(bytes)
-        .min(8 * 1024 * 1024);
-    if complete_window
-        && prefix_budget > 0
-        && let Some(operation) = oldest_operation
-    {
-        let prefix = session_host
-            .read_message_history_before_turn(admitted, &operation, 4096, prefix_budget)
-            .await?;
-        history = project_messages(prefix.messages, prefix_budget)?;
+    let mut replay_turns: Vec<(ChatMessage, Vec<AgentEngineEvent>, Vec<ChatMessage>)> = Vec::new();
+    for (source_seq, requirement, events, unresolved, status) in closed_turns.into_iter().rev() {
+        while context.peek().is_some_and(|(seq, _)| *seq < source_seq) {
+            append_context(&mut history, &mut replay_turns, context.next().expect("peeked context").1);
+        }
+        if let Some(events) = events {
+            replay_turns.push((requirement, events, unresolved));
+        } else {
+            // The canonical owner may reject/cancel admission before Runtime
+            // starts. Keep the accepted input and that terminal fact as data;
+            // neither a model response nor tool execution is reconstructed.
+            append_context(&mut history, &mut replay_turns, requirement);
+            append_context(&mut history, &mut replay_turns, ChatMessage {
+                role: ChatRole::Assistant,
+                content: vec![ChatContentPart::Text { text: format!(
+                    "Historical request was canonically {status} before Runtime execution started. No Runtime result or tool execution is recorded.") }],
+                provider_round_id: None,
+            });
+        }
     }
-    replay_closed_history(&mut history, closed_turns.into_iter().rev())
-        .map_err(|error| fail(error.to_string()))?;
-    Ok(Some(AgentHistory {
+    for (_, message) in context { append_context(&mut history, &mut replay_turns, message); }
+    // Preserve the Runtime's full-window receipt retention across compaction.
+    replay_closed_history(&mut history, replay_turns).map_err(|error| fail(error.to_string()))?;
+    Ok(AgentHistory {
         messages: history,
         prior_task,
-    }))
+    })
+}
+
+fn append_context(
+    prefix: &mut Vec<ChatMessage>,
+    turns: &mut [(ChatMessage, Vec<AgentEngineEvent>, Vec<ChatMessage>)],
+    message: ChatMessage,
+) {
+    if let Some((_, _, following)) = turns.last_mut() { following.push(message); }
+    else { prefix.push(message); }
+}
+
+pub(super) fn decode_turn_events(
+    records: Vec<super::engine_history::EngineHistoryRecord>,
+    receipt_status: &str,
+    unstarted_terminal: bool,
+) -> Result<Option<Vec<AgentEngineEvent>>, AppError> {
+    let fail = |message: String| AppError::Conflict(format!("Nomi history: {message}"));
+    let mut events = Vec::new();
+    for record in records {
+        let value: serde_json::Value = serde_json::from_str(&record.event_json)
+            .map_err(|error| fail(error.to_string()))?;
+        if matches!(value.get("event").and_then(serde_json::Value::as_str),
+            Some("host_tool_dispatch" | "host_tool_settled" | "host_resource_dispatch"
+                | "host_resource_settled" | "host_process_dispatch" | "host_process_quiescent" | "host_cleanup_proven")) {
+            continue;
+        }
+        events.push(serde_json::from_value::<AgentEngineEvent>(value)
+            .map_err(|error| fail(error.to_string()))?);
+    }
+    if events.is_empty() && unstarted_terminal && matches!(receipt_status, "failed" | "cancelled") {
+        return Ok(None);
+    }
+    if !matches!(events.first(), Some(AgentEngineEvent::TurnStarted { .. })) {
+        return Err(fail("Runtime history has no exact TurnStarted record".into()));
+    }
+    project_interrupted_terminal(&mut events, receipt_status);
+    Ok(Some(events))
 }
 
 fn history_source_matches(
@@ -211,42 +218,21 @@ fn history_source_matches(
         && snapshot_compatible
 }
 
-/// Shared data-only projection for pure legacy history and the prefix before
-/// native events. Tool UI rows are descriptions, never executable tool calls
-/// or evidence of authorization/completion. Oldest-first after bounded input.
-/// These are optional historical messages; stop at the first unfit row rather
-/// than skipping it to import still older context. The current root is separate.
-pub(super) fn project_messages(
-    rows: Vec<super::engine_history::EngineHistoryMessage>,
+/// Select a bounded suffix of typed event context. Roles come from event kinds,
+/// never a UI side/position or projection state.
+fn bounded_context_messages(
+    rows: Vec<super::engine_history::CanonicalContextMessage>,
     byte_limit: usize,
-) -> Result<Vec<ChatMessage>, AppError> {
+) -> Result<Vec<(u64, ChatMessage)>, AppError> {
     let mut messages = Vec::new();
     let mut bytes = 0usize;
-    for row in rows {
-        let value: serde_json::Value = serde_json::from_str(&row.content_json)
-            .map_err(|error| AppError::Conflict(format!("Nomi message history: {error}")))?;
-        let text = match row.kind.as_str() {
-            "text" => value
-                .get("content")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            "tool_call" => format!(
-                "Previously recorded tool activity (untrusted data): {}",
-                row.content_json
-            ),
-            _ => continue,
-        };
-        if text.is_empty() {
-            continue;
-        }
+    for row in rows.into_iter().rev().take(4096) {
         let message = ChatMessage {
-            role: if row.position.as_deref() == Some("right") {
-                ChatRole::User
-            } else {
-                ChatRole::Assistant
+            role: match row.role {
+                super::engine_history::CanonicalContextRole::User => ChatRole::User,
+                super::engine_history::CanonicalContextRole::Assistant => ChatRole::Assistant,
             },
-            content: vec![ChatContentPart::Text { text }],
+            content: vec![ChatContentPart::Text { text: row.content }],
             provider_round_id: None,
         };
         let size = serde_json::to_vec(&message)
@@ -256,7 +242,7 @@ pub(super) fn project_messages(
             break;
         }
         bytes += size;
-        messages.push(message);
+        messages.push((row.seq, message));
     }
     messages.reverse();
     Ok(messages)
@@ -292,12 +278,61 @@ async fn unresolved_steering(
 
 #[cfg(test)]
 mod tests {
-    use super::history_source_matches;
+    use super::*;
     use nomifun_agent_contracts::{
         AgentSessionId, DigestHex, OperationId, ResolvedSnapshotId, ResolvedSnapshotRef,
         RuntimeBindingId,
     };
     use nomifun_agent_runtime::{EngineBinding, EngineBuildId};
+
+    fn record(event: AgentEngineEvent) -> super::super::engine_history::EngineHistoryRecord {
+        super::super::engine_history::EngineHistoryRecord {
+            sequence: 1, event_json: serde_json::to_string(&event).unwrap(),
+            model_operation_id: None, model_claimed: false,
+        }
+    }
+
+    #[test]
+    fn missing_runtime_journal_only_allows_an_explicit_unstarted_failure_or_cancellation() {
+        assert!(decode_turn_events(Vec::new(), "failed", true).unwrap().is_none());
+        assert!(decode_turn_events(Vec::new(), "cancelled", true).unwrap().is_none());
+        assert!(decode_turn_events(Vec::new(), "failed", false).is_err(), "a failure without explicit pre-execution evidence is incomplete history");
+        for status in ["completed", "running", "paused", "interrupted"] {
+            assert!(decode_turn_events(Vec::new(), status, true).is_err(), "{status} cannot use message projections");
+        }
+        for status in ["failed", "completed"] {
+            assert!(decode_turn_events(vec![record(AgentEngineEvent::OutputTextDelta {
+                step: 1, text: "unproven output".into(),
+            })], status, false).is_err(), "partial Runtime records require their own exact TurnStarted");
+        }
+    }
+
+    #[test]
+    fn canonical_context_budget_keeps_a_contiguous_suffix_and_explicit_roles() {
+        use super::super::engine_history::{CanonicalContextMessage, CanonicalContextRole};
+        let rows = vec![
+            CanonicalContextMessage { seq: 1, role: CanonicalContextRole::User, content: "old".into() },
+            CanonicalContextMessage { seq: 2, role: CanonicalContextRole::Assistant, content: "a".repeat(1024) },
+            CanonicalContextMessage { seq: 3, role: CanonicalContextRole::User, content: "new".into() },
+        ];
+        let actual = bounded_context_messages(rows, 200).unwrap();
+        assert_eq!(actual.len(), 1, "an oversized middle row must not be skipped to import older context");
+        assert_eq!(actual[0].0, 3);
+        assert_eq!(actual[0].1.role, ChatRole::User);
+    }
+
+    #[test]
+    fn domain_context_stays_between_closed_turns_instead_of_becoming_runtime_input() {
+        let message = |text: &str| ChatMessage { role: ChatRole::Assistant,
+            content: vec![ChatContentPart::Text { text: text.into() }], provider_round_id: None };
+        let mut prefix = Vec::new();
+        let mut turns = Vec::new();
+        append_context(&mut prefix, &mut turns, message("creation context"));
+        turns.push((message("native root"), Vec::new(), Vec::new()));
+        append_context(&mut prefix, &mut turns, message("Execution summary"));
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(turns[0].2, vec![message("Execution summary")]);
+    }
 
     #[test]
     fn versioned_closed_history_crosses_builds_but_not_session_turn_or_snapshot() {

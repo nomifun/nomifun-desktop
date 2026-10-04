@@ -1,6 +1,6 @@
 import '../../../test/setup-dom.ts';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { Message } from '@arco-design/web-react';
 import { useState, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
@@ -22,6 +22,7 @@ import type { ConversationCreationTask, CreationMode } from './types';
 import type { CreativeAsset } from '@/renderer/pages/creativeStudio/assets/types';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { creationDraftStorageKey } from './useCreationDraft';
+import { ipcBridge } from '@/common';
 
 const providerId = parseProviderId('0190f5fe-7c00-7a00-8000-000000000105');
 const presetId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000104');
@@ -31,8 +32,12 @@ const model = { providerId, model: 'image-exact' };
 const provider = { id: providerId, name: 'Provider', platform: 'openai', enabled: true, models: [{ model: model.model, enabled: true, capabilities: [{ task: 'image_generation', traits: [], protocol: 'openai.images' }, { task: 'image_edit', traits: [], protocol: 'openai.images' }] }] } as unknown as IProvider;
 const template = { template_key: 'creative-studio.default', seed: { required_resource_kinds: ['asset_library', 'canvas', 'process_session', 'project_memory', 'workspace'] } } as OfficialPresetTemplate;
 const realFetch = globalThis.fetch;
-beforeEach(() => setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000107'));
-afterEach(() => { cleanup(); sessionStorage.clear(); globalThis.fetch = realFetch; });
+beforeEach(() => {
+  setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000107');
+  spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(() => () => {});
+  spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
+});
+afterEach(() => { cleanup(); mock.restore(); sessionStorage.clear(); globalThis.fetch = realFetch; });
 
 function mount(generationProvider = provider, sessionCollaboration?: Parameters<typeof useGuidCreation>[5]) {
   const cache = new Map();
@@ -46,6 +51,22 @@ function mount(generationProvider = provider, sessionCollaboration?: Parameters<
 }
 
 describe('conversation creation admission and draft behavior', () => {
+  test('an unscoped retired draft cannot seed a new generation composer', async () => {
+    sessionStorage.setItem('nomifun:creative-studio:standalone-workbench-draft:image', JSON.stringify({
+      version: 1, workbenchKind: 'image', layout: 'side', prompt: 'retired prompt',
+      model: null, referenceAssetIds: [],
+      parameters: { interfaceMode: 'images', quality: 'high', width: 1536, height: 1024, aspectRatio: '3:2', count: 2 },
+    }));
+    const hook = mount();
+    act(() => {
+      hook.result.current.setInput('');
+      hook.result.current.creation.selectMode('image');
+    });
+    await waitFor(() => expect(hook.result.current.creation.ready).toBe(true));
+    expect(hook.result.current.creation.draft.pendingPrompt).toBeUndefined();
+    expect(hook.result.current.creation.draft.parameters.image).toEqual({});
+    expect(hook.result.current.creation.draft.references).toEqual([]);
+  });
   test('task selection switches to creative Agent and chat selects general assistant without clearing prompt, references or per-mode settings', async () => {
     const hook = mount();
     act(() => hook.result.current.creation.selectMode('image'));

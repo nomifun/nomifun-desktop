@@ -374,12 +374,6 @@ export interface IAgentSessionHead {
   status: string;
   active_turn_id?: string;
   active_set_generation: number;
-  runtime_checkpoint_locator?: string;
-  runtime_checkpoint_digest?: string;
-  runtime_bound_event_id?: string;
-  runtime_protocol_version?: string;
-  snapshot_digest?: string;
-  checkpoint_through_seq?: number;
   last_seq: number;
   unread_count: number;
 }
@@ -390,8 +384,6 @@ export interface IAgentSessionEvent {
   event_id: string;
   producer_id: string;
   idempotency_key: string;
-  runtime_binding_id?: string;
-  runtime_producer_seq?: number;
   kind: string;
   kind_version: number;
   correlation_id: string;
@@ -904,8 +896,6 @@ const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => 
   ...message,
   msg_id: parseMessageId(message.msg_id),
   turn_id: message.turn_id == null ? undefined : parseMessageId(message.turn_id),
-  final_text_msg_id:
-    message.final_text_msg_id == null ? undefined : parseMessageId(message.final_text_msg_id),
   conversation_id: parseConversationId(message.conversation_id),
   companion_id:
     message.companion_id == null ? message.companion_id : parseCompanionId(message.companion_id),
@@ -1215,6 +1205,7 @@ export const application = {
         work_dir: string;
         log_dir: string;
         storage_generation: string;
+        agent_data_generation: number;
         platform: string;
         arch: string;
       },
@@ -1225,6 +1216,7 @@ export const application = {
       workDir: raw.work_dir,
       logDir: raw.log_dir,
       storageGeneration: raw.storage_generation,
+      agentDataGeneration: raw.agent_data_generation,
       platform: raw.platform,
       arch: raw.arch,
     })
@@ -3209,8 +3201,6 @@ export interface ICreateConversationParams {
       expected_identity_hash?: string | null;
       switched_at?: number;
     };
-    /** Legacy marker for pre-provider-probe health-check conversations. */
-    is_health_check?: boolean;
     /** Binds a nomi conversation to a saved SSH host: the remote tool family
      *  operates that host. Optional companion `ssh_remote_cwd` sets the shell's
      *  starting directory (defaults to the remote $HOME). */
@@ -3253,12 +3243,6 @@ export interface IResponseMessage {
   /** Stable owning turn identity. It is distinct from msg_id for first-class
    * terminal/error rows and continuation message segments. */
   turn_id?: MessageId;
-  /** For a terminal frame, the durable visible text segment that owns the
-   * backend's final text rewrite. This may differ from the terminal msg_id. */
-  final_text_msg_id?: MessageId;
-  /** Present only when the terminal was emitted after backend final-text
-   * middleware and persistence completed. Legacy terminals omit this marker. */
-  final_text_authoritative?: boolean;
   /** Canonical owning conversation entity ID. */
   conversation_id: ConversationId;
   created_at?: number;

@@ -3147,8 +3147,6 @@ mod tests {
                     event_id: EventId::from(format!("{session_key}:ready")),
                     producer_id: EventProducerId::from("runtime_supervisor"),
                     idempotency_key: IdempotencyKey::from(format!("{session_key}:ready")),
-                    runtime_binding_id: None,
-                    runtime_producer_seq: None,
                     semantic_event: SemanticSessionEventDraft {
                         kind: SessionEventKind("session/ready".to_owned()),
                         kind_version: 1,
@@ -3195,8 +3193,6 @@ mod tests {
             event_id: EventId::from(tool_key.clone()),
             producer_id: EventProducerId::from("capability_host"),
             idempotency_key: IdempotencyKey::from(tool_key.clone()),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("tool/call-started".to_owned()),
                 kind_version: 1,

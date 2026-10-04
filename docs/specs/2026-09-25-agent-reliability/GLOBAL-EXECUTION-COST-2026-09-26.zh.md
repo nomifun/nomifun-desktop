@@ -43,7 +43,7 @@ canonical progress 事件保存顺序，但当前没有每条模型/压缩事件
 
 应用编译全部可用工具时，标准、平台和外部工具描述都默认 `deferred=false`。虽然已有冻结 ToolPlan 内的 ToolSearch 机制，大型通用工具表仍然在每次模型请求中完整呈现。
 
-既有 D-023 已明确 [role-complete but context-minimal](../2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md)：能力完整，低频/重型描述按需提供。执行权来自 Snapshot/Kernel；描述暂时未展开不应该改变权限，也不应该让模型误以为该能力不存在。
+既有 D-023 已明确 [Agent Session 当前架构](../../architecture/agent-session.zh.md)：能力完整，低频/重型描述按需提供。执行权来自 Snapshot/Kernel；描述暂时未展开不应该改变权限，也不应该让模型误以为该能力不存在。
 
 ### 3. 当前可调用状态与展示给模型的工具没有同步
 

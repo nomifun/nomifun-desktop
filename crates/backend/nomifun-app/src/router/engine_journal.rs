@@ -490,8 +490,7 @@ impl EngineTurnJournal {
             let metadata = serde_json::to_value(AgentEngineEvent::ExecutionCheckpointSaved {
                 step: checkpoint.model_steps, revision, digest,
             }).map_err(failure)?;
-            let payload = json!({"runtime_binding_id":format!("nomi:{}",journal.session.as_ref()),
-                "producer_seq":next,"event":metadata});
+            let payload = json!({"producer_seq":next,"event":metadata});
             let metadata_bytes = canonical_json_bytes(&payload).map_err(failure)?.len();
             let segment = checkpoint.segments.as_ref().map_or(0, |state| state.segment);
             if segment != cursor.segment && segment != cursor.segment.saturating_add(1) {
@@ -509,7 +508,7 @@ impl EngineTurnJournal {
             let append = SessionEventAppend {
                 agent_session_id: journal.session.clone(), event_id: EventId::from(identity.clone()),
                 producer_id: EventProducerId::from("runtime_supervisor"), idempotency_key: IdempotencyKey::from(identity),
-                runtime_binding_id: None, runtime_producer_seq: None,
+
                 semantic_event: SemanticSessionEventDraft {
                     kind: SessionEventKind("runtime/progress-recorded".into()), kind_version: 1,
                     correlation_id: CorrelationId::from(journal.operation.as_ref()), causation_event_id: Some(journal.root.clone()),
@@ -556,7 +555,6 @@ impl EngineTurnJournal {
     ) -> Result<(), AppError> {
         let next = cursor.sequence.saturating_add(1);
         let value = json!({
-            "runtime_binding_id": format!("nomi:{}", journal.session.as_ref()),
             "producer_seq": next,
             "event": event,
         });
@@ -571,8 +569,6 @@ impl EngineTurnJournal {
             event_id: EventId::from(identity.clone()),
             producer_id: EventProducerId::from("runtime_supervisor"),
             idempotency_key: IdempotencyKey::from(identity),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("runtime/progress-recorded".to_owned()),
                 kind_version: 1,
@@ -634,8 +630,6 @@ impl EngineTurnJournal {
             event_id: event_id.clone(),
             producer_id: EventProducerId::from("runtime_supervisor"),
             idempotency_key: IdempotencyKey::from(identity),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("message/content-part".to_owned()),
                 kind_version: 1,
@@ -676,8 +670,6 @@ impl EngineTurnJournal {
             event_id: EventId::from(identity.clone()),
             producer_id: EventProducerId::from("runtime_supervisor"),
             idempotency_key: IdempotencyKey::from(identity),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("message/completed".to_owned()),
                 kind_version: 1,
@@ -723,8 +715,6 @@ impl EngineTurnJournal {
             event_id: EventId::from(identity.clone()),
             producer_id: EventProducerId::from("runtime_supervisor"),
             idempotency_key: IdempotencyKey::from(identity),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: SemanticSessionEventDraft {
                 kind: SessionEventKind("thinking/content-part".to_owned()),
                 kind_version: 1,
@@ -786,8 +776,6 @@ impl EngineTurnJournal {
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
                         idempotency_key: IdempotencyKey::from(identity),
-                        runtime_binding_id: None,
-                        runtime_producer_seq: None,
                         semantic_event: SemanticSessionEventDraft {
                             kind: SessionEventKind("tool/call-started".to_owned()),
                             kind_version: 1,
@@ -832,8 +820,6 @@ impl EngineTurnJournal {
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
                         idempotency_key: IdempotencyKey::from(identity),
-                        runtime_binding_id: None,
-                        runtime_producer_seq: None,
                         semantic_event: SemanticSessionEventDraft {
                             kind: SessionEventKind("tool/result-recorded".to_owned()),
                             kind_version: 1,
@@ -877,8 +863,6 @@ impl EngineTurnJournal {
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
                         idempotency_key: IdempotencyKey::from(identity),
-                        runtime_binding_id: None,
-                        runtime_producer_seq: None,
                         semantic_event: SemanticSessionEventDraft {
                             kind: SessionEventKind("tool/call-started".to_owned()),
                             kind_version: 1,
@@ -916,8 +900,6 @@ impl EngineTurnJournal {
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
                         idempotency_key: IdempotencyKey::from(identity),
-                        runtime_binding_id: None,
-                        runtime_producer_seq: None,
                         semantic_event: SemanticSessionEventDraft {
                             kind: SessionEventKind("tool/result-recorded".to_owned()),
                             kind_version: 1,
@@ -964,7 +946,7 @@ impl EngineTurnJournal {
                     journal.store.append_native_event(&journal.lease, &SessionEventAppend {
                         agent_session_id: journal.session.clone(), event_id: identity.clone().into(),
                         producer_id: "runtime_supervisor".into(), idempotency_key: identity.into(),
-                        runtime_binding_id: None, runtime_producer_seq: None,
+
                         semantic_event: SemanticSessionEventDraft {
                             kind: SessionEventKind("turn/cancelled".into()), kind_version: 1,
                             correlation_id: journal.operation.as_ref().into(), causation_event_id: Some(journal.turn_started.clone()),
@@ -1026,8 +1008,6 @@ impl EngineTurnJournal {
                     event_id: EventId::from(turn_identity.clone()),
                     producer_id: EventProducerId::from("runtime_supervisor"),
                     idempotency_key: IdempotencyKey::from(turn_identity),
-                    runtime_binding_id: None,
-                    runtime_producer_seq: None,
                     semantic_event: SemanticSessionEventDraft {
                         kind: SessionEventKind(kind.to_owned()),
                         kind_version: 1,
@@ -1271,8 +1251,6 @@ async fn test_fixture_from_pool(
         event_id: EventId::from("ready"),
         producer_id: EventProducerId::from("runtime_supervisor"),
         idempotency_key: IdempotencyKey::from("ready"),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: SemanticSessionEventDraft {
             kind: SessionEventKind("session/ready".into()),
             kind_version: 1,

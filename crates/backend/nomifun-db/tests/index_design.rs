@@ -31,7 +31,10 @@ async fn canonical_baseline_keeps_a_bounded_index_inventory() {
     .await
     .expect("explicit index count");
 
-    assert_eq!(explicit_indexes, 114);
+    // The published complete generation-6 schema had 116 explicit indexes:
+    // 114 in its initial baseline plus the two Plugin Draft source indexes.
+    // Generation 7 preserves that audited inventory without adding an index.
+    assert_eq!(explicit_indexes, 116);
 }
 
 #[tokio::test]
@@ -95,6 +98,16 @@ async fn hot_queries_use_the_curated_composite_and_partial_indexes() {
             "SELECT * FROM plugins WHERE owner_user_id = 'user' \
              ORDER BY updated_at_ms DESC, plugin_id",
             "idx_plugins_owner_updated",
+        ),
+        (
+            "SELECT * FROM plugin_drafts WHERE owner_user_id = 'user' \
+             AND source_conversation_id = 'session' LIMIT 1",
+            "idx_plugin_drafts_source_conversation",
+        ),
+        (
+            "SELECT * FROM plugin_drafts WHERE owner_user_id = 'user' \
+             AND source_operation_key = 'operation' LIMIT 1",
+            "idx_plugin_drafts_source_operation",
         ),
         (
             "SELECT * FROM conversation_execution_links \

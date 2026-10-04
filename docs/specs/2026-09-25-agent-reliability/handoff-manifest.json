@@ -1,717 +1,1155 @@
 {
   "version": 1,
   "purpose": "source-transfer-integrity-only-not-test-evidence",
-  "generated_at": "2026-09-25T11:38:56.441Z",
-  "base_commit": "1348e4def003df8d15890e31554a8f1eb34c56d3",
-  "test_status": "deferred-for-staged-validation-see-DEVELOPMENT-HANDOFF.zh.md",
+  "generated_at": "2026-10-04T12:49:20.508Z",
+  "base_commit": "2ddf08dbc012e14f29f5555c7b076d1ba78c34cb",
+  "test_status": "not-asserted-by-source-transfer-manifest",
   "files": [
+    {
+      "path": "AGENTS.md",
+      "state": "present",
+      "bytes": 3129,
+      "sha256": "336a753493761c9150c464ac06ed522ec8bcbaf63a355a2ec30a370c70f83bb5"
+    },
     {
       "path": "Cargo.lock",
       "state": "present",
-      "bytes": 324779,
-      "sha256": "2187db37243951f9c5a420a956301a5d8220b50c4a9d0ab15799f7d468d145d9"
-    },
-    {
-      "path": "Cargo.toml",
-      "state": "present",
-      "bytes": 16747,
-      "sha256": "97ed8bdd25b08c9b41284ca4f73560710a063e6275660406233aa01c05260e1a"
+      "bytes": 325190,
+      "sha256": "02c6d25287f1402d54e2d9efa0e7956f830860bae315b3bb5add87620d583162"
     },
     {
       "path": "README.md",
       "state": "present",
-      "bytes": 58366,
-      "sha256": "860df800136b8ba064a71b337f70a0ea56df135c6e9c1f303556f191ebf9ebea"
+      "bytes": 58364,
+      "sha256": "1edc55320960794b29de30999940798a7ef75790ba616634aabfd15b6b0d926a"
     },
     {
       "path": "README.zh-CN.md",
       "state": "present",
-      "bytes": 52342,
-      "sha256": "257c152b59d4d0494d7e7e16f5304b1adc65001fbf31d2ba5fa6d3e1145c6188"
+      "bytes": 52340,
+      "sha256": "b761f74ffba16bb582ab86b232c5ed63291c3f11f9f8aae17a3c8f3a792e93dc"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/closure/contract-closure.v1.json",
+      "state": "present",
+      "bytes": 9872,
+      "sha256": "ff5e6d23617c98be981ba85e65550a259b7523092f6460258837527d33676a74"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/events/runtime-event-ack.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/events/runtime-event-envelope.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/events/session-event-append.json",
+      "state": "present",
+      "bytes": 481,
+      "sha256": "f62c550e62b44c5b6f2af83b998b7092a16a8d046738b2240445b27c6e678d0a"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/contracts/events/session-event-registry.json",
       "state": "present",
-      "bytes": 27941,
-      "sha256": "60953b360be73eb78132288e03bf66f01f53f65c0cb39ee2f6a055cf92f3f0ec"
+      "bytes": 26819,
+      "sha256": "4dcc046585697dea945879134f16047faa0a37469d46dffc5ff22edaa0a83c96"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/agent-store-migration-manifest.envelope.json",
       "state": "present",
-      "bytes": 7337,
-      "sha256": "5c79a45228e00a1514623f770071e59638b139dae421c84ee93bbf12ef1ed817"
+      "bytes": 6644,
+      "sha256": "23d20dda49ae7d0e707b9db9befcb23da8e277934edc875a37037ec6eab347ab"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-agent-store-schema-manifest.envelope.json",
       "state": "present",
-      "bytes": 1440,
-      "sha256": "bd6d1e8fab9b95ccb47797067727e4ef1d26225d8d32bd02a92ccc339f37270a"
+      "bytes": 1336,
+      "sha256": "348e0216bc48085a76873340bc3f7986295fd1fc90bcde36f72399467015c367"
     },
     {
-      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-api-inventory.envelope.json",
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/contract-closure.envelope.json",
       "state": "present",
-      "bytes": 14803,
-      "sha256": "9f104160539d4335dc95b708fa40fd844c58db286f836294c09b92b7f1a497af"
+      "bytes": 10259,
+      "sha256": "109afd0751ec611544cb9c3849040ebc099a8798fce460af19ecc3fb157fd1e5"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json",
       "state": "present",
-      "bytes": 2197,
-      "sha256": "7e2792bc263c5b4a5adacb37169009a21881091de3ddb9106f5f1cab83f4986c"
+      "bytes": 2098,
+      "sha256": "68fa8b6d39499d0a71cd651ef40d24ed83b0b8e2bb221dd1ad8a9c3ad0d2cbd2"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/deletion-manifest-set.envelope.json",
+      "state": "deleted"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json",
       "state": "present",
-      "bytes": 6509,
-      "sha256": "f1c7ddb2e2aa61338989a3ab381ff32a4f4f527aaa9a6e6620e621c284f02737"
+      "bytes": 5999,
+      "sha256": "8b4e331d2694ac388cfe74d1b27514750dbf0303e8d5132bf3b90124b2f0c634"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/schemas.json",
+      "state": "present",
+      "bytes": 186821,
+      "sha256": "0aefcddb6027e785cbd04d1099203ff894c36789b025f694e347aec21594e087"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/session-event-registry.envelope.json",
       "state": "present",
-      "bytes": 30698,
-      "sha256": "5bb289d14432b60c2c3d83f3010e82d63d41952d5c9233b38d1741e663a92da5"
+      "bytes": 28642,
+      "sha256": "309e68513b5b95ede4d435c3bb5204510492f7fbb0a649ffd05535eb81e7599a"
     },
     {
-      "path": "crates/backend/nomifun-agent-contracts/contracts/presets/canonical-api-inventory.payload.json",
+      "path": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/domain-wave-1-read-capabilities.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/domain-wave-2-coding-extensions.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/domain-wave-3-creative-multimodal.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/domain-wave-4-identity-channels-devices.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/domain-wave-5-automation-supervision-remote.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/deletion/triad-core.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/historical/agent-v2/inventory/current-composition.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/inventory/current-composition.json",
       "state": "present",
-      "bytes": 10613,
-      "sha256": "3c9619129ebc7bafa417aea715f7f02d6754bab2e323a23777b472ee1ecb1639"
+      "bytes": 2779,
+      "sha256": "268786cbabf1306e5a6b235de35bc272d0dff1fdde291617d9eade545ca22d34"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/inventory/service-key-target-map.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/runtime/checkpoint-mismatch.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/session/checkpoint-contract.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.payload.json",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/validation/d025-fixture-envelope-reference.json",
+      "state": "deleted"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json",
       "state": "present",
-      "bytes": 6039,
-      "sha256": "081dba6af3d06a9dacd0fa25bf511e13cd7a7e5491af1348cf3e3d1a1b11330c"
+      "bytes": 5547,
+      "sha256": "47b34092f3cd3ce97b3353eb11c7330bdf838e4a255f122622cd5429d3deb94b"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql",
-      "state": "present",
-      "bytes": 28592,
-      "sha256": "0c86f69ea70c977c41d0bf0b7dc98d14ee2d1a7a0b0f896af3734a6c4c657ab7"
+      "state": "deleted"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/src/bin/agent-v2-contract.rs",
       "state": "present",
-      "bytes": 31580,
-      "sha256": "9362bc7c5c4a8774d005fd057dc62367942afd517aa4ad75d15f260a0becb7ac"
+      "bytes": 27219,
+      "sha256": "4defd099798da1ad9a3ce0e1bd68cae45200a7208e61fbecf05c5317e6c1557a"
     },
     {
-      "path": "crates/backend/nomifun-agent-contracts/src/chat_model.rs",
+      "path": "crates/backend/nomifun-agent-contracts/src/deletion.rs",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/src/event.rs",
       "state": "present",
-      "bytes": 35526,
-      "sha256": "d43893e7a38085d2f6701b5b4a5eb138ee7ea3a3d26aab1961118e9895d5243d"
+      "bytes": 12630,
+      "sha256": "2b9f5bbcd3ce2c3216122745c8ccc75b89a86b0b8828ea4781397d183b7780fb"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/src/lib.rs",
       "state": "present",
-      "bytes": 1552,
-      "sha256": "aa12101683906c587e71e6b53c90017dab495b5a01bdebe9ba4acfa183eb2c81"
+      "bytes": 1513,
+      "sha256": "1c65b6885534ada4197ecf8c2f972eec2c173a83a9a6cccb8ba3b83418b2ce12"
     },
     {
-      "path": "crates/backend/nomifun-agent-contracts/src/native_execution.rs",
+      "path": "crates/backend/nomifun-agent-contracts/src/manifest.rs",
       "state": "present",
-      "bytes": 2961,
-      "sha256": "00eb88a89760268874fb13e08fdd471c6c8ab8e3eb5db22ee1d5e17a4774e6dd"
+      "bytes": 2306,
+      "sha256": "3775b04997060ecde6ff6899b30fa7b3460b4a8167b89d8c33a5f476af3ec8a7"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-contracts/src/runtime.rs",
+      "state": "present",
+      "bytes": 8024,
+      "sha256": "53b4170c2895c349fc084cb268b3f89d36472f25ddb443fd2a0c40ae6a917180"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/src/schema.rs",
       "state": "present",
-      "bytes": 17461,
-      "sha256": "def962037e26a7acae66c644e555215e2b168357e0943eb9d9b07d446cd4ea7f"
+      "bytes": 16237,
+      "sha256": "13163c2ab5286ca7e7688cdbd8bba16a677d1fd7268f89e96852b20c92d93a87"
     },
     {
       "path": "crates/backend/nomifun-agent-contracts/src/session.rs",
       "state": "present",
-      "bytes": 23961,
-      "sha256": "434a4021abfad12e0f21202555cd5ada5b16039be7c67a5025f5814cc597ae59"
+      "bytes": 22076,
+      "sha256": "f38347855c89efc04cbdafea54818d56c83209a303650710b90c533552182eae"
     },
     {
-      "path": "crates/backend/nomifun-agent-domain-wave5/src/lib.rs",
+      "path": "crates/backend/nomifun-agent-contracts/src/validation.rs",
       "state": "present",
-      "bytes": 93412,
-      "sha256": "48a10b167c6cdbd4701e61b982531dd0393f41ab32fc158c4e319d16b3a5964e"
+      "bytes": 23267,
+      "sha256": "980ea83d55536495d6004cf09cbd038806f008982db41accb9b9916128f26b78"
     },
     {
-      "path": "crates/backend/nomifun-agent-runtime/Cargo.toml",
+      "path": "crates/backend/nomifun-agent-session/src/context_snapshot.rs",
       "state": "present",
-      "bytes": 695,
-      "sha256": "25155abb7500716bd318253fd221f3e9eb7be0537be62139e0ce1905659246da"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/adaptive.rs",
-      "state": "present",
-      "bytes": 3699,
-      "sha256": "c820b0f9bb6035ce846279f34107c218be248303313202d727b6c580c50d28b3"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/checkpoint.rs",
-      "state": "present",
-      "bytes": 4968,
-      "sha256": "4acb432938a589cc852f8df5b2a061635b0e76e6d60d8ee55207cccba0d75259"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/completion.rs",
-      "state": "present",
-      "bytes": 24196,
-      "sha256": "e56a635248e3cec59ca7fea79598b8d28c2dee3baa05c0aa595d02cb3daf7cff"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/context_lifecycle.rs",
-      "state": "present",
-      "bytes": 25832,
-      "sha256": "ebfea04055b4a822aae09a8b8d5722842fe93fe0721ef6f4330dcc3b7e261ffd"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/events.rs",
-      "state": "present",
-      "bytes": 8550,
-      "sha256": "eba4e19704ee41f449b0f0dc98c03369e95e8bdeb817dc603f3f35d9cbe89cbe"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/execution_policy.rs",
-      "state": "present",
-      "bytes": 8663,
-      "sha256": "f000741d50bb3eade2ff55df0b9fe57438f2e615836ace40c02ebc0e7a3f0a26"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/history.rs",
-      "state": "present",
-      "bytes": 36425,
-      "sha256": "6726b90af848d9ac8a51ae879c92d6e8f40588c93e1027cc444bee95a8581e2d"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/lib.rs",
-      "state": "present",
-      "bytes": 3464,
-      "sha256": "a9d939682792af3c916e192f1115674d2b06c400874631c1891e0b409d9584b9"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/output_limit.rs",
-      "state": "present",
-      "bytes": 4564,
-      "sha256": "bfc1fe00f81a86b7e66f8841423bf51e74a413ecfbdc8e67c921809df85d55e4"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/patch_recovery.rs",
-      "state": "present",
-      "bytes": 12292,
-      "sha256": "9c53f69797dd15d63edbf3a83cdb7b8969ef7a7ce0394a88e0bcb21961f6fd7c"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/planning.rs",
-      "state": "present",
-      "bytes": 17392,
-      "sha256": "e4d35e06916862107a2a4d30b63a9344666bf0fcd9a83c6250d67f6f4ae894cf"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/protocol_recovery.rs",
-      "state": "present",
-      "bytes": 3204,
-      "sha256": "84ed31522f347d6ba35f857ca1411801ee32bb551ed754e67a3f62dd68151a2d"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/reconciliation.rs",
-      "state": "present",
-      "bytes": 9678,
-      "sha256": "6b7be30ac88fe69c0262cc5cf52b60502de0696480c2bd56b0adc0778c6797fd"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/recovery.rs",
-      "state": "present",
-      "bytes": 13012,
-      "sha256": "3abb8ac74138a2b5a81e994f14d4d240115f075fa44b9f6c1f196e3f8bd3abdd"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/requirements.rs",
-      "state": "present",
-      "bytes": 11300,
-      "sha256": "d49d56a51cd9118553bdac1d5293add69ef21375b1fddc60476560c809454f56"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/segments.rs",
-      "state": "present",
-      "bytes": 9893,
-      "sha256": "a732e9788df46fb97ff94e78a355ac52d55493017cc9e2236a9142b95cd1502f"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/steering.rs",
-      "state": "present",
-      "bytes": 7337,
-      "sha256": "65491fab7926f376c47899df90245f1e906c51a04472ba15e716bf47471eb0fd"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/task_continuation.rs",
-      "state": "present",
-      "bytes": 12665,
-      "sha256": "2645b3f4849545c9285a6f11d7584872ea6a702ca1d20e30be3bdf684d87d73f"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/tool_validation.rs",
-      "state": "present",
-      "bytes": 11761,
-      "sha256": "da7cce96d8a51090b15a525fcdefbe33858908d05a182ec70b65d74e01273f4b"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/turn.rs",
-      "state": "present",
-      "bytes": 229741,
-      "sha256": "ab44de62a7cbbf4575b4ac7f51057fc72e797a26df13351214024021c8b19362"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/workflow.rs",
-      "state": "present",
-      "bytes": 17228,
-      "sha256": "6c260e66529291e752a07fc488a61a2aba6a4b6eefc621394394bc802301fd59"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-runtime/src/workspace_context.rs",
-      "state": "present",
-      "bytes": 34269,
-      "sha256": "9a33a2222d576bb750a736266a72ad337d1cd5405e5bb9996ff6e0e2840e40da"
+      "bytes": 11666,
+      "sha256": "9d9b0eb7beadf8eb9117e999f7790e5f67db1e81acb1ab6ad7b710b92af3e79a"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/error.rs",
       "state": "present",
-      "bytes": 2902,
-      "sha256": "46fb4e46e86b581351746966b2e263ad10e678184e8acab4b710fb0f936991fc"
+      "bytes": 2603,
+      "sha256": "03d1b2f80ee7cacddeccefea5f63466ec1b5a72294ad8571b2246a9575d748e7"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/lib.rs",
       "state": "present",
-      "bytes": 1226,
-      "sha256": "624ceea28d34416cd4d937133173149e467481971e9e673524d57e4f83325279"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-session/src/native_checkpoint.rs",
-      "state": "present",
-      "bytes": 9871,
-      "sha256": "74f0be78c02d58e9ccf2a9d7977505906bc23bce01f2c5084e4722d62fd39e08"
+      "bytes": 1402,
+      "sha256": "c96d197a5cd676bced2120f7b4249a3ac010b25353e5274ab617370b2c07837c"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/native_checkpoint_tests.rs",
       "state": "present",
-      "bytes": 9742,
-      "sha256": "468c6921708b4dbdd28cda4cc79d5b4ed3aabc21723c97aebd40b655746ebcfe"
-    },
-    {
-      "path": "crates/backend/nomifun-agent-session/src/native_effect_reconciliation.rs",
-      "state": "present",
-      "bytes": 11251,
-      "sha256": "003463e2b2218fe11fefb4d6a44f33edd1fef878fe1bb05f866cd340ba494d77"
+      "bytes": 9667,
+      "sha256": "ef008f8cad426c8fddf788ceb2d6998360a01c2343e5e35a159d5d77a2768a8c"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/native_execution.rs",
       "state": "present",
-      "bytes": 20009,
-      "sha256": "799309859e70192ae65d9d6d112e7da894bf8441f36652c6d6e3ef351e181e75"
+      "bytes": 21016,
+      "sha256": "ff91998dd14ccebc516b9b5affbb46464c7833cf09b790f5ee03ae7e3d791af2"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/native_execution_tests.rs",
       "state": "present",
-      "bytes": 15005,
-      "sha256": "c351602c5640f9f6fb948a5df457d9c9370ea53deb631da911cfa471b4cc50ff"
+      "bytes": 20078,
+      "sha256": "b5e62d7808e2bdbd81969428033dc4bbc47bf2e148713333f53cf5c156f9f788"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/native_pause.rs",
       "state": "present",
-      "bytes": 21834,
-      "sha256": "8d4751a125fe557d3363409511f3f02d6fbe750d89db2aeafae68be42d075b06"
+      "bytes": 26596,
+      "sha256": "ebd0c35c1768006bb979bb08772e67f9a2c35a1e780c8769b3098eef1a3812a4"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/native_recovery.rs",
       "state": "present",
-      "bytes": 12843,
-      "sha256": "a65fe84e1ab7b0661de968e3dc12a08112f5d39e33f42ef2c3a9e4c907b9bb1f"
+      "bytes": 12787,
+      "sha256": "d3a4ffb4b071d735ca29ce388565d882d783ae4091f6ddf64f4db823d8ef70ad"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/projector.rs",
       "state": "present",
-      "bytes": 24318,
-      "sha256": "327fbc6893136bf938e89b42d5c18218db378a1745df38b40d92c4ba92abf026"
+      "bytes": 21453,
+      "sha256": "faefbfb35501bfbea15971c3771512eddf42ac28063dbab7e5132347f55ad74f"
+    },
+    {
+      "path": "crates/backend/nomifun-agent-session/src/snapshot_compatibility.rs",
+      "state": "present",
+      "bytes": 6194,
+      "sha256": "bb79957a618f6c60a0714a9eec05d3558ddf3428ce562306dad86165d21da835"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/store.rs",
       "state": "present",
-      "bytes": 319839,
-      "sha256": "f2bbab7e4d648629bfa17d9875560fbc8178b284e1bfa28845f1e1dd48b33955"
+      "bytes": 309218,
+      "sha256": "3c5f5addf6201aadfe4f9d7bad18079b1d9984599c5a199af4384ee6721642d7"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/tests.rs",
       "state": "present",
-      "bytes": 134967,
-      "sha256": "2d4c6b681238ebc3495592c37fbf7f9022a80556d2fa3cc748c7013c4f711ec0"
+      "bytes": 129029,
+      "sha256": "8d37ad3d0061cb85751890ad09d6becfafbc1a52dca348d0f337f3f87da18eb1"
     },
     {
       "path": "crates/backend/nomifun-agent-session/src/types.rs",
       "state": "present",
-      "bytes": 20070,
-      "sha256": "1b9720ce620090bbaa48e75a74878e98bfa27776377ab9af566f884e8e2ddb32"
+      "bytes": 18466,
+      "sha256": "075d9e3728199e66cbb9a16633c9f106fe8e5ec382605612d7c67454c37fe349"
     },
     {
-      "path": "crates/backend/nomifun-ai-agent/src/engine_sdk.rs",
+      "path": "crates/backend/nomifun-api-types/src/lifecycle.rs",
       "state": "present",
-      "bytes": 19896,
-      "sha256": "4262de1d4f56e3195880a328a64a96e61ff48b9cfb45b113ed9bb25c68d7d2fb"
+      "bytes": 10181,
+      "sha256": "7f1daa2a47606c96a48082cab36f088f4dab1a28ebe1e6abcae508df5c21a1bd"
     },
     {
-      "path": "crates/backend/nomifun-ai-agent/src/protocol/events/mod.rs",
+      "path": "crates/backend/nomifun-app/src/bootstrap/environment.rs",
       "state": "present",
-      "bytes": 20002,
-      "sha256": "1b7093cf5fad9e97436d310fe82fde78140dd3b6522f849682f2d7417c28253c"
+      "bytes": 33295,
+      "sha256": "2738ef678dccaca87e5d298816b907cdf034fc2e97f1a0b763cce746363fa6da"
     },
     {
-      "path": "crates/backend/nomifun-ai-agent/src/protocol/send_error.rs",
+      "path": "crates/backend/nomifun-app/src/lib.rs",
       "state": "present",
-      "bytes": 70008,
-      "sha256": "5d31f4b9c36de947e15c8ac32908b7895b383901d52f717378fa7ee7560a5687"
+      "bytes": 3306,
+      "sha256": "c1c51451ca3a2c8308a59f8e4845a7aed53b1557e6015d698d5050ba5c0bf5c0"
     },
     {
-      "path": "crates/backend/nomifun-ai-agent/src/unified_runtime.rs",
+      "path": "crates/backend/nomifun-app/src/router/agent_wave2_host.rs",
       "state": "present",
-      "bytes": 45272,
-      "sha256": "86a660d4e5dc71654c2f0e24f6715a1f360c6321850d347c8135be48e3960489"
-    },
-    {
-      "path": "crates/backend/nomifun-app/Cargo.toml",
-      "state": "present",
-      "bytes": 9172,
-      "sha256": "727e3ae97803419bda8517c3b8aa9ce004f46610be33c5cde1ec3ab7dc5f73b7"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/robot_wiring.rs",
-      "state": "present",
-      "bytes": 46485,
-      "sha256": "e33808a50b2a6e9882032aa24099b271cc0876cbd27258b406517e32593b5166"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/router/chat_broker_host.rs",
-      "state": "present",
-      "bytes": 99322,
-      "sha256": "62f5c2cfa168b57531a636885bfd1e47e20813429f781a835c0d9645cefcdab3"
+      "bytes": 430058,
+      "sha256": "f2068555763511cedc8571146404ddd088c9606eff0f2c0e4aa377d698ad69fd"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/engine_history.rs",
       "state": "present",
-      "bytes": 19326,
-      "sha256": "482a1bdfabbc386ba7cd8e9f51ba880e2f2718762a5eb3ca433f7a05ce32f3a8"
+      "bytes": 27246,
+      "sha256": "83b9121913902ffc8e2e535880c2d30cf786417cd018e76ae89f47ab98a8db8f"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/engine_journal.rs",
       "state": "present",
-      "bytes": 71347,
-      "sha256": "6d2d59030e38fc1e61da890faf827014ac58900d9b0e18fe87216861762b0a9c"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/router/engine_kernel_session.rs",
-      "state": "present",
-      "bytes": 54608,
-      "sha256": "93058d61dbbbbc508a4c2793c07bd8c17a2c0f46a7c7c0d761b563fedf3143c1"
+      "bytes": 71491,
+      "sha256": "946d7892edeff5ab9d19401c444608a109529f1981647f525947290e0bbfea3b"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/engine_recovery.rs",
       "state": "present",
-      "bytes": 12798,
-      "sha256": "8ad3154f8bbf2424f6760bd8c75b5d8af57c9172302db7a0733015551f937b4f"
+      "bytes": 14205,
+      "sha256": "d40267cf773fbd49c68117ad54083c866816ca59da2f1fb33e82876fae32dc39"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/engine_session_host.rs",
       "state": "present",
-      "bytes": 34500,
-      "sha256": "c351ebecef3616969b21b95f90c2538484427859f514c52ebf99fcf393f51157"
+      "bytes": 48895,
+      "sha256": "8db311296316fb52e76f8328dbd75247d57f87db43fc3e1997d6447384c49116"
     },
     {
-      "path": "crates/backend/nomifun-app/src/router/engine_tool_host.rs",
+      "path": "crates/backend/nomifun-app/src/router/hosted_effect_receipts.rs",
       "state": "present",
-      "bytes": 20917,
-      "sha256": "787765decefbda8d900c866e4ffa7ea543be087e89bbbe24ac8b9ea85d8b7da0"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/router/native_execution_control.rs",
-      "state": "present",
-      "bytes": 23148,
-      "sha256": "509ade1807a31cb5ec62ff01ff929b45b769b6622aa49bb8120a44999de2e3f2"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/router/native_turn_recovery.rs",
-      "state": "present",
-      "bytes": 9094,
-      "sha256": "0334e3daadaed920debcce158d4be9dbfad25dd1bfa96c3079558e4095884331"
+      "bytes": 24365,
+      "sha256": "bae16b66c235ceef54632c60a12f607e5e94d1fa8cf6bc073731b1d4a1e1c313"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/nomi_core_session.rs",
       "state": "present",
-      "bytes": 595456,
-      "sha256": "70fd9506acf5afa8e93886cd6044f550027e6547974e9e228187347af4986b58"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/router/runtime_event_buffer.rs",
-      "state": "present",
-      "bytes": 9741,
-      "sha256": "e435562b85330e7a973c92d2e1f71fd587606a376ca2fb042099b6b7899cabe4"
+      "bytes": 629351,
+      "sha256": "a2632daca5564474f73592dd809ccf3acf09d7d86a728485caafaf5b1dbd08b8"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/runtime_history_port.rs",
       "state": "present",
-      "bytes": 4383,
-      "sha256": "74c5def81d6e6fff3ce92930161202aa72ad46e79e48a7e769df1238ad1f8f4f"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/router/runtime_steering.rs",
-      "state": "present",
-      "bytes": 18383,
-      "sha256": "8dbb4c67606a3d4340a69242a2923518f661312585b9d1c6c3b6ecfde8be9d23"
-    },
-    {
-      "path": "crates/backend/nomifun-app/src/router/state.rs",
-      "state": "present",
-      "bytes": 87420,
-      "sha256": "c3e73e6deed0ec73a371bd2b04c6d17cba4368661c4599e8fbe2a4e44af4733d"
+      "bytes": 5323,
+      "sha256": "2ccc1d6806b5a602aef2c0fa0249b222dfb1c8415a71d28625b0501fccd97b4d"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/unified_runtime_history.rs",
       "state": "present",
-      "bytes": 11812,
-      "sha256": "6bc78fe43945678b706630f3de4cb9159a72609af43605d0a6f32befdcbbd7ed"
+      "bytes": 16732,
+      "sha256": "dee3da614515c2c297ee08aed4986be5d3fea58ef92662701f82dec07baa27e0"
     },
     {
       "path": "crates/backend/nomifun-app/src/router/unified_runtime_host.rs",
       "state": "present",
-      "bytes": 61860,
-      "sha256": "e881b4ab520972adfcbd9d2f42f0eacec3361ec23053030cb61708608ab5f2ba"
+      "bytes": 72884,
+      "sha256": "49cf4134a3769686f3ad3eab247b04d8db72754e999b982cf164477723755f29"
     },
     {
-      "path": "crates/backend/nomifun-app/tests/common/mod.rs",
+      "path": "crates/backend/nomifun-app/src/router/unified_runtime_host_reliability_tests.rs",
       "state": "present",
-      "bytes": 15119,
-      "sha256": "dac0e4e4afe049b2e6a08c5034b4a15d3e137e0c39bdfc8acdfbe767dc54ec5b"
+      "bytes": 37731,
+      "sha256": "6aa6f7058e898589821c5d8b8098cf83ef0f90e1bb29deb0b8cd5168c4079899"
     },
     {
-      "path": "crates/backend/nomifun-app/tests/common/native_reliability_capture.rs",
+      "path": "crates/backend/nomifun-app/tests/cron_e2e.rs",
       "state": "present",
-      "bytes": 4222,
-      "sha256": "cf920771152425883cca8f0f2da1e5bc67b66cb64cf79287a27645876137c738"
+      "bytes": 57481,
+      "sha256": "edf42307910c8e889b783020dec1f953672694af351a1d6bc8ca5a09bf956869"
+    },
+    {
+      "path": "crates/backend/nomifun-app/tests/idmm_e2e.rs",
+      "state": "present",
+      "bytes": 13786,
+      "sha256": "edf556d4a3fb03b82be23ffeeaba9c752b781e9c9249bb20a7f45c972241123a"
     },
     {
       "path": "crates/backend/nomifun-app/tests/native_execution_recovery.rs",
       "state": "present",
-      "bytes": 9516,
-      "sha256": "e8a5f0109492e992c5efc969a2bafc88f7c4458dc9d50e8897a06ad989d55b1b"
+      "bytes": 57803,
+      "sha256": "e90811f487fe14389b41740231c699b1aa02b77b0c1dc89e23c387af83a8f30e"
     },
     {
-      "path": "crates/backend/nomifun-app/tests/nomi_core_live_provider_smoke.rs",
+      "path": "crates/backend/nomifun-app/tests/nomi_core_realtime_stream.rs",
       "state": "present",
-      "bytes": 141319,
-      "sha256": "aa6765c34f1cd79aa048a2ef0351c1d3b8840ebc54533ff641eca125f7c32952"
+      "bytes": 40561,
+      "sha256": "763f37406a3a3025d8cdc81713e052f17ce01f1e79e06c2589d8561962996b45"
     },
     {
       "path": "crates/backend/nomifun-app/tests/nomi_core_route_gap.rs",
       "state": "present",
-      "bytes": 199510,
-      "sha256": "e07c909d0edea8e1204fd05e148fa0b2f014675f0bf601e7ea5341fa65422044"
+      "bytes": 281334,
+      "sha256": "cc80f55301e2bb139825995143af2526e7c5d637d771b4ad80f1b2d32dd410d2"
     },
     {
-      "path": "crates/backend/nomifun-channel/src/message_service.rs",
+      "path": "crates/backend/nomifun-app/tests/requirements_e2e.rs",
       "state": "present",
-      "bytes": 82942,
-      "sha256": "76ecc0afa01b8de5bb5ea9201cd306a3cdce03282b52b05a6bef9201d3918274"
+      "bytes": 21198,
+      "sha256": "2a995e55c9f7adb2e3e11c2d5628a0dee56518462dcd79d74d0d42d5a248cc86"
     },
     {
-      "path": "crates/backend/nomifun-chat-model-broker/Cargo.toml",
+      "path": "crates/backend/nomifun-channel/src/session.rs",
       "state": "present",
-      "bytes": 511,
-      "sha256": "49266175d70d861b1acd571131644ffb94533d499f27aaf27a58822580fd0d37"
+      "bytes": 31382,
+      "sha256": "ede90c6fb4ca1a1ff5d48dbac39e2b287b99147361fa19899dcef3f7de0b5eaf"
     },
     {
-      "path": "crates/backend/nomifun-chat-model-broker/src/broker.rs",
+      "path": "crates/backend/nomifun-channel/tests/session_action_integration.rs",
       "state": "present",
-      "bytes": 26637,
-      "sha256": "a860a685706a3fec119235290daa1bc0270a8596135cdcf776ae28db7aefefd9"
+      "bytes": 21644,
+      "sha256": "74c4d6cb125ac5c72c6d91c3c9a35d290dceb77a842fcbbfd406cb5ba00ca0dd"
     },
     {
-      "path": "crates/backend/nomifun-chat-model-broker/src/lib.rs",
+      "path": "crates/backend/nomifun-companion/src/evolution/transcript.rs",
       "state": "present",
-      "bytes": 877,
-      "sha256": "ee578a24c35ff93825d94ca4ac89be95b57ff846607fcfc3460d424acf9c23a7"
+      "bytes": 7123,
+      "sha256": "744a888fd3612dd09a6fb55f1e2cd09406bb10224457f4bc97135c713ec8b9bc"
     },
     {
-      "path": "crates/backend/nomifun-chat-model-broker/src/provider_errors.rs",
+      "path": "crates/backend/nomifun-conversation/src/canonical_session_owner.rs",
       "state": "present",
-      "bytes": 11428,
-      "sha256": "de8c4ce8f6135555e7cee2adbed51c7399d6a2927eccd6cea5035647ebd1e0a9"
+      "bytes": 40079,
+      "sha256": "9dfb5698979bc00670a50d61afc6f38d74c1a5a6f71017f7e7215ba3ee79ee86"
     },
     {
-      "path": "crates/backend/nomifun-chat-model-broker/src/retry.rs",
+      "path": "crates/backend/nomifun-db/migrations/001_canonical_baseline.sql",
       "state": "present",
-      "bytes": 3125,
-      "sha256": "0bfd4ef6751687b6b48e9edf5cc5fd50049072c5d0ad23ffd32b8e7001301e4e"
+      "bytes": 223930,
+      "sha256": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8"
     },
     {
-      "path": "crates/backend/nomifun-chat-model-broker/tests/conformance.rs",
-      "state": "present",
-      "bytes": 68732,
-      "sha256": "1c68ce7453b2ac5760d8743a3af5239bbc8af66e271ad8e83b15464a1dade583"
+      "path": "crates/backend/nomifun-db/migrations/002_model_compaction_threshold.sql",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-db/migrations/003_agent_session_reasoning_effort.sql",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-db/migrations/004_extended_agent_session_reasoning_effort.sql",
+      "state": "deleted"
     },
     {
       "path": "crates/backend/nomifun-db/migrations/005_native_execution_checkpoints.sql",
-      "state": "present",
-      "bytes": 1020,
-      "sha256": "30b2dc8c101ef3229b551d5b1b0ce376c64a87f744f2574ac67400af9416c4ae"
+      "state": "deleted"
     },
     {
       "path": "crates/backend/nomifun-db/migrations/006_native_execution_leases.sql",
-      "state": "present",
-      "bytes": 622,
-      "sha256": "47e7c09ed12e1c86d3dd3c4110a79353a13113fcf3910050819ac97e69102129"
+      "state": "deleted"
     },
     {
       "path": "crates/backend/nomifun-db/migrations/007_native_pause_resume.sql",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-db/migrations/008_plugin_draft_conversation_source.sql",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-db/migrations/009_plugin_authoring_history.sql",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-db/migrations/010_plugin_draft_install_commit.sql",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-db/migrations/011_agent_session_native_reasoning_effort.sql",
+      "state": "deleted"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/agent_store_clean_cut.rs",
       "state": "present",
-      "bytes": 1743,
-      "sha256": "a85056f419cb347fbb4690f981fe9599d45dbb604911d2682314f42f962ea670"
+      "bytes": 17959,
+      "sha256": "7097606238247acc3012416f107915091bb53d062b4ddfcc8165a49c68617a69"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/agent_store_reset.rs",
+      "state": "present",
+      "bytes": 11153,
+      "sha256": "f72489ca05a4666328e2f8825fccf6f8e69d2bb329f645bfb0b0a4c3ac875f81"
     },
     {
       "path": "crates/backend/nomifun-db/src/database.rs",
       "state": "present",
-      "bytes": 44314,
-      "sha256": "d669b59ef572a9d2f2b46523d313e0f1aa309439c8d62abab5ea475c6d40df1b"
+      "bytes": 25704,
+      "sha256": "4da4ee20874b1b98ff92959be510aa729dc446e234177556d64dfa1eb61ef7e6"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/lib.rs",
+      "state": "present",
+      "bytes": 10139,
+      "sha256": "612aaa02b91276a84991d43de77c4eedfe82800bfff94ea1d181ba16a0155a67"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/repository/agent_execution.rs",
+      "state": "present",
+      "bytes": 29813,
+      "sha256": "50c9cf3ca055917d6c903de0382da9842f9447b2b84ff37f7a3e90284aa26e65"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/repository/cron.rs",
+      "state": "present",
+      "bytes": 12023,
+      "sha256": "d57aa37a16197565c179e87f5df26cb8457b707a03fa33f20ce5a8970b606ec5"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs",
+      "state": "present",
+      "bytes": 180011,
+      "sha256": "0e15e11825737271d74d5d2918e68b211b1958f79185021c4af9b56dcbe8cc7d"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/repository/sqlite_channel.rs",
+      "state": "present",
+      "bytes": 129922,
+      "sha256": "bfad6e3cfe5d459ac2ddd51cb269fca46403160a20f4a5669d1c6d1bd6ccc9d2"
+    },
+    {
+      "path": "crates/backend/nomifun-db/src/repository/sqlite_cron.rs",
+      "state": "present",
+      "bytes": 78257,
+      "sha256": "7415094ff0540385b276f07f9ca2fa60ceca9a60daddcecc916493301c0888e2"
+    },
+    {
+      "path": "crates/backend/nomifun-db/tests/agent_store_reset.rs",
+      "state": "present",
+      "bytes": 4362,
+      "sha256": "1ff5c27dfc773a799949252c7d41a67c1ef95b394f715a5db8c5d8d906ac5ae4"
     },
     {
       "path": "crates/backend/nomifun-db/tests/id_schema_contract.rs",
       "state": "present",
-      "bytes": 4450,
-      "sha256": "d011ec9454da54f405f25ad212aefd9067e65b5548261d6e52134b8eb97228a3"
+      "bytes": 4228,
+      "sha256": "c12f2c7544fa80513594710a39fdd66c9ef2196e669d10827198c64295fc5254"
     },
     {
-      "path": "crates/backend/nomifun-engine-core/Cargo.toml",
+      "path": "crates/backend/nomifun-db/tests/index_design.rs",
       "state": "present",
-      "bytes": 725,
-      "sha256": "4470bef5491b06697579fc98e8a03487491f4e25e73f3cb433658d5d95cace6a"
+      "bytes": 4566,
+      "sha256": "89047478ac8e3e7cc93835f63da4ec658bb04855b93616781f3918fb7cf1169f"
     },
     {
-      "path": "crates/backend/nomifun-engine-core/src/kernel.rs",
+      "path": "crates/backend/nomifun-db/tests/native_reasoning_source.rs",
       "state": "present",
-      "bytes": 19770,
-      "sha256": "2c0298c6b7de77fd6fbe52e52d37098852fb7b4d78dc9d6de6a32bce480a1987"
+      "bytes": 1600,
+      "sha256": "6f9e305c40c4948405d1a24dd025933b4ce64a902a7017e81701c1eb12ef79ad"
     },
     {
-      "path": "crates/backend/nomifun-engine-core/src/lib.rs",
-      "state": "present",
-      "bytes": 1344,
-      "sha256": "2bbe088a51319b7530fe955c530fd787fb8c27094dbcc2f338a8f89af5812951"
+      "path": "crates/backend/nomifun-db/tests/plugin_authoring_migration.rs",
+      "state": "deleted"
     },
     {
-      "path": "crates/backend/nomifun-engine-core/src/tool_schema.rs",
+      "path": "crates/backend/nomifun-system/Cargo.toml",
       "state": "present",
-      "bytes": 7316,
-      "sha256": "d84077e2fea431095bd635e1570e631374cbbfcd4fe230b6f73b5f5c900c4609"
+      "bytes": 789,
+      "sha256": "3dd602120184f5789866e9102383e82af5ef83ab56c648246bf17897404dc239"
     },
     {
-      "path": "crates/backend/nomifun-model-invoke/Cargo.toml",
+      "path": "crates/backend/nomifun-system/src/sysinfo.rs",
       "state": "present",
-      "bytes": 738,
-      "sha256": "da1d47c6ea82201992e5917ed36a20fbce5848c25970d61c17b25f363c1f252b"
+      "bytes": 4184,
+      "sha256": "79a18c75fd3cbde055e512c4d07f342f6b455d225634c8789d7ade4e9ae6ee47"
     },
     {
-      "path": "crates/backend/nomifun-model-invoke/src/transport.rs",
+      "path": "crates/backend/nomifun-system/tests/system_info_routes.rs",
       "state": "present",
-      "bytes": 53189,
-      "sha256": "4ebb7911c82c7a6b086526e3fad58747380d44bbe5ff99403b99a45fb06a3f1a"
+      "bytes": 21123,
+      "sha256": "07c3a1a6aeed408eff0c2f99623468355f6ab5bf44c1f398ad10abfa1903640d"
+    },
+    {
+      "path": "docs/architecture/agent-engine.md",
+      "state": "present",
+      "bytes": 2005,
+      "sha256": "e1955c14293a562d946a1f6749108eb72e462e8277290257b5f7741785db31ce"
+    },
+    {
+      "path": "docs/architecture/agent-engine.zh.md",
+      "state": "present",
+      "bytes": 2061,
+      "sha256": "6c53a0dea7fd6764c867612b661be8790f82dc20e5207f7d8926622b76876a0c"
+    },
+    {
+      "path": "docs/architecture/agent-execution.zh.md",
+      "state": "present",
+      "bytes": 39556,
+      "sha256": "27066ae329017796e7e16623cb4ba2a93de6f748f0cd0c780864ce6c6790ec64"
+    },
+    {
+      "path": "docs/architecture/agent-session.md",
+      "state": "present",
+      "bytes": 5076,
+      "sha256": "282fdb14a6214749f92b49efdf495d9976036d22806c670cffa1e82ced539f36"
+    },
+    {
+      "path": "docs/architecture/agent-session.zh.md",
+      "state": "present",
+      "bytes": 6478,
+      "sha256": "33ce87a955616ebdf7e7b3a218b21b6de47e269c25b76fad488449f72362ac0a"
+    },
+    {
+      "path": "docs/architecture/backend-crates.zh.md",
+      "state": "present",
+      "bytes": 15024,
+      "sha256": "e95dd787c12c08c9e035af67e13de352a73781e084a6b8d8e7b4426c08a515a7"
+    },
+    {
+      "path": "docs/architecture/browser-platform.md",
+      "state": "present",
+      "bytes": 21302,
+      "sha256": "0a8ff868c3b1c802f53bb89e03a035660db71c652e972253b5b98fa7b2e99973"
+    },
+    {
+      "path": "docs/architecture/browser-platform.zh.md",
+      "state": "present",
+      "bytes": 27465,
+      "sha256": "7145ae5e237b5877e03ab56427e49dc8831229a9e8480b645222da452e7c2483"
+    },
+    {
+      "path": "docs/architecture/communication.md",
+      "state": "present",
+      "bytes": 6136,
+      "sha256": "a7b257b0f16322f40327557f7a080b8b866d2b7814a5b269f74dd9f43100d089"
+    },
+    {
+      "path": "docs/architecture/communication.zh.md",
+      "state": "present",
+      "bytes": 12143,
+      "sha256": "1616d0bc68bcc1967b71bd86784b80c3d3852786f3eff6364439d7ff6239a607"
+    },
+    {
+      "path": "docs/architecture/id-system.md",
+      "state": "present",
+      "bytes": 12674,
+      "sha256": "1ff399cd4f074b8088b5dc87ecf2144193b3440fe90ef051cc2756415c692559"
+    },
+    {
+      "path": "docs/architecture/id-system.zh.md",
+      "state": "present",
+      "bytes": 11347,
+      "sha256": "aa3aaa697d71c8153f9e4fd0f7502733ab1d39cacd1e3770f584addc8a5ac597"
+    },
+    {
+      "path": "docs/architecture/overview.md",
+      "state": "present",
+      "bytes": 10425,
+      "sha256": "1de2282543bb3bc00c6fecc8abfdc16df7646ddeb0ec9ab23856f9ed5ff6fc7a"
+    },
+    {
+      "path": "docs/architecture/overview.zh.md",
+      "state": "present",
+      "bytes": 10030,
+      "sha256": "d9f7411f5c7b21d65a210fb54f7a45029c68fe84ff534c93cf2814142e12ec70"
+    },
+    {
+      "path": "docs/reviews/2026-10-04-agent-session-clean-cut.zh.md",
+      "state": "present",
+      "bytes": 11615,
+      "sha256": "a4dbb7ba9efdaa1e7e04d53d6dd43c54129bb99cf589f61b96eb81fc917df5af"
     },
     {
       "path": "docs/specs/2026-09-25-agent-reliability/DEVELOPMENT-HANDOFF.zh.md",
-      "state": "present",
-      "bytes": 17695,
-      "sha256": "25ade72e6d282eb1860575def5b2bc20c3bd638a0d6eadb3963fd7baad36851f"
+      "state": "deleted"
     },
     {
-      "path": "docs/specs/2026-09-25-agent-reliability/EVIDENCE-PIPELINE.zh.md",
+      "path": "docs/specs/2026-09-25-agent-reliability/GLOBAL-EXECUTION-COST-2026-09-26.zh.md",
       "state": "present",
-      "bytes": 6810,
-      "sha256": "d4f637bd3846239995849edd16353231ed4fba9d419248d7d328f7dd047bd6e3"
+      "bytes": 11049,
+      "sha256": "53fa1839943cb0f72f43c317e7d91536c1382987e0a627a92ac9c6b9d84cc4db"
     },
     {
       "path": "docs/specs/2026-09-25-agent-reliability/NEXT-AGENT-PROMPT.zh.md",
       "state": "present",
-      "bytes": 3461,
-      "sha256": "21254583bc5b0e2814d4f1905712db5308576d93d1e68c633a80804c3f2cd4ad"
-    },
-    {
-      "path": "docs/specs/2026-09-25-agent-reliability/PAUSE-RESUME-V2.zh.md",
-      "state": "present",
-      "bytes": 7241,
-      "sha256": "abec0a7550e4505b823267841bc5f828460a16e973a88995dadb1e84d445a720"
+      "bytes": 3433,
+      "sha256": "802b2baca904bf7a160886c005da625ea9226deeaa79dc7df129f45b90ac3a00"
     },
     {
       "path": "docs/specs/2026-09-25-agent-reliability/README.zh.md",
       "state": "present",
-      "bytes": 23555,
-      "sha256": "e29f41eccc9ead386ddb9c3fb382a85aab280518a7653d0d6a5a29d30fee44ed"
+      "bytes": 24304,
+      "sha256": "905f0444ecdb8809594a737d30932e90dd1d3b34e5f8f77355e839981b1f75e6"
     },
     {
       "path": "docs/specs/2026-09-25-agent-reliability/TEST-MATRIX.zh.md",
       "state": "present",
-      "bytes": 8991,
-      "sha256": "d70c422f28e130bb64509c6f4e215dcc6f128a4723bb630ce1b0a8e058635c46"
+      "bytes": 9051,
+      "sha256": "3e776633ec5ca1b5d2f541308fd08242268579c8894f2b623c18a121e53223d7"
+    },
+    {
+      "path": "docs/specs/2026-09-25-agent-reliability/VALIDATION-2026-09-25.zh.md",
+      "state": "present",
+      "bytes": 13171,
+      "sha256": "d0fc0057ad502ce9993f4356330f7a2019d723b2df8bb2371f07fb0fbece7924"
     },
     {
       "path": "package.json",
       "state": "present",
-      "bytes": 4782,
-      "sha256": "7a8be3c42478f619c26b56d69b2c62e1a4eb8538f8ddef085824c1f075271075"
+      "bytes": 4982,
+      "sha256": "4712a7c60d794774dd468cca636d34374b98bd4edca132661f130fd02df3af92"
+    },
+    {
+      "path": "scripts/check-agent-session-boundary.mjs",
+      "state": "present",
+      "bytes": 5599,
+      "sha256": "df9a57b6dd894edd06ec91b603ba5c0624cc6e40cd6aa0b7f00dbf4156129dab"
+    },
+    {
+      "path": "scripts/check-agent-vocabulary.mjs",
+      "state": "present",
+      "bytes": 11633,
+      "sha256": "c79877ca20b454c113eb4261f995734d69352251ea19c6ba3cc7a310f65a75e7"
+    },
+    {
+      "path": "scripts/check-uarc-boundary.mjs",
+      "state": "present",
+      "bytes": 26204,
+      "sha256": "a19fc27aff38c8abb594b895fd90d39e1b389f5961964c74429b03c435005f7e"
+    },
+    {
+      "path": "scripts/check-unified-plugin-boundary.mjs",
+      "state": "present",
+      "bytes": 13936,
+      "sha256": "fd55cbc02ea5cc8b5ae50e40b91813abb3c731b1d4fe2ba896e7ed140888e6f3"
+    },
+    {
+      "path": "scripts/gate-agent-v2.mjs",
+      "state": "present",
+      "bytes": 7742,
+      "sha256": "71467072eef393d0b90509a6689490260c6e3610b7d15e8606d492463400e332"
     },
     {
       "path": "scripts/scripts.json",
       "state": "present",
-      "bytes": 7908,
-      "sha256": "569ff01ca7447acf909d67838bf6a517cab96d5817c376ceb8880107864e20f4"
+      "bytes": 8814,
+      "sha256": "45f08bf4e4b8fd114d207e1cbc5eae3556e4fb25a4524ca24d62216ebbf26fe1"
     },
     {
-      "path": "scripts/validation/agent-reliability-collect.mjs",
+      "path": "scripts/validation/agent-architecture-inventory.json",
       "state": "present",
-      "bytes": 16250,
-      "sha256": "4448c560c8dd2bcc2c5809cf47e4a9dc7c67124db869826ba7930102639a2d19"
+      "bytes": 13881,
+      "sha256": "7bc2fdb293b50cb4a97ba495f5ad72f31991bc8e0c5394f50831c2958c838404"
+    },
+    {
+      "path": "scripts/validation/agent-architecture-manifest.json",
+      "state": "present",
+      "bytes": 488,
+      "sha256": "26ca99eb59e817df2d5f2742fa97d0d3dae9554aa16ccbe29a8af624a75eb79b"
     },
     {
       "path": "scripts/validation/agent-reliability-handoff.mjs",
       "state": "present",
-      "bytes": 6232,
-      "sha256": "c71b7ffadc677b734a5017802c0a4ffa0f6ab9f32e8d1f6a593cedcfe71573d3"
+      "bytes": 6822,
+      "sha256": "49d9aa6fbf1054d2665b31cacfa50ff261f05f6ff21952c6daf0b084bd1e7336"
     },
     {
-      "path": "scripts/validation/agent-reliability-report.mjs",
+      "path": "scripts/validation/retired-agent-capability-ids.json",
       "state": "present",
-      "bytes": 10589,
-      "sha256": "a7df7b002eb036890c1201d9a08b9cdb9c98aa80ddbb6136553db08645a7fd80"
+      "bytes": 3636,
+      "sha256": "3b53228c12475c54c89e3bdbcbd3db28349f2a46505fdfedba140f2cac335d4c"
     },
     {
-      "path": "scripts/validation/agent-reliability-report.test.mjs",
+      "path": "ui/src/common/adapter/ipcBridge.ts",
       "state": "present",
-      "bytes": 6836,
-      "sha256": "3243a30a2dfab8c16a47f2da0ebf2bf7c8a1068dffb26943d2d6c56a55eae787"
+      "bytes": 246624,
+      "sha256": "000cfc61b12d34a5ead102a7e70f906dd0ce6ff4a31e61d9782640630d3540a9"
     },
     {
-      "path": "scripts/validation/probe-stepfun-tool-schema.mjs",
+      "path": "ui/src/common/chat/chatLib.test.ts",
       "state": "present",
-      "bytes": 6245,
-      "sha256": "30ae615bd9642a0f1d885704d1759483627cf0c066a3c8774363d14ff8f357a8"
+      "bytes": 19542,
+      "sha256": "dc593bd3f6b429ce345f1c4efb4d0634c3fce14dc7ee35c41015aa6ddc9b5005"
     },
     {
-      "path": "scripts/validation/probe-stepfun-tool-schema.test.mjs",
+      "path": "ui/src/common/chat/chatLib.ts",
       "state": "present",
-      "bytes": 1448,
-      "sha256": "7cf8bf3e762741cdf99a8dbe481dd94f1a555c58e413f223cef32c2a4091c83b"
+      "bytes": 43220,
+      "sha256": "f216e2176f9395a99835ecfb5c81b103c8a0c3314ef1af67b7c3afad7698abc8"
     },
     {
-      "path": "scripts/validation/run-nomi-core-live-provider-smoke.mjs",
+      "path": "ui/src/common/chat/normalizeToolCall.ts",
       "state": "present",
-      "bytes": 41914,
-      "sha256": "0083980bf1b8cedfa8bd68312ee71736def3416bc834a992b75742e6ae8f1750"
+      "bytes": 17012,
+      "sha256": "50251c64a67ea36ff6b4331bcb096b38f22cb4875f8cc416edcfd00f2e7143d8"
     },
     {
-      "path": "ui/src/common/protocolBindings/TurnStopReason.ts",
+      "path": "ui/src/common/config/configKeys.ts",
       "state": "present",
-      "bytes": 443,
-      "sha256": "9255df381372c922222752d6504fcb3ee040f524cf26eede197cc58018070306"
+      "bytes": 5122,
+      "sha256": "2b2027d71d1a62c451a5af931ea2e046d7905f6504e90bfce13488e12dc2463c"
+    },
+    {
+      "path": "ui/src/common/config/storage.ts",
+      "state": "present",
+      "bytes": 10233,
+      "sha256": "0acbd90b3c5fa1c03d0e7776fa2ee7aae8d5b00aa22884d14a89f208fb7672cb"
+    },
+    {
+      "path": "ui/src/common/utils/browserStorageKey.test.ts",
+      "state": "present",
+      "bytes": 9662,
+      "sha256": "17bae3b046af2436bed63c879dd3f7dff99c85aaa3ded1cc093a4a33d4ceb5bf"
+    },
+    {
+      "path": "ui/src/common/utils/browserStorageKey.ts",
+      "state": "present",
+      "bytes": 7798,
+      "sha256": "6fa8b76a7feac55c81cb0b254055cf95ebc55846079115bee92906d2acbfe6df"
+    },
+    {
+      "path": "ui/src/renderer/components/layout/Sider/pluginPlatformNav.structure.test.ts",
+      "state": "present",
+      "bytes": 879,
+      "sha256": "09999ed9281a0ed2eb2f22f36b9b18e24865121d9e295784b2fbb90a080e1913"
+    },
+    {
+      "path": "ui/src/renderer/creation/CreationControls.test.tsx",
+      "state": "present",
+      "bytes": 9110,
+      "sha256": "78413d5bdd20e251f9729769bb36aaa1aeeed860f547998b9aa98c72f3d465ea"
+    },
+    {
+      "path": "ui/src/renderer/creation/creation.behavior.test.tsx",
+      "state": "present",
+      "bytes": 22155,
+      "sha256": "370df158d90024f9e67d8fa8e5ae226aec4e682d137ca264d0261a8bb0eedb1c"
+    },
+    {
+      "path": "ui/src/renderer/creation/legacyDraftImport.test.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/creation/legacyDraftImport.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/creation/parameterPolicy.ts",
+      "state": "present",
+      "bytes": 5877,
+      "sha256": "0f586dbfcaab6c3c6dedf5ff329a09c651c6f8d4dc30b80c605953fb8632f82d"
+    },
+    {
+      "path": "ui/src/renderer/creation/submission.ts",
+      "state": "present",
+      "bytes": 4380,
+      "sha256": "67c55d5caea75789cc384609decbb361aad5bf0d18b140b0892facf2c127ca00"
+    },
+    {
+      "path": "ui/src/renderer/creation/useCreationDraft.ts",
+      "state": "present",
+      "bytes": 2103,
+      "sha256": "954a717a9fa73f61d0e1d4397e613e9087b21224d7284aa4e3b7b594f68a9d5e"
+    },
+    {
+      "path": "ui/src/renderer/creation/useGuidCreation.ts",
+      "state": "present",
+      "bytes": 6469,
+      "sha256": "de08645d260ceab99ac665aca16ad288c3733af43c996775a888e872855022d5"
+    },
+    {
+      "path": "ui/src/renderer/main.bootstrap.structure.test.ts",
+      "state": "present",
+      "bytes": 1128,
+      "sha256": "6901d91ec98253d2d28a759b997a72b1c95983a5b8cbbcc9ea11b39293e33e0d"
+    },
+    {
+      "path": "ui/src/renderer/main.tsx",
+      "state": "present",
+      "bytes": 6840,
+      "sha256": "63da08431deb3c3e5cba67d6d0472a8c93a15d2f3b12b3cf8cc4807ee4f2dd46"
+    },
+    {
+      "path": "ui/src/renderer/pages/agentSettings/AgentContextOrder.interaction.test.tsx",
+      "state": "present",
+      "bytes": 16487,
+      "sha256": "1d36a79a452d533579b6dbb0d93c0024d71ea0f9b653aa54abf978c54338f698"
+    },
+    {
+      "path": "ui/src/renderer/pages/agentSettings/AgentContributionOrder.tsx",
+      "state": "present",
+      "bytes": 5266,
+      "sha256": "72947029d6316690a01f8213f218b8917cb220615582f40c009b61243877e441"
+    },
+    {
+      "path": "ui/src/renderer/pages/agentSettings/GuidDefaultAgentSetting.interaction.test.tsx",
+      "state": "present",
+      "bytes": 5934,
+      "sha256": "1f4dacc37e49f5ace4de1115dfa2613895a459bd8e9d5e0628e90550384311dd"
+    },
+    {
+      "path": "ui/src/renderer/pages/agentSettings/GuidDefaultAgentSetting.tsx",
+      "state": "present",
+      "bytes": 6033,
+      "sha256": "f798817c8a386bdb7d2fa0be374de32e61b5bd29bcd2d6c3b988a9461c7c58e4"
+    },
+    {
+      "path": "ui/src/renderer/pages/agentSettings/agentEditorDrafts.ts",
+      "state": "present",
+      "bytes": 3456,
+      "sha256": "9358fff93e3b9ebcbb37698f2ed554d764e05e4165afda4394666f01890dfa93"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/MessageList.processFlow.interaction.test.tsx",
+      "state": "present",
+      "bytes": 12297,
+      "sha256": "0dcdb603a5ae0d831710745e032e9455cab0f09b48efe5d3325f9a6a5d78398c"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/MessageList.tsx",
+      "state": "present",
+      "bytes": 58187,
+      "sha256": "ebf54add22510ce55461dbdd493bd9d4b181707678e11667c81c6b03a101bc89"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/MessageList.turnDisclosure.structure.test.ts",
+      "state": "present",
+      "bytes": 8669,
+      "sha256": "19e718805545f5870a6c6e3a26e26cadc344e6537e7243702b2b851f61be8878"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/components/MessageToolGroup.tsx",
+      "state": "present",
+      "bytes": 2256,
+      "sha256": "5726f2dded40d1a84e91b30d5825d1f88b7d16cb2cac52bc3f7c18391913683f"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/components/ProcessTraceItem.interaction.test.tsx",
+      "state": "present",
+      "bytes": 17350,
+      "sha256": "8bb7be15c3260288291209f0861713aaa467ed8cc9e403077eb6c0b848e2ef51"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/components/toolGroupArtifactVisibility.test.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/components/toolGroupArtifactVisibility.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/errorIsolation.redteam.test.ts",
+      "state": "present",
+      "bytes": 9881,
+      "sha256": "78cd655a43f4c54f2692ad45a98fe7e7488b9a37fcf5be471b34772340559ab6"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/hooks.mergeFetchedMessages.test.ts",
+      "state": "present",
+      "bytes": 57027,
+      "sha256": "32842b73e6d628055ed975f50d42e7c7d592a8d10595fc13955df74c9d304c85"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/hooks.ts",
+      "state": "present",
+      "bytes": 43692,
+      "sha256": "8de1be76d1735494431e332ffb153b02dcda4ff2324b8cc34a7f6c27626c8978"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/planToolVisibility.test.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/planToolVisibility.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/turnDeliverablesModel.test.ts",
+      "state": "present",
+      "bytes": 19821,
+      "sha256": "2c474315cfe24229001198b1d3081184874999667966273cc248dc17efd4faa8"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/turnDeliverablesModel.ts",
+      "state": "present",
+      "bytes": 18724,
+      "sha256": "c09801d0554cc7717d799c956e24aaf4c37578bb4f35734ec571e9ceb4a6c9ae"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Messages/turnProcessState.test.ts",
+      "state": "present",
+      "bytes": 6794,
+      "sha256": "3d169b8faf325fb63e472bd4e6668c9af49fbfdb0413a7233dd3d2da5147d34b"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/SessionList/hooks/conversationListFilter.ts",
+      "state": "present",
+      "bytes": 1342,
+      "sha256": "c777a8d3326039c5729bd896a0c1ea046bc3892cb294aaf61baf277abd92b251"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/SessionList/hooks/useConversationListSync.ts",
+      "state": "present",
+      "bytes": 15746,
+      "sha256": "f5028b085be6b845ba661b667cf35e0c3096f27b9b61f8f9cd456d927f085b2e"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeMounts.ts",
+      "state": "present",
+      "bytes": 9345,
+      "sha256": "6ac92afa08a4e06dc22bf0dd38d1092d5624420870076be1b6c3be7b8a19dc08"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/execution/readOnlyConversation.sideEffects.test.ts",
+      "state": "present",
+      "bytes": 3877,
+      "sha256": "b83b23703993dcea52b54aecabc7858cd60e56ca083fc95b8610778e95348273"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/execution/readOnlyConversation.structure.test.ts",
+      "state": "present",
+      "bytes": 838,
+      "sha256": "59cf03e84f867afeb59e29e466dd5531b7e6cf2e109fa0b1e06438074a976ce4"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/conversationSendIdempotency.structure.test.ts",
+      "state": "present",
+      "bytes": 9185,
+      "sha256": "78a6f5b232f233bb6e0e1905c1ee70814dc0afa4de3404cd3e41100ae7640f67"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/ExecutionPauseNotice.tsx",
+      "state": "present",
+      "bytes": 939,
+      "sha256": "ccbb14f04a14e1f009407a1ac93ce0483f7790a2124312f20fe9564906cdf067"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/NomiChat.tsx",
+      "state": "present",
+      "bytes": 6250,
+      "sha256": "32aeed9a527682a713400e0ff72ceee191a85ea9fae7a6d35e0e8bd5940e00ac"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/NomiSendBoxLayout.structure.test.ts",
+      "state": "present",
+      "bytes": 15473,
+      "sha256": "b1deff8c66be1e53c3cd33a951ddd9d1f2a98bdc2fbd60f645ff25ccd5f491cf"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/localCronCommands.test.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/localCronCommands.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/nomiMessageBuffer.test.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/nomiMessageBuffer.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/nomiPostProcessState.test.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/nomiPostProcessState.ts",
+      "state": "deleted"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/useNomiMessage.pause.test.ts",
+      "state": "present",
+      "bytes": 4467,
+      "sha256": "7ee0fca5cc8963379d5e4276dfe892a0dd0442ba337684c4d4518d4bcd4d8bb3"
+    },
+    {
+      "path": "ui/src/renderer/pages/conversation/platforms/nomi/useNomiMessage.ts",
+      "state": "present",
+      "bytes": 31761,
+      "sha256": "aea0a8a4c0e388aedd067de0bc9454a1dc89f47833786549cb0a0aed593425bc"
+    },
+    {
+      "path": "ui/src/renderer/pages/cron/useCronJobs.test.ts",
+      "state": "present",
+      "bytes": 14957,
+      "sha256": "4b1152b79b925427e66942b7c77bd4bd81c46902912c67e8487927b5f79e43ca"
+    },
+    {
+      "path": "ui/src/renderer/pages/cron/useCronJobs.ts",
+      "state": "present",
+      "bytes": 19687,
+      "sha256": "8b8deb6df6c482c53166394dbbbba4357a9d3a29cd9aa266cd008fe90f36e95b"
+    },
+    {
+      "path": "ui/src/renderer/pages/guid/GuidAgentPresetLaunch.structure.test.ts",
+      "state": "present",
+      "bytes": 10141,
+      "sha256": "46a87ab09c49f39eba20aba36c85f6ab3f00edb9a2cc6083e16e0fe615dfc104"
+    },
+    {
+      "path": "ui/src/renderer/pages/guid/hooks/agentPresetSelection.test.ts",
+      "state": "present",
+      "bytes": 6421,
+      "sha256": "aeed1208cc89008ec136136a915802ccc70a7a9cbd8f536c6051d1bab826428b"
+    },
+    {
+      "path": "ui/src/renderer/pages/guid/hooks/agentSelectionUtils.ts",
+      "state": "present",
+      "bytes": 2227,
+      "sha256": "e1b18eef329ed5f91175c02472adfffedf401eb446f2d0a9576e3349ece18464"
+    },
+    {
+      "path": "ui/src/renderer/pages/guid/hooks/guidDraftNavigation.test.tsx",
+      "state": "present",
+      "bytes": 7425,
+      "sha256": "cb735ad49c533ea0f2067da96b27c19ff412acdcc20da7e83adc0381bd1be115"
+    },
+    {
+      "path": "ui/src/renderer/pages/guid/hooks/useGuidDraftState.ts",
+      "state": "present",
+      "bytes": 1519,
+      "sha256": "fce9ad0070c349e7e53b1b1bf2f811d8335b094d22295e3cd08c555268913348"
+    },
+    {
+      "path": "ui/src/renderer/pages/nomi/workspace/productBoundary.structure.test.ts",
+      "state": "present",
+      "bytes": 2788,
+      "sha256": "be5c85e6060bce23c1fe22499ea2d434c949ee355c21c45e15800327ba5094bc"
+    },
+    {
+      "path": "ui/src/renderer/pages/plugins/pluginConversationLaunch.ts",
+      "state": "present",
+      "bytes": 3190,
+      "sha256": "6f140ad39ca6488d987c582a8d46f4493f8635e79944aaa42dd31ffb6bbb743f"
+    },
+    {
+      "path": "ui/test/setup-dom.ts",
+      "state": "present",
+      "bytes": 939,
+      "sha256": "056cc65f3019eecd6bf8f069453302b4d39d1bbec5186939e87bfff0d63fa092"
     }
   ]
 }

@@ -1,6 +1,7 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
 pub mod backup_bundle;
 mod agent_store_reset;
+mod agent_store_clean_cut;
 mod database;
 mod error;
 mod id_schema_contract;
@@ -12,10 +13,11 @@ pub use installation_role_bindings::{load_installation_role_bindings, put_instal
 
 pub use database::{
     Database, init_database, init_database_memory, init_database_memory_with_owner,
-    open_database_for_backup, requires_unified_plugin_clean_start,
+    open_database_for_backup,
     validate_current_migration_lineage, validate_known_migration_lineage_prefix,
 };
 pub use agent_store_reset::{AgentDataResetReport, reset_agent_data};
+pub use agent_store_clean_cut::requires_agent_store_clean_cut;
 pub use error::DbError;
 pub use id_schema_contract::{validate_id_data_contract, validate_id_schema_contract};
 pub use session_projection::MessageDayBucket;

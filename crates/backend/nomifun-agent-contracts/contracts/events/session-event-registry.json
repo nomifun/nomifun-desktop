@@ -894,10 +894,10 @@
       "replay_rule": "no_effect"
     },
     {
-      "kind": "runtime/bound",
+      "kind": "runtime/execution-claimed",
       "version": 1,
       "persistence": "persistent",
-      "payload_schema": "events/runtime-bound/v1",
+      "payload_schema": "events/runtime-execution-claimed/v1",
       "producer": {
         "allowed": [
           "runtime_supervisor"
@@ -906,69 +906,147 @@
       "predecessor": {
         "mode": "any_of",
         "kinds": [
-          "session/opening"
+          "turn/started"
         ]
       },
-      "correlation": "runtime_binding",
-      "idempotency": "runtime_binding_sequence_required",
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
+      "kind": "runtime/execution-recovery-blocked",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-execution-recovery-blocked/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
+      "kind": "runtime/effect-reconciliation-attested",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-effect-reconciliation-attested/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/paused",
+          "turn/failed",
+          "turn/cancelled"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "cache_metadata_only"
+    },
+    {
+      "kind": "turn/pause-requested",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-pause-requested/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": {
+        "required": false,
+        "reducers": []
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/paused",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-paused/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
       "projector": {
         "required": true,
         "reducers": [
-          "session-head"
+          "session-head",
+          "message-projection"
         ]
       },
-      "replay_rule": "cache_metadata_only"
+      "replay_rule": "rebuild_projection"
     },
-      {
-        "kind": "runtime/execution-claimed",
+    {
+      "kind": "turn/resume-authorized",
       "version": 1,
       "persistence": "persistent",
-      "payload_schema": "events/runtime-execution-claimed/v1",
-      "producer": {"allowed": ["runtime_supervisor"]},
-      "predecessor": {"mode": "any_of", "kinds": ["turn/started"]},
+      "payload_schema": "events/turn-resume-authorized/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/paused"
+        ]
+      },
       "correlation": "turn",
       "idempotency": "operation_scoped_required",
-      "projector": {"required": false, "reducers": []},
-      "replay_rule": "cache_metadata_only"
+      "projector": {
+        "required": true,
+        "reducers": [
+          "session-head",
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
     },
-      {
-        "kind": "runtime/execution-recovery-blocked",
-        "version": 1,
-        "persistence": "persistent",
-        "payload_schema": "events/runtime-execution-recovery-blocked/v1",
-        "producer": {"allowed": ["runtime_supervisor"]},
-        "predecessor": {"mode": "any_of", "kinds": ["turn/started"]},
-        "correlation": "turn",
-        "idempotency": "operation_scoped_required",
-        "projector": {"required": false, "reducers": []},
-        "replay_rule": "cache_metadata_only"
-      },
-      {
-        "kind": "runtime/effect-reconciliation-attested", "version": 1, "persistence": "persistent",
-        "payload_schema": "events/runtime-effect-reconciliation-attested/v1", "producer": {"allowed": ["runtime_supervisor"]},
-        "predecessor": {"mode": "any_of", "kinds": ["turn/paused","turn/failed","turn/cancelled"]}, "correlation": "turn",
-        "idempotency": "operation_scoped_required", "projector": {"required": false,"reducers": []}, "replay_rule": "cache_metadata_only"
-      },
-      {
-        "kind": "turn/pause-requested", "version": 1, "persistence": "persistent",
-        "payload_schema": "events/turn-pause-requested/v1", "producer": {"allowed": ["runtime_supervisor"]},
-        "predecessor": {"mode": "any_of", "kinds": ["turn/started"]}, "correlation": "turn",
-        "idempotency": "operation_scoped_required", "projector": {"required": false,"reducers": []}, "replay_rule": "rebuild_projection"
-      },
-      {
-        "kind": "turn/paused", "version": 1, "persistence": "persistent",
-        "payload_schema": "events/turn-paused/v1", "producer": {"allowed": ["runtime_supervisor"]},
-        "predecessor": {"mode": "any_of", "kinds": ["turn/started"]}, "correlation": "turn",
-        "idempotency": "operation_scoped_required", "projector": {"required": true,"reducers": ["session-head","message-projection"]}, "replay_rule": "rebuild_projection"
-      },
-      {
-        "kind": "turn/resume-authorized", "version": 1, "persistence": "persistent",
-        "payload_schema": "events/turn-resume-authorized/v1", "producer": {"allowed": ["runtime_supervisor"]},
-        "predecessor": {"mode": "any_of", "kinds": ["turn/paused"]}, "correlation": "turn",
-        "idempotency": "operation_scoped_required", "projector": {"required": true,"reducers": ["session-head","message-projection"]}, "replay_rule": "rebuild_projection"
-      },
-      {
-        "kind": "runtime/progress-recorded",
+    {
+      "kind": "runtime/progress-recorded",
       "version": 1,
       "persistence": "persistent",
       "payload_schema": "events/runtime-progress-recorded/v1",
@@ -990,59 +1068,6 @@
         "reducers": []
       },
       "replay_rule": "rehydrate_runtime_input"
-    },
-    {
-      "kind": "runtime/checkpointed",
-      "version": 1,
-      "persistence": "persistent",
-      "payload_schema": "events/runtime-checkpointed/v1",
-      "producer": {
-        "allowed": [
-          "runtime_supervisor"
-        ]
-      },
-      "predecessor": {
-        "mode": "any_of",
-        "kinds": [
-          "runtime/bound"
-        ]
-      },
-      "correlation": "runtime_binding",
-      "idempotency": "runtime_binding_sequence_required",
-      "projector": {
-        "required": true,
-        "reducers": [
-          "session-head"
-        ]
-      },
-      "replay_rule": "cache_metadata_only"
-    },
-    {
-      "kind": "runtime/binding-discarded",
-      "version": 1,
-      "persistence": "persistent",
-      "payload_schema": "events/runtime-binding-discarded/v1",
-      "producer": {
-        "allowed": [
-          "runtime_supervisor"
-        ]
-      },
-      "predecessor": {
-        "mode": "any_of",
-        "kinds": [
-          "runtime/bound",
-          "runtime/checkpointed"
-        ]
-      },
-      "correlation": "runtime_binding",
-      "idempotency": "runtime_binding_sequence_required",
-      "projector": {
-        "required": true,
-        "reducers": [
-          "session-head"
-        ]
-      },
-      "replay_rule": "cache_metadata_only"
     },
     {
       "kind": "compaction/completed",

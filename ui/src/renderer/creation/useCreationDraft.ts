@@ -1,12 +1,12 @@
 import { useCallback, useRef, useState } from 'react';
 import type { CreationDraft, CreationMode } from './types';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
 export function emptyCreationDraft(): CreationDraft {
   return { mode: null, lastMode: 'image', models: { image: null, video: null, music: null }, parameters: { image: {}, video: {}, music: { instrumental: true } }, references: [] };
 }
 
-export const creationDraftStorageKey = (scope: string) => browserStorageGenerationKey(`conversation-creation-draft:${scope}`);
+export const creationDraftStorageKey = (scope: string) => agentBrowserStorageGenerationKey(`conversation-creation-draft:${scope}`);
 const storageKey = creationDraftStorageKey;
 function read(scope: string): CreationDraft {
   try {

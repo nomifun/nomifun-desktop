@@ -123,11 +123,7 @@ describe('Guid default Agent workbench setting', () => {
     }
   });
 
-  test('uses the legacy Guid selection only as an upgrade fallback', () => {
-    configService.setLocal('guid.agentSelection', {
-      kind: 'template',
-      templateKey: 'chat.minimal',
-    });
+  test('uses the current general assistant when no default is configured', () => {
     const page = render(
       <I18nextProvider i18n={i18n}>
         <GuidDefaultAgentSetting library={library} />
@@ -136,7 +132,7 @@ describe('Guid default Agent workbench setting', () => {
 
     expect((page.getByRole('combobox', {
       name: agentSettings.defaultAgent.title,
-    }) as HTMLSelectElement).value).toBe('template:chat.minimal');
+    }) as HTMLSelectElement).value).toBe('template:assistant.general');
   });
 
   test('blocks overlapping changes and restores the previous default after a failed save', async () => {

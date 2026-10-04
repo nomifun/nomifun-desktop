@@ -879,32 +879,6 @@
         "replay_rule": "no_effect"
       },
       {
-        "kind": "runtime/bound",
-        "version": 1,
-        "persistence": "persistent",
-        "payload_schema": "events/runtime-bound/v1",
-        "producer": {
-          "allowed": [
-            "runtime_supervisor"
-          ]
-        },
-        "predecessor": {
-          "mode": "any_of",
-          "kinds": [
-            "session/opening"
-          ]
-        },
-        "correlation": "runtime_binding",
-        "idempotency": "runtime_binding_sequence_required",
-        "projector": {
-          "required": true,
-          "reducers": [
-            "session-head"
-          ]
-        },
-        "replay_rule": "cache_metadata_only"
-      },
-      {
         "kind": "runtime/execution-claimed",
         "version": 1,
         "persistence": "persistent",
@@ -1076,59 +1050,6 @@
         "replay_rule": "rehydrate_runtime_input"
       },
       {
-        "kind": "runtime/checkpointed",
-        "version": 1,
-        "persistence": "persistent",
-        "payload_schema": "events/runtime-checkpointed/v1",
-        "producer": {
-          "allowed": [
-            "runtime_supervisor"
-          ]
-        },
-        "predecessor": {
-          "mode": "any_of",
-          "kinds": [
-            "runtime/bound"
-          ]
-        },
-        "correlation": "runtime_binding",
-        "idempotency": "runtime_binding_sequence_required",
-        "projector": {
-          "required": true,
-          "reducers": [
-            "session-head"
-          ]
-        },
-        "replay_rule": "cache_metadata_only"
-      },
-      {
-        "kind": "runtime/binding-discarded",
-        "version": 1,
-        "persistence": "persistent",
-        "payload_schema": "events/runtime-binding-discarded/v1",
-        "producer": {
-          "allowed": [
-            "runtime_supervisor"
-          ]
-        },
-        "predecessor": {
-          "mode": "any_of",
-          "kinds": [
-            "runtime/bound",
-            "runtime/checkpointed"
-          ]
-        },
-        "correlation": "runtime_binding",
-        "idempotency": "runtime_binding_sequence_required",
-        "projector": {
-          "required": true,
-          "reducers": [
-            "session-head"
-          ]
-        },
-        "replay_rule": "cache_metadata_only"
-      },
-      {
         "kind": "compaction/completed",
         "version": 1,
         "persistence": "persistent",
@@ -1184,5 +1105,5 @@
       }
     ]
   },
-  "payload_digest": "5b2ff8d966d0b30b7d9a83d13435423e785a5b69fd051aaaad7c6fe14833ba22"
+  "payload_digest": "fc2945d29cd3a3ff02d648cf904212cc204ae319627b4704fd695d1e8c3dafc6"
 }

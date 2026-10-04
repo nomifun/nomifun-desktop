@@ -192,7 +192,7 @@ CREATE INDEX idx_cron_job_runs_cron_job_id
     ON cron_job_runs(cron_job_id);
 ```
 
-`messages.conversation_id` 逻辑指向 `conversations.conversation_id`；
+`agent_messages.agent_session_id` 逻辑指向 `agent_sessions.agent_session_id`；
 `cron_job_runs.cron_job_id` 逻辑指向 `cron_jobs.cron_job_id`。两者都不向
 SQLite 声明物理关系。
 

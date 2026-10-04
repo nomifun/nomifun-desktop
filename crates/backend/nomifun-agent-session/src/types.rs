@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
     DigestHex, EffectClass,
     EventId,
     EventProducerId, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
-    RuntimeCheckpointValidationResult, RuntimeEventAck, RuntimeEventEnvelope, SessionEventAck,
+    SessionEventAck,
     SessionEventCursor, SessionEventPayloadRef, SessionEventRecord, SessionForkContract,
     ResourceBindingId, SessionPayloadBody, SessionPayloadId, StrictJsonValue,
 };
@@ -78,14 +78,6 @@ pub struct SessionEventAppendResult {
     pub duplicate: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeEventAppendResult {
-    pub append: SessionEventAppendResult,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ack: Option<RuntimeEventAck>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHeadProjection {
@@ -94,18 +86,6 @@ pub struct SessionHeadProjection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
     pub active_set_generation: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_checkpoint_locator: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_checkpoint_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_bound_event_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_protocol_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub snapshot_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checkpoint_through_seq: Option<u64>,
     pub last_seq: u64,
     pub unread_count: u64,
 }
@@ -197,8 +177,6 @@ pub struct SessionAgentBindingTransitionResult {
     pub session: AgentSessionLiveRecord,
     pub transition: AgentBindingChangedPayloadV1,
     pub transition_ack: SessionEventAck,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_discard_ack: Option<SessionEventAck>,
     pub active_set_ack: SessionEventAck,
     pub duplicate: bool,
 }
@@ -254,6 +232,7 @@ pub struct ChatCausalityFacts {
     pub turn_route_identities: BTreeSet<ChatRouteIdentity>,
     pub execution_generation: u64,
     pub execution_fence: u64,
+    pub fork_context: Option<crate::ForkContextSnapshot>,
 }
 
 /// Atomic model-operation admission input. The store validates the active
@@ -489,15 +468,6 @@ pub struct AgentDeletionAuditRecord {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CheckpointAdmission {
-    pub validation: RuntimeCheckpointValidationResult,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compatibility: Option<nomifun_agent_contracts::SnapshotCompatibilityAdmissionResult>,
-    pub checkpoint_reusable: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionRehydrationInput {
     pub agent_session_id: nomifun_agent_contracts::AgentSessionId,
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
@@ -542,11 +512,4 @@ pub struct ForkResult {
 pub struct DeleteResult {
     pub tombstone: AgentSessionTombstone,
     pub operation_id: OperationId,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeAppendContext {
-    pub agent_session_id: nomifun_agent_contracts::AgentSessionId,
-    pub envelope: RuntimeEventEnvelope,
 }

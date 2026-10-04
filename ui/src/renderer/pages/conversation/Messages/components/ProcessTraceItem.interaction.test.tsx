@@ -136,7 +136,7 @@ describe('replayed process trace', () => {
       position: 'left', created_at: 2,
       content: ['src/a.ts', 'src/b.ts', 'src/c.ts'].map((path, index) => ({
         call_id: `edit-${index}`, name: 'write_file', status: 'Success' as const,
-        description: path, render_output_as_markdown: false,
+        description: path,
       })),
     };
     const { container } = render(
@@ -193,8 +193,8 @@ describe('replayed process trace', () => {
       id: 'mixed-tools', type: 'tool_group', conversation_id: conversationId,
       position: 'left', created_at: 3,
       content: [
-        { call_id: 'first', name: 'first_tool', description: 'finished result', status: 'Success', render_output_as_markdown: false },
-        { call_id: 'second', name: 'second_tool', description: 'working now', status: 'Executing', render_output_as_markdown: false },
+        { call_id: 'first', name: 'first_tool', description: 'finished result', status: 'Success' },
+        { call_id: 'second', name: 'second_tool', description: 'working now', status: 'Executing' },
       ],
     };
     const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
@@ -218,7 +218,6 @@ describe('replayed process trace', () => {
         name,
         description: `${name} failed detail`,
         status: 'Error' as const,
-        render_output_as_markdown: false,
       })),
     };
     const { container, getByRole } = render(
@@ -239,7 +238,7 @@ describe('replayed process trace', () => {
       position: 'left', created_at: 4,
       content: [{
         call_id: 'failed-once', name: 'run_command', description: 'targeted test',
-        status: 'Error' as const, render_output_as_markdown: false,
+        status: 'Error' as const,
       }],
     };
     const { container, getByRole } = render(
@@ -284,14 +283,17 @@ describe('replayed process trace', () => {
   });
 
   test('failed calls in the journal are individually visible with a short diagnostic', () => {
-    const item: IMessageToolGroup = {
-      id: 'visible-failures', type: 'tool_group', conversation_id: conversationId,
+    const item = {
+      id: 'visible-failures', type: 'tool_summary' as const, created_at: 5, sourceMessageIds: [],
+      messages: [0, 1].map<IMessageToolCall>((index) => ({
+      id: `visible-failure-${index}`, type: 'tool_call', conversation_id: conversationId,
       position: 'left', created_at: 5,
-      content: [0, 1].map((index) => ({
-        call_id: `failure-${index}`, name: 'create_draft', description: 'create_draft', status: 'Error' as const,
-        render_output_as_markdown: false,
-        result_display: JSON.stringify({ code: 'PLUGIN_NOT_FOUND', message: `Missing plugin-${index}` }),
-      })),
+      content: {
+        call_id: `failure-${index}`, name: 'create_draft', status: 'error',
+        args: {}, artifacts: [],
+        output: JSON.stringify({ code: 'PLUGIN_NOT_FOUND', message: `Missing plugin-${index}` }),
+      },
+    })),
     };
     const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>);
     const rows = container.querySelectorAll('[data-tool-call-id]');
@@ -300,7 +302,7 @@ describe('replayed process trace', () => {
       expect(row.querySelector('.turn-process-trace__diagnostic')?.textContent).toContain(`Missing plugin-${index}`);
       expect(row.querySelector('.turn-process-trace-detail')).toBeNull();
       fireEvent.click(row.querySelector('button')!);
-      expect(row.querySelector('.turn-process-trace-detail')?.textContent).toContain(String(item.content[index].result_display));
+      expect(row.querySelector('.turn-process-trace-detail')?.textContent).toContain(String(item.messages[index].content.output));
       expect(row.querySelectorAll('button')).toHaveLength(1);
     });
   });

@@ -9,11 +9,8 @@ all-targets check、UI typecheck/check/production build 已通过，workspace
 早期 v2 快照、目标架构草案、reset 执行计划与 ID-001…ID-005 决策记录已按
 文档政策移除，需要时查 Git 历史。
 
-Agent Capability Platform v2 的当前文档入口是
-[文档入口](../specs/2026-08-28-agent-capability-platform-v2/README.zh.md)，
-当前任务状态以
-[GLOBAL TODO](../specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md)
-为准。
+Agent Session 的当前实现与开发边界见
+[当前架构](../architecture/agent-session.zh.md)。
 
 本目录不是仓库级全局开发规范入口。当前强制规则请阅读
 [数据与标识符规范](../contributing/data-and-identifier-standards.zh.md) 和
@@ -137,10 +134,10 @@ URL、文件路径或跨设备协议。SQLite 内部表、migration metadata 和
 v3 全面移除物理外键。以 conversation/message 为例：
 
 ```text
-conversations.id                 本表自增技术主键
-conversations.conversation_id    稳定业务 ID
-messages.id                      本表自增技术主键
-messages.conversation_id         指向 conversation_id 的逻辑关联
+agent_sessions.id                 本表自增技术主键
+agent_sessions.agent_session_id    稳定业务 ID
+agent_messages.id                      本表自增技术主键
+agent_messages.agent_session_id         指向 conversation_id 的逻辑关联
 ```
 
 不再同时保存 `messages.conversation_row_id`。文档中的该名称只用于说明

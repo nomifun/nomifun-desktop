@@ -111,12 +111,13 @@ describe('conversation send idempotency wiring', () => {
 
   test('keeps persisted initial deliveries closed until a fresh accepted response', () => {
     const nomiInitial = nomiSource.indexOf('const processInitialMessage = async () => {');
-    const nomiDeferredDispatch = nomiSource.indexOf(
-      '{ id: idempotency_key, input, files, initialOnly: true }',
-      nomiInitial
-    );
+    const nomiDeferredDispatch = nomiSource.indexOf('await executeCommand(', nomiInitial);
+    const command = nomiSource.slice(nomiDeferredDispatch, nomiSource.indexOf('undefined,', nomiDeferredDispatch));
     expect(nomiInitial >= 0).toBe(true);
     expect(nomiDeferredDispatch > nomiInitial).toBe(true);
+    expect(command.includes('id: idempotency_key')).toBe(true);
+    expect(command.includes('initialOnly: true')).toBe(true);
+    expect(command.includes('pluginDelivery: plugin_delivery')).toBe(true);
   });
 
   test('keeps direct-send replays behind authoritative reconciliation', () => {

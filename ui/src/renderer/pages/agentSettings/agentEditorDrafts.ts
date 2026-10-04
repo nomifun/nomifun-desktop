@@ -1,5 +1,5 @@
 import type { AgentPresetDraft, OfficialPresetTemplate, ProductAgentSelection } from '@/common/types/agentPlatform';
-import { browserStorageGenerationKey, type BrowserStoragePersistence } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey, type BrowserStoragePersistence } from '@/common/utils/browserStorageKey';
 import { agentEditorReturn, editingDocument, type AgentEditorReturn, type TemplateEditingState } from './model';
 
 function browserStorage(): BrowserStoragePersistence | undefined {
@@ -12,7 +12,7 @@ export class AgentEditorDrafts {
   private readonly prefix: string;
 
   constructor(ownerUserId: string, private readonly storage: BrowserStoragePersistence | undefined = browserStorage()) {
-    this.prefix = browserStorageGenerationKey(`agent-editor:${ownerUserId}`);
+    this.prefix = agentBrowserStorageGenerationKey(`agent-editor:${ownerUserId}`);
   }
 
   private key(target: string): string { return `${this.prefix}|${target}`; }

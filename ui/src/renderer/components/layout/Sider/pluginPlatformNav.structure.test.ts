@@ -4,10 +4,12 @@ import { expect, test } from 'bun:test';
 test('one Plugin entry owns library, creator, and App/detail routes', () => {
   const sider = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
   const router = readFileSync(new URL('../Router.tsx', import.meta.url), 'utf8');
+  const library = readFileSync(new URL('../../../pages/plugins/PluginLibraryPage.tsx', import.meta.url), 'utf8');
   expect(sider.match(/<SiderPluginEntry\b/g)).toHaveLength(1);
   expect(router.match(/path='\/plugins'/g)).toHaveLength(1);
-  expect(router).toContain("path='/plugins/new'");
-  expect(router).toContain("path='/plugins/create/:draftId'");
+  expect(router).not.toContain("path='/plugins/new'");
+  expect(router).not.toContain("path='/plugins/create/:draftId'");
+  expect(library).toContain('launchPluginConversation(navigate');
   expect(router).toContain("path='/plugins/run/:id'");
   expect(router).not.toMatch(/PluginRuntime|PluginProduct|PluginMount/);
 });

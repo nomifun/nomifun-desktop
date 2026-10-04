@@ -140,7 +140,7 @@ impl AgentSessionStore {
         let generation = if same_acquisition { as_u64(started.2, "execution generation")? } else {
             let identity = format!("native-execution:{}:{}:{fence}", claim.agent_session_id.as_ref(), claim.operation_id.as_ref());
             let event = SessionEventAppend { agent_session_id: claim.agent_session_id.clone(), event_id: identity.clone().into(),
-                producer_id: "runtime_supervisor".into(), idempotency_key: identity.into(), runtime_binding_id: None, runtime_producer_seq: None,
+                producer_id: "runtime_supervisor".into(), idempotency_key: identity.into(),
                 semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                     kind: SessionEventKind("runtime/execution-claimed".into()), kind_version: 1,
                     correlation_id: claim.operation_id.as_ref().into(), causation_event_id: Some(started.0.clone().into()),

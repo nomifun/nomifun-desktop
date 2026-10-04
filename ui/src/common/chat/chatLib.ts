@@ -295,17 +295,6 @@ export type IMessageToolGroup = IMessage<
     call_id: string;
     description: string;
     name: string;
-    render_output_as_markdown: boolean;
-    result_display?:
-      | string
-      | {
-          file_diff: string;
-          file_name: string;
-        }
-      | {
-          img_url: string;
-          relative_path: string;
-        };
     status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending';
   }>
 >;
@@ -768,64 +757,20 @@ const normalizeThinkingStatus = (value: unknown): IMessageThinking['content']['s
 const finiteNumber = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 
-const normalizeToolGroupResultDisplay = (
-  value: unknown
-): IMessageToolGroup['content'][number]['result_display'] | undefined => {
-  if (value == null) return undefined;
-  if (typeof value === 'string') return value;
-  if (!isObject(value)) return toDisplayText(value);
-
-  if ('file_diff' in value || 'file_name' in value) {
-    return {
-      file_diff: toDisplayText(value.file_diff),
-      file_name: toDisplayText(value.file_name),
-    };
-  }
-  if ('img_url' in value || 'relative_path' in value) {
-    return {
-      img_url: toDisplayText(value.img_url),
-      relative_path: toDisplayText(value.relative_path),
-    };
-  }
-
-  return toDisplayText(value);
-};
-
-const LEGACY_TOOL_GROUP_ARTIFACT_ERROR =
-  'Legacy image result was not backed by a committed artifact receipt';
-
 export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['content'] => {
   if (!Array.isArray(value)) return [];
 
   return value
     .filter(isObject)
+    .filter((item) => typeof item.call_id === 'string' && item.call_id.trim().length > 0)
     .map((item) => {
-      const resultDisplay = normalizeToolGroupResultDisplay(item.result_display);
       const status = normalizeToolGroupStatus(item.status);
       const description = toDisplayText(item.description);
-      // ToolGroupEntry has no receipt or 2PC-marker fields. Historical
-      // `result_display.img_url` therefore cannot prove delivery and must be
-      // downgraded at message admission, before process summaries can render a
-      // green state. Verified outputs use the detailed ToolCall carrier.
-      const unverifiedLegacyImage =
-        isObject(resultDisplay) &&
-        'img_url' in resultDisplay &&
-        Boolean(optionalDisplayText(resultDisplay.img_url));
       return {
-        call_id: optionalDisplayText(item.call_id) ?? optionalDisplayText(item.id) ?? uuid(),
-        description:
-          unverifiedLegacyImage && status === 'Success'
-            ? description
-              ? `${description}: ${LEGACY_TOOL_GROUP_ARTIFACT_ERROR}`
-              : LEGACY_TOOL_GROUP_ARTIFACT_ERROR
-            : description,
+        call_id: toDisplayText(item.call_id),
+        description,
         name: toDisplayText(item.name, 'Tool'),
-        render_output_as_markdown:
-          typeof item.render_output_as_markdown === 'boolean' ? item.render_output_as_markdown : false,
-        status: unverifiedLegacyImage && status === 'Success' ? 'Error' : status,
-        ...(!unverifiedLegacyImage && resultDisplay !== undefined
-          ? { result_display: resultDisplay }
-          : {}),
+        status,
       };
     });
 };
@@ -1228,14 +1173,6 @@ export const composeMessage = (
         const existingTerminal = ['Success', 'Error', 'Canceled'].includes(tool.status);
         if (existingTerminal) {
           return tool;
-        }
-        if (
-          ['Success', 'Error', 'Canceled'].includes(newToolData.status) &&
-          !Object.prototype.hasOwnProperty.call(newToolData, 'result_display')
-        ) {
-          // A provisional result retained from Executing is not proof of a
-          // terminal output. The terminal frame must carry it explicitly.
-          merged.result_display = undefined;
         }
         return merged;
       });

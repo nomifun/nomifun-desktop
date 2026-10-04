@@ -83,6 +83,7 @@ pub fn get_system_info() -> SystemInfoResponse {
         work_dir: resolve_work_dir(),
         log_dir: resolve_log_dir(),
         storage_generation: resolve_storage_generation(),
+        agent_data_generation: nomifun_agent_contracts::AGENT_STORE_DATA_GENERATION,
         platform: map_platform(std::env::consts::OS).to_owned(),
         arch: map_arch(std::env::consts::ARCH).to_owned(),
     }
@@ -91,6 +92,10 @@ pub fn get_system_info() -> SystemInfoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn agent_cache_generation_has_the_canonical_schema_authority() {
+        assert_eq!(get_system_info().agent_data_generation, nomifun_agent_contracts::AGENT_STORE_DATA_GENERATION);
+    }
 
     #[test]
     fn test_map_platform_known() {

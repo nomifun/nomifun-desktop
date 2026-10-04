@@ -11,8 +11,8 @@ use nomifun_agent_contracts::{
     CanonicalErrorRegistryPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
     ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
-    D025FixtureContractReferencePayload, D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix,
-    D027TerminalSequenceMatrix, D028PlatformMatrix, DeletionManifest, DigestHex,
+    D026OrderingOutcomeMatrix,
+    D027TerminalSequenceMatrix, D028PlatformMatrix,
     AGENT_STORE_BASELINE_SQL,
     OfficialPresetKey,
     OfficialPresetSeedManifestPayload, PackageManifest, PlatformValidationManifestPayload,
@@ -55,13 +55,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let d026_path = contracts.join("validation/d026-ordering-outcomes.matrix.json");
     let d027_path = contracts.join("validation/d027-terminal-sequences.matrix.json");
     let d028_path = contracts.join("validation/d028-platform-matrix.json");
-    let d025_payload_path =
-        contracts.join("validation/d025-compatibility-fixture-reference.payload.json");
-    let d025_reference_path =
-        contracts.join("validation/d025-fixture-envelope-reference.json");
-    let d025_envelope_path =
-        contracts.join("validation/d025-compatibility-fixture-reference.envelope.json");
-    let checkpoint_fixture_path = contracts.join("runtime/checkpoint-mismatch.json");
     let d026_remote_fixture_path =
         contracts.join("remote/d026-request-admission-ordering.fixture.json");
     let platform_path =
@@ -98,8 +91,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     .map_err(|error| error.message)?;
     let seed_digest = digest_payload(&seed)?;
 
-    let mut api_inventory: CanonicalApiInventoryPayload = read_json(&api_path)?;
-    normalize_api_inventory(&mut api_inventory);
+    let api_inventory: CanonicalApiInventoryPayload = read_json(&api_path)?;
     validate_api_inventory(&api_inventory)?;
     let api_digest = digest_payload(&api_inventory)?;
 
@@ -115,14 +107,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     error_registry.validate()?;
     let error_digest = digest_payload(&error_registry)?;
 
-    // Immutable historical D-014 input, not a CAR deletion instruction. In
-    // particular, Nomi and Conversation are current owners, not deletion targets.
-    // Retain the historical digest field for stored manifest compatibility.
-    let deletion_digests = validate_deletion_manifests(
-        &contracts.join("historical/agent-v2/deletion"),
-    )?;
-    let deletion_set_digest = digest_payload(&deletion_digests)?;
-
     let d026: D026OrderingOutcomeMatrix = read_json(&d026_path)?;
     if !d026.validate_exact_contract() {
         return Err("D-026 ordering matrix is not the exact contract".into());
@@ -135,17 +119,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     d028.validate_exact_contract()?;
     let availability_digest = digest_payload(&d028)?;
 
-    let checkpoint_fixture: Value = read_json(&checkpoint_fixture_path)?;
-    let checkpoint_fixture_digest = digest_payload(&checkpoint_fixture)?;
-    let mut d025_payload: D025FixtureContractReferencePayload = read_json(&d025_payload_path)?;
-    d025_payload.checkpoint_mismatch_fixture.digest = checkpoint_fixture_digest;
-    let d025_envelope = ArtifactEnvelope::new(d025_payload.clone())?;
-    let d025_envelope_contents = pretty_json(&d025_envelope)?;
-    let d025_envelope_artifact_digest = digest_bytes(d025_envelope_contents.as_bytes());
-    let mut d025_reference: D025FixtureEnvelopeReference = read_json(&d025_reference_path)?;
-    d025_reference.fixture_envelope.normalized_relative_path =
-        "contracts/validation/d025-compatibility-fixture-reference.envelope.json".to_owned();
-    d025_reference.fixture_envelope.digest = d025_envelope_artifact_digest;
     let d026_remote_fixture: Value = read_json(&d026_remote_fixture_path)?;
     let d026_remote_fixture_digest = digest_payload(&d026_remote_fixture)?;
     let d026_digest = digest_payload(&d026)?;
@@ -208,7 +181,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         error_registry_digest: error_digest.clone(),
         runtime_protocol_digest: runtime_protocol_digest.clone(),
         runtime_feature_inventory_digest: feature_digest.clone(),
-        deletion_manifest_set_digest: deletion_set_digest.clone(),
         platform_validation_contract_digest: platform_contract_digest.clone(),
         confirmed_decision_contract_digest: closure_digest.clone(),
     };
@@ -222,7 +194,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     platform.official_preset_seed_manifest_digest = seed_digest.clone();
     platform.capability_availability_manifest_digest = availability_digest.clone();
     platform.coding_codex_native_contract_digest = coding_contract_digest.clone();
-    platform.decision_fixture_refs.d025_snapshot_compatibility = d025_reference.clone();
     platform
         .decision_fixture_refs
         .d026_request_admission_ordering
@@ -254,7 +225,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         closure_digest.clone(),
     );
     digest_map.insert("database_schema".to_owned(), database_schema_digest);
-    digest_map.insert("deletion_manifest_set".to_owned(), deletion_set_digest);
     digest_map.insert("error_registry".to_owned(), error_digest);
     digest_map.insert("official_preset_seed_manifest".to_owned(), seed_digest);
     digest_map.insert("package_schema".to_owned(), package_schema_digest);
@@ -329,10 +299,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             pretty_json(&ArtifactEnvelope::new(error_registry)?)?,
         ),
         (
-            "deletion-manifest-set.envelope.json".to_owned(),
-            pretty_json(&ArtifactEnvelope::new(deletion_digests)?)?,
-        ),
-        (
             "platform-validation-fixture.envelope.json".to_owned(),
             pretty_json(&platform_envelope)?,
         ),
@@ -346,26 +312,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;
         write_json(&platform_path, &platform)?;
-        write_json(&d025_payload_path, &d025_payload)?;
-        write_json(&d025_reference_path, &d025_reference)?;
         write_json(&plugin_contract_path, &plugin_contract)?;
-        fs::write(&d025_envelope_path, &d025_envelope_contents)?;
         for (name, contents) in &outputs {
             fs::write(generated.join(name), contents)?;
         }
     } else {
         check_json(&seed_path, &seed)?;
         check_json(&platform_path, &platform)?;
-        check_json(&d025_payload_path, &d025_payload)?;
-        check_json(&d025_reference_path, &d025_reference)?;
         check_json(&plugin_contract_path, &plugin_contract)?;
-        if fs::read_to_string(&d025_envelope_path)? != d025_envelope_contents {
-            return Err(format!(
-                "generated artifact drift: {}; run agent-v2-contract write",
-                d025_envelope_path.display()
-            )
-            .into());
-        }
         for (name, contents) in &outputs {
             let path = generated.join(name);
             let existing = fs::read_to_string(&path)
@@ -381,21 +335,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-fn normalize_api_inventory(api_inventory: &mut CanonicalApiInventoryPayload) {
-    api_inventory
-        .operations
-        .retain(|operation| operation.operation_id != "skills.get");
-    for operation in &mut api_inventory.operations {
-        match operation.operation_id.as_str() {
-            "skills.list" => {
-                operation.operation_id = "agent_catalog.skills.list".to_owned();
-                operation.path = "/api/agent-catalog/skills".to_owned();
-            }
-            _ => {}
-        }
-    }
 }
 
 fn validate_api_inventory(
@@ -553,33 +492,6 @@ fn validate_target_inventory(
     Ok(())
 }
 
-fn validate_deletion_manifests(
-    directory: &Path,
-) -> Result<BTreeMap<String, DigestHex>, Box<dyn Error>> {
-    let mut paths = fs::read_dir(directory)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?;
-    paths.sort();
-    let mut digests = BTreeMap::new();
-    for path in paths {
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let manifest: DeletionManifest = read_json(&path)?;
-        manifest.validate()?;
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or("invalid deletion manifest filename")?
-            .to_owned();
-        digests.insert(name, digest_payload(&manifest)?);
-    }
-    if digests.len() != 6 {
-        return Err(format!("expected six deletion manifests, found {}", digests.len()).into());
-    }
-    Ok(digests)
-}
-
 fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     let mut schemas = BTreeMap::new();
     add_schema::<PackageManifest>(&mut schemas, "package_manifest")?;
@@ -605,7 +517,6 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         &mut schemas,
         "runtime_feature_inventory",
     )?;
-    add_schema::<DeletionManifest>(&mut schemas, "deletion_manifest")?;
     add_schema::<PlatformValidationManifestPayload>(
         &mut schemas,
         "platform_validation_manifest",

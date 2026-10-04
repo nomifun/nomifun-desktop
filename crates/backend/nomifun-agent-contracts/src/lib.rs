@@ -8,7 +8,6 @@ pub mod closure;
 pub mod catalog;
 pub mod chat_model;
 pub mod chat_provider_reasoning;
-pub mod deletion;
 pub mod digest;
 pub mod event;
 pub mod engine_features;
@@ -31,7 +30,6 @@ pub mod validation;
 pub use closure::*;
 pub use catalog::*;
 pub use chat_model::ReasoningEffort;
-pub use deletion::*;
 pub use digest::{
     ArtifactEnvelope, CanonicalDigestError, canonical_json_bytes, digest_bytes, digest_payload,
 };

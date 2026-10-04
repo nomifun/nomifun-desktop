@@ -6,13 +6,12 @@ use nomifun_agent_contracts::{
     AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId, CapabilityId,
     CompactionCompletedPayload, CorrelationId,
     ChatRouteIdentity, DeleteAgentSessionCommand, DigestHex, EffectClass, EventId, EventProducerId,
-    IdempotencyKey, LogicalArtifactRef, OperationId, PresetRevisionRef, PrincipalRef,
+    IdempotencyKey, OperationId, PresetRevisionRef, PrincipalRef,
     ReasoningEffort,
     RemoteBindingId, RemoteBindingProvenance, ResolvedSnapshotId, ResolvedSnapshotRef,
     ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
-    RuntimeBindingId, RuntimeCapabilityExecutionContract,
-    RuntimeCheckpointBinding, RuntimeCheckpointValidationInput, RuntimeCheckpointValidationResult,
-    RuntimeEventEnvelope, RuntimeExecutionCeiling, RuntimeExecutorSupport, RuntimeProfileKind,
+    RuntimeCapabilityExecutionContract,
+    RuntimeExecutionCeiling, RuntimeExecutorSupport, RuntimeProfileKind,
     SemanticSessionEventDraft, SessionEventAppend, SessionEventKind, SessionEventPayloadRef,
     SessionEventRecord, SessionPayloadBody, SessionPayloadRecord, SnapshotCompatibilityAdmissionInput,
     SnapshotCompatibilityAdmissionResult, StrictJsonValue, VersionString, canonical_json_bytes,
@@ -24,8 +23,8 @@ use uuid::Uuid;
 use crate::{
     AgentEffectState, AgentSessionStore, ChatOperationClaimRequest, CreateSessionRequest,
     EffectEventRequest, EffectReconcileOutcome, EffectStrategy, EffectTerminalState, ForkRequest,
-    ReplaceSessionAgentBinding, RuntimeAppendContext, SessionStoreError, TurnReceiptStatus,
-    evaluate_snapshot_compatibility, validate_checkpoint,
+    ReplaceSessionAgentBinding, SessionStoreError, TurnReceiptStatus,
+    evaluate_snapshot_compatibility,
 };
 use crate::projector::reduce_agent_messages;
 
@@ -187,8 +186,6 @@ fn append(
         event_id: event_id(event),
         producer_id: EventProducerId(producer.to_owned()),
         idempotency_key: IdempotencyKey(key.to_owned()),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: SemanticSessionEventDraft {
             kind: SessionEventKind(kind.to_owned()),
             kind_version: 1,
@@ -213,8 +210,6 @@ fn projection_event(
         event_id: event_id(event),
         producer_id: EventProducerId("projection-test".to_owned()),
         idempotency_key: IdempotencyKey(format!("projection-{event}")),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         kind: SessionEventKind(kind.to_owned()),
         kind_version: 1,
         correlation_id: CorrelationId(correlation.to_owned()),
@@ -343,8 +338,11 @@ async fn shared_agent_store_schema_and_session_creation_are_exact_and_idempotent
         .into_iter()
         .map(|table| table.table_name)
         .collect::<BTreeSet<_>>();
-    assert_eq!(tables, canonical_tables);
-    assert!(tables.len() > 5);
+    assert!(canonical_tables.is_subset(&tables), "the owner/reset manifest describes a controlled subset of the shared database");
+    let main = nomifun_db::init_database_memory().await.unwrap();
+    let main_tables: BTreeSet<String> = sqlx::query_scalar("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'")
+        .fetch_all(main.pool()).await.unwrap().into_iter().collect();
+    assert_eq!(tables, main_tables, "fixtures and product initialization must use exactly the same complete baseline");
     for owned in [
         "agent_sessions",
         "agent_turns",
@@ -450,15 +448,18 @@ async fn session_reasoning_effort_is_persisted_and_updated_independently() {
             Some(effort)
         );
     }
-    let stored: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT reasoning_effort, reasoning_effort_v2 FROM agent_sessions \
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT reasoning_effort FROM agent_sessions \
          WHERE agent_session_id = ?",
     )
     .bind(session_id.as_ref())
     .fetch_one(store.test_pool())
     .await
     .unwrap();
-    assert_eq!(stored, (None, Some("ultra".to_owned())));
+    assert_eq!(stored.as_deref(), Some("ultra"));
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('agent_sessions') WHERE name LIKE 'reasoning_effort%'")
+        .fetch_all(store.test_pool()).await.unwrap();
+    assert_eq!(columns, ["reasoning_effort"]);
 
     store
         .update_session_reasoning_effort(&owner(), &session_id, None)
@@ -725,25 +726,8 @@ async fn session_model_binding_replacement_rejects_an_active_turn_and_remote_pro
 #[tokio::test]
 async fn full_agent_transition_is_atomic_audited_generated_and_idempotent() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
-    let (session, ready_event) = create_ready(&store, "agent-transition").await;
+    let (session, _) = create_ready(&store, "agent-transition").await;
     let expected = session.agent_binding.clone();
-    let runtime_binding_id = RuntimeBindingId::from("runtime-agent-transition");
-    let mut bound = append(
-        &session.agent_session_id,
-        "event-runtime-agent-transition",
-        "runtime-supervisor",
-        "runtime-agent-transition",
-        "runtime/bound",
-        runtime_binding_id.as_ref(),
-        Some(ready_event),
-        json!({
-            "protocol_version": "1",
-            "resolved_snapshot_ref": expected.resolved_snapshot_ref.clone(),
-        }),
-    );
-    bound.runtime_binding_id = Some(runtime_binding_id);
-    bound.runtime_producer_seq = Some(1);
-    store.append_event(&bound).await.unwrap();
     let mut replacement = agent_replacement(&expected, "target");
     replacement.typed_resource_bindings = vec![TypedResourceBinding {
         binding_id: ResourceBindingId::from("workspace:target"),
@@ -761,7 +745,6 @@ async fn full_agent_transition_is_atomic_audited_generated_and_idempotent() {
         .await
         .unwrap();
     assert!(!changed.duplicate);
-    assert!(changed.runtime_discard_ack.is_some());
     assert_eq!(changed.session.agent_binding, replacement);
     assert_eq!(changed.transition.previous_binding_ref.binding_version, 1);
     assert_eq!(changed.transition.next_binding_ref.binding_version, 2);
@@ -775,8 +758,6 @@ async fn full_agent_transition_is_atomic_audited_generated_and_idempotent() {
     );
     let head = store.head(&session.agent_session_id).await.unwrap();
     assert_eq!(head.active_set_generation, 1);
-    assert!(head.runtime_bound_event_id.is_none());
-    assert!(head.runtime_checkpoint_locator.is_none());
     assert_eq!(
         store
             .active_capability_ids(&session.agent_session_id)
@@ -1026,12 +1007,8 @@ async fn full_agent_transition_rolls_back_on_resource_failure_and_rejects_stale_
 #[tokio::test]
 async fn session_resource_replacement_updates_json_and_resource_projection_atomically() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
-    sqlx::query("CREATE TABLE knowledge_bases (knowledge_base_id TEXT PRIMARY KEY) STRICT")
-        .execute(store.test_pool())
-        .await
-        .unwrap();
     for id in ["a", "b"] {
-        sqlx::query("INSERT INTO knowledge_bases (knowledge_base_id) VALUES (?)")
+        sqlx::query("INSERT INTO knowledge_bases (knowledge_base_id,name,root_path,created_at,updated_at) VALUES (?,'Fixture knowledge','fixture-root',1,1)")
         .bind(format!("0190f5fe-7c00-7a00-8000-00000000000{id}"))
         .execute(store.test_pool())
         .await
@@ -1237,135 +1214,6 @@ async fn opening_remote_session_listing_is_exact_and_excludes_ready_or_local_ses
         store.list_opening_remote_sessions().await.unwrap(),
         vec![opening_id]
     );
-}
-
-#[tokio::test]
-async fn runtime_admission_boundary_is_atomic_and_cannot_revive_open_failed() {
-    let store = AgentSessionStore::open_in_memory().await.unwrap();
-
-    let ready_session = live_session(session_id());
-    let ready_created = store
-        .create_session(create_request(ready_session, "atomic-ready"))
-        .await
-        .unwrap();
-    let ready_binding = RuntimeBindingId::from("atomic-ready-binding");
-    let ready_bound_event = event_id("atomic-ready-bound");
-    let ready_context = RuntimeAppendContext {
-        agent_session_id: ready_created.session.agent_session_id.clone(),
-        envelope: RuntimeEventEnvelope {
-            runtime_binding_id: ready_binding.clone(),
-            producer_seq: 1,
-            event_id: ready_bound_event.clone(),
-            idempotency_key: IdempotencyKey::from("atomic-ready-bound"),
-            semantic_event: SemanticSessionEventDraft {
-                kind: SessionEventKind("runtime/bound".to_owned()),
-                kind_version: 1,
-                correlation_id: CorrelationId::from("atomic-ready-binding"),
-                causation_event_id: Some(ready_created.opening_ack.event_id.clone()),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "runtime_build_digest": digest('c'),
-                    "protocol_version": "runtime-v1",
-                    "snapshot_digest": digest('b')
-                }))),
-            },
-        },
-    };
-    let ready_event = append(
-        &ready_created.session.agent_session_id,
-        "atomic-ready-event",
-        "runtime-supervisor",
-        "atomic-ready",
-        "session/ready",
-        "atomic-ready-session",
-        Some(ready_bound_event),
-        json!({}),
-    );
-    store
-        .append_runtime_bound_and_ready(ready_context, &ready_event)
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .head(&ready_created.session.agent_session_id)
-            .await
-            .unwrap()
-            .status,
-        "ready"
-    );
-
-    let failed_session = live_session(session_id());
-    let failed_created = store
-        .create_session(create_request(failed_session, "atomic-failed"))
-        .await
-        .unwrap();
-    store
-        .append_open_failed(
-            &failed_created.session.agent_session_id,
-            "REMOTE_OPEN_FAILED",
-            "runtime unavailable",
-            true,
-        )
-        .await
-        .unwrap()
-        .expect("open failure should be committed");
-
-    let late_binding = RuntimeBindingId::from("atomic-late-binding");
-    let late_bound_event = event_id("atomic-late-bound");
-    let late_context = RuntimeAppendContext {
-        agent_session_id: failed_created.session.agent_session_id.clone(),
-        envelope: RuntimeEventEnvelope {
-            runtime_binding_id: late_binding,
-            producer_seq: 1,
-            event_id: late_bound_event.clone(),
-            idempotency_key: IdempotencyKey::from("atomic-late-bound"),
-            semantic_event: SemanticSessionEventDraft {
-                kind: SessionEventKind("runtime/bound".to_owned()),
-                kind_version: 1,
-                correlation_id: CorrelationId::from("atomic-late-binding"),
-                causation_event_id: Some(failed_created.opening_ack.event_id),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "runtime_build_digest": digest('e'),
-                    "protocol_version": "runtime-v1",
-                    "snapshot_digest": digest('b')
-                }))),
-            },
-        },
-    };
-    let late_ready = append(
-        &failed_created.session.agent_session_id,
-        "atomic-late-ready",
-        "runtime-supervisor",
-        "atomic-late-ready",
-        "session/ready",
-        "atomic-late-session",
-        Some(late_bound_event),
-        json!({}),
-    );
-    assert!(matches!(
-        store
-            .append_runtime_bound_and_ready(late_context, &late_ready)
-            .await
-            .unwrap_err(),
-        SessionStoreError::Conflict(message)
-            if message.contains("requires an opening Session")
-    ));
-    assert_eq!(
-        store
-            .head(&failed_created.session.agent_session_id)
-            .await
-            .unwrap()
-            .status,
-        "open_failed"
-    );
-    let event_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM agent_events \
-         WHERE session_id = ? AND kind IN ('runtime/bound', 'session/ready')",
-    )
-    .bind(failed_created.session.agent_session_id.as_ref())
-    .fetch_one(store.test_pool())
-    .await
-    .unwrap();
-    assert_eq!(event_count, 0);
 }
 
 #[tokio::test]
@@ -1974,8 +1822,6 @@ async fn turn_history_projects_wall_clock_timing_and_structured_failure() {
         event_id: EventId::from("turn-history-timing-terminal"),
         producer_id: EventProducerId::from("runtime_supervisor"),
         idempotency_key: IdempotencyKey::from("turn-history-timing-terminal"),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: SemanticSessionEventDraft {
             kind: SessionEventKind("turn/failed".to_owned()),
             kind_version: 1,
@@ -2377,8 +2223,6 @@ async fn stored_payload_and_event_commit_atomically_and_replay_without_budget_gr
         event_id: event_id("event-stored-part"),
         producer_id: EventProducerId("runtime-supervisor".to_owned()),
         idempotency_key: IdempotencyKey("stored-part".to_owned()),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: SemanticSessionEventDraft {
             kind: SessionEventKind("message/content-part".to_owned()),
             kind_version: 1,
@@ -2502,88 +2346,6 @@ async fn completed_compaction_is_the_only_rehydration_base() {
         rehydration.resolved_snapshot_ref,
         session.agent_binding.resolved_snapshot_ref
     );
-}
-
-#[tokio::test]
-async fn runtime_events_require_contiguous_binding_sequence_and_replay_original_ack() {
-    let store = AgentSessionStore::open_in_memory().await.unwrap();
-    let created = store
-        .create_session(create_request(live_session(session_id()), "runtime"))
-        .await
-        .unwrap();
-    let session_id = created.session.agent_session_id;
-    let binding_id = RuntimeBindingId("runtime-binding-1".to_owned());
-    let bound = SessionEventAppend {
-        agent_session_id: session_id.clone(),
-        event_id: event_id("event-runtime-bound"),
-        producer_id: EventProducerId("runtime:runtime-binding-1".to_owned()),
-        idempotency_key: IdempotencyKey("runtime-bound".to_owned()),
-        runtime_binding_id: Some(binding_id.clone()),
-        runtime_producer_seq: Some(1),
-        semantic_event: SemanticSessionEventDraft {
-            kind: SessionEventKind("runtime/bound".to_owned()),
-            kind_version: 1,
-            correlation_id: CorrelationId("runtime-binding-1".to_owned()),
-            causation_event_id: Some(created.opening_ack.event_id),
-            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                "runtime_build_digest": digest('c'),
-                "protocol_version": "runtime-v1",
-                "snapshot_digest": digest('b')
-            }))),
-        },
-    };
-    store.append_event(&bound).await.unwrap();
-
-    let checkpoint = RuntimeEventEnvelope {
-        runtime_binding_id: binding_id.clone(),
-        producer_seq: 2,
-        event_id: event_id("event-runtime-checkpoint"),
-        idempotency_key: IdempotencyKey("runtime-checkpoint".to_owned()),
-        semantic_event: SemanticSessionEventDraft {
-            kind: SessionEventKind("runtime/checkpointed".to_owned()),
-            kind_version: 1,
-            correlation_id: CorrelationId("runtime-binding-1".to_owned()),
-            causation_event_id: Some(bound.event_id),
-            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                "locator": {
-                    "normalized_relative_path": "runtime/checkpoint.json",
-                    "digest": digest('d')
-                },
-                "runtime_bound_event_id": "event-runtime-bound",
-                "protocol_version": "runtime-v1",
-                "snapshot_digest": digest('b'),
-                "through_seq": 3
-            }))),
-        },
-    };
-    let context = RuntimeAppendContext {
-        agent_session_id: session_id.clone(),
-        envelope: checkpoint.clone(),
-    };
-    let committed = store.append_runtime_event(context.clone()).await.unwrap();
-    assert_eq!(committed.ack.unwrap().committed_producer_seq, 2);
-    let replay = store.append_runtime_event(context).await.unwrap();
-    assert!(replay.append.duplicate);
-
-    let mut gap = checkpoint;
-    gap.producer_seq = 4;
-    gap.event_id = event_id("event-runtime-gap");
-    gap.idempotency_key = IdempotencyKey("runtime-gap".to_owned());
-    assert!(matches!(
-        store
-            .append_runtime_event(RuntimeAppendContext {
-                agent_session_id: session_id,
-                envelope: gap,
-            })
-            .await
-            .unwrap_err(),
-        SessionStoreError::RuntimeSequenceGap {
-            committed_producer_seq: 2,
-            expected: 3,
-            actual: 4,
-            ..
-        }
-    ));
 }
 
 #[tokio::test]
@@ -3085,13 +2847,8 @@ async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() 
     store.test_pool().close().await;
 }
 
-#[tokio::test]
-async fn checkpoint_validation_and_snapshot_admission_are_exact() {
-    let store = AgentSessionStore::open_in_memory().await.unwrap();
-    let created = store
-        .create_session(create_request(live_session(session_id()), "checkpoint"))
-        .await
-        .unwrap();
+#[test]
+fn snapshot_admission_requires_exact_execution_support() {
     let profile_digest = digest('e');
     let typed_resource_digest = digest('f');
     let ceiling = RuntimeExecutionCeiling {
@@ -3138,58 +2895,12 @@ async fn checkpoint_validation_and_snapshot_admission_are_exact() {
         SnapshotCompatibilityAdmissionResult::CompatibleExact { .. }
     ));
 
-    let checkpoint = RuntimeCheckpointBinding {
-        runtime_binding_id: RuntimeBindingId("runtime-binding-1".to_owned()),
-        locator: LogicalArtifactRef {
-            artifact_id: ArtifactId("checkpoint-1".to_owned()),
-            normalized_relative_path: "runtime/checkpoint-1".to_owned(),
-            digest: digest('4'),
-        },
-        runtime_bound_event_id: event_id("runtime-bound-1"),
-        protocol_version: VersionString("runtime-v1".to_owned()),
-        resolved_snapshot_ref: snapshot_ref(),
-        through_seq: 4,
-    };
-    let exact = RuntimeCheckpointValidationInput {
-        checkpoint: checkpoint.clone(),
-        referenced_runtime_build_digest: digest('5'),
-        expected_runtime_bound_event_id: event_id("runtime-bound-1"),
-        expected_runtime_build_digest: digest('5'),
-        expected_protocol_version: VersionString("runtime-v1".to_owned()),
-        expected_snapshot_ref: snapshot_ref(),
-        expected_through_seq: 4,
-    };
-    assert_eq!(
-        validate_checkpoint(&exact),
-        RuntimeCheckpointValidationResult::ExactMatch
-    );
-    let admitted = store
-        .admit_checkpoint(&created.session.agent_session_id, &exact, &admission)
-        .await
-        .unwrap();
-    assert!(admitted.checkpoint_reusable);
-
-    let mut mismatch = exact.clone();
-    mismatch.expected_through_seq = 5;
-    assert!(matches!(
-        validate_checkpoint(&mismatch),
-        RuntimeCheckpointValidationResult::Mismatch { .. }
-    ));
-    assert!(
-        !store
-            .admit_checkpoint(&created.session.agent_session_id, &mismatch, &admission,)
-            .await
-            .unwrap()
-            .checkpoint_reusable
-    );
-
     let mut unavailable = admission.clone();
     unavailable.available_executor.protocol_versions.clear();
-    let error = store
-        .admit_checkpoint(&created.session.agent_session_id, &exact, &unavailable)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Some("SNAPSHOT_EXECUTOR_UNAVAILABLE"));
+    assert!(matches!(
+        evaluate_snapshot_compatibility(&unavailable),
+        SnapshotCompatibilityAdmissionResult::ExecutorUnavailable { .. }
+    ));
 }
 
 #[tokio::test]
@@ -3215,9 +2926,10 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         correlation_id: CorrelationId("fork-1".to_owned()),
         event_id: Some(event_id("event-forked-1")),
         base_payload_id: ArtifactId("fork-base-1".to_owned()),
-        base_body: SessionPayloadBody::Json(StrictJsonValue(json!({
-            "summary": "self-contained completed semantics"
-        }))),
+        base_body: SessionPayloadBody::Json(StrictJsonValue(serde_json::to_value(crate::ForkContextSnapshot::new(
+            parent.agent_session_id.clone(), 1, AgentHandoffBindingRefV1::from(&parent.agent_binding), 1,
+            vec![crate::CanonicalContextMessage { seq: 1, role: crate::CanonicalContextRole::User, content: "Parent context".into() }],
+        ).unwrap()).unwrap())),
         base_media_type: "application/json".to_owned(),
         child_initial_active_capability_ids: vec!["coding.workspace".to_owned()],
     };

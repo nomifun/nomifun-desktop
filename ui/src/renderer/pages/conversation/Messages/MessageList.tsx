@@ -75,7 +75,6 @@ import {
   type TurnGateInfo,
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
-import { isInternalInstructionToolCall, isSupersededPlanToolFailure } from './planToolVisibility';
 import type { MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 import { useExecutionSafe } from '../execution/ExecutionContext';
@@ -803,14 +802,6 @@ const MessageList: React.FC<{
       const message = journalSources[i];
       // Skip hidden and available_commands messages
       if (message.hidden) continue;
-      if (isInternalInstructionToolCall(message)) continue;
-      if (
-        message.type === 'tool_call' &&
-        message.content.name === 'update_plan' &&
-        isSupersededPlanToolFailure(message, journalSources.slice(i + 1))
-      ) {
-        continue;
-      }
       if (message.type === 'available_commands') continue;
       // Plans are no longer rendered inline — they surface in the docked
       // PinnedPlan bar above the composer, which reads the raw list directly.

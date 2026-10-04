@@ -7,7 +7,7 @@ fn checkpoint_write(session: &AgentSessionLiveRecord, turn: &EventId, revision: 
     let key = format!("checkpoint-{}-{revision}", session.agent_session_id.as_ref());
     let event = append(&session.agent_session_id, &key, "runtime_supervisor", &key,
         "runtime/progress-recorded", "checkpoint-turn", Some(turn.clone()), json!({
-            "runtime_binding_id":format!("nomi:{}",session.agent_session_id.as_ref()), "producer_seq":revision + 1,
+            "producer_seq":revision + 1,
             "event":{"event":"execution_checkpoint_saved","step":value,"revision":revision + 1,"digest":digest}
         }));
     let write = NativeCheckpointWrite { owner: owner(), operation_id: "checkpoint-turn".into(),

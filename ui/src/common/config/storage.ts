@@ -131,8 +131,6 @@ export type TChatConversation = IChatConversation<
     /** Max tokens per response */
     /** Max agentic turns */
     maxTurns?: number;
-    /** Legacy marker for pre-provider-probe health-check conversations */
-    is_health_check?: boolean;
     /** Last token usage stats */
     last_token_usage?: TokenUsageData;
     /** Marks this nomi conversation as a desktop-companion's single per-companion

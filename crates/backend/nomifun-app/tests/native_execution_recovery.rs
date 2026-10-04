@@ -100,8 +100,6 @@ async fn seed_pending_external_push(
         idempotency_key: IdempotencyKey::from(format!(
             "startup-pending-push-tool:{session_id}"
         )),
-        runtime_binding_id: None,
-        runtime_producer_seq: None,
         semantic_event: SemanticSessionEventDraft {
             kind: SessionEventKind("tool/call-started".to_owned()),
             kind_version: 1,

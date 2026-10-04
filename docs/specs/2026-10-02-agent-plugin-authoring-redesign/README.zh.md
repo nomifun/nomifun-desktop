@@ -495,10 +495,10 @@ check-unified-plugin-boundary 应允许新的官方创作 Module，同时继续�
 | [conversation.rs](../../../crates/backend/nomifun-api-types/src/conversation.rs) 与 [unified_runtime_host.rs](../../../crates/backend/nomifun-app/src/router/unified_runtime_host.rs) | 普通请求与交付结算合同 |
 | [ConversationPluginArtifacts.tsx](../../../ui/src/renderer/pages/plugins/ConversationPluginArtifacts.tsx) 与 [PluginSurfacePanel.tsx](../../../ui/src/renderer/pages/plugins/PluginSurfacePanel.tsx) | 会话成果、真实预览与验证交互 |
 | [plugin_e2e.rs](../../../crates/backend/nomifun-app/tests/plugin_e2e.rs) | Core、准入和交付路径的相关集成用例；不等价于真实模型生成验收 |
-| [model.rs](../../../crates/backend/nomifun-plugin-platform/src/model.rs) 与 [008 迁移](../../../crates/backend/nomifun-db/migrations/008_plugin_draft_conversation_source.sql) | 草稿来源、版本与待收敛的历史字段 |
+| [model.rs](../../../crates/backend/nomifun-plugin-platform/src/model.rs) 与 [008 迁移](../../../crates/backend/nomifun-db/migrations/001_canonical_baseline.sql) | 草稿来源、版本与待收敛的历史字段 |
 | [runtime_output.rs](../../../crates/backend/nomifun-ai-agent/src/runtime_output.rs) | 通用成果交付合同 |
 | [Unified Plugin Core 设计](../2026-09-22-unified-plugin-core/README.zh.md) | 统一包、实例、SDK 与本机 JS 信任 |
-| [Agent 能力产品设计](../2026-09-16-agent-capability-product-redesign.zh.md) | Module 与 Action 授权 |
+| [Agent Session 当前架构](../../architecture/agent-session.zh.md) | Module 与 Action 授权 |
 | [Agent 切换与交接合同](../2026-09-22-agent-session-switch-and-handoff.zh.md) | 回合边界、活动 Execution 与安全接续限制 |
 | [check-unified-plugin-boundary.mjs](../../../scripts/check-unified-plugin-boundary.mjs) | 创作 Module 与统一插件平台的边界检查 |
 

@@ -249,8 +249,6 @@ async fn seed_conversation(
             event_id: format!("cron-fixture:{id}:ready").into(),
             producer_id: "runtime_supervisor".into(),
             idempotency_key: format!("cron-fixture:{id}:ready").into(),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: nomifun_agent_contracts::SessionEventKind("session/ready".to_owned()),
                 kind_version: 1,

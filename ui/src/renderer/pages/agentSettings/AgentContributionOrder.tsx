@@ -42,6 +42,7 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
     try {
       if (mounted.current) {
         await launchPluginConversation(async destination => {
+          if (!mounted.current) return;
           if (typeof destination === 'number') return;
           if (currentOpenAuthor.current && typeof destination === 'string') await currentOpenAuthor.current(destination);
           else await navigate(destination);

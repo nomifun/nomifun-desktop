@@ -728,15 +728,6 @@ pub trait IAgentExecutionRepository: Send + Sync {
     /// Acknowledge every still-pending inactive row for this Conversation
     /// only when the exact validated generation remains pending and no active
     /// replacement link exists. Duplicate inactive rows are one cancel unit.
-    async fn mark_conversation_cleanup_completed(
-        &self,
-        execution_id: &str,
-        conversation_id: &str,
-        completed_at: i64,
-    ) -> Result<bool, DbError>;
-    /// Exact-generation variant used by the scheduler. The legacy
-    /// execution/conversation form above remains source-compatible for other
-    /// repository consumers.
     async fn mark_conversation_cleanup_completed_exact(
         &self,
         cleanup: &PendingConversationCleanup,

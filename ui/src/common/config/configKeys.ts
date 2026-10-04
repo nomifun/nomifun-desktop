@@ -52,11 +52,6 @@ export type ConfigKeyMap = {
   'upload.saveToWorkspace': boolean | undefined;
   /** Explicit Agent Workbench default for newly-created Guid conversations. */
   'guid.defaultAgentSelection': GuidAgentSelectionPreference | undefined;
-  /**
-   * Legacy preference written by Guid's former "last selection wins" behavior.
-   * Read only as an upgrade fallback; new code must not update it.
-   */
-  'guid.agentSelection': GuidAgentSelectionPreference | undefined;
   'system.notificationEnabled': boolean | undefined;
   'system.cronNotificationEnabled': boolean | undefined;
   'system.keepAwake': boolean | undefined;

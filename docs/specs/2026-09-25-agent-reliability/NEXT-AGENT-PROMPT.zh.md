@@ -10,7 +10,7 @@
 先读：
 
 1. 根目录 `AGENTS.md`。
-2. `docs/specs/2026-09-25-agent-reliability/DEVELOPMENT-HANDOFF.zh.md`。
+2. `docs/architecture/agent-session.zh.md`。
 3. 同目录 `TEST-MATRIX.zh.md` 和 `README.zh.md`。
 4. `git status --short`，运行 `node scripts/validation/agent-reliability-handoff.mjs --check` 核对源码。
 5. PAUSE-RESUME-V2.zh.md 和 EVIDENCE-PIPELINE.zh.md。当前是 V2 源码交付，没有运行应用编译或测试，不能把 V1 检查记录算成当前通过。

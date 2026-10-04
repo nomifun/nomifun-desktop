@@ -6,7 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase, IKnowledgeBinding } from '@/common/adapter/ipcBridge';
-import { browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { agentBrowserStorageGenerationKey, browserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 import type { KnowledgeBaseId } from '@/common/types/ids';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -95,7 +95,8 @@ const ensureSubscribed = () => {
  * session already reports the right `mounted` value. Only ids are stored — names
  * and file counts always come from the live `listBases`.
  */
-const seedStorageKey = (targetKey: string) => browserStorageGenerationKey(`knowledge-mounted:${targetKey}`);
+const seedStorageKey = (targetKey: string) =>
+  (targetKey.startsWith('conversation:') ? agentBrowserStorageGenerationKey : browserStorageGenerationKey)(`knowledge-mounted:${targetKey}`);
 
 function readSeed(targetKey: string): KnowledgeBaseId[] {
   if (typeof window === 'undefined') return [];

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
-import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
+import type { IMessageToolCall, TMessage } from '@/common/chat/chatLib';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
@@ -40,38 +40,6 @@ beforeEach(() => {
   };
 });
 
-test('legacy writes remain individual calls while the final artifact card stays aggregated', async () => {
-  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
-  const writes = [1, 2].map<IMessageToolGroup>((index) => ({
-    ...base, id: `write-${index}`, message_id: messageId(index + 20), msg_id: messageId(index + 20),
-    created_at: index + 1, type: 'tool_group', content: [{
-      call_id: `write-call-${index}`, name: 'WriteFile', description: 'src/app.ts',
-      status: 'Success', render_output_as_markdown: false,
-      result_display: { file_name: '/process-write-fixture/src/app.ts', file_diff: `diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+revision-${index}\n` },
-    }],
-  }));
-  const originalContent = structuredClone(writes.map((write) => write.content));
-  const messages: TMessage[] = [
-    { ...base, id: 'write-user', message_id: turnId, msg_id: turnId, type: 'text', position: 'right', created_at: 1, content: { content: 'Update the file' } },
-    ...writes,
-    { ...base, id: 'write-final', msg_id: messageId(23), type: 'text', created_at: 4, content: { content: 'The file is updated.' } },
-  ];
-  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
-    <PreviewProvider persistNamespace='process-write-test' subscribeGlobalOpen={false}>
-      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', workspace: '/process-write-fixture', readOnly: true, isProcessing: false }}>
-        <MessageListProvider initialValue={messages}><MessageList /></MessageListProvider>
-      </ConversationProvider>
-    </PreviewProvider>
-  </I18nextProvider></MemoryRouter>);
-  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
-  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
-  expect(Array.from(page.container.querySelectorAll('[data-tool-call-id]'), (call) => call.getAttribute('data-tool-call-id')))
-    .toEqual(['write-call-1', 'write-call-2']);
-  expect(page.getAllByTestId('turn-deliverables')).toHaveLength(1);
-  await waitFor(() => expect(page.getByTestId('turn-deliverables').textContent).toContain('app.ts'));
-  expect(writes[0].content[0].status).toBe('Success');
-  expect(writes.map((write) => write.content)).toEqual(originalContent);
-});
 afterEach(() => { cleanup(); restoreListeners(); });
 
 test('a completed journal defaults closed and expands its full reasoning and calls without hiding the final reply', () => {

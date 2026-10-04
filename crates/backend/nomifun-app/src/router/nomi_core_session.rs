@@ -1,9 +1,7 @@
 //! One host-owned typed Session facade for the Nomi-core product.
 //!
-//! AgentSession HTTP and model-control entrypoints use the canonical generation
-//! 5 Store. The legacy Conversation service remains behind this composition
-//! boundary only for runtime/domain consumers that have explicit later cutover
-//! owners; it is not an AgentSession identity or receipt authority.
+//! All product and domain consumers use the canonical AgentSession Store.
+//! Conversation DTOs project the same Session identity and Turn authority.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -1664,8 +1662,6 @@ impl NomiCoreSessionOwner {
                         "runtime_supervisor",
                     ),
                     idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(identity),
-                    runtime_binding_id: None,
-                    runtime_producer_seq: None,
                     semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                         kind: nomifun_agent_contracts::SessionEventKind(
                             "turn/failed".to_owned(),
@@ -3689,8 +3685,6 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 event_id: nomifun_agent_contracts::EventId::from(message_id.clone()),
                 producer_id: nomifun_agent_contracts::EventProducerId::from("session_api"),
                 idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(identity),
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
                 semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                     kind: nomifun_agent_contracts::SessionEventKind(
                         "message/assistant-projected".to_owned(),
@@ -4487,8 +4481,6 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 event_id: nomifun_agent_contracts::EventId::from(message_id.clone()),
                 producer_id: nomifun_agent_contracts::EventProducerId::from("session_api"),
                 idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(key),
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
                 semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                     kind: nomifun_agent_contracts::SessionEventKind(
                         "message/assistant-projected".to_owned(),
@@ -5136,7 +5128,7 @@ mod paused_projection_tests {
         nomifun_agent_contracts::SessionEventRecord {
             agent_session_id:"pause-session".into(),seq:10,event_id:"pause-event".into(),
             producer_id:"runtime_supervisor".into(),idempotency_key:"pause-key".into(),
-            runtime_binding_id:None,runtime_producer_seq:None,kind:nomifun_agent_contracts::SessionEventKind("turn/paused".into()),
+            kind:nomifun_agent_contracts::SessionEventKind("turn/paused".into()),
             kind_version:1,correlation_id:operation.into(),causation_event_id:None,
             payload:nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"pause":{
                 "revision":1,"reason":reason,"checkpoint_revision":7,"checkpoint_digest":"a".repeat(64),
@@ -13456,8 +13448,6 @@ async fn append_canonical_creation_message(
             event_id: nomifun_agent_contracts::EventId::from(message_id.to_owned()),
             producer_id: nomifun_agent_contracts::EventProducerId::from("session_api"),
             idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(identity),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: nomifun_agent_contracts::SessionEventKind(
                     "message/user-accepted".to_owned(),
@@ -13839,8 +13829,6 @@ async fn clear_nomi_core_agent_session_context(
             event_id: nomifun_agent_contracts::EventId::from(Uuid::now_v7().to_string()),
             producer_id: nomifun_agent_contracts::EventProducerId::from("session_api"),
             idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(identity),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind: nomifun_agent_contracts::SessionEventKind("context/cleared".to_owned()),
                 kind_version: 1,

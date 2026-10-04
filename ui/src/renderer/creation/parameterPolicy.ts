@@ -64,7 +64,7 @@ export function creationCount(mode: CreationMode, value: unknown, model: Model):
 
 /** Only composer-owned user parameters can be copied from history to a new task. */
 export function creationUserParameters(mode: CreationMode, value: Record<string, unknown>): CreationParameters {
-  const keys = mode === 'image' ? ['size', 'width', 'height', 'aspect', 'quality', 'count'] : mode === 'video' ? ['size', 'aspect', 'resolution', 'seconds', 'count'] : ['lyrics', 'instrumental', 'format', 'seconds'];
+  const keys = mode === 'image' ? ['size', 'width', 'height', 'aspect', 'quality', 'count'] : mode === 'video' ? ['size', 'seconds', 'count'] : ['lyrics', 'instrumental', 'format', 'seconds'];
   return Object.fromEntries(keys.flatMap(key => typeof value[key] === 'string' || typeof value[key] === 'number' || typeof value[key] === 'boolean' || value[key] === null ? [[key, value[key]]] : [])) as CreationParameters;
 }
 export function normalizeCreationParameters(mode: CreationMode, value: CreationParameters, model: Model): CreationParameters {
@@ -77,13 +77,7 @@ export function normalizeCreationParameters(mode: CreationMode, value: CreationP
     params.count = creationCount(mode, params.count, model);
   } else if (mode === 'video') {
     if (!policy.video.seconds.includes(Number(params.seconds))) delete params.seconds;
-    if (!params.size) {
-      const legacySizes: Record<string, string> = { '720p/16:9': '1280x720', '720p/9:16': '720x1280', '1080p/16:9': '1920x1080', '1080p/9:16': '1080x1920' };
-      const legacySize = legacySizes[`${params.resolution}/${params.aspect}`];
-      if (legacySize && policy.video.sizes.includes(legacySize)) params.size = legacySize;
-    }
     if (!policy.video.sizes.includes(String(params.size))) delete params.size;
-    delete params.aspect; delete params.resolution;
     params.count = creationCount(mode, params.count, model);
   } else if (mode === 'music' && creationMusicDuration(params.seconds) === undefined) {
     delete params.seconds;

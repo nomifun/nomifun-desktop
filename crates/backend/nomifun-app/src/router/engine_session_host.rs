@@ -569,53 +569,6 @@ impl EngineSessionHost {
         super::engine_history::load(owner.canonical().store(), receipt, limit).await
     }
 
-    pub async fn read_message_history(
-        &self,
-        receipt: &EngineTurnReceipt,
-        limit: usize,
-        byte_limit: usize,
-    ) -> Result<super::engine_history::EngineMessageHistoryWindow, AppError> {
-        if !Arc::ptr_eq(&self.source, &receipt.source) {
-            return Err(AppError::Conflict(
-                "Receipt belongs to another Session host".into(),
-            ));
-        }
-        let owner = self.owner.upgrade().ok_or_else(|| {
-            AppError::Conflict("Session owner has shut down".into())
-        })?;
-        super::engine_history::load_messages(
-            owner.canonical().store(),
-            receipt,
-            limit,
-            byte_limit,
-        )
-        .await
-    }
-
-    /// Data-only messages strictly before a historical turn. Engines can seed
-    /// their native replay with an imported/forked prefix without duplicating
-    /// messages belonging to replayed turns. Same owner, active generation,
-    /// clear-context floor and resource bounds as the other history readers.
-    /// An unaffordable first prefix row yields an empty window with has_older,
-    /// not permission to skip it and search still older rows.
-    pub async fn read_message_history_before_turn(
-        &self,
-        receipt: &EngineTurnReceipt,
-        before_operation: &str,
-        limit: usize,
-        byte_limit: usize,
-    ) -> Result<super::engine_history::EngineMessageHistoryWindow, AppError> {
-        if !Arc::ptr_eq(&self.source, &receipt.source) {
-            return Err(AppError::Conflict("Receipt belongs to another Session host".into()));
-        }
-        let owner = self.owner.upgrade().ok_or_else(|| {
-            AppError::Conflict("Session owner has shut down".into())
-        })?;
-        super::engine_history::load_messages_before(
-            owner.canonical().store(), receipt, limit, byte_limit, Some(before_operation),
-        ).await
-    }
-
     /// Page toward older receipts within the admitted Session. The cursor is
     /// a previous turn's operation_id from read_history, not a new authority.
     /// No codec, tool replay or completeness/cleanup inference occurs here.

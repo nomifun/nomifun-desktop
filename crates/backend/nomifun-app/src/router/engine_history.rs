@@ -6,9 +6,10 @@ use nomifun_agent_contracts::{
     AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffBindingRefV1, AgentSessionId,
     OperationId, SessionEventRecord,
 };
-use nomifun_agent_session::{AgentSessionStore, ChatCausalityFacts, MessageProjection};
+use nomifun_agent_session::{AgentSessionStore, ChatCausalityFacts, canonical_context_messages};
+pub use nomifun_agent_session::{CanonicalContextMessage, CanonicalContextRole};
 use nomifun_common::AppError;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::engine_session_host::EngineTurnReceipt;
 
@@ -20,6 +21,8 @@ pub struct EngineHistoryRecord {
 }
 
 pub struct EngineHistoryTurn {
+    pub source_seq: u64,
+    pub unstarted_terminal: bool,
     pub operation_id: String,
     pub root_message_id: String,
     pub receipt_status: String,
@@ -31,17 +34,7 @@ pub struct EngineHistoryTurn {
 
 pub struct EngineHistoryWindow {
     pub turns: Vec<EngineHistoryTurn>,
-    pub has_older: bool,
-}
-
-pub struct EngineHistoryMessage {
-    pub kind: String,
-    pub position: Option<String>,
-    pub content_json: String,
-}
-
-pub struct EngineMessageHistoryWindow {
-    pub messages: Vec<EngineHistoryMessage>,
+    pub context_messages: Vec<CanonicalContextMessage>,
     pub has_older: bool,
 }
 
@@ -147,109 +140,6 @@ fn source_message<'a>(
     Ok((source, payload(facts, source)?))
 }
 
-fn projection_content(message: &MessageProjection) -> Option<&str> {
-    message.projection.get("content").and_then(Value::as_str)
-}
-
-pub(super) async fn load_messages(
-    store: &AgentSessionStore,
-    receipt: &EngineTurnReceipt,
-    limit: usize,
-    byte_limit: usize,
-) -> Result<EngineMessageHistoryWindow, AppError> {
-    load_messages_before(store, receipt, limit, byte_limit, None).await
-}
-
-pub(super) async fn load_messages_before(
-    store: &AgentSessionStore,
-    receipt: &EngineTurnReceipt,
-    limit: usize,
-    byte_limit: usize,
-    before_operation: Option<&str>,
-) -> Result<EngineMessageHistoryWindow, AppError> {
-    if !(1..=4096).contains(&limit) || !(1..=8 * 1024 * 1024).contains(&byte_limit) {
-        return Err(failure("invalid compatibility history budget"));
-    }
-    if before_operation
-        .is_some_and(|id| id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control))
-    {
-        return Err(failure("invalid historical turn cursor"));
-    }
-    let facts = facts(store, receipt).await?;
-    let floor = facts
-        .events
-        .iter()
-        .filter(|event| event.kind.0 == "context/cleared")
-        .map(|event| event.seq)
-        .max()
-        .unwrap_or(0);
-    let current_root = facts
-        .events
-        .iter()
-        .find(|event| event.event_id.as_ref() == receipt.root_message_id())
-        .ok_or_else(|| failure("current root message is missing"))?;
-    let before_seq = if let Some(operation) = before_operation {
-        let turn = facts
-            .events
-            .iter()
-            .find(|event| {
-                event.kind.0 == "turn/started" && event.correlation_id.as_ref() == operation
-            })
-            .ok_or_else(|| failure("historical cursor is outside the current Session"))?;
-        require_prior_cursor(turn.seq,current_root.seq)?;
-        source_message(&facts, turn)?.0.seq
-    } else {
-        current_root.seq
-    };
-    let session_id = AgentSessionId::from(receipt.session().session().conversation_id.clone());
-    let mut projections = store.messages_after(&session_id, 0).await.map_err(failure)?;
-    projections.retain(|message| {
-        message.last_seq < before_seq
-            && message.first_seq > floor
-            && message.presentation_intent == "message"
-            && projection_content(message).is_some_and(|content| !content.is_empty())
-    });
-    projections.sort_by(|left, right| {
-        right
-            .last_seq
-            .cmp(&left.last_seq)
-            .then_with(|| right.projection_id.cmp(&left.projection_id))
-    });
-    let mut window = EngineMessageHistoryWindow {
-        has_older: projections.len() > limit,
-        messages: Vec::new(),
-    };
-    let mut bytes = 0usize;
-    for projection in projections.into_iter().take(limit) {
-        let content = projection_content(&projection).unwrap_or_default();
-        let content_json = serde_json::to_string(&json!({ "content": content }))
-            .map_err(failure)?;
-        let position = projection
-            .projection
-            .get("state")
-            .and_then(Value::as_str)
-            .map(|state| if state == "accepted" { "right" } else { "left" }.to_owned());
-        let next = bytes
-            .saturating_add(content_json.len())
-            .saturating_add(position.as_ref().map_or(0, String::len))
-            .saturating_add(4);
-        if next > byte_limit {
-            if window.messages.is_empty() && before_operation.is_none() {
-                return Err(failure("latest compatibility message exceeds budget"));
-            }
-            window.has_older = true;
-            break;
-        }
-        window.messages.push(EngineHistoryMessage {
-            kind: "text".to_owned(),
-            position,
-            content_json,
-        });
-        bytes = next;
-    }
-    Ok(window)
-}
-
 pub(super) async fn load(
     store: &AgentSessionStore,
     receipt: &EngineTurnReceipt,
@@ -293,9 +183,8 @@ async fn load_selected(
     }
     let facts = facts(store, receipt).await?;
     // Native Runtime replay is binding-specific. A canonical Agent transition
-    // is the only boundary that permits older mismatched turns to fall back to
-    // data-only message projection; an unmarked mismatch remains visible to the
-    // runtime compatibility check and fails closed.
+    // is the only boundary that turns older Agent transcripts into data-only
+    // context. An unmarked mismatch fails the Runtime binding check.
     let floor = native_replay_floor(
         &facts.events,
         &facts.event_payloads,
@@ -333,6 +222,7 @@ async fn load_selected(
     let mut window = EngineHistoryWindow {
         has_older: turns.len() > limit,
         turns: Vec::new(),
+        context_messages: Vec::new(),
     };
     let mut total = 0usize;
     // Ordinary turns keep the previous small candidate window. A larger
@@ -375,7 +265,7 @@ async fn load_selected(
             let sequence = value
                 .get("producer_seq")
                 .and_then(Value::as_u64)
-                .unwrap_or(index as u64 + 1);
+                .ok_or_else(|| failure("journal record has no producer sequence"))?;
             if sequence != index as u64 + 1 {
                 return Err(failure("journal sequence is incomplete"));
             }
@@ -421,7 +311,21 @@ async fn load_selected(
         }
         total = total.saturating_add(serialized_bytes);
         let root_content_json = serde_json::to_string(root_payload).map_err(failure)?;
+        let unstarted_terminal = records.is_empty()
+            && terminal.is_some_and(|terminal| {
+                terminal.kind.0 == "turn/cancelled"
+                    || (terminal.kind.0 == "turn/failed"
+                        && facts.event_payloads.get(terminal.event_id.as_ref())
+                            .and_then(|payload| payload.get("code")).and_then(Value::as_str)
+                            == Some("runtime_dispatch_failed"))
+            })
+            && !facts.events.iter().any(|event| event.seq > turn.seq
+                && terminal.is_some_and(|terminal| event.seq < terminal.seq)
+                && (event.kind.0 == "context/model-visible-applied"
+                    || event.kind.0.starts_with("tool/") || event.kind.0.starts_with("effect/")));
         window.turns.push(EngineHistoryTurn {
+            source_seq: root.seq,
+            unstarted_terminal,
             operation_id,
             root_message_id: root.event_id.as_ref().to_owned(),
             receipt_status,
@@ -430,6 +334,25 @@ async fn load_selected(
             records,
             serialized_bytes,
         });
+    }
+    if before_operation.is_none() && exact_operation.is_none() {
+        let context_floor = facts.events.iter().filter(|event| event.kind.0 == "context/cleared")
+            .map(|event| event.seq).max().unwrap_or(0);
+        let retained_floor = if window.has_older {
+            window.turns.last().map_or(context_floor, |turn| turn.source_seq.saturating_sub(1))
+        } else { context_floor };
+        window.context_messages = canonical_context_messages(
+            &facts.events, &facts.event_payloads, retained_floor, floor, current_root.seq,
+        ).map_err(failure)?;
+        if context_floor == 0 && !window.has_older {
+            if let Some(base) = &facts.fork_context {
+                let mut inherited = base.base_context(context_floor).map_err(failure)?;
+                // A self-contained base is historical data before this child's
+                // first event, never a new accepted input or source authority.
+                inherited.append(&mut window.context_messages);
+                window.context_messages = inherited;
+            }
+        }
     }
     Ok(window)
 }
@@ -476,8 +399,6 @@ mod tests {
             event_id: EventId::from(format!("event-{seq}")),
             producer_id: EventProducerId::from("test"),
             idempotency_key: IdempotencyKey::from(format!("key-{seq}")),
-            runtime_binding_id: None,
-            runtime_producer_seq: None,
             kind: SessionEventKind(kind.to_owned()),
             kind_version: 1,
             correlation_id: CorrelationId::from(format!("correlation-{seq}")),
@@ -565,5 +486,97 @@ mod tests {
             native_replay_floor(&events, &payloads, &current_model_variant).unwrap(),
             9
         );
+    }
+
+    fn context_event(seq: u64, kind: &str, correlation: &str, value: Value) -> (SessionEventRecord, Value) {
+        let mut event = event(seq, kind);
+        event.correlation_id = correlation.into();
+        (event, value)
+    }
+
+    fn context_rows(rows: Vec<(SessionEventRecord, Value)>, floor: u64, native_floor: u64, before: u64)
+        -> Result<Vec<CanonicalContextMessage>, AppError> {
+        let payloads = rows.iter().map(|(event, value)| (event.event_id.as_ref().to_owned(), value.clone())).collect();
+        canonical_context_messages(&rows.into_iter().map(|(event, _)| event).collect::<Vec<_>>(),
+            &payloads, floor, native_floor, before).map_err(failure)
+    }
+
+    #[test]
+    fn canonical_domain_context_keeps_creation_prompts_and_execution_notices_with_typed_roles() {
+        let rows = context_rows(vec![
+            context_event(3, "message/user-accepted", "creation", serde_json::json!({
+                "content":"creation prompt", "position":"left", "state":"completed"})),
+            context_event(4, "message/assistant-projected", "notice", serde_json::json!({
+                "content":"execution summary", "position":"right", "state":"accepted"})),
+            context_event(5, "message/assistant-projected", "cron", serde_json::json!({
+                "content":"Cron notice", "notice_kind":"cron"})),
+        ], 0, 0, 6).unwrap();
+        assert_eq!(rows.iter().map(|row| (&row.role, row.content.as_str())).collect::<Vec<_>>(), vec![
+            (&CanonicalContextRole::User, "creation prompt"),
+            (&CanonicalContextRole::Assistant, "execution summary"),
+            (&CanonicalContextRole::Assistant, "Cron notice"),
+        ]);
+    }
+
+    #[test]
+    fn native_turn_messages_cannot_replace_a_missing_runtime_journal() {
+        let rows = context_rows(vec![
+            context_event(3, "message/user-accepted", "root", serde_json::json!({"content":"native request"})),
+            context_event(4, "turn/started", "operation", serde_json::json!({"source_message_id":"event-3"})),
+            context_event(5, "message/content-part", "answer", serde_json::json!({"content":"apparent success"})),
+            context_event(6, "message/completed", "answer", serde_json::json!({"part_count":1})),
+        ], 0, 0, 7).unwrap();
+        assert!(rows.is_empty(), "native history must come from its structured Runtime records");
+    }
+
+    #[test]
+    fn agent_transition_keeps_only_digest_verified_canonical_transcript_as_data_context() {
+        let digest = nomifun_agent_contracts::digest_bytes(b"previous answer");
+        let rows = context_rows(vec![
+            context_event(3, "message/user-accepted", "source", serde_json::json!({"content":"previous request"})),
+            context_event(4, "message/content-part", "answer", serde_json::json!({"content":"previous "})),
+            context_event(5, "message/content-part", "answer", serde_json::json!({"content":"answer"})),
+            context_event(6, "message/completed", "answer", serde_json::json!({"part_count":2,"content_digest":digest})),
+            context_event(10, "message/user-accepted", "current", serde_json::json!({"content":"new request"})),
+            context_event(11, "turn/started", "current-op", serde_json::json!({"source_message_id":"event-10"})),
+            context_event(12, "message/assistant-projected", "summary", serde_json::json!({"content":"typed summary"})),
+        ], 0, 8, 13).unwrap();
+        assert_eq!(rows.iter().map(|row| row.content.as_str()).collect::<Vec<_>>(),
+            ["previous request", "previous answer", "typed summary"]);
+        assert!(context_rows(vec![
+            context_event(4, "message/content-part", "answer", serde_json::json!({"content":"changed"})),
+            context_event(6, "message/completed", "answer", serde_json::json!({"part_count":1,"content_digest":"a".repeat(64)})),
+        ], 0, 8, 13).is_err(), "a projection cannot hide a mismatched canonical completion");
+    }
+
+    #[test]
+    fn canonical_context_respects_clear_floor_and_fixed_accepted_root() {
+        let rows = context_rows(vec![
+            context_event(3, "message/user-accepted", "old", serde_json::json!({"content":"cleared"})),
+            context_event(5, "message/assistant-projected", "notice", serde_json::json!({"content":"retained"})),
+            context_event(6, "message/user-accepted", "root", serde_json::json!({"content":"current"})),
+            context_event(7, "message/assistant-projected", "future", serde_json::json!({"content":"future"})),
+        ], 4, 4, 6).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "retained");
+    }
+
+    #[test]
+    fn agent_transition_prefix_survives_subsequent_native_turns_without_copying_their_messages() {
+        let mut rows = vec![
+            context_event(3, "message/user-accepted", "old-root", serde_json::json!({"content":"previous Agent request"})),
+            context_event(4, "message/content-part", "old-answer", serde_json::json!({"content":"previous Agent answer"})),
+            context_event(5, "message/completed", "old-answer", serde_json::json!({"part_count":1,
+                "content_digest":nomifun_agent_contracts::digest_bytes(b"previous Agent answer")})),
+        ];
+        let prefix = context_rows(rows.clone(), 0, 8, 9).unwrap();
+        for native_turn in 0..3 {
+            let seq = 10 + native_turn * 4;
+            rows.push(context_event(seq, "message/user-accepted", "native-root", serde_json::json!({"content":"native request"})));
+            rows.push(context_event(seq + 1, "turn/started", "native-op", serde_json::json!({"source_message_id":format!("event-{seq}")})));
+            rows.push(context_event(seq + 2, "message/content-part", "native-answer", serde_json::json!({"content":"native response"})));
+            assert_eq!(context_rows(rows.clone(), 0, 8, seq + 3).unwrap(), prefix,
+                "reconstruct from canonical events on every Turn, without importing current-binding projections");
+        }
     }
 }

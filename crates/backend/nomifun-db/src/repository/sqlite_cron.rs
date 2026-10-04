@@ -294,10 +294,8 @@ async fn validate_cron_authority(
 }
 
 /// Lock and authenticate the exact Session relation target inside the caller's
-/// write transaction. During the UARC cutover a target is represented by
-/// either the legacy Conversation aggregate or the canonical Agent Store, but
-/// never by an inferred cross-owner fallback. A tombstone/deleting canonical
-/// row is deliberately not a valid scheduling target.
+/// write transaction. The target is a live canonical AgentSession owned by
+/// this user. A tombstone or deleting row is not a valid scheduling target.
 async fn lock_owned_session_relation(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_id: &str,

@@ -22,7 +22,6 @@ pub struct CanonicalAgentStoreSchemaManifestPayload {
     pub error_registry_digest: DigestHex,
     pub runtime_protocol_digest: DigestHex,
     pub runtime_feature_inventory_digest: DigestHex,
-    pub deletion_manifest_set_digest: DigestHex,
     pub platform_validation_contract_digest: DigestHex,
     pub confirmed_decision_contract_digest: DigestHex,
 }

@@ -29,7 +29,7 @@ fn claim(f: &Fixture, holder: &str, fence: u64, cp: Option<&NativeCheckpoint>) -
 
 fn progress(f: &Fixture, key: &str, event: Value) -> SessionEventAppend {
     append(&f.session.agent_session_id, key, "runtime_supervisor", key, "runtime/progress-recorded", "lease-turn", Some(f.started.clone()),
-        json!({"runtime_binding_id":"native-fixture","producer_seq":1,"event":event}))
+        json!({"producer_seq":1,"event":event}))
 }
 
 fn model(f: &Fixture, operation: &str) -> ChatOperationClaimRequest {

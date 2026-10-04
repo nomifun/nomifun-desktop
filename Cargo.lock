@@ -7126,6 +7126,7 @@ dependencies = [
  "dirs 6.0.0",
  "futures",
  "http-body-util",
+ "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",

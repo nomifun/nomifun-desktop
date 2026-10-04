@@ -2,7 +2,7 @@
 
 日期：2026-09-25。状态：实施中，**尚未证明 99%**。
 
-最新开发交接见 [DEVELOPMENT-HANDOFF.zh.md](DEVELOPMENT-HANDOFF.zh.md)，分阶段验收见
+最新开发交接见 [Agent Session 当前架构](../../architecture/agent-session.zh.md)，分阶段验收见
 [TEST-MATRIX.zh.md](TEST-MATRIX.zh.md)。本文保留各阶段的历史状态和失败记录，不把后来实现追写为当时已通过。
 操作系统命令、tool-call、内部端口、长会话及五类官方 Agent 的三阶段逐项 Case 基线见
 [HIGH-ORDER-OPERATIONS-CASE-CATALOG.zh.md](HIGH-ORDER-OPERATIONS-CASE-CATALOG.zh.md)；阶段一文档设计已完成，阶段二排查与阶段三修复尚未开始，该目录不是通过报告。

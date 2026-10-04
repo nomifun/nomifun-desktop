@@ -1,7 +1,7 @@
 # 分阶段验证与交付矩阵
 
 更新：2026-09-25。用户选择开发优先，新增行为的测试执行留给后续机器/agent。
-下表是验收要求，不是通过报告。历史结果仅见 `DEVELOPMENT-HANDOFF.zh.md` 的冻结记录。
+下表是验收要求，不是通过报告。当前 Session、日志和数据库边界见 `docs/architecture/agent-session.zh.md`；历史实施记录只在 Git 历史。
 
 ## V2 新增验收范围（当前全部未执行）
 

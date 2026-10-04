@@ -5,7 +5,9 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::DbError;
 
-const RESET_ORDER: &[&str] = &[
+const AGENT_SELECTION_PREFERENCES: &[&str] = &["guid.defaultAgentSelection", "guid.agentSelection"];
+
+pub(crate) const RESET_ORDER: &[&str] = &[
     "agent_effects",
     "agent_turns",
     "agent_session_resources",
@@ -67,6 +69,15 @@ pub struct AgentDataResetReport {
 /// configuration tables are counted before and after the reset. Any schema
 /// drift or preservation mismatch aborts the transaction.
 pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport, DbError> {
+    let mut tx = pool.begin().await?;
+    let report = reset_agent_data_in_transaction(&mut tx).await?;
+    tx.commit().await?;
+    Ok(report)
+}
+
+pub(crate) async fn reset_agent_data_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<AgentDataResetReport, DbError> {
     let manifest = agent_store_schema_manifest_payload();
     let reset_tables = manifest
         .tables
@@ -90,11 +101,10 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
         .map(|table| table.table_name.clone())
         .collect::<Vec<_>>();
 
-    let mut tx = pool.begin().await?;
     let existing_tables = sqlx::query_scalar::<_, String>(
         "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?
     .into_iter()
     .collect::<BTreeSet<_>>();
@@ -113,11 +123,11 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
             "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?",
         )
         .bind(trigger)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         if let Some(sql) = sql {
             sqlx::query(&format!("DROP TRIGGER {trigger}"))
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             suspended_trigger_sql.push(sql);
         }
@@ -126,10 +136,15 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
         .into_iter()
         .filter(|table| existing_tables.contains(table))
         .collect::<Vec<_>>();
-    let preserved_before = table_counts(&mut tx, &preserved_tables).await?;
+    let preserved_before = table_counts(tx, &preserved_tables).await?;
+    let removed_agent_selections = if existing_tables.contains("client_preferences") {
+        sqlx::query("DELETE FROM client_preferences WHERE key IN (?,?)")
+            .bind(AGENT_SELECTION_PREFERENCES[0]).bind(AGENT_SELECTION_PREFERENCES[1])
+            .execute(&mut **tx).await?.rows_affected()
+    } else { 0 };
     if existing_tables.contains("requirement_pre_effect_abandon_guards") {
         sqlx::query("DELETE FROM requirement_pre_effect_abandon_guards")
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     let requirements_released = if existing_tables.contains("requirements") {
@@ -140,7 +155,7 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
                 lease_expires_at = NULL, claim_token = NULL \
              WHERE owner_conversation_id IS NOT NULL",
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected()
     } else {
@@ -150,7 +165,7 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
         sqlx::query(
             "UPDATE channel_sessions SET conversation_id = NULL WHERE conversation_id IS NOT NULL",
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected()
     } else {
@@ -158,22 +173,33 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
     };
     let cron_jobs_detached = if existing_tables.contains("cron_jobs") {
         sqlx::query(
-            "UPDATE cron_jobs SET conversation_id = NULL, conversation_title = NULL, \
+            "UPDATE cron_jobs SET enabled = 0, conversation_id = NULL, conversation_title = NULL, \
+                preset_id = NULL, preset_revision = NULL, agent_snapshot = NULL, agent_config = NULL, \
                 last_run_at = NULL, last_status = NULL, last_error = NULL, \
                 run_count = 0, retry_count = 0 \
-             WHERE conversation_id IS NOT NULL OR last_run_at IS NOT NULL \
+             WHERE conversation_id IS NOT NULL OR preset_id IS NOT NULL OR agent_snapshot IS NOT NULL OR agent_config IS NOT NULL OR last_run_at IS NOT NULL \
                 OR last_status IS NOT NULL OR last_error IS NOT NULL \
                 OR run_count <> 0 OR retry_count <> 0",
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected()
     } else {
         0
     };
+    if existing_tables.contains("plugin_drafts") {
+        sqlx::query("UPDATE plugin_drafts SET source_conversation_id = NULL WHERE source_conversation_id IS NOT NULL")
+            .execute(&mut **tx).await?;
+    }
+    if existing_tables.contains("channel_inbound_receipts") {
+        // Keep Channel deduplication authority so a provider retry cannot
+        // replay an old delivery as new work after Agent history is cleared.
+        sqlx::query("UPDATE channel_inbound_receipts SET conversation_id = NULL, message_id = NULL WHERE conversation_id IS NOT NULL OR message_id IS NOT NULL")
+            .execute(&mut **tx).await?;
+    }
     let knowledge_session_bindings = if existing_tables.contains("knowledge_bindings") {
         sqlx::query("DELETE FROM knowledge_bindings WHERE target_kind = 'conversation'")
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
     } else {
@@ -181,6 +207,7 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
     };
 
     let mut deleted_rows = BTreeMap::new();
+    deleted_rows.insert("client_preferences.agent_selections".to_owned(), removed_agent_selections);
     deleted_rows.insert(
         "requirements.agent_claims_released".to_owned(),
         requirements_released,
@@ -202,20 +229,20 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
             continue;
         }
         let result = sqlx::query(&format!("DELETE FROM {table}"))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         deleted_rows.insert((*table).to_owned(), result.rows_affected());
     }
     sqlx::query("UPDATE agent_events SET causation_event_id = NULL")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("UPDATE agent_sessions SET parent_agent_session_id = NULL")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     for table in RESET_ORDER {
         let result = sqlx::query(&format!("DELETE FROM {table}"))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         deleted_rows.insert((*table).to_owned(), result.rows_affected());
     }
@@ -224,7 +251,7 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
             "DELETE FROM agent_metadata WHERE source_key <> 'agent_builtin_nomi' \
                 OR agent_type <> 'nomi' OR agent_source <> 'internal'",
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected()
     } else {
@@ -232,15 +259,14 @@ pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport,
     };
     deleted_rows.insert("agent_metadata.custom_rows".to_owned(), removed_custom_agents);
     for trigger_sql in suspended_trigger_sql {
-        sqlx::query(&trigger_sql).execute(&mut *tx).await?;
+        sqlx::query(&trigger_sql).execute(&mut **tx).await?;
     }
-    let preserved_after = table_counts(&mut tx, &preserved_tables).await?;
+    let preserved_after = table_counts(tx, &preserved_tables).await?;
     if preserved_before != preserved_after {
         return Err(DbError::Init(
             "Agent-only reset changed preserved non-Agent configuration".to_owned(),
         ));
     }
-    tx.commit().await?;
     Ok(AgentDataResetReport {
         deleted_rows,
         preserved_rows: preserved_after,
@@ -253,9 +279,14 @@ async fn table_counts(
 ) -> Result<BTreeMap<String, u64>, DbError> {
     let mut counts = BTreeMap::new();
     for table in tables {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(&mut **tx)
-            .await?;
+        let sql = if table == "client_preferences" {
+            "SELECT COUNT(*) FROM client_preferences WHERE key NOT IN (?,?)".to_owned()
+        } else { format!("SELECT COUNT(*) FROM {table}") };
+        let mut query = sqlx::query_scalar::<_,i64>(&sql);
+        if table == "client_preferences" {
+            query = query.bind(AGENT_SELECTION_PREFERENCES[0]).bind(AGENT_SELECTION_PREFERENCES[1]);
+        }
+        let count: i64 = query.fetch_one(&mut **tx).await?;
         let count = u64::try_from(count)
             .map_err(|_| DbError::Init(format!("negative row count for {table}")))?;
         counts.insert(table.clone(), count);

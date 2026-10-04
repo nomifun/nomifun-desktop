@@ -86,19 +86,9 @@ function toNormalizedToolGroupStatus(status: unknown): NormalizedToolStatus {
   }
 }
 
-const getResultDisplayText = (
-  result_display: IMessageToolGroup['content'][0]['result_display']
-): string | undefined => {
-  if (!result_display) return undefined;
-  if (typeof result_display === 'string') return result_display;
-  if ('file_diff' in result_display) return result_display.file_diff;
-  if ('img_url' in result_display) return result_display.relative_path || result_display.img_url;
-  return undefined;
-};
-
 export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCall[] {
   if (!Array.isArray(message.content)) return [];
-  return message.content.map(({ name, call_id, description, status, result_display }) => {
+  return message.content.map(({ name, call_id, description, status }) => {
     const displayStatus = normalizeToolGroupStatus(status);
     const desc = typeof description === 'string' ? description.slice(0, 100) : '';
 
@@ -108,7 +98,6 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
       status: toNormalizedToolGroupStatus(displayStatus),
       description: desc,
       ...(description ? { input: description } : {}),
-      output: getResultDisplayText(result_display),
     };
   });
 }

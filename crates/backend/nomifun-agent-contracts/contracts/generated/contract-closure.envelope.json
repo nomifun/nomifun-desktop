@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "schema_version": "1.0.0",
-    "decision_revision": "2026-09-13-remove-agent-editor-test",
+    "decision_revision": "2026-10-04-canonical-agent-session",
     "decisions": [
       {
         "decision_id": "D-001",
@@ -22,7 +22,7 @@
       {
         "decision_id": "D-004",
         "status": "confirmed",
-        "contract": "One Codex-derived sidecar runtime replaces Nomi while preserving complete Coding."
+        "contract": "One in-process nomifun.nomi Runtime owns both Chat and Coding execution through the same canonical Session journal."
       },
       {
         "decision_id": "D-005",
@@ -32,37 +32,37 @@
       {
         "decision_id": "D-006",
         "status": "confirmed",
-        "contract": "Thin Functional Kernel is closed; all business domains are plugins."
+        "contract": "The Kernel owns admission and frozen authority; domain Modules own actions and resource semantics."
       },
       {
         "decision_id": "D-007",
         "status": "confirmed",
-        "contract": "Package, Capability, Skill, and MCP are the four product layers; Capability is executable."
+        "contract": "Agent revisions select Module and Action grants; Skill, MCP, Provider and typed Resource bindings retain separate owners."
       },
       {
         "decision_id": "D-008",
         "status": "confirmed",
-        "contract": "Preset has initial and on-demand capability sets resolved once before Session creation."
+        "contract": "Immutable Agent revision and Session Snapshot freeze the selected execution closure before Turn admission."
       },
       {
         "decision_id": "D-009",
         "status": "confirmed",
-        "contract": "The official preset key exact-set contains seven role presets."
+        "contract": "Official Agent presets are seeded from the exact current official-agent-seed-manifest."
       },
       {
         "decision_id": "D-010",
         "status": "confirmed",
-        "contract": "Agent Preset uses one progressive editor; package, capability, skill, and MCP navigation remain separate."
+        "contract": "The Agent editor configures Module and Action grants and resources without exposing a Runtime selector."
       },
       {
         "decision_id": "D-011",
         "status": "confirmed",
-        "contract": "First final-stack gate contains chat.minimal, coding.codex, and CI-only sample.echo."
+        "contract": "Chat and Coding use one adaptive Runtime; no parallel legacy engine or transcript is installed."
       },
       {
         "decision_id": "D-012",
         "status": "confirmed",
-        "contract": "Agent Store generation 5 is a clean Agent-data start with no legacy Agent conversion or compatibility read."
+        "contract": "The canonical Agent data generation contains no legacy Agent conversion, compatibility reader or dual write."
       },
       {
         "decision_id": "D-013",
@@ -82,7 +82,7 @@
       {
         "decision_id": "D-016",
         "status": "confirmed",
-        "contract": "Stable freezes a vendor-neutral seam; local install and one SDK begin only in Phase N1."
+        "contract": "The Unified Plugin Core is the sole plugin implementation and authorization source."
       },
       {
         "decision_id": "D-017",
@@ -102,27 +102,27 @@
       {
         "decision_id": "D-020",
         "status": "confirmed",
-        "contract": "Nomi is removed by one bounded C9 shutdown after the three release-blocking platform candidates; no sticky canary or durable handoff platform is required."
+        "contract": "One official Runtime factory is installed; replaced factories and compatibility branches are physically removed."
       },
       {
         "decision_id": "D-021",
         "status": "confirmed",
-        "contract": "AgentSessionId UUIDv7 is the only product and execution session identity; Conversation is absent from v4."
+        "contract": "AgentSessionId UUIDv7 is the sole Session identity; user-facing Conversation terminology projects that same identity."
       },
       {
         "decision_id": "D-023",
         "status": "confirmed",
-        "contract": "Official seeds are role-complete and context-minimal; G0 freezes their exact contribution manifest."
+        "contract": "Official seeds are role-complete and context-minimal; exact immutable Agent revision closure governs execution."
       },
       {
         "decision_id": "D-024",
         "status": "confirmed",
-        "contract": "One irreversible delete closure uses the real Runtime dispose result, purges Session-owned content, and leaves only the four-field tombstone; callers provide no synthetic zero proof."
+        "contract": "One irreversible delete closure uses the real Runtime dispose result, purges Session-owned content, and leaves a minimal owner-scoped tombstone; callers provide no synthetic cleanup proof."
       },
       {
         "decision_id": "D-025",
         "status": "confirmed",
-        "contract": "Compatibility compares only the frozen selected execution closure; incompatibility leaves the existing Session read-only and requires an explicit fork."
+        "contract": "Native checkpoints require exact admitted build and binding; closed canonical event history may cross an explicitly validated model or Agent transition as data without granting authority."
       },
       {
         "decision_id": "D-026",
@@ -132,12 +132,12 @@
       {
         "decision_id": "D-027",
         "status": "confirmed",
-        "contract": "C9 performs one bounded shutdown, descendant-process cleanup, and explicit unknown handling before physical Nomi deletion; no online drain or exact-zero proof platform is required."
+        "contract": "Runtime disposal performs bounded cancellation, descendant cleanup and explicit unknown-effect handling before physical Session content deletion."
       },
       {
         "decision_id": "D-028",
         "status": "confirmed",
-        "contract": "The release-blocking native platforms are Windows Desktop x64, macOS Desktop arm64, and Linux Desktop x64; additional targets are non-blocking engineering work."
+        "contract": "Platform verification follows the current validation manifest and supported desktop viewport; one host never certifies another native platform."
       }
     ],
     "canonical_sources": [
@@ -156,7 +156,7 @@
       },
       {
         "source_kind": "canonical_agent_store_schema",
-        "logical_path": "crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql",
+        "logical_path": "crates/backend/nomifun-db/migrations/001_canonical_baseline.sql",
         "owns": [
           "tables",
           "indexes",
@@ -203,7 +203,7 @@
       },
       {
         "resolution_id": "CR-005",
-        "canonical_rule": "Snapshot freezes only the selected capability, provider, tool, model, resource, and Runtime execution closure; actual build identity exists only in runtime/bound."
+        "canonical_rule": "Snapshot freezes the selected execution closure; actual admitted build and binding are recorded in native TurnStarted and checked exactly for native checkpoint recovery."
       },
       {
         "resolution_id": "CR-006",
@@ -211,15 +211,15 @@
       },
       {
         "resolution_id": "CR-007",
-        "canonical_rule": "Agent-only reset clears only tables whose schema reset_scope is agent_data and preserves all other domain configuration."
+        "canonical_rule": "Agent-only reset clears canonical AgentData tables and explicitly owned Session-bound domain relations, releases live Agent references, and preserves non-Agent business configuration and immutable external deduplication identity."
       },
       {
         "resolution_id": "CR-008",
-        "canonical_rule": "Runtime checkpoints and content-addressed objects are derived storage; canonical SQLite facts are sufficient for safe rebuild."
+        "canonical_rule": "Runtime checkpoints are derived recovery data; canonical event and payload facts own context. Message projections never supply missing Runtime history."
       },
       {
         "resolution_id": "CR-009",
-        "canonical_rule": "Fresh initialization installs generation 5 schema, preserves non-Agent configuration, seeds current official Presets, and starts with empty Session and Execution collections."
+        "canonical_rule": "Fresh initialization installs the current canonical schema, preserves non-Agent configuration at the clean-cut boundary, seeds current official Presets, and starts with empty Session and Execution collections."
       },
       {
         "resolution_id": "CR-010",
@@ -237,5 +237,5 @@
     "production_behavior_included": false,
     "unresolved_decisions": []
   },
-  "payload_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848"
+  "payload_digest": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4"
 }

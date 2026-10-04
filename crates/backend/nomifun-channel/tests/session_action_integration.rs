@@ -223,11 +223,11 @@ async fn gs2_multiple_sessions_returned() {
     let uid2 = create_user(&repo, &channel_plugin_id, "p2", "telegram").await;
 
     session_mgr
-        .get_or_create_session(&uid1, "c1", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid1, "c1", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
     session_mgr
-        .get_or_create_session(&uid2, "c2", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid2, "c2", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
 
@@ -257,11 +257,11 @@ async fn pc1_same_user_different_chat() {
     let uid = create_user(&repo, &channel_plugin_id, "p1", "telegram").await;
 
     let s1 = session_mgr
-        .get_or_create_session(&uid, "chatA", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid, "chatA", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
     let s2 = session_mgr
-        .get_or_create_session(&uid, "chatB", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid, "chatB", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
 
@@ -282,11 +282,11 @@ async fn pc2_different_users_same_chat() {
     let uid2 = create_user(&repo, &channel_plugin_id, "p2", "telegram").await;
 
     let s1 = session_mgr
-        .get_or_create_session(&uid1, "chatA", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid1, "chatA", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
     let s2 = session_mgr
-        .get_or_create_session(&uid2, "chatA", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid2, "chatA", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
 
@@ -302,11 +302,11 @@ async fn pc3_same_user_same_chat_reuses() {
     let uid = create_user(&repo, &channel_plugin_id, "p1", "telegram").await;
 
     let s1 = session_mgr
-        .get_or_create_session(&uid, "chatA", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid, "chatA", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
     let s2 = session_mgr
-        .get_or_create_session(&uid, "chatA", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid, "chatA", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
 
@@ -323,15 +323,15 @@ async fn ru3_revoke_clears_sessions() {
     let uid2 = create_user(&repo, &channel_plugin_id, "p2", "telegram").await;
 
     session_mgr
-        .get_or_create_session(&uid1, "c1", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid1, "c1", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
     session_mgr
-        .get_or_create_session(&uid1, "c2", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid1, "c2", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
     session_mgr
-        .get_or_create_session(&uid2, "c1", &channel_plugin_id, "acp", None)
+        .get_or_create_session_for_chat(&uid2, "c1", &channel_plugin_id, "acp", nomifun_channel::types::ChatKind::Direct, None)
         .await
         .unwrap();
 

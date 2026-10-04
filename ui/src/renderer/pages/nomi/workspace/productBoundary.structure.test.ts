@@ -31,9 +31,11 @@ describe('desktop companion product boundary', () => {
   });
 
   test('the collapsed desktop surface exposes direct companion switching', () => {
-    expect(companionWindow.includes("className='nomi-companion-switcher'")).toBe(true);
-    expect(companionWindow.includes('item.companion_id !== companionId')).toBe(true);
-    expect(companionWindow.includes('activateCompanionWindow(item.companion_id)')).toBe(true);
+    const switcher = read(new URL('../../companion/CompanionSwitcher.tsx', import.meta.url));
+    expect(switcher.includes("className='nomi-companion-switcher'")).toBe(true);
+    expect(switcher.includes('item.companion_id !== companionId')).toBe(true);
+    expect(companionWindow.includes('<CompanionSwitcher')).toBe(true);
+    expect(companionWindow.includes('onSwitch={(id) => void activateCompanionWindow(id)}')).toBe(true);
     expect(companionWindow.includes('if (profileRef.current?.model)')).toBe(true);
   });
 

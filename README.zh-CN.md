@@ -603,18 +603,19 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:browser-platform-boundary` | Enforce native conversation Browser ownership, isolated background-browser boundaries, and retirement of legacy browser paths. |
 | `bun run check:desktop-ui-boundary` | 校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流 |
-| `bun run check:uarc-boundary` | 校验 UARC 单 Runtime、generation-5 Agent Store、Capability/Resource 和平台边界，阻止退役架构回流 |
+| `bun run check:uarc-boundary` | 校验单一Runtime、canonical Agent Store、Module/Resource边界；退役生产引用预算为零 |
 | `bun run check:nomi-core-live-provider` | Compile the credential-isolated canonical AgentSession live Provider smoke without making a live request. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
 | `bun run check:agent-reliability` | 读取独立评测 evidence.json 验证三项 99% 统计下界（--input 路径）；样本不足不会通过 |
-| `bun run check` | 聚合静态检查：typecheck + 桌面 UI 边界 + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器/Unified Plugin 边界 + Agent 词汇 + 脚本登记 |
+| `bun run check` | 聚合类型、桌面UI、资源规范、canonical Agent Session、Runtime/Plugin边界及脚本登记检查 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |
 | `bun run check:icons` | 校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到） |
 | `bun run check:dead-css` | 死 CSS 工具类禁令：拦住 <任意颜色前缀>-[rgb(var(--RAMP-N))] / border-border-* / border-b-base / border-b-light / {bg,text,border}-RAMP-N/NN（存量已清零，无基线，出现一处即失败） |
 | `bun run check:unified-plugin-boundary` | 校验 Unified Plugin 单合同、单 Router/Bridge、canonical DB 表与旧 N1/M1/发布聚合物理删除 |
-| `bun run gate:agent-v2` | 仅保留 contract-closure 合同检查；旧 Wrapper 阶段门禁已退役，不构成多 Engine 验收 |
+| `bun run gate:agent-v2` | 校验当前canonical Agent合同与生成物完整性 |
+| `bun run check:agent-session-boundary` | 校验canonical事件上下文、单native字段、单数据库基线及旧代码和文档物理删除 |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
 | **维护 / 工具** | |

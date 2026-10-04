@@ -13,6 +13,7 @@ describe('renderer bootstrap storage boundary', () => {
   test('routes nullable system-info generation through the tolerant initializer', () => {
     expect(mainSource.includes('initializeBrowserStorageGeneration(info?.storageGeneration)')).toBe(true);
     expect(mainSource.includes('setBrowserStorageGeneration(info.storageGeneration)')).toBe(false);
+    expect(mainSource.includes('initializeAgentBrowserStorageGeneration(info?.agentDataGeneration)')).toBe(true);
   });
 
   test('keeps genuine storage bootstrap failures visible', () => {
