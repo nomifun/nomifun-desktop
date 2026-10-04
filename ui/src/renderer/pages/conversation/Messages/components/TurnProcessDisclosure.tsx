@@ -28,6 +28,8 @@ interface TurnProcessDisclosureProps<T> {
   getProcessItemKey: (item: T) => string;
   getProcessItemState: (item: T) => TurnDisclosureProcessState;
   getProcessItemLayoutKind?: (item: T) => string;
+  processFooter?: React.ReactNode;
+  activityLabel?: string;
 }
 
 export interface TurnProcessDisclosureExpansionSnapshot {
@@ -74,9 +76,11 @@ function TurnProcessDisclosure<T>({
   getProcessItemKey,
   getProcessItemState,
   getProcessItemLayoutKind,
+  processFooter,
+  activityLabel,
 }: TurnProcessDisclosureProps<T>) {
   const { t } = useTranslation();
-  const hasProcessItems = item.processItems.length > 0;
+  const hasProcessItems = item.processItems.length > 0 || processFooter != null;
   const [expanded, setExpanded] = useState(() => getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
   const [now, setNow] = useState(() => Date.now());
   const expansionSnapshotRef = useRef<TurnProcessDisclosureExpansionSnapshot>({
@@ -135,6 +139,7 @@ function TurnProcessDisclosure<T>({
   const headerContent = (
     <>
       <span className='turn-process-disclosure__label'>{label}</span>
+      {activityLabel && <span className='turn-process-disclosure__activity' role='status'>{activityLabel}</span>}
       {hasProcessItems && (
         <Right
           theme='outline'
@@ -205,6 +210,7 @@ function TurnProcessDisclosure<T>({
               </div>
             );
           })}
+          {processFooter}
         </div>
       )}
     </div>

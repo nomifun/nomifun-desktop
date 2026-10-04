@@ -78,6 +78,9 @@ import TurnDeliverablesCard from './components/TurnDeliverablesCard';
 import { isInternalInstructionToolCall, isSupersededPlanToolFailure } from './planToolVisibility';
 import type { MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
+import { useExecutionSafe } from '../execution/ExecutionContext';
+import { delegatedTurnPresentation, resolveConversationDelegation } from './conversationDelegationModel';
+import DelegationProgress from './components/DelegationProgress';
 
 type SourceMessageId = MessageId;
 
@@ -742,6 +745,7 @@ const MessageList: React.FC<{
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
+  const execution = useExecutionSafe();
   const creationTaskOwnerMessageIds = useConversationCreationTaskOwnerMessageIds();
   const thinkingDisplay = useThinkingDisplayPreferences();
   useAutoPreviewOfficeFiles(conversationContext);
@@ -843,6 +847,19 @@ const MessageList: React.FC<{
     }
     return result;
   }, [list, thinkingDisplay.visible, conversationContext?.isProcessing]);
+
+  const delegation = useMemo(() => resolveConversationDelegation(conversationContext?.conversation_id, execution,
+    assignTurnIdsFromUserRequests(list.map(message => {
+      const role = getProcessedItemRole(message);
+      return { id: message.id, turnId: role === 'user' ? message.msg_id : message.turn_id, role,
+        createdAt: message.created_at ?? 0,
+        displayAt: message.type === 'text' ? message.content.display_at_ms : undefined,
+        sourceMessageIds: getProcessedItemSourceMessageIds(message),
+        turnStartedAt: getProcessedItemTurnStartedAt(message) };
+    }), {
+      activeTurnId: conversationContext?.activeTurnId,
+      activeRequestMessageId: conversationContext?.activeRequestMessageId,
+    })), [conversationContext?.conversation_id, conversationContext?.activeTurnId, conversationContext?.activeRequestMessageId, execution, list]);
 
   const displayList = useMemo<IProcessedItem[]>(() => {
     const itemById = new Map<string, IRenderableItem>();
@@ -1240,6 +1257,8 @@ const MessageList: React.FC<{
   };
 
   const renderTurnDisclosure = (item: ITurnProcessDisclosureVO, highlighted: boolean) => {
+    const linkedDelegation = delegation?.turnId === item.msg_id ? delegation : undefined;
+    const presentation = delegatedTurnPresentation(item, linkedDelegation);
     const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
       item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
     const visibleProcessItems = selectJournalProcessItems(item.processItems, {
@@ -1300,7 +1319,12 @@ const MessageList: React.FC<{
 
     return (
       <TurnProcessDisclosure
-        item={{ ...item, processItems: visibleProcessItems }}
+        item={{ ...presentation, processItems: visibleProcessItems }}
+        activityLabel={linkedDelegation ? linkedDelegation.detail
+          ? t('messages.delegation.activity', { status: t(`agentExecution.status.execution.${linkedDelegation.detail.execution.status}`) })
+          : t('messages.delegation.syncing') : undefined}
+        processFooter={linkedDelegation && execution ? <DelegationProgress delegation={linkedDelegation}
+          projectStep={execution.projectStep} refetch={execution.refetch} /> : undefined}
         highlighted={highlighted}
         renderProcessItem={renderJournalProcessItem}
         getProcessItemKey={getProcessedItemAnchorId}

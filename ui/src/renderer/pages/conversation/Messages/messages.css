@@ -337,6 +337,105 @@
   white-space: nowrap;
 }
 
+.turn-process-disclosure__activity {
+  margin-left: 6px;
+  color: var(--color-text-2, #4e5969);
+}
+
+.turn-process-disclosure--live .turn-process-disclosure__activity {
+  color: var(--primary);
+}
+
+.conversation-delegation {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  color: var(--color-text-2, #4e5969);
+}
+
+.conversation-delegation__heading,
+.conversation-delegation__empty,
+.conversation-delegation__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.conversation-delegation__heading {
+  min-height: 28px;
+  font-size: 14px;
+}
+
+.conversation-delegation__count {
+  margin-left: auto;
+  color: var(--color-text-3, #86909c);
+  font-size: 12px;
+}
+
+.conversation-delegation__empty {
+  flex-wrap: wrap;
+  margin-left: 24px;
+  font-size: 13px;
+  line-height: 22px;
+}
+
+.conversation-delegation__goal {
+  overflow-wrap: anywhere;
+}
+
+.conversation-delegation__row {
+  width: 100%;
+  min-height: 32px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  text-align: left;
+}
+
+button.conversation-delegation__row { cursor: pointer; }
+button.conversation-delegation__row:hover { color: var(--color-text-1, #1d2129); }
+button.conversation-delegation__row:focus-visible {
+  outline: 2px solid var(--color-primary-light-3, #bedaff);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.conversation-delegation__icon {
+  flex: none;
+  width: 16px;
+  color: var(--color-text-3, #86909c);
+}
+
+.conversation-delegation__content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.conversation-delegation__name,
+.conversation-delegation__participant { display: block; overflow-wrap: anywhere; }
+.conversation-delegation__participant { color: var(--color-text-3, #86909c); font-size: 12px; }
+.conversation-delegation__status { flex: none; font-size: 12px; color: var(--color-text-3, #86909c); }
+.conversation-delegation__task--running .conversation-delegation__status { color: var(--primary); }
+.conversation-delegation__task--completed .conversation-delegation__status { color: var(--success); }
+.conversation-delegation__task--failed .conversation-delegation__status { color: var(--danger); }
+.conversation-delegation__task--waiting_input .conversation-delegation__status { color: var(--warning); }
+.conversation-delegation__note {
+  margin: 4px 0 0 24px;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
 .turn-process-disclosure__arrow {
   flex: none;
   opacity: 0.75;
