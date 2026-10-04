@@ -626,6 +626,8 @@ mod tests {
                 tasks: Vec::new(),
                 traits: Vec::new(),
                 context_limit: None,
+                output_limit: None,
+                token_limit_sources: None,
             },
             ModelInfo {
                 id: "us.anthropic.claude-sonnet-4-v1:0".into(),
@@ -633,6 +635,8 @@ mod tests {
                 tasks: vec![nomifun_api_types::ModelTask::Chat],
                 traits: Vec::new(),
                 context_limit: None,
+                output_limit: None,
+                token_limit_sources: None,
             },
         ];
         enrich_model_suggestions("bedrock", &mut models);
@@ -650,9 +654,12 @@ mod tests {
             tasks: Vec::new(),
             traits: Vec::new(),
             context_limit: Some(1_048_576),
+            output_limit: Some(65_536),
+            token_limit_sources: None,
         }];
         enrich_model_suggestions("gemini", &mut models);
         assert_eq!(models[0].context_limit, Some(1_048_576));
+        assert_eq!(models[0].output_limit, Some(65_536));
         assert!(!models[0].tasks.is_empty());
     }
 }

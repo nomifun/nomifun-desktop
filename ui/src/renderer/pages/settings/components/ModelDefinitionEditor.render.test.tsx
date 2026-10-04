@@ -403,7 +403,8 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('上下文窗口')).toBe(true);
     expect(html.includes('最大输出（tokens）')).toBe(true);
     expect(html.includes('data-output-limit-input')).toBe(true);
-    expect(html.includes('未设置最大输出，将使用供应商默认值。')).toBe(true);
+    expect(html.includes(zhSettings.outputLimitProviderDefault)).toBe(true);
+    expect(zhSettings.outputLimitProviderDefault.includes('服务商/模型')).toBe(true);
   });
 
   test('places model reasoning depth beside Chat generation limits', () => {

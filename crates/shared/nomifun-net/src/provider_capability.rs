@@ -84,7 +84,11 @@ pub fn classify_unsupported_technical_capability(
             Some(ProviderTechnicalCapability::FunctionCalling)
         }
         "reasoning" | "reasoning_effort" | "thinking" => {
-            Some(ProviderTechnicalCapability::Reasoning)
+            // A rejected tier/budget is not proof that the model lacks the
+            // entire reasoning feature. Keep genuine parameter/feature
+            // rejection distinct from unsupported enum values.
+            if direct(&["unsupported_value", "invalid_value"]) { None }
+            else { Some(ProviderTechnicalCapability::Reasoning) }
         }
         "stream" | "stream_options" | "streaming" => {
             Some(ProviderTechnicalCapability::Streaming)
@@ -108,6 +112,10 @@ mod tests {
         for body in [
             br#"{"error":{"code":"invalid_request_error","param":"tools","message":"tools unsupported"}}"#.as_slice(),
             br#"{"error":{"code":"unsupported_parameter","param":"temperature"}}"#.as_slice(),
+            br#"{"error":{"code":"unsupported_value","param":"reasoning_effort"}}"#.as_slice(),
+            br#"{"error":{"code":"unsupported_value","param":"reasoning"}}"#.as_slice(),
+            br#"{"error":{"code":"unsupported_value","param":"thinking"}}"#.as_slice(),
+            br#"{"error":{"code":"invalid_value","param":"reasoning_effort"}}"#.as_slice(),
             br#"{"message":"streaming not supported"}"#.as_slice(),
         ] {
             assert_eq!(classify_unsupported_technical_capability_body(body), None);

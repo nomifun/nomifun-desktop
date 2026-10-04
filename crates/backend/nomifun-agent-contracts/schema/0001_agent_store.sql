@@ -390,6 +390,12 @@ CREATE TABLE agent_sessions (
         reasoning_effort_v2 IS NULL OR
         reasoning_effort_v2 IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
     ),
+    reasoning_effort_v3 TEXT CHECK (
+        reasoning_effort_v3 IS NULL OR (
+            state <> 'deleted' AND
+            reasoning_effort_v3 IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+        )
+    ),
     CHECK (
         (
             state IN ('live', 'deleting') AND
@@ -405,7 +411,7 @@ CREATE TABLE agent_sessions (
             agent_binding_json IS NULL AND remote_binding_id IS NULL AND
             remote_binding_version IS NULL AND parent_agent_session_id IS NULL AND
             fork_base_payload_id IS NULL AND reasoning_effort IS NULL AND
-            reasoning_effort_v2 IS NULL AND next_seq IS NULL AND
+            reasoning_effort_v2 IS NULL AND reasoning_effort_v3 IS NULL AND next_seq IS NULL AND
             created_at IS NULL AND deleted_at IS NOT NULL
         )
     ),

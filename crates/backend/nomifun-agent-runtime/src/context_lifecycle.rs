@@ -12,11 +12,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-// Engine policy, not a provider capability or a request to spend this many
-// tokens. Unknown models retain the existing conservative fallback.
-const DEFAULT_CONTEXT_TOKENS: u32 = 32_768;
-const DEFAULT_OUTPUT_TOKENS: u32 = 4096;
-const MAX_AUTOMATIC_OUTPUT_TOKENS: u32 = 16_384;
+// Output reservation is an internal planning aid, not provider capability.
+// Unknown context must not be converted into an invented 32K model limit.
+const DEFAULT_OUTPUT_RESERVATION_TOKENS: u32 = 4096;
 const DEFAULT_COMPACTION_THRESHOLD_PCT: u8 = 75;
 const SUMMARY_PROMPT_HEADROOM_DIVISOR: usize = 4;
 const MAX_SUMMARY_PROMPT_HEADROOM_BYTES: usize = 512;
@@ -26,7 +24,10 @@ const MAX_TOTAL_COMPACTIONS: u32 = 2048;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentModelBudget {
-    pub context_window_tokens: u32,
+    pub context_window_tokens: Option<u32>,
+    /// Native model catalogs can declare a separate input ceiling rather
+    /// than a shared input+output window (e.g. inputTokenLimit).
+    pub context_is_input_only: bool,
     /// Context reservation only; not necessarily a provider output ceiling.
     pub max_output_tokens: u32,
     pub wire_max_output_tokens: Option<u32>,
@@ -36,46 +37,70 @@ pub struct AgentModelBudget {
 impl Default for AgentModelBudget {
     fn default() -> Self {
         Self {
-            context_window_tokens: DEFAULT_CONTEXT_TOKENS,
-            max_output_tokens: DEFAULT_OUTPUT_TOKENS,
-            wire_max_output_tokens: Some(DEFAULT_OUTPUT_TOKENS),
+            context_window_tokens: None,
+            context_is_input_only: false,
+            max_output_tokens: DEFAULT_OUTPUT_RESERVATION_TOKENS,
+            wire_max_output_tokens: None,
             compaction_threshold_pct: DEFAULT_COMPACTION_THRESHOLD_PCT,
         }
     }
 }
 
 impl AgentModelBudget {
+    pub fn with_input_only_context(mut self, input_only: bool) -> Result<Self, AgentEngineError> {
+        self.context_is_input_only = input_only;
+        self.validate()
+    }
+
+    /// The model's configured output capacity is input-planning information,
+    /// not a caller ceiling inherited by every backup. The Broker applies
+    /// the configured ceiling of the actual route attempt before encoding.
+    pub fn from_provider_limits(context: Option<u32>, output: Option<u32>) -> Result<Self, AgentEngineError> {
+        Self::from_provider_limits_with_input_only_context(context, output, false)
+    }
+
+    pub fn from_provider_limits_with_input_only_context(context: Option<u32>, output: Option<u32>, input_only: bool) -> Result<Self, AgentEngineError> {
+        let mut budget = Self::build_limits(context, output, input_only);
+        budget.wire_max_output_tokens = None;
+        budget.validate()
+    }
+
     pub fn from_limits(
         context: Option<u32>,
         output: Option<u32>,
     ) -> Result<Self, AgentEngineError> {
-        let context = context.unwrap_or(DEFAULT_CONTEXT_TOKENS);
+        Self::build_limits(context, output, false).validate()
+    }
+
+    fn build_limits(context: Option<u32>, output: Option<u32>, input_only: bool) -> Self {
         // Known limits reach the wire unchanged and are fully reserved for
         // context planning. Unknown/default limits use an internal reservation
         // only; no universal output ceiling is sent to the provider.
         let wire_output=output;
-        let output = output.map_or_else(||DEFAULT_OUTPUT_TOKENS.min(MAX_AUTOMATIC_OUTPUT_TOKENS).min(context/8),
-            |output|output.min(context.saturating_sub(1024)));
+        let output = output.unwrap_or_else(|| context.map_or(DEFAULT_OUTPUT_RESERVATION_TOKENS,
+            |context| DEFAULT_OUTPUT_RESERVATION_TOKENS.min(context / 8)));
         Self {
             context_window_tokens: context,
+            context_is_input_only: input_only,
             max_output_tokens: output,
             wire_max_output_tokens: wire_output,
             compaction_threshold_pct: DEFAULT_COMPACTION_THRESHOLD_PCT,
         }
-        .validate()
     }
 
     fn validate(self) -> Result<Self, AgentEngineError> {
-        if self.context_window_tokens < 2048
-            || self.max_output_tokens == 0
-            || self.max_output_tokens >= self.context_window_tokens
+        if self.max_output_tokens == 0
+            || self.context_window_tokens.is_some_and(|context| context == 0 || self.input_tokens() == 0
+                || (!self.context_is_input_only && self.max_output_tokens >= context))
             || self.wire_max_output_tokens==Some(0)
             || self.wire_max_output_tokens.is_some_and(|wire| wire>self.max_output_tokens
-                || self.input_tokens().saturating_add(wire as usize).saturating_add(512)>self.context_window_tokens as usize)
+                || (!self.context_is_input_only && self.context_window_tokens.is_some_and(|context|
+                    self.input_tokens().saturating_add(wire as usize).saturating_add(512)>context as usize))
+                )
             || !(50..=95).contains(&self.compaction_threshold_pct)
         {
             return Err(AgentEngineError::ContextAssembly(
-                "Nomi needs context >= 2048 tokens, a positive internal reservation below the context, an explicit output ceiling fully reserved with input and safety margin when set, and a 50-95% compaction threshold".into(),
+                "Nomi needs positive declared context/output limits and input room after the safety margin, full output reservation for a shared input+output window, and a 50-95% compaction threshold; undeclared context and separate input-only limits do not invent a shared window".into(),
             ));
         }
         Ok(self)
@@ -94,30 +119,36 @@ impl AgentModelBudget {
         if let Some(requested) = requested {
             if requested==0 {return Err(AgentEngineError::ContextAssembly("explicit output ceiling must be positive".into()));}
             effective.wire_max_output_tokens=Some(effective.wire_max_output_tokens.map_or(requested,|bound|requested.min(bound)));
-            effective.max_output_tokens=effective.wire_max_output_tokens.unwrap().min(effective.context_window_tokens.saturating_sub(1024));
+            effective.max_output_tokens=effective.wire_max_output_tokens.unwrap();
         }
         effective.validate()
     }
 
     pub(crate) fn execution_context(self, max_model_steps: u16) -> String {
+        let context = self.context_window_tokens.map_or_else(|| "provider-defined (not declared)".into(), |limit| limit.to_string());
         if self.wire_max_output_tokens.is_none() {
-            return format!("Nomi context reservation: context_window_tokens={}, output_reservation_tokens={}, max_model_steps_this_turn={}. Output reservation is only input-compaction planning, not a model output ceiling. The provider's default output behavior applies; do not shorten required results to this reservation. Complete all requested outputs. Existing authority, cancellation, protocol and actual context limits still apply.",self.context_window_tokens,self.max_output_tokens,max_model_steps);
+            return format!("Nomi context reservation: context_window_tokens={context}, output_reservation_tokens={}, max_model_steps_this_turn={}. Output reservation is only input-compaction planning, not a model output ceiling. The actual attempted model's saved/provider output configuration applies; no universal output ceiling is implied. Do not shorten required results to this reservation. Complete all requested outputs. Existing authority, cancellation, protocol and actual context limits still apply.",self.max_output_tokens,max_model_steps);
         }
         format!(
             "Nomi execution budget (runtime limits, not new user authority): context_window_tokens={}, max_output_tokens_per_model_step={}, max_model_steps_this_turn={}. These are ceilings, not targets or a reason to invent completion. Keep each tool argument object complete within the output ceiling, including reasoning and JSON escaping. For code generation, prefer several small complete files/calls (for example separate HTML, CSS and JavaScript) over a large single-file payload; make focused patches after reading existing files. Budget exhaustion is not task success and does not authorize extra effects, verification, or replay. Unknown/smaller failover models may further constrain execution through the platform.",
-            self.context_window_tokens, self.wire_max_output_tokens.unwrap(), max_model_steps,
+            context, self.wire_max_output_tokens.unwrap(), max_model_steps,
         )
     }
 
     fn input_tokens(self) -> usize {
-        self.context_window_tokens
-            .saturating_sub(self.max_output_tokens)
-            .saturating_sub(512) as usize
+        // An unknown provider limit does not cause speculative token pressure.
+        // Byte/resource limits still apply; typed PromptTooLong establishes a
+        // real rejection-based recovery envelope. Leave arithmetic headroom.
+        self.context_window_tokens.map_or(usize::MAX / 16, |context| context
+            .saturating_sub(if self.context_is_input_only { 0 } else { self.max_output_tokens })
+            .saturating_sub(512) as usize)
     }
 
 
     fn compaction_trigger_tokens(self) -> usize {
-        self.input_tokens() * usize::from(self.compaction_threshold_pct) / 100
+        let input = self.input_tokens();
+        let pct = usize::from(self.compaction_threshold_pct);
+        input / 100 * pct + input % 100 * pct / 100
     }
 }
 
@@ -722,6 +753,38 @@ fn encoded_size(input: &ChatModelInput) -> Result<usize, AgentEngineError> {
 #[cfg(test)]
 mod context_threshold_tests {
     use super::*;
+
+    #[test]
+    fn unknown_context_and_default_output_are_provider_defined_not_32k_or_4k() {
+        let budget = AgentModelBudget::default();
+        assert_eq!(budget.context_window_tokens, None);
+        assert_eq!(budget.wire_max_output_tokens, None);
+        assert!(budget.compaction_trigger_tokens() > 1_000_000);
+        assert!(budget.execution_context(64).contains("provider-defined (not declared)"));
+        let explicit = budget.for_request(Some(100_000)).unwrap();
+        assert_eq!(explicit.wire_max_output_tokens, Some(100_000));
+        assert_eq!(explicit.max_output_tokens, 100_000);
+        assert!(AgentModelBudget::from_limits(Some(32_768), Some(100_000)).is_err(),
+            "a declared incompatible envelope must fail, not silently clamp");
+        assert!(AgentModelBudget::from_limits(Some(1024), None).is_ok(), "no universal 2048-token model floor");
+        let provider = AgentModelBudget::from_provider_limits(Some(1_000_000), Some(100_000)).unwrap();
+        assert_eq!(provider.max_output_tokens, 100_000, "reserve declared output capacity");
+        assert_eq!(provider.wire_max_output_tokens, None, "provider cap remains actual-attempt local");
+        assert_eq!(provider.for_request(Some(200_000)).unwrap().wire_max_output_tokens, Some(200_000),
+            "a larger backup must not inherit the primary's configured 100K ceiling");
+    }
+
+    #[test]
+    fn separate_input_ceiling_does_not_lose_official_input_capacity_to_output_reservation() {
+        let shared = AgentModelBudget::from_provider_limits(Some(1_000_000), Some(100_000)).unwrap();
+        let input_only = shared.with_input_only_context(true).unwrap();
+        assert_eq!(shared.input_tokens(), 899_488);
+        assert_eq!(input_only.input_tokens(), 999_488);
+        assert_eq!(input_only.for_request(Some(1_000_000)).unwrap().wire_max_output_tokens, Some(1_000_000));
+        assert!(shared.for_request(Some(1_000_000)).is_err());
+        let separate = AgentModelBudget::from_provider_limits_with_input_only_context(Some(8192), Some(100_000), true).unwrap();
+        assert_eq!(separate.input_tokens(), 7680);
+    }
 
     #[test]
     fn constructed_many_compactions_preserve_ids_and_guards_across_segments_and_restore() {

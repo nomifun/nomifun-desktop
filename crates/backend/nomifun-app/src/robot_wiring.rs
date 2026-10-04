@@ -33,8 +33,6 @@ use tokio::sync::{mpsc, watch};
 #[cfg(test)]
 use tokio::sync::broadcast;
 
-const ROBOT_VISION_MAX_TOKENS: u32 = 512;
-
 /// Production bridge from the robot's one-shot image request to the shared
 /// Agent Chat resolver. Protocol, endpoint and auth come exclusively from the
 /// selected model's persisted Chat capability.
@@ -76,7 +74,7 @@ impl VisionCompletionExecutor for AgentRobotVisionExecutor {
             &config,
             "你在为一台物理机器人看图。用一到两句中文口语描述你看到的内容，直接回答问题。",
             vec![message],
-            ROBOT_VISION_MAX_TOKENS,
+            None,
         )
         .await
         .map_err(|error| anyhow::anyhow!("视觉模型调用失败: {error}"))?;

@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import { parseProviderId } from '@/common/types/ids';
+import { OutputLimitInput } from '@/renderer/pages/settings/components/OutputLimitInput';
 import NomiCreativeModelSelect from '../../models/NomiCreativeModelSelect';
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import {
@@ -777,15 +778,10 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
                     defaultValue: 'Maximum planning output tokens',
                   })}
                 </span>
-                <InputNumber
-                  min={128}
-                  max={32_768}
-                  step={128}
-                  value={promptPlanning?.maxTokens ?? 4096}
-                  onChange={(maxTokens) =>
-                    typeof maxTokens === 'number' &&
-                    onChange(patchPromptPlanning(template, { maxTokens }))
-                  }
+                <OutputLimitInput
+                  value={promptPlanning?.maxTokens ?? undefined}
+                  onChange={(maxTokens) => onChange(patchPromptPlanning(template, { maxTokens }))}
+                  compact
                 />
               </label>
               <div className={styles.twoColumns}>

@@ -98,6 +98,16 @@ const getWorkspacePathErrorPayload = (error: unknown): EmbeddedBackendErrorPaylo
   return getEmbeddedBackendErrorPayload(error);
 };
 
+const getConversationConfigurationErrorKey = (payload: EmbeddedBackendErrorPayload | undefined): string | undefined => {
+  const code = 'AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED';
+  const matches = payload?.code === code || (
+    payload?.code === 'CONFLICT'
+    && typeof payload.error === 'string'
+    && /^(?:Conflict:\s*)?AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED(?:\s*:|$)/.test(payload.error)
+  );
+  return matches ? `conversation.agentError.codes.${code}.body` : undefined;
+};
+
 const getWorkspacePathFromErrorDetails = (error: unknown): string | undefined => {
   const payload = getWorkspacePathErrorPayload(error);
   return getWorkspacePathFromDetails(payload?.details);
@@ -135,6 +145,10 @@ const normalizeConversationRuntimeWorkspaceErrorCode = (
 export const getConversationCreateErrorMessage = (error: unknown, t: TFunction): string => {
   const normalizedCode = normalizeConversationCreateErrorCode(error);
   const payload = getWorkspacePathErrorPayload(error);
+  const configurationKey = getConversationConfigurationErrorKey(payload);
+  if (configurationKey) {
+    return t(configurationKey);
+  }
   const workspacePath = getWorkspacePathFromErrorDetails(error);
   const rawMessage = payload?.error || parseError(error) || t('conversation.createFailed');
 
@@ -150,6 +164,10 @@ export const getConversationCreateErrorMessage = (error: unknown, t: TFunction):
 
 export const getConversationRuntimeWorkspaceErrorMessage = (error: unknown, t: TFunction): string => {
   const payload = getWorkspacePathErrorPayload(error);
+  const configurationKey = getConversationConfigurationErrorKey(payload);
+  if (configurationKey) {
+    return t(configurationKey);
+  }
   const providerKey = payload?.code ? providerErrorI18nKey(payload.code) : undefined;
   if (providerKey) {
     return t(providerKey);

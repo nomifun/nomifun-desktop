@@ -25,4 +25,13 @@ describe('per-capability output limit editor wiring', () => {
     expect(inputSource.includes('OUTPUT_LIMIT_UNIT_MULTIPLIERS')).toBe(true);
     expect(inputSource.includes('settings.outputLimitConverted')).toBe(true);
   });
+
+  test('passes only declared provider output windows through every catalog entry point', () => {
+    const hookSource=source('../../../hooks/agent/useModeModeList.ts');
+    expect(hookSource.includes('outputLimit: model.output_limit')).toBe(true);
+    for(const relative of ['./AddPlatformModal.tsx','./AddModelModal.tsx']) {
+      expect(source(relative).includes('outputLimit: model.outputLimit')).toBe(true);
+    }
+    expect(source('./ModelDefinitionEditor.tsx').includes('outputLimit: profile.outputLimit')).toBe(true);
+  });
 });

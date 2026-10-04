@@ -16,7 +16,9 @@ pub enum AgentEngineEvent {
         turn_operation_id: OperationId,
     },
     ExecutionBudgetPrepared {
+        /// Zero means provider-defined/undeclared, never a zero-token ceiling.
         context_window_tokens: u32,
+        /// Internal context reservation; provider wire ceiling may be absent.
         max_output_tokens: u32,
         max_model_steps: u16,
     },

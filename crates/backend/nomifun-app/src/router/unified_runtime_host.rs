@@ -733,12 +733,11 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             &self.snapshot_ref,
         )
         .await?;
-        // Unknown-limit fallback and output reservation are explicit policies;
-        // use the same frozen observation as the Broker's inference request.
-        let (context, _) = facts.envelope_with_unknown_policy(super::engine_model_facts::EngineModelLimits {
-            context_tokens: Some(32_768), output_tokens: Some(4096), compaction_threshold_pct: None,
-        }).ok_or_else(|| error("model limits cannot support Nomi context policy"))?;
-        let model_budget = AgentModelBudget::from_limits(Some(context), facts.configured_output_ceiling())
+        // Use the same frozen primary observation as inference. Unknown stays
+        // provider-defined; unused smaller failovers cannot throttle primary.
+        let primary = facts.primary_limits().ok_or_else(|| error("model route has no primary facts"))?;
+        let model_budget = AgentModelBudget::from_provider_limits_with_input_only_context(
+            primary.context_tokens, facts.configured_output_ceiling(), primary.context_is_input_only)
             .and_then(|budget| budget.with_compaction_threshold_pct(facts.compaction_threshold_pct()))
             .map_err(error)?;
         let operation = admitted.operation_id().to_owned();
@@ -931,6 +930,8 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 max_output_tokens: None,
                 reasoning: response.reasoning_effort.map(|effort| ChatReasoningRequest {
                     effort: Some(match effort {
+                        SessionReasoningEffortDto::None => ReasoningEffort::None,
+                        SessionReasoningEffortDto::Minimal => ReasoningEffort::Minimal,
                         SessionReasoningEffortDto::Low => ReasoningEffort::Low,
                         SessionReasoningEffortDto::Medium => ReasoningEffort::Medium,
                         SessionReasoningEffortDto::High => ReasoningEffort::High,

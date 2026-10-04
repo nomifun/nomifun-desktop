@@ -197,6 +197,66 @@ async fn chat_context_settings_round_trip_through_model_routes() {
 }
 
 #[tokio::test]
+async fn model_token_limits_round_trip_custom_and_explicit_default_without_clamping() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Nullable budget contract").await;
+    let app = system_routes(build_state(&db));
+    for (context, output, explicit_null) in [
+        (Some(1_000_003_i64), Some(531_007_i64), false),
+        (Some(131_129), Some(31_007), false),
+        (None, None, true),
+        (Some(131_129), Some(31_007), false),
+        (None, None, false),
+    ] {
+        let mut capability = chat_capability();
+        if let Some(value) = context { capability["context_limit"] = json!(value); }
+        else if explicit_null { capability["context_limit"] = Value::Null; }
+        if let Some(value) = output { capability["output_limit"] = json!(value); }
+        else if explicit_null { capability["output_limit"] = Value::Null; }
+        let saved = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
+            "provider_id": provider_id, "model":{"model":"budget-roundtrip", "capabilities":[capability]}
+        })))).await.unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved = body_json(saved).await;
+        let capability = &saved["data"]["capabilities"][0];
+        assert_eq!(capability.get("context_limit").and_then(Value::as_i64), context);
+        assert_eq!(capability.get("output_limit").and_then(Value::as_i64), output);
+        let repository = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+        let row = nomifun_db::IProviderModelCapabilityRepository::get(
+            &repository, &provider_id, "budget-roundtrip", "chat"
+        ).await.unwrap().unwrap();
+        assert_eq!((row.context_limit, row.output_limit), (context, output));
+    }
+}
+
+#[tokio::test]
+async fn provider_clone_preserves_manual_and_default_model_token_limits() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Budget clone source").await;
+    let app = system_routes(build_state(&db));
+    for (model, context, output) in [("manual-model", Some(1_000_003_i64), Some(31_007_i64)), ("default-model", None, None)] {
+        let mut capability = chat_capability();
+        capability["context_limit"] = json!(context);
+        capability["output_limit"] = json!(output);
+        if model == "manual-model" {
+            capability["provider_params"] = json!({"_nomifun_context_limit_kind":"input_only"});
+        }
+        let response = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
+            "provider_id":provider_id,"model":{"model":model,"capabilities":[capability]}
+        })))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    let cloned = nomifun_db::IProviderRepository::clone_graph(&repository, &provider_id, "Budget clone").await.unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    let source = nomifun_db::IProviderModelCapabilityRepository::list_for_provider(&capabilities, &provider_id)
+        .await.unwrap().into_iter().map(|row|(row.model,row.task,row.context_limit,row.output_limit,row.provider_params)).collect::<Vec<_>>();
+    let target = nomifun_db::IProviderModelCapabilityRepository::list_for_provider(&capabilities, &cloned.provider_id)
+        .await.unwrap().into_iter().map(|row|(row.model,row.task,row.context_limit,row.output_limit,row.provider_params)).collect::<Vec<_>>();
+    assert_eq!(target, source);
+}
+
+#[tokio::test]
 async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence() {
     let db = init_database_memory().await.unwrap();
     let app = system_routes(build_state(&db));

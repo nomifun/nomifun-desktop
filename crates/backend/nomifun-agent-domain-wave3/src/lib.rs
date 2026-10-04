@@ -229,8 +229,8 @@ pub struct CreationTextRequest {
     pub target: CreationTaskTarget,
     pub prompt: String,
     pub system: Option<String>,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -288,10 +288,6 @@ pub struct CreationMusicRequest {
     #[serde(default)]
     pub instrumental: bool,
     pub format: Option<String>,
-}
-
-const fn default_max_tokens() -> u32 {
-    4_096
 }
 
 const fn default_creation_count() -> u32 {
@@ -1380,7 +1376,7 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
                 "target": creation_target_schema(),
                 "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
                 "system": {"type": "string", "maxLength": MAX_SYSTEM_CHARS},
-                "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072}
+                "max_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX}
             }),
             &["target", "prompt"],
         ),
@@ -2010,10 +2006,10 @@ fn validate_creation_text(request: &CreationTextRequest) -> Result<(), Wave3Host
             })
         })
         .and_then(|_| {
-            if (1..=131_072).contains(&request.max_tokens) {
+            if request.max_tokens.is_none_or(|limit| limit > 0) {
                 Ok(())
             } else {
-                Err("max_tokens must be between 1 and 131072".to_owned())
+                Err("max_tokens must be a positive 32-bit integer".to_owned())
             }
         })
         .map_err(Wave3HostPortError::invalid_request)
@@ -2591,6 +2587,21 @@ mod tests {
     }
 
     #[test]
+    fn creation_text_token_limit_is_optional_and_explicit_limits_stay_validated() {
+        let input = json!({
+            "target": {"kind": "conversation_turn", "conversation_id": "0190f5fe-7c00-7a00-8000-000000000001", "message_id": "0190f5fe-7c00-7a00-8000-000000000002"},
+            "prompt": "draft a report"
+        });
+        let mut request: CreationTextRequest = serde_json::from_value(input).unwrap();
+        assert_eq!(request.max_tokens, None);
+        validate_creation_text(&request).unwrap();
+        request.max_tokens = Some(u32::MAX);
+        validate_creation_text(&request).unwrap();
+        request.max_tokens = Some(0);
+        assert!(validate_creation_text(&request).is_err());
+    }
+
+    #[test]
     fn creative_resource_descriptors_match_the_frozen_typed_slots() {
         let descriptors = typed_resource_descriptors();
         assert_eq!(descriptors.len(), 2);
@@ -2971,7 +2982,7 @@ mod tests {
                 },
                 prompt: "hello".to_owned(),
                 system: None,
-                max_tokens: 4_096,
+                max_tokens: Some(4_096),
             }),
         });
         let waker = Waker::noop();

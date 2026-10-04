@@ -430,6 +430,8 @@ async fn session_reasoning_effort_is_persisted_and_updated_independently() {
     assert_eq!(updated.agent_binding, frozen_binding);
 
     for effort in [
+        ReasoningEffort::None,
+        ReasoningEffort::Minimal,
         ReasoningEffort::XHigh,
         ReasoningEffort::Max,
         ReasoningEffort::Ultra,

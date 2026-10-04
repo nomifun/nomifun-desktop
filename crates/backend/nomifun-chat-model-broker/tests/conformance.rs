@@ -197,6 +197,38 @@ struct StaticCredentialStore {
     mismatch: bool,
 }
 
+struct OutputBoundRouteResolver {
+    routes: ResolvedChatRouteSet,
+    limits: BTreeMap<String, u32>,
+}
+
+#[async_trait]
+impl ChatRouteResolver for OutputBoundRouteResolver {
+    async fn resolve(&self, _selection: &ChatRouteSelection) -> Result<ResolvedChatRouteSet, ChatModelError> {
+        Ok(self.routes.clone())
+    }
+    async fn output_limit_for_route(&self, route: &ResolvedChatRoute) -> Result<Option<u32>, ChatModelError> {
+        Ok(self.limits.get(route.model_route_id.as_ref()).copied())
+    }
+}
+
+struct OutputBoundCaptureTransport {
+    requests: Arc<Mutex<Vec<ProviderWireRequest>>>,
+}
+
+#[async_trait]
+impl ProviderTransport for OutputBoundCaptureTransport {
+    async fn open_stream(&self, request: ProviderWireRequest, _credential: CredentialLease) -> Result<ProviderWireStream, ChatModelError> {
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(request);
+        if requests.len() == 1 {
+            return Err(ChatModelError::new(ChatModelErrorCode::ProviderUnavailable,
+                "fixture selects the next configured route", ChatRetryDirective::Failover));
+        }
+        Ok(Box::pin(stream::iter(successful_frames("output-bound", "bounded reply"))))
+    }
+}
+
 #[derive(Default)]
 struct RecordingCapabilityObserver {
     observations: Mutex<Vec<(String, ChatModelFeature)>>,
@@ -968,6 +1000,151 @@ fn provider_output_default_omits_optional_wire_fields_and_required_protocols_fai
 }
 
 #[test]
+fn gemini_explicit_reasoning_controls_are_encoded_or_rejected_without_loss() {
+    use nomifun_chat_model_broker::{ChatReasoningRequest, ReasoningEffort, ReasoningSummary};
+    let transport = ScriptedTransport::new([]);
+    let adapter = GeminiAdapter::new(transport);
+    let route = route(ChatProtocol::Gemini, "thinking-controls", 1);
+    let lease = CredentialLease::new(route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle");
+    let mut request = basic_request(&route);
+    request.input.reasoning = Some(ChatReasoningRequest {
+        effort: None, summary: ReasoningSummary::Auto, max_reasoning_tokens: Some(2048),
+    });
+    let body = adapter.encode_request(&request, &route, &lease).unwrap().body;
+    assert_eq!(body["generationConfig"]["thinkingConfig"], serde_json::json!({"thinkingBudget":2048,"includeThoughts":true}));
+    request.input.reasoning.as_mut().unwrap().effort = Some(ReasoningEffort::High);
+    assert_eq!(adapter.encode_request(&request, &route, &lease).unwrap_err().code, ChatModelErrorCode::InvalidRequest);
+    request.input.reasoning.as_mut().unwrap().max_reasoning_tokens = None;
+    request.input.reasoning.as_mut().unwrap().summary = ReasoningSummary::Detailed;
+    assert_eq!(adapter.encode_request(&request, &route, &lease).unwrap_err().code, ChatModelErrorCode::UnsupportedFeature);
+    request.input.reasoning = None;
+    request.input.prompt_cache = PromptCachePolicy::Ephemeral;
+    assert_eq!(adapter.encode_request(&request, &route, &lease).unwrap_err().code, ChatModelErrorCode::UnsupportedFeature);
+}
+
+#[test]
+fn openai_separate_reasoning_budgets_and_chat_summary_details_fail_explicitly() {
+    use nomifun_chat_model_broker::{ChatReasoningRequest, ReasoningEffort, ReasoningSummary};
+    for adapter in adapters(&transport_map([])).into_iter()
+        .filter(|adapter| matches!(adapter.protocol(), ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses)) {
+        let route = route(adapter.protocol(), "reasoning-budget", 1);
+        let lease = CredentialLease::new(route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle");
+        let mut request = basic_request(&route);
+        request.input.reasoning = Some(ChatReasoningRequest {
+            effort: Some(ReasoningEffort::High), summary: ReasoningSummary::None, max_reasoning_tokens: Some(2048),
+        });
+        assert_eq!(adapter.encode_request(&request, &route, &lease).unwrap_err().code, ChatModelErrorCode::UnsupportedFeature);
+        if adapter.protocol() == ChatProtocol::OpenaiChat {
+            request.input.reasoning.as_mut().unwrap().max_reasoning_tokens = None;
+            request.input.reasoning.as_mut().unwrap().summary = ReasoningSummary::Detailed;
+            assert_eq!(adapter.encode_request(&request, &route, &lease).unwrap_err().code, ChatModelErrorCode::UnsupportedFeature);
+        }
+    }
+}
+
+#[test]
+fn official_reasoning_tiers_preserve_default_absence_and_explicit_disable() {
+    use nomifun_chat_model_broker::{ChatReasoningRequest, ReasoningEffort, ReasoningSummary};
+    for adapter in adapters(&transport_map([])).into_iter()
+        .filter(|adapter| matches!(adapter.protocol(), ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses | ChatProtocol::Gemini)) {
+        let route = route(adapter.protocol(), "official-tiers", 1);
+        let lease = CredentialLease::new(route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle");
+        let mut request = basic_request(&route);
+        let defaults = adapter.encode_request(&request, &route, &lease).unwrap().body;
+        assert!(defaults.get("reasoning_effort").is_none());
+        assert!(defaults.get("reasoning").is_none());
+        assert!(defaults["generationConfig"].get("thinkingConfig").is_none());
+        request.input.reasoning = Some(ChatReasoningRequest {
+            effort: Some(ReasoningEffort::Minimal), summary: ReasoningSummary::None, max_reasoning_tokens: None,
+        });
+        let minimal = adapter.encode_request(&request, &route, &lease).unwrap().body;
+        let effort = match adapter.protocol() {
+            ChatProtocol::OpenaiChat => &minimal["reasoning_effort"],
+            ChatProtocol::OpenaiResponses => &minimal["reasoning"]["effort"],
+            ChatProtocol::Gemini => &minimal["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            _ => unreachable!(),
+        };
+        assert_eq!(effort, "minimal");
+        request.input.reasoning.as_mut().unwrap().effort = Some(ReasoningEffort::None);
+        assert!(!request.input.required_features().contains(&ChatModelFeature::Reasoning));
+        if adapter.protocol() == ChatProtocol::Gemini {
+            assert_eq!(adapter.encode_request(&request, &route, &lease).unwrap_err().code, ChatModelErrorCode::UnsupportedFeature);
+        } else {
+            let disabled = adapter.encode_request(&request, &route, &lease).unwrap().body;
+            let effort = if adapter.protocol() == ChatProtocol::OpenaiChat { &disabled["reasoning_effort"] }
+                else { &disabled["reasoning"]["effort"] };
+            assert_eq!(effort, "none");
+        }
+    }
+}
+
+#[tokio::test]
+async fn openai_chat_concise_summary_is_rejected_before_any_transport_call() {
+    use nomifun_chat_model_broker::{ChatReasoningRequest, ReasoningEffort, ReasoningSummary};
+    let primary = route(ChatProtocol::OpenaiChat, "unsupported-summary", 1);
+    let mut request = basic_request(&primary);
+    request.input.reasoning = Some(ChatReasoningRequest {
+        effort: Some(ReasoningEffort::High), summary: ReasoningSummary::Concise, max_reasoning_tokens: None,
+    });
+    let transport = ScriptedTransport::new([]);
+    let transports = transport_map([(ChatProtocol::OpenaiChat, provider_transport(&transport))]);
+    let broker = broker(StaticCausalityGate::allow(), ResolvedChatRouteSet { primary, failovers: Vec::new() },
+        Arc::new(StaticCredentialStore { mismatch: false }), &transports, BrokerRetryPolicy::default());
+    let output = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(output.last().unwrap().as_ref().unwrap_err().code, ChatModelErrorCode::UnsupportedFeature);
+    assert_eq!(transport.calls(), 0);
+}
+
+#[tokio::test]
+async fn failover_output_bound_comes_from_actual_attempt_and_preserves_explicit_caller_bound() {
+    for (primary_protocol, backup_protocol, primary_limit, backup_limit) in [
+        (ChatProtocol::OpenaiChat, ChatProtocol::Anthropic, 4096, 100_000),
+        (ChatProtocol::Anthropic, ChatProtocol::OpenaiChat, 100_000, 4096),
+    ] {
+        for caller_bound in [None, Some(512)] {
+            let primary = route(primary_protocol, "bound-primary", 1);
+            let backup = route(backup_protocol, "bound-backup", 1);
+            let mut request = basic_request(&primary);
+            request.input.max_output_tokens = caller_bound;
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let transport: Arc<dyn ProviderTransport> = Arc::new(OutputBoundCaptureTransport { requests: Arc::clone(&requests) });
+            let transports = transport_map([(primary_protocol, Arc::clone(&transport)), (backup_protocol, transport)]);
+            let resolver = OutputBoundRouteResolver {
+                routes: ResolvedChatRouteSet { primary, failovers: vec![backup] },
+                limits: BTreeMap::from([("bound-primary".into(), primary_limit), ("bound-backup".into(), backup_limit)]),
+            };
+            let broker = ChatModelBroker::new(StaticCausalityGate::allow(), Arc::new(resolver),
+                Arc::new(StaticCredentialStore { mismatch: false }), adapters(&transports),
+                BrokerRetryPolicy { max_total_attempts: 2, max_attempts_per_route: 1 }).unwrap();
+            let output = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+            assert!(output.iter().all(Result::is_ok));
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for (index, limit) in [primary_limit, backup_limit].into_iter().enumerate() {
+                assert_eq!(requests[index].body["max_tokens"].as_u64(),
+                    Some(u64::from(caller_bound.map_or(limit, |caller| caller.min(limit)))));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn required_attempt_without_caller_or_model_output_limit_fails_before_transport() {
+    let primary = route(ChatProtocol::Anthropic, "missing-bound", 1);
+    let mut request = basic_request(&primary);
+    request.input.max_output_tokens = None;
+    let transport = ScriptedTransport::new([]);
+    let transports = transport_map([(ChatProtocol::Anthropic, provider_transport(&transport))]);
+    let broker = broker(StaticCausalityGate::allow(), ResolvedChatRouteSet { primary, failovers: Vec::new() },
+        Arc::new(StaticCredentialStore { mismatch: false }), &transports, BrokerRetryPolicy::default());
+    let output = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    let error = output.last().unwrap().as_ref().unwrap_err();
+    assert_eq!(error.code, ChatModelErrorCode::InvalidRequest);
+    assert!(error.message.contains("explicit output token ceiling"));
+    assert_eq!(transport.calls(), 0);
+}
+
+#[test]
 fn parallel_tool_delivery_preference_is_optional_and_uses_each_protocol_control() {
     for adapter in adapters(&transport_map([])) {
         let protocol = adapter.protocol();
@@ -1172,6 +1349,27 @@ async fn broker_reports_only_conclusive_pre_semantic_capability_failures() {
         *observer.observations.lock().unwrap(),
         vec![("observed".to_owned(), ChatModelFeature::ToolCalls)]
     );
+}
+
+#[tokio::test]
+async fn rejected_reasoning_tier_keeps_feature_health_and_surfaces_parameter_error() {
+    let primary = route(ChatProtocol::OpenaiChat, "unsupported-tier", 1);
+    let request = basic_request(&primary);
+    let transport = ScriptedTransport::new([TransportScript::Frames(vec![frame("error", serde_json::json!({
+        "error":{"code":"unsupported_value","param":"reasoning_effort","message":"unsupported tier"}
+    }))])]);
+    let transports = transport_map([(ChatProtocol::OpenaiChat, provider_transport(&transport))]);
+    let observer = Arc::new(RecordingCapabilityObserver::default());
+    let broker = broker_with_observer(StaticCausalityGate::allow(),
+        ResolvedChatRouteSet { primary, failovers: Vec::new() },
+        Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+        BrokerRetryPolicy { max_total_attempts: 1, max_attempts_per_route: 1 }, observer.clone());
+    let output = broker.open_chat_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    let error = output.last().unwrap().as_ref().unwrap_err();
+    assert_eq!(error.code, ChatModelErrorCode::InvalidRequest);
+    assert_eq!(error.retry, ChatRetryDirective::Never);
+    assert!(error.unsupported_feature.is_none());
+    assert!(observer.observations.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

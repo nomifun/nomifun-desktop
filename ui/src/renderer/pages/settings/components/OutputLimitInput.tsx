@@ -39,9 +39,8 @@ interface OutputLimitInputProps {
 }
 
 export const normalizeOutputLimit = (value: unknown): number | undefined => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
-  const normalized = Math.trunc(value);
-  return normalized > 0 ? normalized : undefined;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= MAX_OUTPUT_LIMIT_TOKENS
+    ? value : undefined;
 };
 
 export const outputLimitFromDisplayValue = (
@@ -199,6 +198,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
             })}
             onChange={(nextValue) => {
               const nextLimit = outputLimitFromDisplayValue(nextValue, unit);
+              if (typeof nextValue === 'number' && nextLimit === undefined) return;
               if (nextLimit === undefined) setCustomActive(false);
               onChange?.(nextLimit);
             }}

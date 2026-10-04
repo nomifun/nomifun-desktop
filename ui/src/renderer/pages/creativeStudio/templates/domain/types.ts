@@ -129,7 +129,8 @@ interface CreativeTemplateTextModelBinding {
 export interface CreativeTemplatePromptPlanningSettings {
   model: CreativeTemplateTextModelBinding | null;
   instruction: string;
-  maxTokens: number;
+  /** Omit/null uses provider defaults; existing explicit token ceilings stay exact. */
+  maxTokens?: number | null;
 }
 
 type CreativeTemplatePromptSource =

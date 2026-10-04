@@ -214,8 +214,7 @@ describe('model definition capability selection', () => {
   });
 
   test('prefills a provider-declared context window without overriding the user', () => {
-    // The provider catalog is the only automatic source for this number — the
-    // fallback is a silent 200k assumption that miscalibrates compaction.
+    // Only an explicit provider declaration supplies a numeric window.
     expect(
       applyCatalogSuggestionForTask(
         { model: '', capabilities: [] },
@@ -244,6 +243,60 @@ describe('model definition capability selection', () => {
         'chat'
       ).capabilities[0]?.contextLimit
     ).toBeUndefined();
+  });
+
+  test('catalog limits and traits are advisory, including an explicit provider-default choice', () => {
+    const suggestion = { model: 'catalog/model', tasks: ['chat' as const], traits: ['vision_input' as const],
+      contextLimit: 1_000_000, outputLimit: 100_000 };
+    const fresh = applyCatalogSuggestionForTask({model:'',capabilities:[emptyCapabilityDraft('chat')]},suggestion,'chat');
+    expect(fresh.capabilities[0]).toMatchObject({contextLimit:1_000_000,outputLimit:100_000,traits:['vision_input']});
+    const explicit = patchCapabilityDraft(emptyCapabilityDraft('chat'), {
+      contextLimit: undefined, outputLimit: undefined, traits: ['web_search'],
+      providerParamsJson:'{"reasoning_effort":"high"}',
+    });
+    const preserved = applyCatalogSuggestionForTask({model:'old',capabilities:[explicit]},suggestion,'chat');
+    expect(preserved.capabilities[0]).toMatchObject({contextLimit:undefined,outputLimit:undefined,traits:['web_search'],
+      providerParamsJson:explicit.providerParamsJson});
+    const persisted = capabilityDraftFromResponse({task:'chat',traits:[],protocol:'openai.chat_text',connection_role:'default'});
+    const unchanged = applyCatalogSuggestionForTask({model:'old',capabilities:[persisted]},suggestion,'chat');
+    expect(unchanged.capabilities[0]).toMatchObject({contextLimit:undefined,outputLimit:undefined,traits:[]});
+    const numeric = patchCapabilityDraft(explicit,{contextLimit:2_000_000,outputLimit:200_000});
+    const kept = applyCatalogSuggestionForTask({model:'old',capabilities:[numeric]},suggestion,'chat');
+    expect(kept.capabilities[0]).toMatchObject({contextLimit:2_000_000,outputLimit:200_000});
+    expect(capabilityInputsFromDefinition(preserved)![0]).not.toHaveProperty('outputLimitSource');
+  });
+
+  test('token validation accepts the wire integer range without imposing a universal model ceiling', () => {
+    const manifests = {chat:manifest('chat','openai.chat_text')};
+    const validate = (contextLimit?:number,outputLimit?:number) => validateModelDefinition({model:'m',capabilities:[
+      {...emptyCapabilityDraft('chat'),protocol:'openai.chat_text',contextLimit,outputLimit}
+    ]},manifests,'https://provider.example');
+    for (const value of [undefined,1_000_000,100_000_000,0xffff_ffff]) expect(validate(value,value).valid).toBe(true);
+    for (const value of [0,-1,1.5,Number.NaN,Number.POSITIVE_INFINITY,0x1_0000_0000]) {
+      expect(validate(value,value).errors.some(error=>error.code==='invalid_token_limit')).toBe(true);
+    }
+  });
+
+  test('catalog context semantics are imported only with a new declared window, never over user modes', () => {
+    const suggestion={model:'declared',tasks:['chat' as const],traits:[],contextLimit:1_000_000,
+      outputLimit:100_000,contextLimitKind:'input_only' as const};
+    const applied=applyCatalogSuggestionForTask({model:'',capabilities:[emptyCapabilityDraft('chat')]},suggestion,'chat');
+    expect(JSON.parse(applied.capabilities[0].providerParamsJson)).toEqual({_nomifun_context_limit_kind:'input_only'});
+    expect(capabilityInputsFromDefinition(applied)![0].provider_params).toEqual({_nomifun_context_limit_kind:'input_only'});
+    for(const kind of [undefined,'combined' as const]) {
+      const adopted=applyCatalogSuggestionForTask({model:'',capabilities:[]},{...suggestion,contextLimitKind:kind},'chat');
+      expect(adopted.capabilities[0].providerParamsJson).toBe(kind===undefined?'':JSON.stringify({_nomifun_context_limit_kind:'combined'},null,2));
+    }
+    for(const capability of [
+      patchCapabilityDraft(emptyCapabilityDraft('chat'),{contextLimit:undefined}),
+      {...emptyCapabilityDraft('chat'),contextLimit:200_000},
+      capabilityDraftFromResponse({task:'chat',traits:[],protocol:'openai.chat_text',connection_role:'default'}),
+      {...emptyCapabilityDraft('chat'),providerParamsJson:'{"_nomifun_context_limit_kind":"combined","temperature":0.2}'},
+      {...emptyCapabilityDraft('chat'),providerParamsJson:'{"temperature":'},
+    ]) {
+      const updated=applyCatalogSuggestionForTask({model:'old',capabilities:[capability]},suggestion,'chat');
+      expect(updated.capabilities[0].providerParamsJson).toBe(capability.providerParamsJson);
+    }
   });
 
   test('the add-model sequence reaches a saveable draft', () => {
@@ -563,7 +616,7 @@ describe('model definition capability selection', () => {
       contentEndpoint: '',
       realtimeEndpoint: '',
       allowCrossOriginCredentials: false,
-      providerParamsJson: '',
+      providerParamsJson: '{"voice":"alloy"}',
     });
     expect(
       validateModelDefinition(
@@ -957,11 +1010,26 @@ describe('model reasoning effort', () => {
       expect(protocolSupportsReasoningEffort(protocol)).toBe(false);
     }
     expect(reasoningEffortsForProtocol('openai.responses')).toEqual([
-      'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
+      'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
     ]);
     expect(reasoningEffortsForProtocol('gemini.generate_text')).toEqual([
-      'low', 'medium', 'high',
+      'minimal', 'low', 'medium', 'high',
     ]);
+  });
+
+  test('explicit none/minimal survive JSON separately from provider defaults and Gemini rejects none', () => {
+    for(const effort of ['none','minimal'] as const) {
+      const params=withProviderParamReasoningEffort('{"temperature":0.2}',effort);
+      expect(providerParamReasoningEffort(params)).toBe(effort);
+      expect(JSON.parse(withProviderParamReasoningEffort(params,undefined))).toEqual({temperature:0.2});
+      const capability={...emptyCapabilityDraft('chat'),protocol:'openai.chat_text',providerParamsJson:params};
+      expect(validateModelDefinition({model:'m',capabilities:[capability]},
+        {chat:manifest('chat','openai.chat_text')},'https://provider.example').valid).toBe(true);
+      const google={...capability,protocol:'gemini.generate_text'};
+      const validation=validateModelDefinition({model:'m',capabilities:[google]},
+        {chat:manifest('chat','gemini.generate_text')},'https://provider.example');
+      expect(validation.valid).toBe(effort==='minimal');
+    }
   });
 
   test('validation rejects malformed or unsupported authored reasoning levels', () => {

@@ -102,7 +102,6 @@ fn rate_limit_poll_backoff(
 /// The MIME stamped on produced text artifacts (the bridge keys its text-asset
 /// special case off a `text/plain` prefix).
 const TEXT_MIME: &str = "text/plain; charset=utf-8";
-const DEFAULT_TEXT_MAX_TOKENS: u32 = 4096;
 
 /// Complete one-shot text request handed from the creation state machine to
 /// the application's Agent Chat execution bridge.
@@ -113,7 +112,7 @@ pub struct CreationTextRequest {
     pub expected_config_revision: Option<i64>,
     pub system: String,
     pub prompt: String,
-    pub max_tokens: u32,
+    pub max_tokens: Option<u32>,
 }
 
 /// Chat execution seam for Workshop text nodes.
@@ -242,14 +241,15 @@ fn music_prompt(params: &Value) -> Result<String, CreationError> {
     ))
 }
 
-fn param_text_max_tokens(params: &Value) -> Result<u32, CreationError> {
+fn param_text_max_tokens(params: &Value) -> Result<Option<u32>, CreationError> {
     let Some(value) = params.get("max_tokens") else {
-        return Ok(DEFAULT_TEXT_MAX_TOKENS);
+        return Ok(None);
     };
     value
         .as_u64()
         .filter(|value| *value > 0)
         .and_then(|value| u32::try_from(value).ok())
+        .map(Some)
         .ok_or_else(|| {
             CreationError::new(
                 "invalid_params",
@@ -3180,7 +3180,25 @@ mod tests {
         assert_eq!(requests[0].model, "test-model");
         assert_eq!(requests[0].system, "be concise");
         assert_eq!(requests[0].prompt, "draft a launch note");
-        assert_eq!(requests[0].max_tokens, 777);
+        assert_eq!(requests[0].max_tokens, Some(777));
+    }
+
+    #[tokio::test]
+    async fn text_task_without_token_limit_leaves_provider_default_available() {
+        let adapter = MockAdapter::with(
+            "must-not-run", vec![ModelTask::Chat],
+            MockBehavior::SubmitError("media adapter must not execute Chat".into()),
+        );
+        let h = harness(adapter.clone(), "openai").await;
+        let mut task = new_task(&h.provider_id, "text");
+        task.params = json!({"prompt": "draft a long report"});
+        let created = h.svc.create_test_task(task).await.unwrap();
+        let done = wait_terminal(&h.svc, &created.creation_task_id).await;
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        assert_eq!(adapter.submit_calls.load(Ordering::SeqCst), 0);
+        let requests = h.text_executor.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].max_tokens, None);
     }
 
     #[tokio::test]
@@ -4383,8 +4401,8 @@ mod tests {
 
     #[test]
     fn text_max_tokens_is_strict_and_bounded() {
-        assert_eq!(param_text_max_tokens(&json!({})).unwrap(), DEFAULT_TEXT_MAX_TOKENS);
-        assert_eq!(param_text_max_tokens(&json!({"max_tokens": 8192})).unwrap(), 8192);
+        assert_eq!(param_text_max_tokens(&json!({})).unwrap(), None);
+        assert_eq!(param_text_max_tokens(&json!({"max_tokens": 8192})).unwrap(), Some(8192));
         for invalid in [
             json!({"max_tokens": 0}),
             json!({"max_tokens": -1}),

@@ -14,9 +14,6 @@ use serde_json::json;
 use crate::adapter::{AdapterRegistry, ProtocolAdapter};
 use crate::adapters::default_realtime_adapters;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::media_prompt::{
-    apply_known_media_prompt_limit, apply_media_prompt_length_retry,
-};
 use crate::realtime::{
     RealtimeAdapterRegistry, RealtimeServerEvent, RealtimeSession, RealtimeSessionConfig,
 };
@@ -310,38 +307,15 @@ impl ModelInvokeService {
                 call.config_revision
             )));
         }
-        let mut context = InvocationContext::from_resolved(call, adapter)?;
-        let _ = apply_known_media_prompt_limit(
-            &context.call.protocol,
-            &context.call.model,
-            &mut context.call.request,
-        );
+        let context = InvocationContext::from_resolved(call, adapter)?;
         let redactor = context.call.connection.auth.secret_redactor();
-        let first_attempt = context
+        // Submit the complete caller prompt. Provider length errors must not
+        // trigger a second generation with changed user instructions.
+        let outcome = context
             .adapter
             .submit(&self.http, &context.call)
             .await
-            .map_err(|error| error.redacted(&redactor));
-        let outcome = match first_attempt {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if apply_media_prompt_length_retry(
-                    &context.call.protocol,
-                    &context.call.model,
-                    &mut context.call.request,
-                    &error,
-                )
-                .is_none()
-                {
-                    return Err(error);
-                }
-                context
-                    .adapter
-                    .submit(&self.http, &context.call)
-                    .await
-                    .map_err(|retry_error| retry_error.redacted(&redactor))?
-            }
-        };
+            .map_err(|error| error.redacted(&redactor))?;
         let outcome = bind_pending_job(
             &context.call.protocol,
             context.call.config_revision,
@@ -766,7 +740,6 @@ fn validate_typed_task_controls(protocol: &str, request: &TaskRequest) -> Result
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use nomifun_api_types::ModelTask;
     use nomifun_common::encrypt_string;
@@ -1122,7 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stepfun_long_image_prompt_is_fitted_before_the_provider_wire() {
+    async fn stepfun_long_image_prompt_is_submitted_and_retained_without_changes() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/images/generations"))
@@ -1148,8 +1121,8 @@ mod tests {
         .await;
         let canonical_prompt = format!("START-{}-END", "角色细节".repeat(300));
 
-        let output = svc
-            .invoke(
+        let (output, context) = svc
+            .invoke_with_context(
                 &mref(&pid, "step-image-edit-2"),
                 image_request(&canonical_prompt),
             )
@@ -1158,64 +1131,59 @@ mod tests {
         assert!(matches!(output, TaskOutcome::Done(TaskResult::Assets(_))));
 
         let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         let wire_prompt = body["prompt"].as_str().expect("StepFun prompt string");
-        assert!(wire_prompt.chars().count() <= 512);
-        assert!(wire_prompt.starts_with("START-"));
-        assert!(wire_prompt.ends_with("-END"));
-        assert!(canonical_prompt.chars().count() > 512, "canonical prompt remains complete");
+        assert_eq!(wire_prompt, canonical_prompt);
+        let TaskRequest::ImageGeneration(retained) = &context.call.request else {
+            panic!("expected retained image request")
+        };
+        assert_eq!(retained.prompt, canonical_prompt);
     }
 
     #[tokio::test]
-    async fn provider_prompt_too_long_response_retries_video_once_with_reported_limit() {
-        let server = MockServer::start().await;
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let responder_attempts = Arc::clone(&attempts);
-        Mock::given(method("POST"))
-            .and(path("/v1/videos"))
-            .respond_with(move |_request: &wiremock::Request| {
-                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    ResponseTemplate::new(400).set_body_json(json!({
+    async fn provider_prompt_too_long_errors_preserve_full_video_prompt_without_retry() {
+        for message in ["prompt max 256", "prompt too long; actual length is 1810"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/videos"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
                         "error": {
                             "type": "prompt_too_long",
-                            "message": "prompt max 256"
+                            "message": message
                         }
-                    }))
-                } else {
-                    ResponseTemplate::new(200)
-                        .set_body_json(json!({"id": "v1", "status": "queued"}))
-                }
-            })
-            .expect(2)
-            .mount(&server)
-            .await;
+                    })))
+                .expect(1)
+                .mount(&server)
+                .await;
 
-        let (svc, pool) = setup().await;
-        let pid = seed_provider(&pool, &server.uri()).await;
-        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
-        let canonical_prompt = format!("START-{}-END", "scene ".repeat(300));
+            let (svc, pool) = setup().await;
+            let pid = seed_provider(&pool, &server.uri()).await;
+            seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+            let canonical_prompt = format!("START-{}-END", "scene ".repeat(300));
 
-        let outcome = svc
-            .invoke(
-                &mref(&pid, "sora-2"),
-                video_request_with_prompt(&canonical_prompt),
-            )
-            .await
-            .unwrap();
-        let TaskOutcome::Pending(job) = outcome else {
-            panic!("expected retried video request to be accepted")
-        };
-        assert_eq!(job.remote_id, "v1");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            let error = svc
+                .invoke(
+                    &mref(&pid, "sora-2"),
+                    video_request_with_prompt(&canonical_prompt),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert_eq!(error.http_status, Some(400));
+            assert!(error.is_context_length_rejected());
+            assert!(error.message.contains("prompt_too_long"));
+            assert!(error.message.contains(message));
 
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        let first = String::from_utf8_lossy(&requests[0].body);
-        let second = String::from_utf8_lossy(&requests[1].body);
-        assert!(second.len() < first.len());
-        assert!(second.contains("START-"));
-        assert!(second.contains("-END"));
-        assert!(canonical_prompt.chars().count() > 256, "canonical prompt remains complete");
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let body = String::from_utf8_lossy(&requests[0].body);
+            let wire_prompt = body
+                .split_once("name=\"prompt\"").expect("multipart prompt field").1
+                .split_once("\r\n\r\n").expect("multipart prompt content").1
+                .split_once("\r\n--").expect("multipart prompt boundary").0;
+            assert_eq!(wire_prompt, canonical_prompt);
+        }
     }
 
     #[tokio::test]

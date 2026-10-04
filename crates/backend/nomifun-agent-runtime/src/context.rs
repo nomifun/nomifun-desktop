@@ -13,7 +13,9 @@ use crate::agents_md::AgentsMdContext;
 use crate::error::AgentEngineError;
 
 const DEFAULT_MAX_CONTEXT_BYTES: usize = 2 * 1024 * 1024;
-const DEFAULT_MAX_HISTORY_MESSAGES: usize = 128;
+// The byte resource envelope already bounds allocation. A fixed 128-message
+// cap discarded fitting history even on large-context models.
+const DEFAULT_MAX_HISTORY_MESSAGES: usize = usize::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +213,18 @@ mod tests {
         assert_eq!(input.messages.len(), 2);
         assert_eq!(input.messages[1], user("current"));
         assert_eq!(input.instructions, vec!["workspace rules"]);
+        assert_eq!(diagnostics.dropped_history_messages, 0);
+    }
+
+    #[test]
+    fn default_resource_budget_keeps_more_than_128_fitting_messages() {
+        let history: Vec<_> = (0..512).map(|i| user(&format!("historical user {i}"))).collect();
+        let (input, diagnostics) = AgentContextAssembler::assemble(
+            base_input(), history.clone(), user("current"), &AgentsMdContext::default(),
+            AgentContextBudget::default(),
+        ).unwrap();
+        assert_eq!(input.messages.len(), 513);
+        assert_eq!(&input.messages[..512], history.as_slice());
         assert_eq!(diagnostics.dropped_history_messages, 0);
     }
 

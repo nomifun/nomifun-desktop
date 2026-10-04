@@ -199,8 +199,10 @@ fn build_image_body(call: &ResolvedCall) -> Result<(Value, usize), InvokeError> 
         "model": call.model,
         "prompt": prompt,
         "n": count,
-        "size": size.unwrap_or(DEFAULT_IMAGE_SIZE),
     });
+    if let Some(size) = size {
+        typed["size"] = Value::String(size.to_owned());
+    }
     if let Some(images) = images {
         typed["extra_body"] = json!({"response_format": "b64_json"});
         typed["extra_body"]["image"] = Value::Array(
@@ -220,6 +222,10 @@ fn build_image_body(call: &ResolvedCall) -> Result<(Value, usize), InvokeError> 
             "Agnes image request body must be an object",
         )
     })?;
+    // Agnes requires a size. Supply the local fallback only when neither the
+    // capability nor this request selected one; configured 2K–4K tiers must
+    // survive a caller that leaves its optional typed size unset.
+    object.entry("size").or_insert_with(|| Value::String(DEFAULT_IMAGE_SIZE.into()));
     // These OpenAI-style top-level fields are specifically rejected by the
     // Agnes text-image queue. `response_format` is owned by `extra_body`.
     object.remove("quality");
@@ -473,7 +479,15 @@ fn build_video_body(
     request: &VideoGenRequest,
 ) -> Result<Value, InvokeError> {
     validate_video_model(model)?;
-    let (width, height) = video_dimensions(request.size.as_deref())?;
+    let (width, height) = if request.size.as_deref().is_some_and(|size| !size.trim().is_empty()) {
+        video_dimensions(request.size.as_deref())?
+    } else {
+        // Missing typed dimensions must not replace saved/extra dimensions
+        // with the adapter fallback. Validate the same existing wire shape.
+        let width = request_u32_field(configured, &request.extra, "width")?.unwrap_or(DEFAULT_VIDEO_WIDTH);
+        let height = request_u32_field(configured, &request.extra, "height")?.unwrap_or(DEFAULT_VIDEO_HEIGHT);
+        video_dimensions(Some(&format!("{width}x{height}")))?
+    };
     let frame_rate = request_u32_field(configured, &request.extra, "frame_rate")?
         .unwrap_or(DEFAULT_FRAME_RATE);
     if !(1..=60).contains(&frame_rate) {
@@ -664,6 +678,51 @@ mod tests {
             server.uri()
         ));
         call
+    }
+
+    #[test]
+    fn image_size_defaults_preserve_configured_and_request_tiers() {
+        for (configured, extra, typed_size, expected) in [
+            (json!({}), json!({}), None, DEFAULT_IMAGE_SIZE),
+            (json!({"size": "4K"}), json!({}), None, "4K"),
+            (json!({"size": "4K"}), json!({"size": "2K"}), None, "2K"),
+            (json!({"size": "4K"}), json!({"size": "2K"}), Some("3K"), "3K"),
+        ] {
+            let mut call = call_with_endpoint(
+                "https://unused.invalid/v1", IMAGE_MODEL, IMAGE_ADAPTER_ID,
+                "/images/generations", TaskRequest::ImageGeneration(crate::types::ImageGenRequest {
+                    prompt: "detailed scene".into(), count: 1,
+                    size: typed_size.map(str::to_owned), quality: None, extra,
+                }),
+            );
+            call.model_params = configured;
+            let (body, _) = build_image_body(&call).unwrap();
+            assert_eq!(body["size"], expected);
+        }
+    }
+
+    #[test]
+    fn video_dimensions_preserve_saved_extra_and_explicit_values_without_guessing_new_specs() {
+        let mut request = VideoGenRequest {
+            prompt: "scene".into(), seconds: None, size: None, resolution: None, inputs: Vec::new(), extra: json!({}),
+        };
+        for (configured, extra, size, expected) in [
+            (json!({}), json!({}), None, (DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT)),
+            (json!({"width": 1920, "height": 1080}), json!({}), None, (1920, 1080)),
+            (json!({"width": 1920, "height": 1080}), json!({"width": 1280, "height": 720}), None, (1280, 720)),
+            (json!({"width": 1920, "height": 1080}), json!({"width": 1280, "height": 720}), Some("768x1024"), (768, 1024)),
+        ] {
+            request.extra = extra;
+            request.size = size.map(str::to_owned);
+            let body = build_video_body(VIDEO_MODEL, &configured, &request).unwrap();
+            assert_eq!(body["width"], expected.0);
+            assert_eq!(body["height"], expected.1);
+        }
+        request.extra = json!({});
+        request.size = None;
+        for configured in [json!({"width": 0}), json!({"height": "1080"}), json!({"width": 1919})] {
+            assert!(build_video_body(VIDEO_MODEL, &configured, &request).is_err(), "invalid dimensions must not be silently defaulted");
+        }
     }
 
     #[tokio::test]

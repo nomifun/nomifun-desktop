@@ -98,7 +98,7 @@
       "max_output_tokens": 512,
       "reasoning": {
         "effort": "low",
-        "summary": "concise"
+        "summary": "none"
       },
       "prompt_cache": "disabled",
       "response_format": {

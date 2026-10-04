@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use nomifun_api_types::{ModelInfo, ModelTask};
+use nomifun_api_types::{ModelContextLimitKind, ModelInfo, ModelTask, ModelTokenLimitSources};
 use nomifun_common::AppError;
 use nomifun_model_invoke::{AuthMaterial, AuthScheme};
 use serde::Deserialize;
@@ -176,6 +176,8 @@ pub(crate) async fn fetch_deepgram_catalog(
                     tasks: vec![task],
                     traits: Vec::new(),
                     context_limit: None,
+                    output_limit: None,
+                    token_limit_sources: None,
                 });
             }
         }
@@ -214,18 +216,15 @@ async fn fetch_xai(
             .await
             .map_err(|_| AppError::BadGateway(format!("xAI {path} response was not valid JSON")))?;
         for item in body.models {
-            if let Some(model) = models.iter_mut().find(|known| known.id == item.id) {
+            let mut candidate = item.into_info();
+            if let Some(model) = models.iter_mut().find(|known| known.id == candidate.id) {
                 if !model.tasks.contains(&task) {
                     model.tasks.push(task);
                 }
+                merge_declared_limits(model, &candidate);
             } else {
-                models.push(ModelInfo {
-                    id: item.id,
-                    name: None,
-                    tasks: vec![task],
-                    traits: Vec::new(),
-                    context_limit: item.context_length,
-                });
+                candidate.tasks.push(task);
+                models.push(candidate);
             }
         }
     }
@@ -239,6 +238,8 @@ async fn fetch_xai(
         tasks: vec![ModelTask::SpeechSynthesis],
         traits: Vec::new(),
         context_limit: None,
+        output_limit: None,
+        token_limit_sources: None,
     });
     models.push(ModelInfo {
         id: "xai-stt".into(),
@@ -246,6 +247,8 @@ async fn fetch_xai(
         tasks: vec![ModelTask::SpeechRecognition],
         traits: Vec::new(),
         context_limit: None,
+        output_limit: None,
+        token_limit_sources: None,
     });
     Ok(models)
 }
@@ -273,6 +276,37 @@ struct OpenAiModel {
     /// `None` rather than being guessed from the model id.
     #[serde(default, deserialize_with = "deserialize_declared_token_limit")]
     context_length: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_declared_token_limit")]
+    max_output_tokens: Option<i64>,
+    #[serde(default)]
+    top_provider: Option<OpenAiTopProvider>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiTopProvider {
+    #[serde(default, deserialize_with = "deserialize_declared_token_limit")]
+    context_length: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_declared_token_limit")]
+    max_completion_tokens: Option<i64>,
+}
+
+impl OpenAiModel {
+    fn into_info(self) -> ModelInfo {
+        let context_limit = self.context_length.or_else(|| {
+            self.top_provider.as_ref().and_then(|provider| provider.context_length)
+        });
+        let output_limit = self.max_output_tokens.or_else(|| {
+            self.top_provider.as_ref().and_then(|provider| provider.max_completion_tokens)
+        });
+        let sources = token_limit_sources(
+            context_limit,
+            if self.context_length.is_some() { "context_length" } else { "top_provider.context_length" },
+            output_limit,
+            if self.max_output_tokens.is_some() { "max_output_tokens" } else { "top_provider.max_completion_tokens" },
+        );
+        ModelInfo { id: self.id, name: None, tasks: Vec::new(), traits: Vec::new(),
+            context_limit, output_limit, token_limit_sources: sources }
+    }
 }
 
 /// Fetch models from an OpenAI-compatible `/models` endpoint.
@@ -311,13 +345,7 @@ pub(super) async fn fetch_openai_compatible_with_auth(
     Ok(body
         .data
         .into_iter()
-        .map(|m| ModelInfo {
-            id: m.id,
-            name: None,
-            tasks: Vec::new(),
-            traits: Vec::new(),
-            context_limit: m.context_length,
-        })
+        .map(OpenAiModel::into_info)
         .collect())
 }
 
@@ -334,6 +362,12 @@ struct AnthropicModelsResponse {
 #[derive(Deserialize)]
 struct AnthropicModel {
     id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_declared_token_limit")]
+    max_input_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_declared_token_limit")]
+    max_tokens: Option<i64>,
 }
 
 async fn fetch_anthropic(
@@ -363,17 +397,20 @@ async fn fetch_anthropic(
     let body: AnthropicModelsResponse = resp.json().await.map_err(|_| {
         AppError::BadGateway("Anthropic models response was not valid JSON".into())
     })?;
-    // `/v1/models` reports only identity and display metadata; Anthropic does
-    // not publish the context window there, so nothing is carried.
+    // Newer native catalogs publish limits; older identity-only entries remain
+    // valid and unknown. Native `max_tokens` is a documented model ceiling,
+    // not the ambiguous request/default parameter in compatible catalogs.
     Ok(body
         .data
         .into_iter()
         .map(|m| ModelInfo {
             id: m.id,
-            name: None,
+            name: m.display_name,
             tasks: Vec::new(),
             traits: Vec::new(),
-            context_limit: None,
+            context_limit: m.max_input_tokens,
+            output_limit: m.max_tokens,
+            token_limit_sources: token_limit_sources(m.max_input_tokens, "max_input_tokens", m.max_tokens, "max_tokens"),
         })
         .collect())
 }
@@ -399,6 +436,8 @@ struct GeminiModel {
         deserialize_with = "deserialize_declared_token_limit"
     )]
     input_token_limit: Option<i64>,
+    #[serde(default, rename = "outputTokenLimit", deserialize_with = "deserialize_declared_token_limit")]
+    output_token_limit: Option<i64>,
 }
 
 async fn fetch_gemini(
@@ -438,6 +477,8 @@ async fn fetch_gemini(
                 tasks: Vec::new(),
                 traits: Vec::new(),
                 context_limit: m.input_token_limit,
+                output_limit: m.output_token_limit,
+                token_limit_sources: token_limit_sources(m.input_token_limit, "inputTokenLimit", m.output_token_limit, "outputTokenLimit"),
             }
         })
         .collect())
@@ -476,6 +517,8 @@ async fn fetch_bedrock(config: &FetchConfig) -> Result<Vec<ModelInfo>, AppError>
             ),
             traits: Vec::new(),
             context_limit: None,
+            output_limit: None,
+            token_limit_sources: None,
         })
         .collect::<Vec<_>>();
 
@@ -507,6 +550,8 @@ async fn fetch_bedrock(config: &FetchConfig) -> Result<Vec<ModelInfo>, AppError>
                     tasks,
                     traits: Vec::new(),
                     context_limit: None,
+                    output_limit: None,
+                    token_limit_sources: None,
                 },
             );
         }
@@ -540,16 +585,12 @@ fn is_anthropic_bedrock_identifier(identifier: &str) -> bool {
 
 fn upsert_bedrock_model(models: &mut Vec<ModelInfo>, candidate: ModelInfo) {
     if let Some(existing) = models.iter_mut().find(|model| model.id == candidate.id) {
+        merge_declared_limits(existing, &candidate);
         if existing.tasks.is_empty() && !candidate.tasks.is_empty() {
             existing.tasks = candidate.tasks;
         }
         if existing.name.is_none() {
             existing.name = candidate.name;
-        }
-        // Symmetric with the fields above so a merge can never be the place a
-        // provider-declared window gets dropped.
-        if existing.context_limit.is_none() {
-            existing.context_limit = candidate.context_limit;
         }
     } else {
         models.push(candidate);
@@ -893,11 +934,45 @@ fn declared_token_limit(value: &serde_json::Value) -> Option<i64> {
     let limit = match value {
         serde_json::Value::Number(number) => number
             .as_i64()
-            .or_else(|| number.as_f64().map(|number| number as i64))?,
+            .or_else(|| number.as_f64().filter(|value| value.is_finite()
+                && value.fract() == 0.0 && *value > 0.0 && *value < i64::MAX as f64)
+                .map(|value| value as i64))?,
         serde_json::Value::String(text) => text.trim().parse::<i64>().ok()?,
         _ => return None,
     };
     (limit > 0).then_some(limit)
+}
+
+fn token_limit_sources(context_limit: Option<i64>, context_field: &str,
+    output_limit: Option<i64>, output_field: &str) -> Option<ModelTokenLimitSources> {
+    (context_limit.is_some() || output_limit.is_some()).then(|| ModelTokenLimitSources {
+        context_limit: context_limit.map(|_| context_field.to_owned()),
+        output_limit: output_limit.map(|_| output_field.to_owned()),
+        context_limit_kind: context_limit.and_then(|_| match context_field {
+            "inputTokenLimit" | "max_input_tokens" => Some(ModelContextLimitKind::InputOnly),
+            "context_length" | "top_provider.context_length" => Some(ModelContextLimitKind::Combined),
+            _ => None,
+        }),
+    })
+}
+
+fn merge_declared_limits(existing: &mut ModelInfo, candidate: &ModelInfo) {
+    let mut sources = existing.token_limit_sources.clone().unwrap_or_default();
+    if existing.context_limit.is_none() {
+        existing.context_limit = candidate.context_limit;
+        sources.context_limit = candidate.token_limit_sources.as_ref()
+            .and_then(|source| source.context_limit.clone());
+        sources.context_limit_kind = candidate.token_limit_sources.as_ref()
+            .and_then(|source| source.context_limit_kind);
+    }
+    if existing.output_limit.is_none() {
+        existing.output_limit = candidate.output_limit;
+        sources.output_limit = candidate.token_limit_sources.as_ref()
+            .and_then(|source| source.output_limit.clone());
+    }
+    if sources.context_limit.is_some() || sources.output_limit.is_some() {
+        existing.token_limit_sources = Some(sources);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -912,6 +987,8 @@ fn fallback_models(ids: &[&str]) -> Vec<ModelInfo> {
             tasks: Vec::new(),
             traits: Vec::new(),
             context_limit: None,
+            output_limit: None,
+            token_limit_sources: None,
         })
         .collect()
 }
@@ -1026,7 +1103,11 @@ mod tests {
             .unwrap();
         assert_eq!(models[0].id, "gemini-3.1-pro");
         assert_eq!(models[0].context_limit, Some(1_048_576));
+        assert_eq!(models[0].output_limit, Some(65_536));
+        assert_eq!(models[0].token_limit_sources.as_ref().unwrap().context_limit_kind, Some(ModelContextLimitKind::InputOnly));
+        assert_eq!(models[0].token_limit_sources.as_ref().unwrap().output_limit.as_deref(), Some("outputTokenLimit"));
         assert_eq!(models[1].context_limit, None);
+        assert_eq!(models[1].output_limit, None);
     }
 
     #[tokio::test]
@@ -1073,11 +1154,62 @@ mod tests {
     }
 
     #[test]
+    fn catalog_output_limits_have_explicit_field_provenance_not_request_defaults() {
+        use serde_json::json;
+        let models: OpenAiModelsResponse = serde_json::from_value(json!({"data":[
+            {"id":"openrouter/model","context_length":131072,"top_provider":{"context_length":65536,"max_completion_tokens":32768}},
+            {"id":"direct-declared","max_output_tokens":"65536"},
+            {"id":"request-default-not-ceiling","max_tokens":4096,"default_parameters":{"max_tokens":4096}},
+            {"id":"invalid","max_output_tokens":200.5},
+            {"id":"plain-openai"}
+        ]})).unwrap();
+        let models = models.data.into_iter().map(OpenAiModel::into_info).collect::<Vec<_>>();
+        assert_eq!(models[0].context_limit, Some(131072)); // Never silently min with another field.
+        assert_eq!(models[0].output_limit, Some(32768));
+        assert_eq!(models[0].token_limit_sources.as_ref().unwrap().context_limit_kind, Some(ModelContextLimitKind::Combined));
+        assert_eq!(models[0].token_limit_sources.as_ref().unwrap().output_limit.as_deref(), Some("top_provider.max_completion_tokens"));
+        assert_eq!(models[1].output_limit, Some(65536));
+        assert_eq!(models[1].token_limit_sources.as_ref().unwrap().output_limit.as_deref(), Some("max_output_tokens"));
+        for model in &models[2..] {
+            assert_eq!(model.output_limit, None);
+            assert_eq!(model.token_limit_sources, None);
+        }
+    }
+
+    #[test]
+    fn anthropic_native_catalog_carries_new_declared_limits_and_preserves_older_unknowns() {
+        let response: AnthropicModelsResponse = serde_json::from_value(serde_json::json!({"data":[
+            {"id":"claude-live","display_name":"Claude live","max_input_tokens":1000000,"max_tokens":64000},
+            {"id":"older-identity-only"}
+        ]})).unwrap();
+        assert_eq!(response.data[0].max_input_tokens, Some(1000000));
+        assert_eq!(response.data[0].max_tokens, Some(64000));
+        assert_eq!(token_limit_sources(response.data[0].max_input_tokens, "max_input_tokens", response.data[0].max_tokens, "max_tokens").unwrap().context_limit_kind, Some(ModelContextLimitKind::InputOnly));
+        assert_eq!(response.data[1].max_input_tokens, None);
+        assert_eq!(response.data[1].max_tokens, None);
+    }
+
+    #[test]
+    fn duplicate_catalog_merge_retains_the_first_declared_limit_without_clamping() {
+        let mut existing: ModelInfo = serde_json::from_value(serde_json::json!({
+            "id":"model","context_limit":1000000,"output_limit":64000,
+            "token_limit_sources":{"context_limit":"context_length","output_limit":"max_output_tokens"}
+        })).unwrap();
+        let smaller: ModelInfo = serde_json::from_value(serde_json::json!({"id":"model","context_limit":32000,"output_limit":4096})).unwrap();
+        merge_declared_limits(&mut existing, &smaller);
+        assert_eq!(existing.context_limit, Some(1000000));
+        assert_eq!(existing.output_limit, Some(64000));
+        assert_eq!(existing.token_limit_sources.as_ref().unwrap().output_limit.as_deref(), Some("max_output_tokens"));
+    }
+
+    #[test]
     fn declared_token_limit_accepts_only_usable_positive_numbers() {
         use serde_json::json;
 
         assert_eq!(declared_token_limit(&json!(200_000)), Some(200_000));
-        assert_eq!(declared_token_limit(&json!(200_000.7)), Some(200_000));
+        assert_eq!(declared_token_limit(&json!(200_000.7)), None);
+        assert_eq!(declared_token_limit(&json!(65_536.0)), Some(65_536));
+        assert_eq!(declared_token_limit(&json!(9_223_372_036_854_775_808_u64)), None);
         assert_eq!(declared_token_limit(&json!(" 32768 ")), Some(32_768));
         for unusable in [
             json!(0),
@@ -1525,6 +1657,8 @@ mod tests {
                 tasks: Vec::new(),
                 traits: Vec::new(),
                 context_limit: None,
+                output_limit: None,
+                token_limit_sources: None,
             }
         );
     }

@@ -79,6 +79,8 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
           tasks: model.tasks,
           traits: model.traits,
           ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
+          ...(model.outputLimit === undefined ? {} : { outputLimit: model.outputLimit }),
+          ...(model.contextLimitKind === undefined ? {} : { contextLimitKind: model.contextLimitKind }),
         })),
       [modelListState.data?.models]
     );
