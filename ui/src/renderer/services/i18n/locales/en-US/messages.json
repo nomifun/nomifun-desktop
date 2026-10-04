@@ -12,6 +12,15 @@
   "toolGroupViewSteps": "View Steps",
   "toolDetailInput": "Input",
   "toolDetailOutput": "Output",
+  "toolDetailTruncated": "Output was truncated; showing retained content",
+  "toolState": {
+    "running": "Running",
+    "completed": "Ended",
+    "failed": "Failed",
+    "canceled": "Canceled",
+    "notExecuted": "Not run",
+    "skipped": "Skipped"
+  },
   "toolRetryCount": "Retried {{count}} times",
   "toolRetryAttempt": "Attempt {{number}}",
   "toolDetailLoading": "Loading...",

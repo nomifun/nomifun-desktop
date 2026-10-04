@@ -16,7 +16,7 @@ import { hasSkillSuggest, stripSkillSuggest } from '@renderer/utils/chat/skillSu
 import { hasThinkTags, stripThinkTags } from '@renderer/utils/chat/thinkTagFilter';
 import { Attention, Code, Edit, Info, Right, Terminal } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { FileChangeInfo } from '../MessageFileChanges';
 import { isContextCompressionTip } from '../processTipModel';
@@ -31,6 +31,7 @@ import type { MessageId } from '@/common/types/ids';
 import { getProcessItemState, mergeProcessStates } from '../turnProcessState';
 import { projectAssistantText, stripInternalToolCallPayload } from '../processTraceDisplayModel';
 import AssistantProtocolNotice from './AssistantProtocolNotice';
+import MessageThinking from './MessageThinking';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import {
   buildToolReceiptDetailRows,
@@ -64,12 +65,6 @@ type TranslationFn = ReturnType<typeof useTranslation>['t'];
 type ProcessTraceVariant = 'list' | 'receipt';
 type ProcessTraceIconKind = 'system' | 'tool' | 'command' | 'file' | 'edit';
 type ProcessTracePresentationState = TurnDisclosureProcessState | 'recovered';
-type LabeledToolRow = {
-  row: ToolReceiptDetailRow;
-  label: string;
-  presentationState?: ProcessTracePresentationState;
-};
-
 type ProcessTraceRow = {
   key: string;
   label: string;
@@ -100,25 +95,6 @@ const getPublicProcessNarration = (value: unknown): string => {
 };
 
 const joinCompactText = (parts: Array<string | undefined>): string => parts.filter(Boolean).join(' ');
-
-const compactRepeatedToolRows = (rows: LabeledToolRow[], t: TranslationFn): LabeledToolRow[] => {
-  const grouped = new Map<string, { item: LabeledToolRow; count: number }>();
-  for (const item of rows) {
-    const key = [item.presentationState ?? item.row.state, item.row.action, item.row.target ?? '', item.label].join('\u0000');
-    const existing = grouped.get(key);
-    if (existing) existing.count += 1;
-    else grouped.set(key, { item, count: 1 });
-  }
-  if (grouped.size === rows.length) return rows;
-  return Array.from(grouped.values()).map(({ item, count }) => count === 1 ? item : ({
-    ...item,
-    label: t('messages.processReceipt.repeatedOperation', {
-      label: item.label,
-      count,
-      defaultValue: '{{label}} · {{count}} times',
-    }),
-  }));
-};
 
 const TraceRowIcon: React.FC<{ kind?: ProcessTraceIconKind }> = ({ kind = 'system' }) => {
   const props = {
@@ -153,6 +129,7 @@ const getToolTraceIconKind = (action: ToolReceiptAction): ProcessTraceIconKind =
 
 const getToolReceiptDetailDisplayTarget = (row: ToolReceiptDetailRow, workspaceRoots: string[]): string | undefined => {
   if (!row.target) return undefined;
+  if (row.action === 'generic' && row.target.startsWith(`${row.title} `)) return row.target.slice(row.title.length + 1);
   if (row.action !== 'read_files' && row.action !== 'edit_files') return row.target;
   return formatWorkspaceFileTarget(row.target, { workspaceRoots }).label;
 };
@@ -276,7 +253,37 @@ const formatToolReceiptDetailLabel = (
     );
   }
 
-  return joinCompactText([row.title, displayTarget]);
+  return row.action === 'generic' ? displayTarget ?? row.title
+    : displayTarget && (displayTarget === row.title || displayTarget.startsWith(`${row.title} `))
+    ? displayTarget
+    : joinCompactText([row.title, displayTarget]);
+};
+
+const getToolErrorPreview = (row: ToolReceiptDetailRow): string | undefined => {
+  if (row.state !== 'failed' || !row.output) return undefined;
+  if (row.commandNotStarted || row.commandTimedOut || row.notExecutedReason || row.skipped) return undefined;
+  let preview = row.output.split(/\r?\n/).find((line) => line.trim())?.trim();
+  try {
+    const result: unknown = JSON.parse(row.output);
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      const record = result as Record<string, unknown>;
+      const error = record.error && typeof record.error === 'object'
+        ? record.error as Record<string, unknown>
+        : undefined;
+      const message = [record.message, record.error, error?.message].find((value) => typeof value === 'string');
+      const code = typeof record.code === 'string' ? record.code : error?.code;
+      preview = [code, message].filter((value): value is string => typeof value === 'string' && Boolean(value.trim())).join(' · ') || undefined;
+    } else if (typeof result === 'string') {
+      preview = result;
+    } else {
+      preview = undefined;
+    }
+  } catch {
+    // Plain-text diagnostics retain their first line; the full output stays in details.
+  }
+  if (!preview) return undefined;
+  const characters = Array.from(preview);
+  return characters.slice(0, 160).join('') + (characters.length > 160 ? '…' : '');
 };
 
 const formatFileChangeStats = (file: FileChangeInfo): string =>
@@ -433,7 +440,7 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
             </>
             {attempt.truncated && (
               <div className='turn-process-trace-detail__label'>
-                {t('messages.toolDetailLoadFailed', { defaultValue: 'Full output was truncated' })}
+                {t('messages.toolDetailTruncated', { defaultValue: 'Output was truncated; showing retained content' })}
               </div>
             )}
           </div>
@@ -447,9 +454,16 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
       <div className='turn-process-trace-detail'>
         <ToolFileListDetail rows={[row]} workspaceRoots={workspaceRoots} />
         <ToolTraceDetailSection
+          label={t('messages.toolDetailInput', { defaultValue: 'Input' })}
+          value={input}
+        />
+        <ToolTraceDetailSection
           label={t('messages.toolDetailOutput', { defaultValue: 'Output' })}
           value={row.output}
         />
+        {row.truncated && <div className='turn-process-trace-detail__label'>
+          {t('messages.toolDetailTruncated', { defaultValue: 'Output was truncated; showing retained content' })}
+        </div>}
       </div>
     );
   }
@@ -470,7 +484,7 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
       />
       {row.truncated && (
         <div className='turn-process-trace-detail__label'>
-          {t('messages.toolDetailLoadFailed', { defaultValue: 'Full output was truncated' })}
+          {t('messages.toolDetailTruncated', { defaultValue: 'Output was truncated; showing retained content' })}
         </div>
       )}
     </div>
@@ -492,9 +506,14 @@ const ToolTraceRow: React.FC<{
   currentActivity = false,
   presentationState,
 }) => {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const detailId = useId();
   const hasDetail = shouldShowToolRowDetail(row, { fileRowCount });
   const visualState = presentationState ?? row.state;
+  const errorPreview = getToolErrorPreview(row);
+  const statusKey = row.skipped ? 'skipped' : row.notExecutedReason || row.commandNotStarted ? 'notExecuted' : row.state;
+  const Header = hasDetail ? 'button' : 'div';
   const rowClassName = classNames(
     'turn-process-trace__row',
     'turn-process-trace-tool__toggle',
@@ -502,38 +521,28 @@ const ToolTraceRow: React.FC<{
     `turn-process-trace__row--${visualState}`
   );
 
-  if (!hasDetail) {
-    return (
-      <div className='turn-process-trace-tool'>
-        <div className={classNames('turn-process-trace__row', currentActivity && 'turn-process-trace__row--current-activity', `turn-process-trace__row--${visualState}`)}>
-          <TraceRowIcon kind={getToolTraceIconKind(row.action)} />
-          <span className='turn-process-trace__text' title={row.target ?? label}>
-            {label}
-          </span>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className='turn-process-trace-tool'>
-      <button
-        type='button'
+    <div className='turn-process-trace-tool' data-tool-call-id={row.key}>
+      <Header
+        type={hasDetail ? 'button' : undefined}
         className={rowClassName}
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
+        onClick={hasDetail ? () => setExpanded((value) => !value) : undefined}
+        aria-expanded={hasDetail ? expanded : undefined}
+        aria-controls={hasDetail ? detailId : undefined}
       >
         <TraceRowIcon kind={getToolTraceIconKind(row.action)} />
-        <span className='turn-process-trace__text' title={row.target ?? label}>
-          {label}
+        <span className='turn-process-trace__content'>
+          <span className='turn-process-trace__text' title={row.target ?? label}>{label}</span>
+          {errorPreview && <span className='turn-process-trace__diagnostic'>{errorPreview}</span>}
         </span>
-        <Right
+        <span className='turn-process-trace__status'>{t(`messages.toolState.${statusKey}`)}</span>
+        {hasDetail && <Right
           theme='outline'
           size='12'
           className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')}
-        />
-      </button>
-      {expanded && <ToolTraceDetail row={row} workspaceRoots={workspaceRoots} />}
+        />}
+      </Header>
+      {hasDetail && expanded && <div id={detailId}><ToolTraceDetail row={row} workspaceRoots={workspaceRoots} /></div>}
     </div>
   );
 };
@@ -650,19 +659,23 @@ const ToolProcessTraceRows: React.FC<{
   const tools = useMemo(() => normalizeToolMessages(messages), [messages]);
   const rows = useMemo(
     () =>
-      buildToolReceiptDetailRows(tools).map((row) => {
+      // Each call keeps its own position and details, including retry attempts.
+      tools.flatMap((tool) => buildToolReceiptDetailRows([tool]).map((row) => {
         // Closed turns settle only stale running rows. Completed results and
         // failures inside a mixed group retain their own lifecycle state.
         const effectiveRow = stateOverride && row.state === 'running' && !row.notExecutedReason
           ? { ...row, state: stateOverride }
           : row;
         const baseLabel = formatToolReceiptDetailLabel(effectiveRow, t, workspaceRoots);
+        const retryAttempt = tool.retry?.attemptNo;
         const recoveredAttemptCount = effectiveRow.attempts?.filter(
           (attempt) => attempt.state === 'failed'
         ).length ?? 0;
         return {
           row: effectiveRow,
-          label: recoveredAttemptCount > 0 && effectiveRow.state === 'completed'
+          label: retryAttempt && retryAttempt > 1
+            ? `${baseLabel} · ${t('messages.toolRetryAttempt', { number: retryAttempt, defaultValue: 'Attempt {{number}}' })}`
+            : recoveredAttemptCount > 0 && effectiveRow.state === 'completed'
             ? t('messages.processReceipt.recoveredAfterRetry', {
                 target: getToolReceiptDetailDisplayTarget(effectiveRow, workspaceRoots) ?? effectiveRow.title,
                 count: recoveredAttemptCount,
@@ -680,7 +693,7 @@ const ToolProcessTraceRows: React.FC<{
               ? { presentationState: 'recovered' as const }
             : {}),
         };
-      }),
+      })),
     [recoverFailures, stateOverride, t, tools, workspaceRoots]
   );
 
@@ -690,7 +703,7 @@ const ToolProcessTraceRows: React.FC<{
   const ungroupedVisibleRows = groupFailedRows
     ? rows.filter(({ row }) => row.state !== 'failed')
     : rows;
-  const visibleRows = compactRepeatedToolRows(ungroupedVisibleRows, t);
+  const visibleRows = ungroupedVisibleRows;
   const nonFileRows = visibleRows.filter(({ row }) => !isFileReceiptRow(row));
   const visibleFileRows = visibleRows.filter(({ row }) => isFileReceiptRow(row)).map(({ row }) => row);
   const currentActivityKey = rows.findLast(({ row }) => row.state === 'running')?.row.key;
@@ -885,17 +898,7 @@ const ProcessTraceItem: React.FC<{
         const content = toDisplayText(item.content.content).trim();
         if (!content || /^\[Private reasoning omitted(?: from replay)?\]$/i.test(content)) return null;
         return (
-          <ProcessTraceRows
-            rows={[{
-              key: item.id,
-              state,
-              label: state === 'running'
-                ? t('messages.processReceipt.analyzingRequest', { defaultValue: 'Analyzing the request' })
-                : state === 'completed'
-                  ? t('messages.processReceipt.analyzedRequest', { defaultValue: 'Analyzed the request' })
-                  : t('messages.processReceipt.analyzeRequest', { defaultValue: 'Analyze the request' }),
-            }]}
-          />
+          <MessageThinking message={item} variant='process' completed={state !== 'running'} />
         );
       }
     case 'tips':

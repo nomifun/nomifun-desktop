@@ -356,6 +356,15 @@ describe('normalizeToolCall', () => {
     expect(formatToolDisplayName('Bash')).toBe('Bash');
   });
 
+  it('removes canonical platform routing hashes from labels without changing tool identity', () => {
+    const alias = 'platform__plugin_development_plugin_develo__0d897918b652be9c2802';
+    expect(formatToolDisplayName(alias)).toBe('platform/plugin_development_plugin_develo');
+    expect(formatToolDisplayName('platform__custom__not-a-routing-hash')).toBe('platform__custom__not-a-routing-hash');
+    const tool = normalizeToolCall({ type: 'tool_call', content: { call_id: 'platform-call', name: alias, status: 'completed' } } as any);
+    expect(tool?.name).toBe(alias);
+    expect(tool?.key).toBe('platform-call');
+  });
+
   const infrastructureFailures = [
     'Command timed out after 120000ms.\nPartial output:\nRESULT_PASS',
     'Command was cancelled.\nSTDOUT:\npartial',

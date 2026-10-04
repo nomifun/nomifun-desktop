@@ -32,13 +32,11 @@ import contentStyles from '../components/ConversationContentColumn.module.css';
 import { useConversationColumnRef } from '../components/useConversationColumnRef';
 import HOC from '@renderer/utils/ui/HOC';
 import type { FileChangeInfo } from './MessageFileChanges';
-import { parseDiff } from './MessageFileChanges';
 import { useMessageList, useMessageListLoading } from './hooks';
 import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
 import MessageToolCall from './components/MessageToolCall';
 import MessageToolGroup from './components/MessageToolGroup';
-import { isSuccessfulWriteFileResult } from './components/toolGroupArtifactVisibility';
 import MessageText from './components/MessageText';
 import MessageThinking from './components/MessageThinking';
 import MessageListSkeleton from './components/MessageListSkeleton';
@@ -58,7 +56,6 @@ import {
   selectJournalProcessItems,
 } from './processTraceDisplayModel';
 import { formatFileTargetPreview } from './processFileTargetLabel';
-import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
 import SelectionReplyButton from './components/SelectionReplyButton';
@@ -80,7 +77,6 @@ import {
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
 import { isInternalInstructionToolCall, isSupersededPlanToolFailure } from './planToolVisibility';
 import type { MessageId } from '@/common/types/ids';
-import { ExplicitToolRetryReceiptIndex } from './toolRetryReceiptModel';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 
 type SourceMessageId = MessageId;
@@ -668,10 +664,9 @@ const getProcessItemLayoutKind = (item: IRenderableItem): string => {
 };
 
 const isPrivateJournalActivity = (item: IRenderableItem): boolean =>
-  item.type === 'thinking' ||
-  (item.type === 'agent_status' &&
+  item.type === 'agent_status' &&
     item.content.turn_summary !== true &&
-    (item.content.status === 'preparing' || item.content.status === 'prepared'));
+    (item.content.status === 'preparing' || item.content.status === 'prepared');
 
 const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActions?: boolean }> = React.memo(
   HOC((props) => {
@@ -763,66 +758,17 @@ const MessageList: React.FC<{
 
   // Pre-process message list to group tool outputs into summary cards
   const processedList = useMemo(() => {
-    // Invisible model activity must not split a visible tool stage. Public
-    // progress remains the boundary between adjacent batches of operations.
+    // Reasoning and public narration both separate adjacent tool stages.
+    // Only routine model lifecycle activity is omitted from the journal.
     const journalSources = selectJournalProcessItems(list, {
       running: conversationContext?.isProcessing === true,
       isPrivateActivity: isPrivateJournalActivity,
       isRunning: (message) => getProcessItemState(message) === 'running',
     });
     const result: Array<IMessageVO> = [];
-    let diffsChanges: FileChangeInfo[] = [];
-    let diffsSourceMessageIds: SourceMessageId[] = [];
-    let diffsTurnId: MessageId | undefined;
     let toolList: Array<IMessageToolGroup | IMessageToolCall> = [];
     let toolSourceMessageIds: SourceMessageId[] = [];
-    const retrySummaries = new ExplicitToolRetryReceiptIndex<ToolSummaryVO>();
-
-    const pushFileDffChanges = (
-      changes: FileChangeInfo,
-      sourceMessageId: SourceMessageId,
-      created_at: number,
-      msg_id?: MessageId,
-      turn_id?: MessageId
-    ) => {
-      if (diffsChanges.length && diffsTurnId && turn_id && diffsTurnId !== turn_id) {
-        diffsChanges = [];
-        diffsSourceMessageIds = [];
-      }
-      if (!diffsChanges.length) {
-        diffsSourceMessageIds = [];
-        diffsTurnId = turn_id;
-        result.push({
-          type: 'file_summary',
-          id: `summary-${sourceMessageId}`,
-          msg_id,
-          turn_id,
-          diffs: diffsChanges,
-          sourceMessageIds: diffsSourceMessageIds,
-          created_at,
-        });
-      }
-      diffsChanges.push(changes);
-      diffsSourceMessageIds.push(sourceMessageId);
-      toolList = [];
-      toolSourceMessageIds = [];
-    };
     const pushToolList = (message: IMessageToolGroup | IMessageToolCall) => {
-      const existingRetry = message.type === 'tool_call' ? retrySummaries.takeContinuation(message) : undefined;
-      if (message.type === 'tool_call' && existingRetry) {
-        existingRetry.messages.push(message);
-        const sourceMessageId = getMessageBusinessIdentity(message);
-        if (sourceMessageId) existingRetry.sourceMessageIds.push(sourceMessageId);
-        // A retry can be separated from its first attempt by thinking/text.
-        // Keep the durable summary reference above, but do not accidentally
-        // append an unrelated following tool to that earlier receipt.
-        toolList = [];
-        toolSourceMessageIds = [];
-        diffsChanges = [];
-        diffsSourceMessageIds = [];
-        diffsTurnId = undefined;
-        return;
-      }
       const groupedTurnId = toolList.find((tool) => tool.turn_id)?.turn_id;
       if (groupedTurnId && message.turn_id && groupedTurnId !== message.turn_id) {
         // A delayed event from another explicit turn must start a new receipt;
@@ -847,17 +793,6 @@ const MessageList: React.FC<{
       toolList.push(message);
       const sourceMessageId = getMessageBusinessIdentity(message);
       if (sourceMessageId) toolSourceMessageIds.push(sourceMessageId);
-      if (message.type === 'tool_call') {
-        const summary = result.findLast(
-          (item): item is ToolSummaryVO => item.type === 'tool_summary' && item.messages === toolList
-        );
-        if (summary) {
-          retrySummaries.rememberFirst(message, summary);
-        }
-      }
-      diffsChanges = [];
-      diffsSourceMessageIds = [];
-      diffsTurnId = undefined;
     };
 
     for (let i = 0, len = journalSources.length; i < len; i++) {
@@ -881,9 +816,6 @@ const MessageList: React.FC<{
       if (message.type === 'plan') {
         toolList = [];
         toolSourceMessageIds = [];
-        diffsChanges = [];
-        diffsSourceMessageIds = [];
-        diffsTurnId = undefined;
         continue;
       }
       // Connection-handshake status banners (connecting/connected/authenticated/
@@ -897,22 +829,6 @@ const MessageList: React.FC<{
         }
       }
       if (message.type === 'tool_group') {
-        if (message.content.length === 1) {
-          const writeFileResults = message.content
-            .filter(isSuccessfulWriteFileResult)
-            .map((item) => item.result_display as WriteFileResult);
-          const sourceMessageId = getMessageBusinessIdentity(message);
-          if (writeFileResults.length && writeFileResults[0].file_diff && sourceMessageId) {
-            pushFileDffChanges(
-              parseDiff(writeFileResults[0].file_diff, writeFileResults[0].file_name),
-              sourceMessageId,
-              message.created_at ?? 0,
-              message.msg_id,
-              message.turn_id
-            );
-            continue;
-          }
-        }
         pushToolList(message);
         continue;
       }
@@ -922,9 +838,6 @@ const MessageList: React.FC<{
       }
       toolList = [];
       toolSourceMessageIds = [];
-      diffsChanges = [];
-      diffsSourceMessageIds = [];
-      diffsTurnId = undefined;
       if (message.type === 'thinking' && !thinkingDisplay.visible) continue;
       result.push(message);
     }
@@ -1340,12 +1253,13 @@ const MessageList: React.FC<{
       const processState = getDisclosureProcessItemState(processItem);
       const layoutKind = getProcessItemLayoutKind(processItem);
 
-      if (layoutKind === 'text' || layoutKind === 'thinking') {
+      if (layoutKind === 'text' || layoutKind === 'thinking' || layoutKind === 'tool') {
         return renderProcessTraceItem(
           processItem,
-          'list',
+          layoutKind === 'tool' ? 'receipt' : 'list',
           workspaceRoots,
-          item.running ? undefined : processState
+          item.running ? undefined : processState,
+          processState === 'failed' && item.state !== 'failed'
         );
       }
 
@@ -1550,15 +1464,17 @@ const MessageList: React.FC<{
           {/* Gradient mask */}
           <div className='absolute bottom-0 left-0 right-0 h-100px pointer-events-none' />
           {/* Scroll button */}
-          <div className='absolute bottom-20px left-50% transform -translate-x-50% z-100'>
-            <div
+          <div className='absolute bottom-20px right-16px z-100'>
+            <button
+              type='button'
               className='flex items-center justify-center w-40px h-40px rd-full bg-base shadow-lg cursor-pointer hover:bg-1 transition-all hover:scale-110 border-1px border-solid border-3'
               onClick={handleScrollButtonClick}
               title={t('messages.scrollToBottom')}
+              aria-label={t('messages.scrollToBottom')}
               style={{ lineHeight: 0 }}
             >
               <Down theme='filled' size='20' fill={iconColors.secondary} style={{ display: 'block' }} />
-            </div>
+            </button>
           </div>
         </>
       )}

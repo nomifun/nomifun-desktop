@@ -350,9 +350,9 @@
 .turn-process-disclosure__body {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   overflow: visible;
-  padding: 14px 0 4px;
+  padding: 16px 0 8px;
 }
 
 .turn-process-disclosure__item {
@@ -362,7 +362,7 @@
 
 .turn-process-disclosure__body .turn-process-trace,
 .turn-process-disclosure__body .turn-process-trace-tool {
-  gap: 4px;
+  gap: 8px;
 }
 
 .turn-process-disclosure__body .turn-process-trace__paragraph {
@@ -373,22 +373,22 @@
 }
 
 .turn-process-disclosure__body .turn-process-trace__row {
-  min-height: 20px;
-  color: var(--color-text-3, #86909c);
+  min-height: 28px;
+  color: var(--color-text-2, #4e5969);
   font-size: var(--conversation-message-font-size);
   line-height: var(--conversation-message-line-height);
 }
 
 .turn-process-disclosure__body .turn-process-trace__row--running {
-  color: var(--color-text-3, #86909c);
+  color: var(--color-text-2, #4e5969);
 }
 
 .turn-process-disclosure__body .turn-process-trace__row--failed {
-  color: var(--color-danger-6, #f53f3f);
+  color: var(--color-text-2, #4e5969);
 }
 
 .turn-process-disclosure__body .turn-process-trace__row--canceled {
-  color: var(--color-text-4, #c9cdd4);
+  color: var(--color-text-2, #4e5969);
 }
 
 .turn-process-disclosure__item .message-error-note {
@@ -507,12 +507,9 @@
 
 .turn-process-receipt__body {
   min-width: 0;
-  max-height: min(360px, 42vh);
   margin-left: 24px;
-  margin-top: 2px;
-  overflow-y: auto;
-  padding-right: 6px;
-  scrollbar-gutter: stable;
+  margin-top: 8px;
+  overflow: visible;
   color: var(--color-text-2, #4e5969);
 }
 
@@ -524,32 +521,32 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
 }
 
 .turn-process-trace-tool {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
 }
 
 .turn-process-trace__row {
   box-sizing: border-box;
   display: flex;
   width: 100%;
-  min-height: 22px;
+  min-height: 28px;
   min-width: 0;
-  align-items: center;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 8px;
   border: 0;
   background: transparent;
-  color: var(--color-text-3, #86909c);
+  color: var(--color-text-2, #4e5969);
   font: inherit;
   font-size: var(--conversation-message-font-size, 14px);
   font-weight: 400;
   line-height: var(--conversation-message-line-height, 22px);
-  padding: 0;
+  padding: 3px 0;
   text-align: left;
 }
 
@@ -558,7 +555,7 @@ button.turn-process-trace__row {
 }
 
 .turn-process-trace-tool__toggle {
-  gap: 6px;
+  gap: 8px;
 }
 
 button.turn-process-trace__row:hover {
@@ -572,37 +569,76 @@ button.turn-process-trace__row:focus-visible {
 }
 
 .turn-process-trace__row--running {
-  color: var(--color-text-3, #86909c);
+  color: var(--color-text-2, #4e5969);
 }
 
 .turn-process-trace__row--failed {
-  color: var(--color-danger-6, #f53f3f);
+  color: var(--color-text-2, #4e5969);
 }
 
 .turn-process-trace__row--recovered {
-  color: var(--warning, #ff7d00);
+  color: var(--color-text-2, #4e5969);
 }
 
 .turn-process-trace__row--canceled {
-  color: var(--color-text-4, #c9cdd4);
+  color: var(--color-text-2, #4e5969);
 }
 
 .turn-process-trace__text {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.turn-process-trace__content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.turn-process-trace__status {
+  flex: none;
+  color: var(--color-text-3, #86909c);
+  font-size: 12px;
   white-space: nowrap;
+}
+
+.turn-process-trace__diagnostic {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-text-2, #4e5969);
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.turn-process-trace__row--failed .turn-process-trace__status,
+.turn-process-trace__row--failed .turn-process-trace__diagnostic {
+  color: var(--color-danger-6, #f53f3f);
+}
+
+.turn-process-trace__row--recovered .turn-process-trace__status,
+.turn-process-trace__row--recovered .turn-process-trace__diagnostic,
+.turn-process-trace__row--canceled .turn-process-trace__status {
+  color: var(--warning, #ff7d00);
+}
+
+.turn-process-trace__row .turn-process-trace-tool__arrow {
+  margin-top: 5px;
 }
 
 .turn-process-trace__row-icon {
   display: inline-flex;
   width: 16px;
-  height: 16px;
+  height: 22px;
   flex: none;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-4, #c9cdd4);
+  color: var(--color-text-3, #86909c);
   line-height: 0;
 }
 
@@ -662,7 +698,7 @@ button.turn-process-trace__row:focus-visible {
   min-width: 0;
   flex-direction: column;
   gap: 6px;
-  margin: 2px 0 6px 0;
+  margin: 0 0 8px 24px;
   padding-left: 12px;
   border-left: 1px solid var(--color-border-2, #e5e6eb);
 }

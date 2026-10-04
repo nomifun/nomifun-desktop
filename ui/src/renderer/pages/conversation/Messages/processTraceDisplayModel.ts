@@ -29,9 +29,8 @@ export const shouldShowToolRowDetail = (
 };
 
 /**
- * Private thinking snapshots and routine model lifecycle updates do not
- * describe completed work. Keep at most the current live activity at the tail
- * of the journal; all public narration and tool receipts retain their order.
+ * Routine model lifecycle updates keep at most their current live activity.
+ * Reasoning, public narration, and tool receipts retain their arrival order.
  */
 export const selectJournalProcessItems = <T>(
   items: T[],

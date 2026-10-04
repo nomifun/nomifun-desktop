@@ -8,9 +8,11 @@ import type { IMessageThinking } from '@/common/chat/chatLib';
 import { buildCompletedThinkingSummary } from '@/common/config/thinkingDisplay';
 import { toDisplayText } from '@/common/chat/displayText';
 import ThinkingProcessDisplay from '@renderer/components/chat/ThinkingProcessDisplay';
+import MarkdownView from '@renderer/components/Markdown';
 import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 
 interface MessageThinkingProps {
   message: IMessageThinking;
@@ -29,16 +31,6 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
 }) => {
   const { t } = useTranslation();
   const thinkingDisplay = useThinkingDisplayPreferences();
-
-  const formatElapsedTime = (seconds: number): string => {
-    const sUnit = t('common.unit.second_short', { defaultValue: 's' });
-    const mUnit = t('common.unit.minute_short', { defaultValue: 'm' });
-
-    if (seconds < 60) return `${seconds}${sUnit}`;
-    const minutes = Math.floor(seconds / 60);
-    const remaining = seconds % 60;
-    return `${minutes}${mUnit} ${remaining}${sUnit}`;
-  };
 
   const { status, subject } = message.content;
   const text = toDisplayText(message.content.content);
@@ -67,8 +59,12 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
       })}
       completedSummary={completedSummary}
       bodyLength={thinkingDisplay.contentLength}
-      formatElapsedTime={formatElapsedTime}
-    />
+      showElapsedTime={false}
+    >
+      <MarkdownView fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>
+        {text}
+      </MarkdownView>
+    </ThinkingProcessDisplay>
   );
 };
 
