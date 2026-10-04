@@ -4347,3 +4347,11 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 
 - 同步5aef3c560会话可读性，55项新定向UI及boundary通过；正式frontend fb65ea76及desktop A90A44E3…均构建成功。首次官方Tauri启动全新data/work/profile，PID35248自然exit101：profile store在后端创建data目录之前初始化，真实错误ProfileCleanupUnavailable；模型0/后代监听0，首失败留外部`global-current-ui-adoption`，不代判typed续接。
 - 最小修复在desktop profile store初始化前创建目录，继续原Store的file/junction拒绝及后端身份校验，不改退出入口、权限或旧数据。新缺失目录回归首红1PASS/1FAIL、修后2/2，NTFS junction及普通文件原件保持。Windows/Mac入口共用准备函数，Mac原生未验；正式修后fresh启动及typed/UI仍待本次后续验证。
+
+### 修后fresh启动与typed正文续接正式采用（2026-10-04；两项限定子断言通过）
+
+- 7d388a69e已推送并正式重建，前端fb65ea76/1280×832；同一个此前仍不存在的data根、独立新profile，PID55832已成功进入真实Tauri并由产品初始化新DB/身份。没有复制旧DB、重根或去除凭据校验；first PID35248/exit101与红回归原件保持。setup首次把成功201误当200而停，后续只读复用已创建的唯一provider，未重复POST。
+- 零付费本地模型两次真实SSE：首段“首段：甲乙”加LF，以length结束；第二请求实际含首段assistant正文与output-token ceiling notice，再输出“尾段：丙丁”加LF。canonical确有step1 ModelOutputTruncated/continuation=true/空discarded IDs，同一Turn两步completed、无业务工具调用。
+- 正式message-history两条公开text各有真实不同ID/同Turn/finish/hidden=false，尾段continuation_of_message_id精确指首段。实际UI及Ctrl+R刷新后均公开显示两段，不被完成态过程折叠吞掉；参数/事件/历史JSON及两次PNG已独立核对，不拼造正文或链接。这里只关闭真实typed续接及刷新可见性，不代判完整过程工具行布局、历史旧正文/模型采用或共享全量。
+- PID55832实际API exit0，后代/监听0；同原句柄的本地模型carrier自然exit0，上游0。外部`global-current-ui-adoption/fixed-run`保留身份/请求/SSE/typed事件/精确消息link/像素/退出；首次startup及setup错误分别存原目录。不将API退出当新托盘证据，W274继续复用。
+- B合法短路径调查无新的已实现正文导入入口：fork要求父旧binding且不复制原tool journal；Agent switch设transition floor排除旧工具Turn，新child也拒绝父Session显式地址。故不fork后重发取绿、不改合同门禁；完整旧正文实际模型采用仍待兼容执行器或受授权的来源导入方案，c1dc新恢复文案的正式拒绝UI尚未验。冷恢复/S3/系统重启/跨盘UNC及原生成/字节/完整交付残余继续保留。
