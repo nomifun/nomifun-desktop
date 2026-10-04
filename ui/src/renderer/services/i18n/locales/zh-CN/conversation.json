@@ -145,6 +145,9 @@
       "unknown_upstream": "上游"
     },
     "codes": {
+      "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED": {
+        "body": "当前会话保存的 Agent 配置与当前配置不兼容，无法直接继续。请通过会话的 Agent 切换流程确认兼容配置，或新建会话；已有记录会保留。"
+      },
       "INTERRUPTED_BY_RESTART": {
         "title": "任务因应用退出而中断",
         "body": "应用在任务执行中途退出，本次任务未能完成。会话已恢复可用，可重新发送该请求。"

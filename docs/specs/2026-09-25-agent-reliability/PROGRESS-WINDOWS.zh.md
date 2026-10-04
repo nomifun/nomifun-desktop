@@ -4328,3 +4328,9 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 当前Turn的强制report收到夹具plain文本，被产品正确判failed；下一Turn触及夹具原三响应上限后暂停/取消。以上首败均保留，不把参数子断言扩成完整报告链PASS或W276旧原因已解释。PID77052实际API exit0、carrier自然exit0，后代/监听0；正式托盘Quit继续复用W274。
 - C成功恢复的新库原PID65828已部署，但cold launcher使用powershell.exe时无法识别Get-FileHash，首次预部署停止。未发送输入（Turn/effect0）、未sampler/fault/arm/冷启动；真实GUI/API与helper均exit0。退出快照一项输入法伴随PID后续已消失，晚读无遗留；保留原快照。经Get-Command验证的pwsh绝对路径修正仅存候选，时间盒到线，不删原件重部署，成功恢复仍未验。
 - 仓库外`2026-10-04/windows/global-c-config-resume`保存首次夹具失败、修正后的四份真实请求及已有SSE、canonical/预算独立核对及两次实际退出；第四次上限响应未单独保存原HTTP，不离线补造。`global-c-recovery-resume`保存预部署首败、固定原句柄和清理。B提交Network观察与D迟到resize载体独立准备已停止，仅候选、未正式执行，不能计修复进度。旧wire/生成残余、v4/typed实际采用、W276/成功恢复、S3等保持开放，完整共享/Windows/发布认证未完成；自有GUI/Cargo/helper/carrier/监听已清理。
+
+### B原会话提交拒绝与恢复提示（2026-10-04；文案修复、正式新UI未验）
+
+- 冻结e869桌面/前端及原data/work、step-3.7-flash，原PID69884；正式UI一次原347字历史问题已捕获POST409原响应字段/178B摘要及可见toast：CONFLICT/AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED。accepted/新Turn/模型0；这是本次拒绝的直接证据，不反推旧HTTP，更不解释W250原漏stdin。首次观察器等待输入到期时未发送任务，后续只重新挂接同PID；首次实际提交后的120秒边界未重置。OPTIONS取body的观察器错误另存，不抹去已取得的真实POST正文。
+- 当前源码展示层未映射该结构化拒绝，中文UI泄露内部英文合同说明、缺少恢复操作提示。最小修复仅对精确原生标签给中英文兼容配置/Agent切换或新会话提示，通用冲突/引用中的标签保持原文；不改变合同门禁、模型、权限、任务或原记录。
+- 修前新回归1PASS/2FAIL，修后及相邻provider回归5/5，i18n与desktop boundary通过。新renderer未构建/正式采用，保留FIXED_PENDING_RETEST；历史正文/模型采用仍未验。用户要求长耗时先不测，本轮不扩展编译或其他专项。
