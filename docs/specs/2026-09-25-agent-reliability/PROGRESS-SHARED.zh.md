@@ -10,7 +10,7 @@
 不再用六个粗簇作为完成计数：U1合同拒绝恢复提示、U2新版过程工具行、U3委派进度后续已正式验证关闭；
 用户进一步明确重构旧设计会话可不兼容；D1旧W250合同恢复移出本轮，不改原FAIL/409，不设计旧合同桥接。
 U4、D2、D3当前版本整改与正式验收已完成，详见[Windows本轮记录](PROGRESS-WINDOWS.zh.md)。U4的continue_task／context_only各一条真实UI短链，同ID／草稿、B请求中的原始历史工具数据、B独立权限／完成门及无重放均验证；D2的保存→warmup→首次准入、活动冻结、真实Stop及下一配置完成已验；D3有对应owner清理成功、canonical witness和原OS句柄exit0。原W276停滞／exit1及唯一原因缺证保留，D4对照已完成。
-最新五项目标中，成功冷恢复、完整多来源历史报告和Windows完整ConPTY组合已各自验收；实际Windows睡眠／重启继续推进，Mac全新目录启动已交用户在Mac独立执行，等待实测。跨盘／真实UNC仍按用户要求跳过。
+最新五项目标中，成功冷恢复、完整多来源历史报告和Windows完整ConPTY组合已各自验收；Mac全新目录启动据独立实机提交`f13d7980e`采纳本项PASS，详见[Mac进度](PROGRESS-MACOS.zh.md)。当前只剩实际Windows睡眠／整机重启，维护时间待用户回复。跨盘／真实UNC仍按用户要求跳过。
 W250旧wire、LF/guard及复杂生成失败退出重复执行队列，原FAIL/缺证继续保留，不改PASS。
 Windows fresh启动、typed续接/刷新可见性及已有非零尾注、迟到resize等限定验证已结算，机制证据直接复用。
 重新整理本身不计修复。后续U1真实409中文提示/零模型/原件保护已验；U2原真实读取行及新exit1/stdout19bytes的

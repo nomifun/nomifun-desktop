@@ -2,7 +2,7 @@
 
 更新：2026-10-05。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 用户2026-09-30已收敛为简单系统命令、步骤、过程状态和结果可靠性；活动范围以最新实施计划为准。
-2026-10-05五项当前状态统一维护在[实施计划](IMPLEMENTATION-PLAN.zh.md)；本页保留逐批实测证据和原失败记录。
+2026-10-05五项当前状态统一维护在[实施计划](IMPLEMENTATION-PLAN.zh.md)；本页保留逐批实测证据和原失败记录。实际电源周期尚未执行：仓库外`remaining-five-cases/01-power-preflight`独立验收仅证明真实S3能力、wake timer arm／cancel、同测试token属性0→2→0恢复及原driver自然exit0；LastSleep／LastWake前后相同，未改电源策略。固定端口的跨boot外部载体与观察方案已准备，维护时间待用户回复；预检不代判真实睡眠／重启PASS。
 旧675＋82、2,374槽保留为历史全产品参考，不再领取其全部余项。共享根因及已有Windows修复保留。
 
 ## 既有综合会话证据（追溯，不再整组复跑）
