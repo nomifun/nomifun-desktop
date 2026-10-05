@@ -26,9 +26,9 @@ D1所用W250是重构过程中较早构建保存的冻结合同样本，并非�
 | Windows睡眠／重启恢复 | 无睡眠预检完成；待实际S3／整机重启 | `01-power-preflight`：真实S3能力、唤醒timer arm／cancel、同token原属性恢复和原driver自然exit0已核对，尚未睡眠；真实电源周期仍须输入／ACK、deadline／lease、进程身份、不同OS boot和自动接管／清理证据；维护时间待用户回复 |
 | 完整ConPTY组合 | 已完成本项原生验收 | `02-conpty-combination`：同一生产Supervisor完成20组合（19ConPTY＋1pipe），真实输入／尺寸、8次串行、4次并发、3组父子取消；generic ConPTY EOF按不支持核对，pipe真实EOF通过；4个容量驱逐、全部20个shutdown移除及原terminal witness不变，close gauges归零、句柄回收与原driver自然exit0，独立oracle通过 |
 | 完整多来源历史报告 | 已完成本项正式验收 | `history-01`：两个不同closed来源共20份原始结果、16份资源参数与完整脚本、两份5040字节文件及SHA，独立fresh读取、40037字节最终报告和实际UI／刷新核对；26次本地HTTP、6个Effects，无来源重放；自然native exit0、后代／监听0 |
-| Mac全新数据目录首次启动 | 已提供专用prompt交用户在Mac单独执行，等待实机结果 | Mac实机新目录启动、profile store／DB初始化及自然退出；Windows共用函数通过不代判Mac通过 |
+| Mac全新数据目录首次启动 | 据Mac独立实机记录采纳本项PASS | `f13d7980e`：原生arm64正式制品，多级新data首次启动、实际profile store／gen7 baseline及同目录冷启动；两次原subprocess自然Quit exit0、后代／监听／DB句柄清理；file／symlink拒绝与哨兵保护、模型0；原件保存在Mac，由Mac进度页记录 |
 
-源码起点`eb3bb1ac5`。本机已确认Windows支持S3。用户指定Mac在其Mac电脑单独执行，专用prompt保存于仓库外本轮证据根的`MAC-STARTUP-TASK-PROMPT.txt`；其他四项继续推进，收到Mac实证后再核验状态。准备或交接完成不记验收通过。
+源码起点`eb3bb1ac5`。本机已确认Windows支持S3。用户指定Mac在其Mac电脑单独执行，专用prompt保存于仓库外本轮证据根的`MAC-STARTUP-TASK-PROMPT.txt`；Mac执行记录已由`f13d7980e`回传并合并，据该实机记录采纳S2，本Windows宿主未复测Mac原件。当前只剩Windows真实睡眠／整机重启，准备或交接完成不记验收通过。
 
 本轮证据根为仓库外`2026-10-05/windows/remaining-five-cases`。冷恢复制品`563ae069492c1a371c64ba2078018b23dfd262aa76ec3f6a3675ac36da090a46`、同源helper `b35308eead27e2d477e711535cfaf2d64ee11db226585e5536f9d8ec6f793f52`与前端`9473e998-945d-41cc-804f-903be22e1749`均冻结；多来源报告采用已冻结的`68B6…`制品，其身份单独记录。ConPTY及power外部驱动沿用仓库锁定依赖和当前生产实现。原夹具／oracle首错保留，当前三项PASS各有独立验收和原OS句柄退出证据；不代判实际电源、Mac或全量发布认证。
 
