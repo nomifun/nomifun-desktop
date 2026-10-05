@@ -77,6 +77,7 @@ mod cleanup_authority_tests {
 #[cfg(windows)]
 pub use platform::windows::{
     WindowsExactProcess, WindowsProcessIdentity, WindowsProcessJob, WindowsRecoveryJob,
+    WindowsConPtyCloseMetrics, windows_conpty_close_metrics,
     windows_child_process_identity, windows_process_identity,
 };
 #[cfg(target_os = "linux")]

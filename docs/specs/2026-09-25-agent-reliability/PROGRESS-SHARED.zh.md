@@ -2,13 +2,15 @@
 
 更新：2026-10-05。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 
-## 当前待办入口（2026-10-04重新整理）
+本轮共享功能正式证据采用Windows全新generation 7实验：`history-01`完成两个不同closed来源的20份原始结果、完整文件／脚本、独立fresh读取和最终实际UI／刷新；`cold-002`在真实进程故障后以生产默认lease恢复同Turn，唯一写入不重放，fresh回读／报告完成，实际GUI与载体自然退出及清理通过。逐批原件与限制见[Windows进度](PROGRESS-WINDOWS.zh.md)，当前状态只在实施计划的五项表维护。
 
-当前有限项以[实施计划的当前有限待办](IMPLEMENTATION-PLAN.zh.md#当前有限待办2026-10-04重新整理)为准，
+## 当前待办入口（2026-10-05五项目标）
+
+当前有限项统一维护在[实施计划的五项当前状态](IMPLEMENTATION-PLAN.zh.md)，
 不再用六个粗簇作为完成计数：U1合同拒绝恢复提示、U2新版过程工具行、U3委派进度后续已正式验证关闭；
 用户进一步明确重构旧设计会话可不兼容；D1旧W250合同恢复移出本轮，不改原FAIL/409，不设计旧合同桥接。
 U4、D2、D3当前版本整改与正式验收已完成，详见[Windows本轮记录](PROGRESS-WINDOWS.zh.md)。U4的continue_task／context_only各一条真实UI短链，同ID／草稿、B请求中的原始历史工具数据、B独立权限／完成门及无重放均验证；D2的保存→warmup→首次准入、活动冻结、真实Stop及下一配置完成已验；D3有对应owner清理成功、canonical witness和原OS句柄exit0。原W276停滞／exit1及唯一原因缺证保留，D4对照已完成。
-成功冷恢复、实际电源周期和完整专项组合暂缓；跨盘/真实UNC跳过、Mac启动原生验证待现场。
+最新五项目标中，成功冷恢复、完整多来源历史报告和Windows完整ConPTY组合已各自验收；实际Windows睡眠／重启继续推进，Mac全新目录启动已交用户在Mac独立执行，等待实测。跨盘／真实UNC仍按用户要求跳过。
 W250旧wire、LF/guard及复杂生成失败退出重复执行队列，原FAIL/缺证继续保留，不改PASS。
 Windows fresh启动、typed续接/刷新可见性及已有非零尾注、迟到resize等限定验证已结算，机制证据直接复用。
 重新整理本身不计修复。后续U1真实409中文提示/零模型/原件保护已验；U2原真实读取行及新exit1/stdout19bytes的
