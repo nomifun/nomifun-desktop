@@ -13,6 +13,7 @@ use axum::{
 };
 use nomifun_app::{DesktopHostServices, DesktopServer};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::Duration};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -59,37 +60,73 @@ const RECOVERY_REPORT: &str = "global-c-report-fresh";
 
 enum RecoveryReply { Hold, Tool(&'static str, &'static str, Value) }
 
-fn recovery_result<'a>(body: &'a Value, id: &str) -> Option<&'a Value> {
-    body["messages"].as_array()?.iter().find(|message|
-        message["role"] == "tool" && message["tool_call_id"] == id)
+fn recovery_result(body: &Value, id: &str) -> Option<Value> {
+    let messages = body["messages"].as_array()?.iter().filter(|message|
+        message["role"] == "tool" && message["tool_call_id"] == id).collect::<Vec<_>>();
+    let [message] = messages.as_slice() else { return None; };
+    if message.get("is_error") == Some(&Value::Bool(true)) { return None; }
+    let result: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
+    (result.is_object() && result.get("is_error") != Some(&Value::Bool(true))).then_some(result)
+}
+
+fn recovery_write_returned(body: &Value) -> bool {
+    recovery_result(body, RECOVERY_WRITE).is_some_and(|result|
+        result["written"] == true && result["path"] == RECOVERY_FILE
+            && result["bytes"] == RECOVERY_CONTENT.len()
+            && result["sha256"] == format!("{:x}", Sha256::digest(RECOVERY_CONTENT.as_bytes())))
+}
+
+fn recovery_read_returned(body: &Value) -> bool {
+    recovery_result(body, RECOVERY_READ).is_some_and(|result|
+        result["path"] == RECOVERY_FILE && result["content"] == RECOVERY_CONTENT
+            && result["eof"] == true && result["offset"] == 0
+            && result["total_bytes"] == RECOVERY_CONTENT.len()
+            && result["sha256"] == format!("{:x}", Sha256::digest(RECOVERY_CONTENT.as_bytes())))
+}
+
+fn recovery_plan_returned(body: &Value, id: &str, state: &str) -> bool {
+    recovery_result(body, id).is_some_and(|result|
+        matches!(result["status"].as_str(), Some("updated" | "unchanged"))
+            && result["needs_replan"] == false
+            && result["requirement_ids"].as_array().is_some_and(|ids| ids.iter().any(|id| id == "input_0"))
+            && result["plan"] == json!([{"step":"Verify saved file","status":state}]))
 }
 
 fn recovery_reply(call: usize, body: &Value, armed: bool) -> Result<RecoveryReply, &'static str> {
-    let result = |id| recovery_result(body, id).is_some();
-    let read_matches = || recovery_result(body, RECOVERY_READ)
-        .is_some_and(|message| message["content"].to_string().contains("GLOBAL_C_AUTO_RECOVERY_OK"));
+    let written = recovery_write_returned(body);
+    let read_matches = recovery_read_returned(body);
     let reply = match call {
         0 if !armed => RecoveryReply::Tool(RECOVERY_WRITE, "write_file",
             json!({"path":RECOVERY_FILE,"content":RECOVERY_CONTENT})),
-        1 if !armed && result(RECOVERY_WRITE) => RecoveryReply::Hold,
-        2 if armed && result(RECOVERY_WRITE) => RecoveryReply::Tool(RECOVERY_REPLAN, "update_plan",
+        1 if !armed && written => RecoveryReply::Hold,
+        2 if armed && written => RecoveryReply::Tool(RECOVERY_REPLAN, "update_plan",
             json!({"explanation":"Reconsider the saved task after cold recovery; do not repeat its completed write.",
                 "plan":[{"step":"Verify saved file","status":"in_progress"}]})),
-        3 if armed && result(RECOVERY_WRITE) && result(RECOVERY_REPLAN) => RecoveryReply::Tool(RECOVERY_READ, "read_file",
+        3 if armed && written && recovery_plan_returned(body, RECOVERY_REPLAN, "in_progress") => RecoveryReply::Tool(RECOVERY_READ, "read_file",
             json!({"path":RECOVERY_FILE})),
-        4 if armed && result(RECOVERY_WRITE) && read_matches() => RecoveryReply::Tool(RECOVERY_CLOSE, "update_plan",
+        4 if armed && written && read_matches => RecoveryReply::Tool(RECOVERY_CLOSE, "update_plan",
             json!({"explanation":"The fresh read confirms the saved content.",
                 "plan":[{"step":"Verify saved file","status":"completed"}]})),
-        5 if armed && result(RECOVERY_WRITE) && result(RECOVERY_CLOSE) && read_matches() => RecoveryReply::Tool(RECOVERY_REPORT, "report_completion",
-            json!({"summary":"冷恢复后已回读 recovery-check.txt，当前正文为 GLOBAL_C_AUTO_RECOVERY_OK，文件内容核对完成。",
+        5 if armed && written && recovery_plan_returned(body, RECOVERY_CLOSE, "completed") && read_matches => RecoveryReply::Tool(RECOVERY_REPORT, "report_completion",
+            json!({"summary":format!("冷恢复后已回读 recovery-check.txt，当前完整正文（包括末尾 LF）为：\n{RECOVERY_CONTENT}"),
                 "criteria":[{"step":"Verify saved file","disposition":"supported",
-                    "evidence_call_ids":[RECOVERY_READ],"requirement_ids":["input_0"],
+                    "evidence_call_ids":[RECOVERY_READ],
                     "rationale":"The fresh read confirms the requested file content after cold recovery."}]})),
         _ => return Err("SUCCESS_RECOVERY_UNEXPECTED_REQUEST_OR_MISSING_RESULT"),
     };
-    if let RecoveryReply::Tool(_, name, _) = &reply {
-        if !body["tools"].as_array().is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == *name)) {
-            return Err("SUCCESS_RECOVERY_TOOL_NOT_EXPOSED");
+    if let RecoveryReply::Tool(_, name, arguments) = &reply {
+        let tools = body["tools"].as_array().ok_or("SUCCESS_RECOVERY_TOOL_NOT_EXPOSED")?;
+        let function = tools.iter().find(|tool| tool["function"]["name"] == *name)
+            .map(|tool| &tool["function"]).ok_or("SUCCESS_RECOVERY_TOOL_NOT_EXPOSED")?;
+        let validator = jsonschema::validator_for(&function["parameters"])
+            .map_err(|_| "SUCCESS_RECOVERY_TOOL_SCHEMA_INVALID")?;
+        if !function["parameters"].is_object() || !validator.is_valid(arguments) {
+            return Err("SUCCESS_RECOVERY_ARGUMENTS_NOT_ADVERTISED");
+        }
+        if *name == "report_completion" && !function["parameters"]
+            .pointer("/properties/criteria/items/properties/evidence_call_ids/items/enum")
+            .and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|id| id == RECOVERY_READ)) {
+            return Err("SUCCESS_RECOVERY_FRESH_READ_NOT_ELIGIBLE");
         }
     }
     Ok(reply)
@@ -432,6 +469,82 @@ else if (process.argv[2] === 'child') {
 mod tests {
     use super::*;
 
+    fn recovery_test_body() -> Value {
+        let plan = json!({"type":"object","additionalProperties":false,"required":["plan"],"properties":{
+            "explanation":{"type":"string"},"plan":{"type":"array","minItems":1,"items":{
+                "type":"object","additionalProperties":false,"required":["step","status"],"properties":{
+                    "step":{"type":"string"},"status":{"enum":["in_progress","completed"]}}}}}});
+        let report = json!({"type":"object","additionalProperties":false,"required":["summary","criteria"],"properties":{
+            "summary":{"type":"string"},"criteria":{"type":"array","minItems":1,"items":{
+                "type":"object","additionalProperties":false,"required":["disposition","rationale","evidence_call_ids"],
+                "properties":{"step":{"type":"string"},"disposition":{"const":"supported"},"rationale":{"type":"string"},
+                    "evidence_call_ids":{"type":"array","minItems":1,"items":{"enum":[RECOVERY_READ]}}}}}}});
+        json!({"messages":[],"tools":[
+            {"type":"function","function":{"name":"write_file","parameters":{
+                "type":"object","additionalProperties":false,"required":["path","content"],"properties":{
+                    "path":{"const":RECOVERY_FILE},"content":{"const":RECOVERY_CONTENT}}}}},
+            {"type":"function","function":{"name":"read_file","parameters":{
+                "type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"const":RECOVERY_FILE}}}}},
+            {"type":"function","function":{"name":"update_plan","parameters":plan}},
+            {"type":"function","function":{"name":"report_completion","parameters":report}}
+        ]})
+    }
+
+    fn recovery_test_receipt(id: &str) -> Value {
+        let digest = format!("{:x}", Sha256::digest(RECOVERY_CONTENT.as_bytes()));
+        match id {
+            RECOVERY_WRITE => json!({"written":true,"path":RECOVERY_FILE,"bytes":RECOVERY_CONTENT.len(),"sha256":digest}),
+            RECOVERY_READ => json!({"path":RECOVERY_FILE,"content":RECOVERY_CONTENT,"sha256":digest,
+                "total_bytes":RECOVERY_CONTENT.len(),"offset":0,"eof":true}),
+            RECOVERY_REPLAN | RECOVERY_CLOSE => json!({"status":"updated","needs_replan":false,"requirement_ids":["input_0"],
+                "plan":[{"step":"Verify saved file","status":if id==RECOVERY_REPLAN {"in_progress"} else {"completed"}}]}),
+            _ => json!({"status":"accepted"}),
+        }
+    }
+
+    fn recovery_test_add_receipt(body: &mut Value, id: &str) {
+        body["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":id,
+            "content":recovery_test_receipt(id).to_string()}));
+    }
+
+    #[test]
+    fn success_recovery_rejects_unexecuted_or_incomplete_results_and_unadvertised_controls() {
+        let mut body = recovery_test_body();
+        body["messages"] = json!([{"role":"tool","tool_call_id":RECOVERY_WRITE,"content":"Not executed: invalid arguments"}]);
+        assert!(recovery_reply(1, &body, false).is_err());
+        body["messages"] = json!([]);
+        recovery_test_add_receipt(&mut body, RECOVERY_WRITE);
+        let mut failed_write = recovery_test_receipt(RECOVERY_WRITE);
+        failed_write["written"] = json!(false);
+        body["messages"][0]["content"] = json!(failed_write.to_string());
+        assert!(recovery_reply(1, &body, false).is_err());
+        body["messages"][0]["content"] = json!(recovery_test_receipt(RECOVERY_WRITE).to_string());
+        assert!(matches!(recovery_reply(1, &body, false).unwrap(), RecoveryReply::Hold));
+        let mut unadvertised = body.clone();
+        unadvertised["tools"].as_array_mut().unwrap().retain(|tool| tool["function"]["name"] != "update_plan");
+        assert!(recovery_reply(2, &unadvertised, true).is_err());
+        recovery_test_add_receipt(&mut body, RECOVERY_REPLAN);
+        let mut rejected_plan = recovery_test_receipt(RECOVERY_REPLAN);
+        rejected_plan["status"] = json!("rejected");
+        body["messages"][1]["content"] = json!(rejected_plan.to_string());
+        assert!(recovery_reply(3, &body, true).is_err());
+        body["messages"][1]["content"] = json!(recovery_test_receipt(RECOVERY_REPLAN).to_string());
+        recovery_test_add_receipt(&mut body, RECOVERY_READ);
+        let mut partial = recovery_test_receipt(RECOVERY_READ);
+        partial["eof"] = json!(false);
+        body["messages"][2]["content"] = json!(partial.to_string());
+        assert!(recovery_reply(4, &body, true).is_err());
+        body["messages"][2]["content"] = json!(recovery_test_receipt(RECOVERY_READ).to_string());
+        recovery_test_add_receipt(&mut body, RECOVERY_CLOSE);
+        let RecoveryReply::Tool(_, _, arguments) = recovery_reply(5, &body, true).unwrap() else { panic!("report expected"); };
+        assert!(!arguments["criteria"][0].as_object().unwrap().contains_key("requirement_ids"),
+            "the current advertised omission covers all immutable accepted input without guessed IDs");
+        assert!(arguments["summary"].as_str().unwrap().ends_with(RECOVERY_CONTENT));
+        body["tools"][3]["function"]["parameters"]["properties"]["criteria"]["items"]["properties"]
+            ["evidence_call_ids"]["items"]["enum"] = json!([RECOVERY_WRITE]);
+        assert!(recovery_reply(5, &body, true).is_err(), "historical write cannot replace current fresh-read evidence");
+    }
+
     #[tokio::test]
     async fn success_recovery_holds_model_only_tail_and_never_reproposes_the_write() {
         use futures_util::StreamExt;
@@ -444,18 +557,13 @@ mod tests {
             tree_script: std::sync::OnceLock::new(), waiting_streams: AtomicUsize::new(0),
             finish: Semaphore::new(0), stop: CancellationToken::new(),
         });
-        let mut body = json!({"messages":[],"tools":[
-            {"type":"function","function":{"name":"write_file"}},
-            {"type":"function","function":{"name":"read_file"}},
-            {"type":"function","function":{"name":"update_plan"}},
-            {"type":"function","function":{"name":"report_completion"}}
-        ]});
+        let mut body = recovery_test_body();
         assert_eq!(arm_success_recovery(State(fixture.clone())).await.0, axum::http::StatusCode::CONFLICT);
         let first = model(State(fixture.clone()), Json(body.clone())).await;
         let bytes = axum::body::to_bytes(first.into_body(), 65536).await.unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(text.contains(RECOVERY_WRITE) && text.contains("write_file") && text.contains("[DONE]"));
-        body["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":RECOVERY_WRITE,"content":"write returned"}));
+        recovery_test_add_receipt(&mut body, RECOVERY_WRITE);
         let held = model(State(fixture.clone()), Json(body.clone())).await;
         let mut stream = held.into_body().into_data_stream();
         let comment = stream.next().await.unwrap().unwrap();
@@ -488,8 +596,7 @@ mod tests {
             let arguments: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
             if id == RECOVERY_READ { assert_eq!(arguments["path"], RECOVERY_FILE); }
             if id == RECOVERY_REPORT { assert_eq!(arguments["criteria"][0]["evidence_call_ids"], json!([RECOVERY_READ])); }
-            body["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":id,
-                "content":if id == RECOVERY_READ { RECOVERY_CONTENT } else { "returned" }}));
+            recovery_test_add_receipt(&mut body, id);
         }
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 6);
         assert_eq!(model(State(fixture), Json(body)).await.status(), 400,

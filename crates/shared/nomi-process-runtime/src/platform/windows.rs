@@ -1,4 +1,11 @@
 mod conpty;
+pub use conpty::WindowsConPtyCloseMetrics;
+
+/// Inspect only the already-created pseudoconsole close executor. None means
+/// it has not been initialized; an initialization error remains distinguishable.
+pub fn windows_conpty_close_metrics() -> Result<Option<WindowsConPtyCloseMetrics>, &'static str> {
+    conpty::windows_conpty_close_metrics()
+}
 mod handles;
 
 use std::{
