@@ -1,6 +1,48 @@
 # macOS 命令与会话可靠性进度
 
-更新：2026-10-04。本次近期四目标收尾完成；此前 Windows 结果仍只作共享历史引用，不代判。
+更新：2026-10-05。本次仅补全新数据目录首次启动的 Mac 实机验收；此前近期四目标与 Windows 历史结果保留各自边界。
+
+## S2 全新数据目录首次启动（2026-10-05，Mac 本项 PASS）
+
+验收源码为干净的 `eb3bb1ac545a33f3681d72799735c7017f68e50d`，包含启动顺序修复
+`7d388a69e`；构建前后核对 HEAD/工作树，fetch 后与远端一致。按当前 AGENTS、canonical
+Session 架构与实施计划五项目标执行，本次只验证 Mac 首启/profile store，不重开整套走查。
+
+- 系统：原生 arm64 / Mac16,12 / macOS 26.6.2（25G83）。用仓库支持的
+  `bun run build:mac arm` 重建 release Tauri App/DMG，实际 build exit 0；固定 CEF
+  152.0.6 / Chromium 152.0.7977.83、主/GPU/Renderer/Plugin/Alerts 五种 helper 均为 arm64。
+  nested ad-hoc 签名通过 `codesign --verify --deep --strict`，release lock 已生成；这不是公证或 signed RC 认证。
+- 冻结 App 内真实 executable SHA-256：
+  `fe3c57cfc05a4961363a004ac204f7472df92687ca71c95dd1ed26b99b2ab80d`；
+  前端 build ID：`aebc1cf2-dc9b-491b-8579-70a8e2ed4df1`，包内 manifest、当前 UI 构建和 executable 嵌入字节一致。
+- 完整原件仓库外：`/Users/muri/nomifun-evidence/2026-10-05/macos/fresh-data-startup-231759/`
+  （下称 E）。保存源码 archive/文件摘要、系统与制品身份、App/DMG/lock、必要环境路径、
+  原 PID/出生时间、stdout/stderr、UI 工具取得的完整截图与 AX、实验 DB、只读身份/完整性快照、
+  两次自然退出/后代/监听记录、拒绝 backtrace、哨兵原件/摘要及 `summary.json`。
+
+| 验收项 | 结果 | 直接 Mac 证据 |
+| --- | --- | --- |
+| 多级新 data 首次启动 | PASS | `01-first`：data、父级、祖父级启动前均不存在；直接 exec 冻结 executable，PID 58715，出生 07:36:20 +08:00，真实 `tauri://localhost#/guid` 窗口与截图，health 200 |
+| Mac BrowserProfileStore 路径 | PASS | 完整 CEF prepare 条件成立，两次正常启动没有 unavailable fallback；同一 executable 的 symlink 用例在实际 Mac setup 返回 ProfileCleanupUnavailable，证明生产 store 防护分支实际执行 |
+| DB/身份初始化 | PASS | generation 7、单条成功 canonical baseline，SHA-384 与当前完整 SQL 一致；唯一安装 owner `01a10946-94b6-77c2-a857-2f5b2acb79f8`，integrity ok / FK 0 |
+| 首次自然退出 | PASS | 点击原生 Quit NomiFun；保留原 subprocess 等待句柄得到 exit 0；原 PID/已观察后代、58713～58717 五个监听及 DB 句柄均清理，无观察器 TERM/KILL |
+| 同目录冷启动及自然退出 | PASS | `02-cold`：PID 59161，出生 07:39:28 +08:00；真实窗口/截图、同安装身份/generation/baseline/schema；Quit 后原句柄 exit 0，后代、58916～58920 监听、DB 句柄 0 |
+| 文件/symlink 拒绝与原件保护 | PASS | `03/04` 真实 setup 拒绝（file exists / ProfileCleanupUnavailable）；wait=-6/SIGABRT 的自退出原日志保留，未当作正常 Quit；三份哨兵逐字节/SHA/inode/mode/mtime 同，symlink inode/目标与目标目录内容同，无 DB/身份创建 |
+| 零模型与隔离 | PASS | 显式 data/work 均在 E/experiment；正常 work 是独立已建空目录；显式 data 派生独立 WKWebView store ID `11b7ca40-fbfb-3adf-be52-23b03b173e3e`，两次一致。配置 provider/connection/model 0，canonical 五表及 execution attempt 0，未发送任务，供应商请求 0 |
+
+两次正常关闭后实验 DB 原件 SHA-256 同为
+`7b83e04a29385a434bde978c68e05ea29b3c0cc8efd5ecca49d412e86c416924`，inode、安装身份与 schema 同。
+文件控制记录仅 `dataset-v3.json.installed_at` 更新为本次启动时间，已核对唯一生产
+`finalize_data_layer`/receipt writer；generation、work root、owner/binding 不变，差异原件保留。
+
+观察器首错分别保留：bundle ID 歧义后改用冻结 App 绝对路径；辅助 manifest HTTP probe 404
+不作前端身份依据；闭库 `mode=ro` 缺 WAL sidecar 后，在确认 exit/写句柄/sidecar 全无后使用
+`mode=ro&immutable=1` + query_only 回读；截图 API 实返 JPEG，首 PNG 格式断言失败保留，
+交付字节相同的 `.jpg` 原始截图副本。未因此改产品、重启取绿或放宽根防护。
+
+本次无生产源码变更，仅提交本项状态。未读取/复制真实用户 DB 或模型凭据，未 kill 用户实例，
+未更改 TCC/系统安全设置；未使用 Browser 任务或初始化 CEF Engine，后者的使用/Keychain 清理
+仍按原证据边界。本项 PASS 不代判 Windows、整套 Mac、共享矩阵、发布或 99% 认证。
 
 ### 用户新增：全局模型配置不降能力（2026-10-04）
 
