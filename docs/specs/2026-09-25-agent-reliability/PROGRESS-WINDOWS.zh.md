@@ -2,7 +2,15 @@
 
 更新：2026-10-05。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 用户2026-09-30已收敛为简单系统命令、步骤、过程状态和结果可靠性；活动范围以最新实施计划为准。
-2026-10-05五项当前状态统一维护在[实施计划](IMPLEMENTATION-PLAN.zh.md)；本页保留逐批实测证据和原失败记录。实际电源周期尚未执行：仓库外`remaining-five-cases/02-power-preflight`独立验收仅证明真实S3能力、wake timer arm／cancel、同测试token属性0→2→0恢复及原driver自然exit0；LastSleep／LastWake前后相同，未改电源策略。新版外部驱动`7459a97a…`／制品`0d93365a…`在实际SetSuspendState前补六原句柄存活、原身份及三个同START witness未结束门禁，缺前提不睡眠并执行清理；oracle同步核对intent／return／summary、单一新Event42与九类无效快照拒绝。新source／artifact身份保存在`power-gate-build-identity.json`，旧01预检的`630f…`源码／`9DFA…`制品与原证据分开保留。固定端口的跨boot外部载体与观察方案已准备，维护时间待用户回复；预检不代判真实睡眠／重启PASS。
+2026-10-05五项当前状态统一维护在[实施计划](IMPLEMENTATION-PLAN.zh.md)。用户最新指示为电脑已经重启、禁止再次重启，只验证修复；本轮按已有Boot15验证，不保留追加整机周期安排作为当前执行输入。
+
+## 实际S3与已有重启后的验证（2026-10-05）
+
+- `03-real-s3`实际执行原冻结source `7459a97a…`／binary `0d93365a…`一次：六个原PID／FILETIME在睡前均live、三个START witness未结束；唯一新Kernel-Power event42 **43488**，TargetState／EffectiveState均**4**。wall **65954ms**、unbiased awake **2866ms**，实际睡眠差**63088ms**，LastWake−LastSleep **63089.8684ms**吻合；同次实际return与intent／final gate一致。
+- pipe／ConPTY deadline均真实TimedOut、root／child原句柄终止、cleanup reaped／errors空，迟到输入拒绝且完整START原结果不变。idle-exempt ConPTY同原身份跨S3保持，**19 bytes CR**仅一次实际count1 ACK，随后Cancelled／父子回收；shutdown exact，wake timer取消、同token属性**0→2→0**恢复，供应商0。
+- 观察器首败是额外`last_error==0`条件：`SetSuspendState`实际返回**true**，raw LastError **1300**。微软[SetSuspendState返回合同](https://learn.microsoft.com/en-us/windows/win32/api/powrprof/nf-powrprof-setsuspendstate)以非零为成功，只在失败时解释GetLastError；[GetLastError说明](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror)不保证成功清零。原`physical=false`／driver **native exit2**及15份原JSON保持；`corrected-verification.json`严格绑定原source／binary／PID／FILETIME、全部真实判据，独立采纳S3通过，**不宣称原exit0**。11类无关失败负控均拒绝。未来外部驱动仅移除这一多余条件并编译通过，未再次执行Sleep；特权／timer清理的error0合同未放宽。
+- 用户已有整机重启被三项OS原件确认：BootId **14→15**，Kernel-General启动record **35022→43139**，WMI本次启动**10月5日10:57:59＋08:00**。`post-existing-boot-001`沿原`cold-002`的同EXE／data／work、新WebView profile零输入安全重开；131条event／payload、原completed Turn／fence1、唯一returned Effect逐字段不变，原26-byte文件SHA／inode／mtime保持，未产生新dispatch、Turn或Effect。实际同Session完整正文、末LF说明、26B实物、1/1及Ctrl-R刷新均取证；原GUI和8个已捕获后代共**9原句柄自然exit0**，监听和捕获不确定性0。
+- 原current-generation隔离数据在这次OS重启前均closed或为空、执行checkpoint已清除。因此上述证据关闭真实S3和已有重启后closed历史保持／安全启动；**运行中原checkpoint跨OS自动接管仍缺证**，不靠回填prekill JSON、新输入、旧数据转换或再次重启补造。本轮未发现需要修改产品恢复链的真实缺陷；唯一修复为外部观察器成功返回判据，原01／02预检和独立事实版本保存于仓库外`remaining-five-cases`。
 旧675＋82、2,374槽保留为历史全产品参考，不再领取其全部余项。共享根因及已有Windows修复保留。
 
 ## 既有综合会话证据（追溯，不再整组复跑）
