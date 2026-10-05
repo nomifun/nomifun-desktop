@@ -8,7 +8,7 @@ import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
 import MessageList from './MessageList';
-import { MessageListProvider } from './hooks';
+import { MessageListProvider, useUpdateMessageList } from './hooks';
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
 import { ipcBridge } from '@/common';
 import agentExecutionLocale from '@/renderer/services/i18n/locales/en-US/agentExecution.json';
@@ -41,6 +41,152 @@ beforeEach(() => {
 });
 
 afterEach(() => { cleanup(); restoreListeners(); });
+
+test('a live journal only animates its current thought and preserves completed thought disclosures', () => {
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const messages: TMessage[] = [
+    { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
+    { ...base, id: 'thought-1', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: 'First reasoning is complete.', status: 'done' } },
+    { ...base, id: 'progress', msg_id: messageId(3), type: 'text', created_at: 3, content: { content: 'I will inspect the source now.' } },
+    { ...base, id: 'read-call', msg_id: messageId(4), type: 'tool_call', created_at: 4, content: { call_id: 'read-current', name: 'read_file', status: 'completed', args: { path: 'src/app.ts' }, output: 'Source contents', artifacts: [] } },
+    { ...base, id: 'thought-2', msg_id: messageId(5), type: 'thinking', created_at: 5, content: { content: 'Second reasoning is in progress.', status: 'thinking' } },
+  ];
+  const FinishCurrentThought = () => {
+    const updateMessages = useUpdateMessageList();
+    return <button onClick={() => updateMessages(current => current.map(message =>
+      message.id === 'thought-2' && message.type === 'thinking'
+        ? { ...message, content: { ...message.content, status: 'done' } }
+        : message
+    ))}>Finish current thought</button>;
+  };
+  const view = (running: boolean) => <MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='live-thought-status-test' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: running, activeTurnId: turnId }}>
+        <MessageListProvider initialValue={messages}><MessageList /><FinishCurrentThought /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>;
+  const page = render(view(true));
+
+  const thinkingActivity = page.getByTestId('conversation-current-activity');
+  expect(thinkingActivity.getAttribute('role')).toBe('status');
+  expect(thinkingActivity.getAttribute('data-activity-state')).toBe('thinking');
+  expect(thinkingActivity.textContent).toContain('Thinking...');
+  expect(thinkingActivity.querySelector('.arco-spin')).not.toBeNull();
+
+  const thoughts = page.container.querySelectorAll('[data-thinking-process-state]');
+  expect(thoughts).toHaveLength(2);
+  expect(Array.from(thoughts, thought => thought.getAttribute('data-thinking-process-state'))).toEqual(['completed', 'running']);
+  expect(thoughts[0].querySelector('.arco-spin')).toBeNull();
+  expect(thoughts[1].querySelector('.arco-spin')).not.toBeNull();
+  expect(page.container.querySelectorAll('[data-thinking-process-state="running"]')).toHaveLength(1);
+  const firstHeader = thoughts[0].querySelector<HTMLButtonElement>('[data-thinking-process-header]')!;
+  const secondHeader = thoughts[1].querySelector<HTMLButtonElement>('[data-thinking-process-header]')!;
+  expect(firstHeader.textContent).toContain('Thought complete');
+  expect(secondHeader.textContent).toContain('Thinking...');
+  expect(thoughts[0].querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('First reasoning is complete.');
+  fireEvent.click(firstHeader);
+  expect(firstHeader.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(firstHeader);
+  expect(firstHeader.getAttribute('aria-expanded')).toBe('true');
+  expect(thoughts[0].querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('First reasoning is complete.');
+  fireEvent.click(secondHeader);
+  expect(secondHeader.getAttribute('aria-expanded')).toBe('false');
+
+  fireEvent.click(page.getByRole('button', { name: 'Finish current thought' }));
+  const completedThoughts = page.container.querySelectorAll('[data-thinking-process-state]');
+  expect(Array.from(completedThoughts, thought => thought.getAttribute('data-thinking-process-state'))).toEqual(['completed', 'completed']);
+  expect(page.container.querySelector('[data-thinking-process-state="running"]')).toBeNull();
+  expect(completedThoughts[1].querySelector('.arco-spin')).toBeNull();
+  const completedHeader = completedThoughts[1].querySelector<HTMLButtonElement>('[data-thinking-process-header]')!;
+  expect(completedHeader.textContent).toContain('Thought complete');
+  expect(completedHeader.getAttribute('aria-expanded')).toBe('false');
+  const processingActivity = page.getByTestId('conversation-current-activity');
+  expect(processingActivity.getAttribute('data-activity-state')).toBe('processing');
+  expect(processingActivity.textContent).toContain('Processing...');
+  expect(processingActivity.querySelector('.arco-spin')).not.toBeNull();
+  fireEvent.click(completedHeader);
+  expect(completedHeader.getAttribute('aria-expanded')).toBe('true');
+  expect(completedThoughts[1].querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('Second reasoning is in progress.');
+  expect(messages[4].type === 'thinking' && messages[4].content.status).toBe('thinking');
+
+  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
+  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  expect(page.getByTestId('conversation-current-activity').textContent).toContain('Processing...');
+  page.rerender(view(false));
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
+});
+
+test('canonical terminal metadata closes stale thinking while the session still reports processing', () => {
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const messages: TMessage[] = [
+    { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
+    { ...base, id: 'stale-thought', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: 'The source inspection reasoning.', status: 'thinking' } },
+    { ...base, id: 'final', msg_id: messageId(3), type: 'text', created_at: 3, content: { content: 'The inspection is complete.' } },
+    { ...base, id: 'terminal-metadata', msg_id: messageId(4), type: 'agent_status', created_at: 4,
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', started_at_ms: 1, finished_at_ms: 3 } },
+  ];
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='terminal-thought-status-test' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: true, activeTurnId: turnId }}>
+        <MessageListProvider initialValue={messages}><MessageList /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+
+  expect(page.container.querySelector('.turn-process-disclosure--live')).toBeNull();
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  expect(Array.from(page.container.querySelectorAll('.markdown-shadow'), node => node.shadowRoot?.textContent ?? '')
+    .some(text => text.includes('The inspection is complete.'))).toBe(true);
+  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
+  const thought = page.container.querySelector('[data-thinking-process-state]');
+  expect(thought?.getAttribute('data-thinking-process-state')).toBe('completed');
+  expect(thought?.querySelector('.arco-spin')).toBeNull();
+  expect(thought?.querySelector('[data-thinking-process-header]')?.textContent).toContain('Thought complete');
+  expect(thought?.querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('The source inspection reasoning.');
+  expect(messages[1].type === 'thinking' && messages[1].content.status).toBe('thinking');
+});
+
+test('the current activity row appears while waiting for the first response and changes to processing during a tool call', () => {
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const messages: TMessage[] = [
+    { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
+  ];
+  const StartToolCall = () => {
+    const updateMessages = useUpdateMessageList();
+    return <button onClick={() => updateMessages(current => [...current,
+      { ...base, id: 'thought', msg_id: messageId(2), type: 'thinking', created_at: 2, content: { content: 'The file to inspect is selected.', status: 'done' } },
+      { ...base, id: 'read-call', msg_id: messageId(3), type: 'tool_call', created_at: 3, content: { call_id: 'read-active', name: 'read_file', status: 'running', args: { path: 'src/app.ts' }, artifacts: [] } },
+    ])}>Start tool call</button>;
+  };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='waiting-activity-test' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: true, activeTurnId: turnId }}>
+        <MessageListProvider initialValue={messages}><MessageList /><StartToolCall /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+
+  const waitingActivity = page.getByTestId('conversation-current-activity');
+  expect(waitingActivity.getAttribute('role')).toBe('status');
+  expect(waitingActivity.getAttribute('data-activity-state')).toBe('processing');
+  expect(waitingActivity.textContent).toContain('Processing...');
+  expect(waitingActivity.querySelector('.arco-spin')).not.toBeNull();
+
+  fireEvent.click(page.getByRole('button', { name: 'Start tool call' }));
+  const thought = page.container.querySelector('[data-thinking-process-state]');
+  expect(thought?.getAttribute('data-thinking-process-state')).toBe('completed');
+  expect(thought?.querySelector('.arco-spin')).toBeNull();
+  expect(thought?.querySelector('[data-thinking-process-header]')?.textContent).toContain('Thought complete');
+  expect(page.container.querySelector('[data-tool-call-id="read-active"]')).not.toBeNull();
+  const toolActivity = page.getByTestId('conversation-current-activity');
+  expect(toolActivity.getAttribute('data-activity-state')).toBe('processing');
+  expect(toolActivity.textContent).toContain('Processing...');
+  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
+  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  expect(page.getByTestId('conversation-current-activity').textContent).toContain('Processing...');
+});
 
 test('a completed journal defaults closed and expands its full reasoning and calls without hiding the final reply', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };

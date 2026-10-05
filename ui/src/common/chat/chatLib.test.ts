@@ -47,6 +47,14 @@ const baseWire = (overrides: Record<string, unknown>) =>
     ...overrides,
   }) as any;
 
+test('explicit thinking deltas can reopen a completed contiguous phase', () => {
+  const completed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Inspect. ', status: 'done' } }));
+  const resumed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Verify.', status: 'thinking' } }));
+  const merged = composeMessage(resumed, completed ? [completed] : []);
+  expect(merged).toHaveLength(1);
+  expect(merged[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+});
+
 test('cancelled tool history cannot become successful after a late frame', () => {
   const cancelled = normalizeToolCallContent({call_id:'cancelled',name:'exec_command',status:'canceled',output:'STARTED'}, 'finish');
   expect(cancelled.status).toBe('canceled');

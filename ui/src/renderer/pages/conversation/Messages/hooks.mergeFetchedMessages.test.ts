@@ -639,6 +639,40 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged.map((message) => message.id)).toEqual(['durable-thinking-step-1', 'turn-summary']);
   });
 
+  test('history refresh preserves the current thinking phase until its canonical Turn settles', () => {
+    const turnId = messageId('active-thinking-turn');
+    const live = baseMessage({
+      id: 'live-thinking', msg_id: 'thinking-step-1', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect the workspace', status: 'thinking' },
+    });
+    const persisted = baseMessage({
+      id: 'saved-thinking', msg_id: 'thinking-step-1', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect the workspace', status: 'done' },
+    });
+    const active = mergeFetchedMessagesForConversation([live], fetchedMessages([persisted]), live.conversation_id);
+    expect(active).toHaveLength(1);
+    expect(active[0].id).toBe('saved-thinking');
+    expect(active[0].content).toMatchObject({ status: 'thinking' });
+
+    const combined = {
+      ...persisted,
+      content: { content: 'Earlier reasoning. Inspect the workspace', status: 'done' },
+    } as TMessage;
+    const reopened = mergeFetchedMessagesForConversation([live], fetchedMessages([combined]), live.conversation_id);
+    expect(reopened[0].content).toMatchObject({
+      content: 'Earlier reasoning. Inspect the workspace', status: 'thinking',
+    });
+
+    const terminal = baseMessage({
+      id: 'turn-summary', msg_id: 'turn-summary', turn_id: turnId, type: 'agent_status',
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, finished_at_ms: 3000 },
+    });
+    const settled = mergeFetchedMessagesForConversation(
+      active, fetchedMessages([persisted, terminal]), live.conversation_id
+    );
+    expect(settled.find(message => message.type === 'thinking')?.content).toMatchObject({ status: 'done' });
+  });
+
   test('keeps a longer streaming thinking snapshot if the fetched row is stale', () => {
     const streamingThinking = baseMessage({
       id: 'client-streaming-thinking-id',
@@ -867,6 +901,42 @@ describe('composeMessageForTest', () => {
     expect(merged[0].created_at).toBe(1000);
     expect(merged[0].turn_id).toBe(rootTurnId);
     expect(merged[0].content).toMatchObject({ status: 'done', duration: 4000 });
+  });
+
+  test('thinking completion updates its own step while later thinking remains active', () => {
+    const first = baseMessage({
+      id: 'first-thought', msg_id: 'thinking-step-1', type: 'thinking',
+      content: { content: 'Inspect the workspace', status: 'thinking' },
+    });
+    const second = baseMessage({
+      id: 'second-thought', msg_id: 'thinking-step-2', type: 'thinking',
+      content: { content: 'Plan the next edit', status: 'thinking' },
+    });
+    const completion = baseMessage({
+      id: 'first-done', msg_id: 'thinking-step-1', type: 'thinking',
+      content: { content: '', status: 'done' },
+    });
+    const merged = composeMessageForTest(completion, [first, second]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0].content).toMatchObject({ content: 'Inspect the workspace', status: 'done' });
+    expect(merged[1].content).toMatchObject({ content: 'Plan the next edit', status: 'thinking' });
+  });
+
+  test('a new reasoning delta reopens a completed contiguous step', () => {
+    const completed = baseMessage({
+      id: 'thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Inspect the workspace. ', status: 'done' },
+    });
+    const resumed = baseMessage({
+      id: 'resumed-thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Consider the result.', status: 'thinking' },
+    });
+    const merged = composeMessageForTest(resumed, [completed]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe('thought');
+    expect(merged[0].content).toMatchObject({
+      content: 'Inspect the workspace. Consider the result.', status: 'thinking',
+    });
   });
 
   test('keeps terminal tips separate from successful text sharing the same stream msg_id', () => {

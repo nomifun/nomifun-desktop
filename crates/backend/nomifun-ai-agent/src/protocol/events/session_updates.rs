@@ -15,6 +15,9 @@ pub struct AgentStatusEventData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingEventData {
     pub content: String,
+    /// Canonical model-step identity shared by realtime and durable thinking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u16>,
     #[serde(default)]
     pub subject: Option<String>,
     #[serde(default)]

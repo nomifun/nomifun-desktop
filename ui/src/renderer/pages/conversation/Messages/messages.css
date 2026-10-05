@@ -277,6 +277,17 @@
   color: var(--color-text-3, #86909c);
 }
 
+.conversation-current-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin-top: 12px;
+  color: var(--color-text-3, #86909c);
+  font-size: 13px;
+  line-height: 20px;
+}
+
 .turn-process-disclosure__header {
   box-sizing: border-box;
   display: flex;

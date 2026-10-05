@@ -1216,6 +1216,7 @@ export const composeMessage = (
       const merged = {
         ...last.content,
         content: last.content.content + message.content.content,
+        status: message.content.status,
         subject: message.content.subject || last.content.subject,
       };
       return updateMessage(list.length - 1, { ...last, content: merged });

@@ -1198,6 +1198,7 @@ mod tests {
         let mut reducer = SpokenReplyReducer::default();
         assert_eq!(
             reducer.push(AgentStreamEvent::Thinking(ThinkingEventData {
+                step: None,
                 content: "internal reasoning".to_owned(),
                 subject: None,
                 duration: None,

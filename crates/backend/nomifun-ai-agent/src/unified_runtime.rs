@@ -151,6 +151,7 @@ struct TurnProjection {
     message: SendMessageData,
     output: EngineTurnOutput,
     calls: Mutex<BTreeMap<String, ToolCallEventData>>,
+    thinking_step: Mutex<Option<u16>>,
     terminal: Mutex<Option<AgentEngineEvent>>,
     last_model_step: std::sync::atomic::AtomicU16,
 }
@@ -205,7 +206,43 @@ impl AgentEventSink for TurnProjection {
 }
 
 impl TurnProjection {
+    fn complete_thinking(&self) {
+        let step = self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(step) = step {
+            self.output.publish(EngineProgress::Thinking(ThinkingEventData {
+                content: String::new(),
+                step: Some(step),
+                subject: None,
+                duration: None,
+                status: Some("done".into()),
+            }));
+        }
+    }
+
     fn project(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+        // This runs only after the typed transition is recorded by the host.
+        // Closing one reasoning phase does not complete the enclosing Turn;
+        // its terminal remains owned by the cleanup and receipt path.
+        match &event {
+            AgentEngineEvent::ReasoningDelta { step, .. } => {
+                let previous = *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner());
+                if previous.is_some_and(|previous| previous != *step) {
+                    self.complete_thinking();
+                }
+                *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()) = Some(*step);
+            }
+            AgentEngineEvent::ModelStepStarted { .. }
+            | AgentEngineEvent::ExecutionResumed { .. }
+            | AgentEngineEvent::OutputTextDelta { .. }
+            | AgentEngineEvent::CompletionDelivered { .. }
+            | AgentEngineEvent::ToolCallDelta { .. }
+            | AgentEngineEvent::ToolCallCompleted { .. }
+            | AgentEngineEvent::ToolStarted { .. }
+            | AgentEngineEvent::ModelOutputTruncated { .. }
+            | AgentEngineEvent::ModelResponseRejected { .. }
+            | AgentEngineEvent::DeliveryReviewSuperseded { .. } => self.complete_thinking(),
+            _ => {}
+        }
         let projected = match event {
             // The host has committed the full plan. Re-read the canonical
             // snapshot, including lifecycle and reset state, for presentation.
@@ -214,12 +251,13 @@ impl TurnProjection {
             AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } => {
                 Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
             }
-            AgentEngineEvent::ReasoningDelta { text, .. } => {
+            AgentEngineEvent::ReasoningDelta { step, text } => {
                 Some(EngineProgress::Thinking(ThinkingEventData {
                     content: text,
+                    step: Some(step),
                     subject: None,
                     duration: None,
-                    status: None,
+                    status: Some("thinking".into()),
                 }))
             }
             AgentEngineEvent::ToolCallCompleted { call, .. } => {
@@ -305,6 +343,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         let projection = Arc::new(TurnProjection {
             host: self.host.clone(), message: message.clone(), output,
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            thinking_step: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         });
         let session = self.engine.open_session(self.binding.clone(), self.model.clone(),
@@ -799,6 +838,7 @@ mod tests {
         let projection = TurnProjection {
             host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            thinking_step: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
         let mut events = state.subscribe();
@@ -820,6 +860,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thinking_completes_before_committed_public_text_without_completing_the_turn() {
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        projection.emit(AgentEngineEvent::ReasoningDelta {
+            step: 1, text: "Inspect the workspace".into(),
+        }).await.unwrap();
+        let AgentStreamEvent::Thinking(running) = events.try_recv().unwrap() else {
+            panic!("expected thinking delta");
+        };
+        assert_eq!(running.step, Some(1));
+        assert_eq!(running.status.as_deref(), Some("thinking"));
+
+        let text = AgentEngineEvent::OutputTextDelta { step: 1, text: "I will inspect the files.".into() };
+        host.fail_record.store(true, Ordering::Release);
+        assert!(projection.emit(text.clone()).await.is_err());
+        assert!(events.try_recv().is_err(), "uncommitted text must not close reasoning");
+        host.fail_record.store(false, Ordering::Release);
+        projection.emit(text).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected reasoning completion before text");
+        };
+        assert_eq!(completed.step, Some(1));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        assert!(completed.content.is_empty());
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Text(_)));
+        assert!(events.try_recv().is_err());
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+
+        projection.emit(AgentEngineEvent::OutputTextDelta { step: 1, text: "More progress".into() }).await.unwrap();
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Text(_)));
+        assert!(events.try_recv().is_err(), "reasoning completion is emitted once per active phase");
+    }
+
+    #[tokio::test]
+    async fn thinking_completion_tracks_tool_handoffs_and_model_step_changes() {
+        use nomifun_agent_contracts::StrictJsonValue;
+        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+
+        let host = Host::new();
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host, message: message(), output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()), thinking_step: Mutex::new(None), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
+        };
+        let mut events = state.subscribe();
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Read the source".into() }).await.unwrap();
+        assert!(matches!(events.try_recv().unwrap(), AgentStreamEvent::Thinking(_)));
+        projection.emit(AgentEngineEvent::ToolCallCompleted {
+            step: 1,
+            call: ChatToolCall {
+                call_id: ToolCallId::from("read-source"), name: "read_file".into(),
+                arguments: StrictJsonValue(serde_json::json!({"path":"README.md"})), provider_metadata: None,
+            },
+        }).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected reasoning completion at the tool handoff");
+        };
+        assert_eq!(completed.step, Some(1));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        assert!(events.try_recv().is_err());
+
+        // Providers can expose another reasoning phase within the same step.
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 1, text: "Check the next detail".into() }).await.unwrap();
+        let AgentStreamEvent::Thinking(reopened) = events.try_recv().unwrap() else {
+            panic!("expected new reasoning phase");
+        };
+        assert_eq!(reopened.step, Some(1));
+        assert_eq!(reopened.status.as_deref(), Some("thinking"));
+        projection.emit(AgentEngineEvent::ModelStepStarted { step: 2, operation_id: OperationId::from("model:2") }).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected old step completion before the new model step");
+        };
+        assert_eq!(completed.step, Some(1));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 2, text: "Verify the result".into() }).await.unwrap();
+        let AgentStreamEvent::Thinking(next) = events.try_recv().unwrap() else {
+            panic!("expected next step reasoning");
+        };
+        assert_eq!(next.step, Some(2));
+        assert_eq!(next.status.as_deref(), Some("thinking"));
+
+        projection.emit(AgentEngineEvent::TurnCancelled { model_steps: 2 }).await.unwrap();
+        assert!(events.try_recv().is_err(), "deferred terminal must not publish before the owner receipt");
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+    }
+
+    #[tokio::test]
     async fn tool_projection_retains_call_identity_arguments_and_error_outcome() {
         use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
         use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
@@ -833,6 +969,7 @@ mod tests {
             message: message(),
             output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()),
+            thinking_step: Mutex::new(None),
             terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
@@ -901,6 +1038,7 @@ mod tests {
             message: message(),
             output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()),
+            thinking_step: Mutex::new(None),
             terminal: Mutex::new(None),
             last_model_step: std::sync::atomic::AtomicU16::new(0),
         };

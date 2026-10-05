@@ -589,7 +589,8 @@ export function buildTurnDisclosureItems(
   const flush = (fallbackClosed: boolean) => {
     if (!segment.length) return;
     const segmentTurnId = segment[0]?.turnId;
-    const isClosed = options.tailClosed === true || (activeTurnId ? segmentTurnId !== activeTurnId : fallbackClosed);
+    const isClosed = (segmentTurnId !== undefined && turnEndedAtByTurn.has(segmentTurnId))
+      || options.tailClosed === true || (activeTurnId ? segmentTurnId !== activeTurnId : fallbackClosed);
     output.push(
       ...buildSegmentOutput(
         segment,

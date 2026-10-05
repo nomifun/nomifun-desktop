@@ -157,6 +157,18 @@ pub(super) fn canonical_assistant_step_message_id(
     Ok(assistant.to_string())
 }
 
+/// Reasoning has its own per-step identity so a completed phase cannot be
+/// confused with later thinking or the public assistant text during hydration.
+pub(super) fn canonical_thinking_step_message_id(
+    root_message_id: &str,
+    step: u16,
+) -> Result<String, AppError> {
+    let assistant = canonical_assistant_step_message_id(root_message_id, step)?;
+    let mut bytes = *Uuid::parse_str(&assistant).map_err(failure)?.as_bytes();
+    bytes[13] ^= 0x80;
+    Ok(Uuid::from_bytes(bytes).to_string())
+}
+
 fn canonical_event_payload(
     session_id: &AgentSessionId,
     value: Value,
@@ -696,10 +708,11 @@ impl EngineTurnJournal {
         if text.trim().is_empty() {
             return Ok(());
         }
+        let thinking_message_id = canonical_thinking_step_message_id(journal.root.as_ref(), step)?;
         let (message_id, previous_parts) = cursor
             .thinking_messages
             .entry(step)
-            .or_insert_with(|| (Uuid::now_v7().to_string(), 0));
+            .or_insert_with(|| (thinking_message_id, 0));
         let part = previous_parts.saturating_add(1);
         let identity = format!(
             "thinking-part:{}:{}:{step}:{part}",
@@ -1492,15 +1505,25 @@ mod history_display_tests {
             .expect("thinking projection is present in a new history reader");
         assert_eq!(thinking.projection["content"], "Inspect the workspace. ");
         assert_eq!(thinking.projection["turn_id"], journal.0.root.as_ref());
+        assert_eq!(thinking.projection["correlation_id"],
+            canonical_thinking_step_message_id(journal.0.root.as_ref(), 1).unwrap());
+        journal.append(serde_json::to_string(&AgentEngineEvent::ReasoningDelta {
+            step: 2, text: "Verify the result.".to_owned(),
+        }).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
         store.rebuild_projections(&journal.0.session).await.unwrap();
         let (rebuilt, _, _) = store
             .message_history_before(&journal.0.session, None, 50)
             .await
             .unwrap();
         assert_eq!(
-            rebuilt.iter().find(|projection| projection.presentation_intent == "thinking")
+            rebuilt.iter().find(|projection| projection.projection["correlation_id"] ==
+                canonical_thinking_step_message_id(journal.0.root.as_ref(), 1).unwrap())
                 .unwrap().projection["content"],
             "Inspect the workspace. "
         );
+        assert_eq!(rebuilt.iter().filter(|projection| projection.presentation_intent == "thinking").count(), 2);
+        assert_eq!(rebuilt.iter().find(|projection| projection.projection["correlation_id"] ==
+            canonical_thinking_step_message_id(journal.0.root.as_ref(), 2).unwrap())
+            .unwrap().projection["content"], "Verify the result.");
     }
 }

@@ -305,6 +305,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
         content: {
           ...last.content,
           content: nextContent,
+          status: message.content.status,
           subject: message.content.subject || last.content.subject,
         },
       };
@@ -913,7 +914,17 @@ export const mergeFetchedMessagesForConversation = (
       return withFetchedCanonicalIdentity(dbMessage, preferTextMessageVersion(dbMessage, streamMessage));
     }
     if (dbMessage.type === 'thinking' && streamMessage.type === 'thinking') {
-      return withFetchedCanonicalIdentity(dbMessage, preferThinkingMessageVersion(dbMessage, streamMessage));
+      // Recorded reasoning fragments are returned as done by history. Until
+      // the canonical Turn receipt settles, the live event owns its explicit
+      // phase status, even when history combines several phases in one step.
+      const preferred = preferThinkingMessageVersion(dbMessage, streamMessage);
+      if (dbMessage.turn_id && !settledTurnIds.has(dbMessage.turn_id)) {
+        return withFetchedCanonicalIdentity(dbMessage, {
+          ...preferred,
+          content: { ...preferred.content, status: streamMessage.content.status },
+        });
+      }
+      return withFetchedCanonicalIdentity(dbMessage, preferred);
     }
     if (dbMessage.type === 'tool_call' && streamMessage.type === 'tool_call') {
       const content = mergeToolCallContent(dbMessage.content, streamMessage.content);

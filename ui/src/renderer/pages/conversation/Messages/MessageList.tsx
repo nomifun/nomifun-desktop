@@ -20,7 +20,7 @@ import { useConversationContextSafe } from '@/renderer/hooks/context/Conversatio
 import { useThinkingDisplayPreferences } from '@/renderer/hooks/config/useThinkingDisplayPreferences';
 import { iconColors } from '@/renderer/styles/colors';
 import { CHAT_MESSAGE_JUMP_EVENT, type ChatMessageJumpDetail } from '@/renderer/utils/chat/chatMinimapEvents';
-import { Image } from '@arco-design/web-react';
+import { Image, Spin } from '@arco-design/web-react';
 import { Down } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -1066,6 +1066,19 @@ const MessageList: React.FC<{
     workspaceRoots,
   ]);
 
+  const currentActivity = useMemo(() => {
+    if (conversationContext?.isProcessing !== true) return undefined;
+    const activeTurn = displayList.findLast((item): item is ITurnProcessDisclosureVO =>
+      item.type === 'turn_process_disclosure'
+      && (!conversationContext.activeTurnId || item.msg_id === conversationContext.activeTurnId)
+    );
+    if (activeTurn && !activeTurn.running) return undefined;
+    const latestItem = activeTurn?.processItems.at(-1);
+    const latestState = latestItem && (activeTurn?.processItemStates[getProcessedItemAnchorId(latestItem)]
+      ?? getProcessItemState(latestItem));
+    return latestItem?.type === 'thinking' && latestState === 'running' ? 'thinking' : 'processing';
+  }, [conversationContext?.activeTurnId, conversationContext?.isProcessing, displayList]);
+
   const lastUserTextIndex = useMemo(
     () =>
       displayList.findLastIndex(
@@ -1262,7 +1275,7 @@ const MessageList: React.FC<{
           processItem,
           layoutKind === 'tool' ? 'receipt' : 'list',
           workspaceRoots,
-          item.running ? undefined : processState,
+          layoutKind === 'thinking' || !item.running ? processState : undefined,
           processState === 'failed' && item.state !== 'failed'
         );
       }
@@ -1433,7 +1446,7 @@ const MessageList: React.FC<{
     return <MessageListSkeleton />;
   }
 
-  if (displayList.length === 0 && emptySlot) {
+  if (displayList.length === 0 && emptySlot && !currentActivity) {
     return <div className='relative flex-1 h-full flex items-center justify-center'>{emptySlot}</div>;
   }
 
@@ -1462,6 +1475,20 @@ const MessageList: React.FC<{
               {displayList.map((item, index) => (
                 <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
               ))}
+              {currentActivity && (
+                <div
+                  className='conversation-current-activity'
+                  data-testid='conversation-current-activity'
+                  data-activity-state={currentActivity}
+                  role='status'
+                  aria-live='polite'
+                >
+                  <Spin size={12} />
+                  <span>{currentActivity === 'thinking'
+                    ? t('conversation.thinking.label', { defaultValue: 'Thinking...' })
+                    : t('messages.processing', { defaultValue: 'Processing...' })}</span>
+                </div>
+              )}
               <div className='h-20px' />
             </div>
           </div>

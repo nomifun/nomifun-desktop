@@ -1638,6 +1638,7 @@ mod tests {
     #[test]
     fn thinking_event_produces_thinking() {
         let event = AgentStreamEvent::Thinking(ThinkingEventData {
+            step: None,
             content: "Analyzing...".into(),
             subject: None,
             duration: None,
