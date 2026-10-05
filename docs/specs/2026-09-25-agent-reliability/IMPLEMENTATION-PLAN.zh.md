@@ -23,7 +23,7 @@ D1所用W250是重构过程中较早构建保存的冻结合同样本，并非�
 | 项目 | 当前状态 | 必须取得的交付证据 |
 | --- | --- | --- |
 | 自动冷恢复 | 已完成本项正式验收 | `cold-002`：原固定句柄exit137；新进程沿同制品／data／work，在默认90秒lease自然到期后接管原Turn；checkpoint精确核对，唯一已完成写入不重放，fresh完整回读及报告完成；独立post oracle及实际UI通过，冷GUI／载体自然exit0、后代／监听清理通过，无手工resume或DB改写 |
-| Windows睡眠／重启恢复 | 无睡眠预检完成；待实际S3／整机重启 | `01-power-preflight`：真实S3能力、唤醒timer arm／cancel、同token原属性恢复和原driver自然exit0已核对，尚未睡眠；真实电源周期仍须输入／ACK、deadline／lease、进程身份、不同OS boot和自动接管／清理证据；维护时间待用户回复 |
+| Windows睡眠／重启恢复 | 新版睡前门禁及无睡眠预检完成；待实际S3／整机重启 | `02-power-preflight`：新版驱动编译、真实S3能力、唤醒timer arm／cancel、同token原属性恢复和原driver自然exit0已核对；实际睡眠前就近核验六个原句柄与三个START witness，缺前提拒绝睡眠并清理，产品deadline／lease不变；原01预检独立保留。真实电源周期仍待完整采证，维护时间待用户回复 |
 | 完整ConPTY组合 | 已完成本项原生验收 | `02-conpty-combination`：同一生产Supervisor完成20组合（19ConPTY＋1pipe），真实输入／尺寸、8次串行、4次并发、3组父子取消；generic ConPTY EOF按不支持核对，pipe真实EOF通过；4个容量驱逐、全部20个shutdown移除及原terminal witness不变，close gauges归零、句柄回收与原driver自然exit0，独立oracle通过 |
 | 完整多来源历史报告 | 已完成本项正式验收 | `history-01`：两个不同closed来源共20份原始结果、16份资源参数与完整脚本、两份5040字节文件及SHA，独立fresh读取、40037字节最终报告和实际UI／刷新核对；26次本地HTTP、6个Effects，无来源重放；自然native exit0、后代／监听0 |
 | Mac全新数据目录首次启动 | 据Mac独立实机记录采纳本项PASS | `f13d7980e`：原生arm64正式制品，多级新data首次启动、实际profile store／gen7 baseline及同目录冷启动；两次原subprocess自然Quit exit0、后代／监听／DB句柄清理；file／symlink拒绝与哨兵保护、模型0；原件保存在Mac，由Mac进度页记录 |
@@ -31,6 +31,8 @@ D1所用W250是重构过程中较早构建保存的冻结合同样本，并非�
 源码起点`eb3bb1ac5`。本机已确认Windows支持S3。用户指定Mac在其Mac电脑单独执行，专用prompt保存于仓库外本轮证据根的`MAC-STARTUP-TASK-PROMPT.txt`；Mac执行记录已由`f13d7980e`回传并合并，据该实机记录采纳S2，本Windows宿主未复测Mac原件。当前只剩Windows真实睡眠／整机重启，准备或交接完成不记验收通过。
 
 本轮证据根为仓库外`2026-10-05/windows/remaining-five-cases`。冷恢复制品`563ae069492c1a371c64ba2078018b23dfd262aa76ec3f6a3675ac36da090a46`、同源helper `b35308eead27e2d477e711535cfaf2d64ee11db226585e5536f9d8ec6f793f52`与前端`9473e998-945d-41cc-804f-903be22e1749`均冻结；多来源报告采用已冻结的`68B6…`制品，其身份单独记录。ConPTY及power外部驱动沿用仓库锁定依赖和当前生产实现。原夹具／oracle首错保留，当前三项PASS各有独立验收和原OS句柄退出证据；不代判实际电源、Mac或全量发布认证。
+
+真实重启入口已完成同boot失败关闭、固定端口真实wire续接、原lease自然到期与原句柄退出保护；11个本地脚本依赖封闭。`boot/prepare-smoke-001`只做零输入交接：官方helper原句柄自然exit0、原端口新provider calls0、同canonical前缀／Turn0／Effect0，随后GUI／provider及已捕获后代自然exit0，监听和捕获不确定性0。此准备样本不用于实际重启验收；真实`boot/reboot-001`尚未开始，不能复用或改写smoke事实取PASS。
 
 2026-10-04 当前实施：用户明确要求 U4、D2、D3 持续实施至完整交付，本轮这三项不按原长测暂缓或诊断时间盒停止。源码起点 `296dc899f`，以 generation 7 的新会话与隔离 data/work/profile 验证；不恢复旧会话 reader 或导入旧日志。
 
