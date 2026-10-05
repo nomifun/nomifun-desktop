@@ -508,12 +508,37 @@ mod tests {
     fn thinking_event_roundtrip() {
         let event = AgentStreamEvent::Thinking(ThinkingEventData {
             content: "Analyzing...".into(),
+            step: Some(2),
             subject: Some("code review".into()),
             duration: Some(1500),
             status: Some("in_progress".into()),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "thinking");
+        assert_eq!(json["data"]["step"], 2);
         assert_eq!(json["data"]["duration"], 1500);
+        let AgentStreamEvent::Thinking(decoded) = serde_json::from_value(json).unwrap() else {
+            panic!("expected thinking event");
+        };
+        assert_eq!(decoded.step, Some(2));
+    }
+
+    #[test]
+    fn thinking_completion_roundtrip_preserves_its_step() {
+        let event = AgentStreamEvent::Thinking(ThinkingEventData {
+            content: String::new(),
+            step: Some(3),
+            subject: None,
+            duration: None,
+            status: Some("done".into()),
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["data"]["step"], 3);
+        assert_eq!(json["data"]["status"], "done");
+        let AgentStreamEvent::Thinking(decoded) = serde_json::from_value(json).unwrap() else {
+            panic!("expected thinking event");
+        };
+        assert_eq!(decoded.step, Some(3));
+        assert_eq!(decoded.status.as_deref(), Some("done"));
     }
 }

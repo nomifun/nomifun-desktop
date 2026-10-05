@@ -1719,6 +1719,8 @@ impl NomiCoreSessionOwner {
         let step_message_id = match event {
             AgentStreamEvent::Text(data) => data.step.and_then(|step|
                 super::engine_journal::canonical_assistant_step_message_id(root_message_id, step).ok()),
+            AgentStreamEvent::Thinking(data) => data.step.and_then(|step|
+                super::engine_journal::canonical_thinking_step_message_id(root_message_id, step).ok()),
             _ => None,
         };
         let assistant_message_id = step_message_id.as_deref().unwrap_or(assistant_message_id);
@@ -5754,6 +5756,32 @@ mod session_boundary_tests {
                 super::super::engine_journal::canonical_assistant_step_message_id(root, step).unwrap());
             assert_eq!(wire.data["turn_id"], root);
             if step > 1 { assert_ne!(wire.data["msg_id"], fallback); }
+        }
+    }
+
+    #[test]
+    fn canonical_thinking_steps_keep_completion_scoped_to_the_same_durable_row() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let fallback = NomiCoreSessionOwner::canonical_assistant_stream_message_id(root).unwrap();
+        let mut identities = std::collections::BTreeSet::new();
+        for step in [1_u16, 2, 300] {
+            let identity = super::super::engine_journal::canonical_thinking_step_message_id(root, step).unwrap();
+            assert!(identities.insert(identity.clone()));
+            assert_ne!(identity, root);
+            assert_ne!(identity, super::super::engine_journal::canonical_assistant_step_message_id(root, step).unwrap());
+            assert_eq!(uuid::Uuid::parse_str(&identity).unwrap().get_version_num(), 7);
+            for status in ["thinking", "done"] {
+                let event: AgentStreamEvent = serde_json::from_value(json!({
+                    "type": "thinking", "data": { "content": "", "step": step, "status": status },
+                })).unwrap();
+                let wire = NomiCoreSessionOwner::canonical_stream_wire_event(
+                    &session_id, root, &fallback, &event,
+                ).unwrap();
+                assert_eq!(wire.data["msg_id"], identity);
+                assert_eq!(wire.data["turn_id"], root);
+                assert_eq!(wire.data["data"]["status"], status);
+            }
         }
     }
 
