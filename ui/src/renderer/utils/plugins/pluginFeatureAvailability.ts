@@ -1,7 +1,7 @@
 import { PLUGIN_DEVELOPMENT_MODULE } from '@/common/types/pluginDevelopment';
 
-// Temporarily hide plugin UI while retaining its implementation and saved Agent grants.
-export const PLUGIN_FEATURE_VISIBLE = false;
+// Shared visibility switch for plugin surfaces; existing Agent grants are preserved.
+export const PLUGIN_FEATURE_VISIBLE = true;
 
 export const isVisibleAgentModule = (moduleId: string): boolean =>
   PLUGIN_FEATURE_VISIBLE || moduleId !== PLUGIN_DEVELOPMENT_MODULE;

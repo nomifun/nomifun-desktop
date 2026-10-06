@@ -173,8 +173,8 @@ describe('Agent capability Module workbench', () => {
     { catalogued: true, selected: false },
     { catalogued: true, selected: true },
     { catalogued: false, selected: true },
-  ])('hides plugin development while preserving saved grants (%j)', async ({ catalogued, selected }) => {
-    expect(PLUGIN_FEATURE_VISIBLE).toBe(false);
+  ])('shows plugin development while preserving saved grants (%j)', async ({ catalogued, selected }) => {
+    expect(PLUGIN_FEATURE_VISIBLE).toBe(true);
     const plugin = moduleItem('plugin.development', [
       ['plugin.development/list', 'read_local'],
       ['plugin.development/create', 'write_durable'],
@@ -187,14 +187,14 @@ describe('Agent capability Module workbench', () => {
       documentWith(selected ? [[pluginGrant.capability, [...pluginGrant.action_allowlist]]] : []),
       catalog(catalogued ? [files, plugin] : [files])
     );
-    const hiddenNames = /plugin\.development|Plugins and small apps/i;
-    const assertHidden = () => {
-      expect(screen.queryByRole('heading', { name: hiddenNames })).toBeNull();
-      expect(screen.queryByRole('switch', { name: hiddenNames })).toBeNull();
-      expect(screen.queryByText('plugin.development')).toBeNull();
-      expect(screen.getByRole('button', { name: /All categories 0 enabled, 1 total/ })).toBeTruthy();
+    const pluginName = catalogued ? en.modules.pluginDevelopment.name : 'plugin.development';
+    const assertVisible = () => {
+      expect(screen.getByRole('heading', { name: pluginName })).toBeTruthy();
+      expect(screen.getByRole('switch', { name: `${selected ? 'Disable' : 'Enable'} ${pluginName}` })
+        .getAttribute('aria-checked')).toBe(String(selected));
     };
-    assertHidden();
+    assertVisible();
+    expect(screen.getByRole('button', { name: `All categories ${selected ? 1 : 0} enabled, 2 total` })).toBeTruthy();
     await act(async () => {
       fireEvent.click(screen.getByRole('switch', { name: 'Enable Workspace I/O' }));
     });
@@ -207,8 +207,7 @@ describe('Agent capability Module workbench', () => {
       ...(selected ? [pluginGrant] : []),
       { capability: files.module, action_allowlist: ['workspace.files/read', 'workspace.files/write'] },
     ]);
-    expect(screen.queryByRole('heading', { name: hiddenNames })).toBeNull();
-    expect(screen.queryByRole('switch', { name: hiddenNames })).toBeNull();
+    assertVisible();
   });
 
   test('shows enabled and total Module counts for all categories', () => {

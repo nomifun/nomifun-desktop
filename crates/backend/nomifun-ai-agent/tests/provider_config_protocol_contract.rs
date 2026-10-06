@@ -68,7 +68,7 @@ async fn insert_provider(repo: &SqliteProviderRepository, fixture: ProviderFixtu
     let encrypted_credentials = encrypt_string(fixture.credentials_json, &TEST_KEY).unwrap();
     let capabilities = [NewProviderModelCapability {
         task: "chat",
-        traits: "[\"streaming\"]",
+        traits: "[]",
         protocol: fixture.protocol,
         connection_role: "default",
         endpoint: fixture.endpoint,
@@ -187,6 +187,7 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .await
     .unwrap();
     assert_eq!(openai.provider, ProviderType::OpenAI);
+    assert!(openai.compat.supports_image());
     assert_eq!(
         openai.provider.requires_output_ceiling(),
         protocol_requires_output_ceiling("openai.chat_text")
@@ -211,6 +212,7 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .await
     .unwrap();
     assert_eq!(anthropic.provider, ProviderType::Anthropic);
+    assert!(anthropic.compat.supports_image());
     assert_eq!(
         anthropic.provider.requires_output_ceiling(),
         protocol_requires_output_ceiling("anthropic.messages")
@@ -232,6 +234,7 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .await
     .unwrap();
     assert_eq!(gemini.provider, ProviderType::Gemini);
+    assert!(gemini.compat.supports_image());
     assert_eq!(
         gemini.provider.requires_output_ceiling(),
         protocol_requires_output_ceiling("gemini.generate_text")
@@ -253,6 +256,7 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     .await
     .unwrap();
     assert_eq!(bedrock.provider, ProviderType::Bedrock);
+    assert!(bedrock.compat.supports_image());
     assert_eq!(
         bedrock.provider.requires_output_ceiling(),
         protocol_requires_output_ceiling("bedrock.anthropic_messages")
@@ -263,4 +267,68 @@ async fn capability_endpoints_and_sdk_config_reach_the_matching_nomi_serializer(
     let bedrock_config = bedrock.bedrock.expect("Bedrock SDK config");
     assert_eq!(bedrock_config.region.as_deref(), Some("us-east-1"));
     assert_eq!(bedrock_config.profile.as_deref(), Some("contract"));
+}
+
+#[tokio::test]
+async fn a_chat_model_without_catalog_traits_sends_images_to_the_provider() {
+    use nomi_providers::create_provider;
+    use nomi_types::llm::{LlmEvent, LlmRequest};
+    use nomi_types::message::{ContentBlock, Message, Role};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let harness = setup().await;
+    insert_provider(harness.provider_repo.as_ref(), ProviderFixture {
+        id: OPENAI_ID,
+        platform: "openai",
+        base_url: &server.uri(),
+        auth_scheme: "bearer",
+        credentials_json: r#"{"api_keys":["local-image-test"]}"#,
+        bedrock_config: None,
+        model: "opaque-new-model",
+        protocol: "openai.chat_text",
+        endpoint: Some("/chat/completions"),
+        provider_params: "{}",
+    }).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let config = resolve_provider_config(&harness.invoke, OPENAI_ID, "opaque-new-model", workspace.path())
+        .await.unwrap();
+    let provider = create_provider(&config);
+    let request = LlmRequest {
+        model: config.model.clone(),
+        system: String::new(),
+        messages: vec![Message::new(Role::User, vec![ContentBlock::Image {
+            media_type: "image/png".to_owned(),
+            data: "aGVsbG8=".to_owned(),
+        }])],
+        tools: Vec::new(),
+        max_tokens: None,
+        thinking: None,
+        reasoning_effort: None,
+        retain_provider_round: false,
+    };
+    let mut stream = provider.stream(&request).await.unwrap();
+    let mut completed = false;
+    while let Some(event) = stream.recv().await {
+        match event {
+            LlmEvent::Done { .. } => completed = true,
+            LlmEvent::Error(message) => panic!("local image request failed: {message}"),
+            _ => {},
+        }
+    }
+    assert!(completed);
+    let sent = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&sent[0].body).unwrap();
+    let user = body["messages"].as_array().unwrap().iter()
+        .find(|message| message["role"] == "user").unwrap();
+    assert_eq!(user["content"][0]["type"], "image_url");
+    assert_eq!(user["content"][0]["image_url"]["url"], "data:image/png;base64,aGVsbG8=");
 }

@@ -26,7 +26,7 @@ export type { TaskModelSelection, TaskModelProviderScope } from './taskModelSele
 
 interface TaskModelSelectProps {
   task: ModelTask;
-  /** Extra capability the model must carry (e.g. `['vision_input']`). */
+  /** Inputs/search the configured adapter must represent (e.g. `['vision_input']`). */
   traits?: ModelTrait[];
   value: TaskModelSelection | null;
   /** Fired only with a complete, live selection. */

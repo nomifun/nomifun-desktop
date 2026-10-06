@@ -8,7 +8,7 @@ use nomi_config::config::{CliArgs, Config, ProviderType};
 use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason};
-use nomifun_api_types::{ModelTask, ModelTrait};
+use nomifun_api_types::ModelTask;
 use nomifun_common::{AppError, ProviderId, ProviderWithModel};
 use nomifun_model_invoke::{
     AuthMaterial, AuthScheme, ModelInvokeService, ModelRef, ProtocolExecutorKind,
@@ -108,15 +108,18 @@ fn resolve_bedrock_config(
     }
 }
 
-/// Image input is opt-in on the exact Chat capability. Runtime observations
-/// may downgrade a declared vision model after an explicit upstream rejection,
-/// but can never promote a capability that omitted `vision_input`.
+/// Image input follows the selected protocol serializer. Catalog traits are
+/// advisory; only an explicit upstream rejection can narrow runtime support.
 pub(crate) fn capability_supports_image(
     provider_id: &str,
     model: &str,
-    traits: &[ModelTrait],
+    protocol_id: &str,
 ) -> bool {
-    traits.contains(&ModelTrait::VisionInput)
+    nomifun_chat_model_broker::chat_protocol_for_id(protocol_id)
+        .is_some_and(|protocol| {
+            nomifun_chat_model_broker::protocol_features(protocol)
+                .contains(&nomifun_chat_model_broker::ChatModelFeature::ImageInput)
+        })
         && !nomifun_common::VisionUnsupportedRegistry::global()
             .is_unsupported(provider_id, model)
 }
@@ -415,7 +418,7 @@ async fn resolve_provider_fields_at_revision(
         supports_image: Some(capability_supports_image(
             provider_id,
             model,
-            &task.traits,
+            &task.protocol,
         )),
         max_tokens_field,
         require_reasoning_content,
@@ -432,7 +435,7 @@ async fn resolve_provider_fields_at_revision(
         base_url,
         compat_overrides,
         bedrock_config,
-        supports_web_search: task.traits.contains(&ModelTrait::WebSearch),
+        supports_web_search: task.protocol == "openai.responses",
     })
 }
 
@@ -873,17 +876,17 @@ mod image_override_tests {
     use super::*;
 
     #[test]
-    fn absent_vision_trait_never_defaults_to_supported() {
-        assert!(!capability_supports_image(
-            "unlikely-prov-xyz",
-            "unlikely-model",
-            &[]
-        ));
-        assert!(capability_supports_image(
-            "unlikely-prov-xyz",
-            "unlikely-model",
-            &[ModelTrait::VisionInput]
-        ));
+    fn image_input_uses_protocol_support_and_explicit_upstream_rejection() {
+        for protocol in ["openai.chat_text", "openai.responses", "anthropic.messages",
+            "gemini.generate_text", "bedrock.anthropic_messages", "vertex.anthropic_messages"] {
+            assert!(capability_supports_image("image-default-test", protocol, protocol));
+        }
+        assert!(!capability_supports_image("image-default-test", "image-only", "openai.images"));
+
+        nomifun_common::VisionUnsupportedRegistry::global()
+            .mark_unsupported("image-rejection-test", "rejected-model");
+        assert!(!capability_supports_image("image-rejection-test", "rejected-model", "openai.chat_text"));
+        assert!(capability_supports_image("other-image-provider", "rejected-model", "openai.chat_text"));
     }
 }
 
@@ -1038,7 +1041,7 @@ mod provider_resolution_tests {
                 .contains_key("reasoning_effort"),
             "the normalized model default must be carried as a typed request field"
         );
-        assert_eq!(fields.compat_overrides.supports_image, Some(false));
+        assert_eq!(fields.compat_overrides.supports_image, Some(true));
         assert!(!fields.supports_web_search);
     }
 
@@ -1051,7 +1054,7 @@ mod provider_resolution_tests {
             base_url: "https://api.openai.com/v1",
             base_url_override: None,
             endpoint: Some("/responses"),
-            traits: r#"["vision_input","web_search"]"#,
+            traits: "[]",
             credentials: r#"{"api_keys":["test-secret"]}"#,
             provider_params: r#"{"chain_rounds":true,"temperature":0.2}"#,
             bedrock_config: None,
@@ -1078,7 +1081,7 @@ mod provider_resolution_tests {
     }
 
     #[tokio::test]
-    async fn vision_input_is_strictly_controlled_by_the_exact_chat_trait() {
+    async fn vision_input_does_not_require_a_saved_trait() {
         let fields = resolve_case(ChatCase {
             provider_id: "0190f5fe-7c00-7a00-8000-000000000105",
             protocol: "openai.chat_text",
@@ -1086,7 +1089,7 @@ mod provider_resolution_tests {
             base_url: "https://transport.example/root",
             base_url_override: None,
             endpoint: Some("/chat/completions"),
-            traits: r#"["vision_input"]"#,
+            traits: "[]",
             credentials: r#"{"api_keys":["test-secret"]}"#,
             provider_params: "{}",
             bedrock_config: None,

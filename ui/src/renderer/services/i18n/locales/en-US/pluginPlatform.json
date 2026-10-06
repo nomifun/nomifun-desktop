@@ -71,6 +71,8 @@
   },
   "workspace": {
     "title": "Plugins & Apps (Beta)",
+    "betaTitle": "Beta version",
+    "betaNotice": "Use is not recommended at this time.",
     "subtitle": "Local capability center",
     "navigation": "Plugin workspace navigation",
     "collapse": "Collapse plugin navigation",

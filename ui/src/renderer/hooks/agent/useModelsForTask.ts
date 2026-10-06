@@ -29,8 +29,8 @@ export interface ModelsForTaskResult {
 
 /**
  * Resolve a runtime model list from the nested provider response. Task and
- * traits are matched against the same capability object; disabled providers
- * and disabled models are never runnable.
+ * adapter input requirements match the same capability object. Disabled
+ * providers and disabled models are never runnable.
  */
 export const buildTaskModelGroups = (
   providers: readonly IProvider[],

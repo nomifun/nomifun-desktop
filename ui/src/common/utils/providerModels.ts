@@ -43,6 +43,41 @@ export const modelHealthOf = (
 export const modelNamesOf = (provider: Pick<IProvider, 'models'>): string[] =>
   provider.models.map((row) => row.model);
 
+/**
+ * Input/search representation supplied by the configured Chat adapter. Saved
+ * catalog traits are descriptive metadata; an omitted trait never disables a
+ * native model feature. Unknown model IDs may use any supported adapter, while
+ * unknown adapters cannot claim to encode inputs they do not implement.
+ *
+ * Keep the input protocol facts aligned with
+ * `nomifun-chat-model-broker::adapter::protocol_features`.
+ * Provider-native search is available through the Responses search executor.
+ */
+export const capabilitySupportsTrait = (
+  capability: ProviderModelCapabilityResponse | undefined,
+  trait: ModelTrait
+): boolean => {
+  if (capability?.task !== 'chat') return false;
+  const protocol = capability.protocol;
+  switch (trait) {
+    case 'vision_input':
+      return [
+        'openai.chat_text',
+        'openai.responses',
+        'anthropic.messages',
+        'gemini.generate_text',
+        'bedrock.anthropic_messages',
+        'vertex.anthropic_messages',
+      ].includes(protocol);
+    case 'audio_input':
+      return ['openai.chat_text', 'openai.responses', 'gemini.generate_text'].includes(protocol);
+    case 'web_search':
+      return protocol === 'openai.responses';
+    case 'video_input':
+      return false;
+  }
+};
+
 export const modelSupportsTask = (
   model: ProviderModelResponse,
   task: ModelTask,
@@ -52,7 +87,7 @@ export const modelSupportsTask = (
   const capability = model.capabilities.find((item) => item.task === task);
   return Boolean(
     capability &&
-      requiredTraits.every((trait) => capability.traits.includes(trait)) &&
+      requiredTraits.every((trait) => capabilitySupportsTrait(capability, trait)) &&
       requiredTechnicalCapabilities.every(
         (technical) =>
           !capability.health?.unsupported_technical_capabilities?.includes(technical)

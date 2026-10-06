@@ -5,9 +5,12 @@
 //! scheme, status, timeout, MIME and memory limits to both forms and only
 //! returns after the complete batch has been materialized successfully.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use nomifun_net::egress::{
+    SafeHttpError, SafeHttpErrorKind, parse_untrusted_url, resolve_untrusted_url,
+};
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::{StatusCode, Url};
 use nomifun_api_types::ModelTask;
@@ -273,18 +276,7 @@ fn parse_artifact_url(raw: &str) -> Result<reqwest::Url, InvokeError> {
     if raw.is_empty() {
         return Err(InvokeError::parse("provider returned an empty artifact URL"));
     }
-    let url = reqwest::Url::parse(raw)
-        .map_err(|error| InvokeError::parse(format!("provider returned an invalid artifact URL: {error}")))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(InvokeError::parse(format!(
-            "artifact URL uses unsupported scheme {:?}",
-            url.scheme()
-        )));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(InvokeError::parse("artifact URL must not contain embedded credentials"));
-    }
-    Ok(url)
+    parse_untrusted_url(raw).map_err(map_download_target_error)
 }
 
 fn is_followable_redirect(status: StatusCode) -> bool {
@@ -302,45 +294,35 @@ async fn validate_download_target(
     url: &Url,
     trusted_origin: &Url,
 ) -> Result<Vec<SocketAddr>, InvokeError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| InvokeError::parse("artifact URL has no host"))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| InvokeError::parse("artifact URL has no usable port"))?;
-    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|error| {
-            InvokeError::new(
-                InvokeErrorKind::Network,
-                format!("failed to resolve artifact host {host:?}: {error}"),
-            )
-        })?
-        .collect();
-    if addresses.is_empty() {
-        return Err(InvokeError::new(
-            InvokeErrorKind::Network,
-            format!("artifact host {host:?} resolved to no addresses"),
-        ));
-    }
     // String equality alone is not trust: a public provider hostname can DNS
     // rebind to loopback/metadata while remaining textually same-origin.  Only
     // an endpoint explicitly configured as localhost/private IP grants the
     // same-origin private-network exception.
     let private_allowed = same_origin(url, trusted_origin)
         && trusted_origin_allows_private(trusted_origin);
-    if !private_allowed
-        && let Some(address) = addresses.iter().find(|address| is_forbidden_ip(address.ip()))
-    {
-        return Err(InvokeError::new(
-            InvokeErrorKind::ProviderError,
-            format!(
-                "artifact URL resolves to a private, loopback, link-local, metadata, or reserved address ({})",
-                address.ip()
-            ),
-        ));
-    }
-    Ok(addresses)
+    // Use the shared DNS policy for every redirect hop, including safe
+    // recovery from detected Fake-IP tunnels. The returned real addresses
+    // remain pinned by `pinned_client`; reserved answers never become targets.
+    resolve_untrusted_url(url, private_allowed)
+        .await
+        .map_err(map_download_target_error)
+}
+
+fn map_download_target_error(error: SafeHttpError) -> InvokeError {
+    let kind = match error.kind() {
+        SafeHttpErrorKind::InvalidUrl | SafeHttpErrorKind::InvalidRedirect => {
+            InvokeErrorKind::ParseError
+        }
+        SafeHttpErrorKind::ForbiddenTarget
+        | SafeHttpErrorKind::TooManyRedirects
+        | SafeHttpErrorKind::BodyTooLarge => InvokeErrorKind::ProviderError,
+        SafeHttpErrorKind::Dns | SafeHttpErrorKind::Network | SafeHttpErrorKind::BodyRead => {
+            InvokeErrorKind::Network
+        }
+        SafeHttpErrorKind::Timeout => InvokeErrorKind::Timeout,
+        SafeHttpErrorKind::ClientBuild => InvokeErrorKind::Config,
+    };
+    InvokeError::new(kind, format!("artifact URL validation failed: {error}"))
 }
 
 fn pinned_client(url: &Url, addresses: &[SocketAddr]) -> Result<reqwest::Client, InvokeError> {
@@ -395,44 +377,6 @@ fn is_trusted_local_origin_ip(ip: IpAddr) -> bool {
             ip.is_loopback() || (first & 0xfe00) == 0xfc00
         }
     }
-}
-
-fn is_forbidden_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_forbidden_v4(ip),
-        IpAddr::V6(ip) => is_forbidden_v6(ip),
-    }
-}
-
-fn is_forbidden_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    a == 0
-        || a == 10
-        || a == 127
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 169 && b == 254)
-        || (a == 172 && (16..=31).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
-        || (a == 192 && b == 168)
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a >= 224
-}
-
-fn is_forbidden_v6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4() {
-        return is_forbidden_v4(v4);
-    }
-    let segments = ip.segments();
-    ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (segments[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-        || (segments[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-        || (segments[0] & 0xffc0) == 0xfec0 // deprecated site-local fec0::/10
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
 }
 
 fn normalize_mime(value: Option<&str>) -> Option<String> {
@@ -698,6 +642,112 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(redirected.kind, InvokeErrorKind::ProviderError);
+    }
+
+    #[tokio::test]
+    async fn same_origin_local_asset_cannot_redirect_to_another_local_port() {
+        let origin_server = MockServer::start().await;
+        let target_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/redirect"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/asset", target_server.uri())),
+            )
+            .expect(1)
+            .mount(&origin_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/asset"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"must not be fetched"))
+            .expect(0)
+            .mount(&target_server)
+            .await;
+
+        let error = service()
+            .await
+            .materialize_assets(
+                &Url::parse(&origin_server.uri()).unwrap(),
+                vec![ProducedAsset {
+                    data: ProducedData::Url(format!("{}/redirect", origin_server.uri())),
+                    mime: None,
+                }],
+                limits(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert!(error.message.contains("forbidden address"), "{error}");
+        origin_server.verify().await;
+        target_server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn local_download_exception_requires_the_exact_configured_origin() {
+        for (origin, expected) in [
+            ("http://127.0.0.1:8080", "127.0.0.1:8080"),
+            ("http://[::1]:8080", "[::1]:8080"),
+        ] {
+            let origin = Url::parse(origin).unwrap();
+            let addresses = validate_download_target(&origin.join("/asset").unwrap(), &origin)
+                .await
+                .unwrap();
+            assert_eq!(addresses, vec![expected.parse::<SocketAddr>().unwrap()]);
+        }
+
+        let origin = Url::parse("http://127.0.0.1:8080").unwrap();
+        for target in [
+            "https://127.0.0.1:8080/asset",
+            "http://127.0.0.1:8081/asset",
+            "http://127.0.0.2:8080/asset",
+        ] {
+            let error = validate_download_target(&Url::parse(target).unwrap(), &origin)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ProviderError, "target={target}");
+        }
+    }
+
+    #[tokio::test]
+    async fn benchmark_and_reserved_literals_never_gain_a_local_origin_exception() {
+        for target in [
+            "https://198.18.0.42/asset",
+            "https://198.19.255.255/asset",
+            "https://[2001:2::2a]/asset",
+            "https://[2001:2:0:ffff::1]/asset",
+            "https://[::ffff:198.18.0.42]/asset",
+            "https://[2001:db8::1]/asset",
+            "https://169.254.169.254/asset",
+        ] {
+            // Even a textually identical configured endpoint cannot authorize
+            // benchmark, documentation or metadata addresses as local models.
+            let url = Url::parse(target).unwrap();
+            let error = validate_download_target(&url, &url).await.unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ProviderError, "target={target}");
+            assert!(error.message.contains("forbidden address"), "{error}");
+        }
+    }
+
+    #[test]
+    fn artifact_urls_reject_credentials_fragments_and_unsupported_schemes() {
+        for target in [
+            "",
+            "file:///tmp/generated.png",
+            "data:image/png;base64,aGk=",
+            "https://user:secret@example.com/asset",
+            "https://example.com/asset#fragment",
+            "http://",
+        ] {
+            let error = parse_artifact_url(target).unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::ParseError, "target={target}");
+            assert!(!error.message.contains("secret"), "{error}");
+        }
+        assert_eq!(
+            parse_artifact_url(" https://example.com/asset?signature=abc ")
+                .unwrap()
+                .as_str(),
+            "https://example.com/asset?signature=abc"
+        );
     }
 
     #[test]

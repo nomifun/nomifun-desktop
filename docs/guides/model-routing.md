@@ -28,24 +28,52 @@ profiles for many services.
 
 An OpenAI-compatible or otherwise registered protocol can use a custom base URL
 to reach a cloud gateway, a private endpoint, or a local/self-hosted service
-such as Ollama or vLLM. Register only capabilities the endpoint actually
-supports. A successful health request does not prove that every media or
-technical operation is compatible.
+such as Ollama or vLLM. Distinct tasks can have their own invocation routes. A
+successful health request does not prove that every media or technical operation
+is compatible.
 
 For each model:
 
 1. Choose or create the provider.
 2. Enter the endpoint and credentials required by that provider.
-3. Add the exact model id.
-4. Override context or output limits when the upstream default is missing or
-   inaccurate.
-5. Enable only the tasks that the provider/protocol contract supports.
+3. Search the provider's complete model catalog or enter the exact model id.
+4. Confirm the invocation purpose. Specialized ASR, TTS, and other entry points
+   carry their purpose; an unknown model in the general entry asks once after
+   the model id is entered.
+5. For Chat models, set the context window and maximum output side by side in **Context & output**
+   on the model configuration homepage, with the compaction threshold below.
+   Unset overrides keep the provider/model defaults.
 6. Save and run the available health/status checks.
 
 Provider credentials remain local configuration. Any hosted provider still
 processes the content sent to it according to its own billing and data policy.
 
-## Task-aware capabilities
+Chat, speech recognition, speech synthesis, and the other specialized model
+pages provide **Edit model** on each model row. Edit and save without leaving
+the current page. The editor shows the current task's invocation route and
+preserves the latest configuration for other tasks. Model aliases and
+descriptions are shared across tasks. Use **Providers & keys** to manage
+credentials or the model's complete set of invocation routes.
+
+## Model catalog and invocation routes
+
+The catalog supplies suggestions. It neither restricts which model ids can be
+saved nor requires a "Supported tasks" selection first. Missing suggestions or
+a failed catalog request do not block manual entry. Specialized ASR, TTS, and
+other entry points carry the invocation purpose. A model with no verified task
+in the general entry asks for that purpose once after the id is entered; it is
+never automatically treated as a Chat model. Only provider-declared task data
+or an exact documented profile can automatically suggest distinct routes.
+Future model ids from a native catalog need no built-in name whitelist.
+Name-based inference never creates
+routes automatically. Use "Add invocation route" to configure tasks that need
+a different protocol, endpoint, or credentials.
+
+Manually changing the model id clears automatically suggested routes for the
+old id while retaining user-configured and previously saved routes. A verified
+catalog purpose that conflicts with the current purpose requires explicit
+acknowledgment; the current purpose remains until then. Background catalog
+refreshes never replace the existing configuration.
 
 The managed model catalog can represent these task families:
 
@@ -61,14 +89,25 @@ The managed model catalog can represent these task families:
 | Music generation | Conversation creation and Creative Studio |
 | Embedding / reranking | Retrieval and knowledge workflows |
 
-Task selection is explicit. The runtime does not infer image or video support
-from a model name, and it does not silently use a same-named model from another
-provider.
+These tasks identify distinct invocation protocols and endpoints. The runtime
+does not infer image or video generation routes from a model name, and it does
+not silently use a same-named model from another provider.
 
-The only user-authored refinements on a Chat capability are image understanding,
-video understanding, audio input, and provider-native web search. Tool calling,
-reasoning, and streaming are not checkboxes. Chat models start optimistic for
-those technical capabilities. The runtime records a negative observation only
+The backend checks whether the selected protocol supports the purpose when
+saving. Invocations read only the saved route for the exact task. Missing ASR,
+TTS, or other independent routes produce an explicit error; they never fall
+back to a Chat HTTP endpoint.
+
+Chat requires no image, video, audio, tool calling, reasoning, streaming, or
+provider-native web search checkboxes. Catalog capability metadata is advisory;
+an omitted trait in an existing configuration does not disable a model feature.
+Input content and request options depend on the formats the registered protocol
+can serialize and on the actual provider response. A missing serializer is not
+made available by removing a checkbox. Provider-native search likewise requires
+an implementation for that protocol.
+
+Chat models start optimistic for tool calling, reasoning, and streaming. The
+runtime records a negative observation only
 when a complete provider error object returns HTTP 400/422 and its
 machine-readable fields explicitly identify the unsupported parameter or
 feature. Authentication/permission failures, rate limits, quota, timeouts,
@@ -91,7 +130,7 @@ for that task:
 
 | Conversation need | Default key | Required capability |
 | --- | --- | --- |
-| Image understanding | `models.default.vision` | One Chat capability declaring `vision_input`, with no confirmed tool-calling limitation |
+| Image understanding | `models.default.vision` | A Chat protocol that can represent image input, with no confirmed tool-calling limitation |
 | Image generation | `models.default.imageGeneration` | `image_generation` |
 | Image editing | `models.default.imageEdit` | `image_edit` |
 | Video generation | `models.default.videoGeneration` | `video_generation` |
@@ -99,7 +138,7 @@ for that task:
 | Speech synthesis | `models.default.speechSynthesis` | `speech_synthesis` |
 
 Automatic media Actions use the exact task default when one is configured. With
-no default, they select an enabled model that declares the required task,
+no default, they select an enabled model with the required invocation route,
 preferring a healthy capability observation, then the provider and model order
 in Model Management. If no compatible model is available, the conversation asks
 the user to configure one. An unavailable configured default is not silently
@@ -109,14 +148,17 @@ model for one explicit task.
 The vision model is frozen into new conversations as a conditional Chat
 candidate. It participates only when the current request actually requires
 image input, so it cannot become an ordinary text-chat failover. A primary Chat
-model that already supports vision remains the direct route.
+model whose Chat protocol can represent image input remains the preferred route.
+Missing catalog metadata or old traits do not force another model; actual
+support is still determined by the provider response.
 
-The model capability catalog and routing authority are separate layers.
-Creation tasks and multimodal inputs require positive evidence before automatic
-routing. Tool calling, reasoning, and streaming are optimistic until conclusive
-negative evidence narrows later routes. That optimism can never promote a Chat
-model into image/video/music/TTS/ASR generation: automatic creation selects
-only models that explicitly support the exact task.
+The model catalog and invocation configuration are separate layers. Multimodal
+Chat input depends on protocol formats and actual invocation results; creation
+tasks still require their own saved routes. Tool calling, reasoning, and
+streaming are optimistic until conclusive negative evidence narrows later
+routes. Chat input and technical features do not create image/video/music/TTS/ASR
+generation routes: automatic creation selects only models with the exact task
+route configured.
 
 Creative Studio persists the exact `{ providerId, model, task, capability }`
 identity with each admitted media operation. Retrying the same idempotent task

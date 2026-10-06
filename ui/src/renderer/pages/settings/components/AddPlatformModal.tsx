@@ -30,9 +30,10 @@ import ModelDefinitionEditor, {
 import {
   capabilityInputsFromDefinition,
   describeValidationErrors,
-  emptyCapabilityDraft,
+  createModelDefinitionDraft,
   normalizeModelId,
   validateModelDefinition,
+  withCatalogTaskEvidence,
   type ModelDefinitionDraft,
   type ProviderConnectionInput,
 } from './providerModelAdvanced';
@@ -56,8 +57,6 @@ import {
 } from './providerAutoConfiguration';
 import useProviderAutoConfiguration from './useProviderAutoConfiguration';
 import ProviderCompatibilityModePicker from './ProviderCompatibilityModePicker';
-
-const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
 
 const ProviderLogo: React.FC<{ logo: string | null; name: string; size?: number }> = ({
   logo,
@@ -83,11 +82,14 @@ const renderPlatformOption = (platform: PlatformConfig, t: (key: string) => stri
 const AddPlatformModal = ModalHOC<{
   onSubmit: (provider: IProvider) => void;
   deepLinkData?: DeepLinkAddProviderDetail;
-}>(({ modalProps, onSubmit, modalCtrl, deepLinkData }) => {
+  initialTask?: ModelTask;
+}>(({ modalProps, onSubmit, modalCtrl, deepLinkData, initialTask }) => {
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const [form] = Form.useForm();
-  const [definition, setDefinition] = useState<ModelDefinitionDraft>(EMPTY_DEFINITION);
+  const [definition, setDefinition] = useState<ModelDefinitionDraft>(() =>
+    createModelDefinitionDraft(deepLinkData?.task ?? initialTask)
+  );
   const [pendingConnections, setPendingConnections] = useState<ProviderConnectionInput[]>([]);
   const [baseUrlDirty, setBaseUrlDirty] = useState(false);
   const [authSchemeDirty, setAuthSchemeDirty] = useState(false);
@@ -201,6 +203,7 @@ const AddPlatformModal = ModalHOC<{
         label: model.label,
         ...(model.displayName ? { displayName: model.displayName } : {}),
         tasks: model.tasks,
+        ...(model.tasksSource === undefined ? {} : { tasksSource: model.tasksSource }),
         traits: model.traits,
         ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
         ...(model.outputLimit === undefined ? {} : { outputLimit: model.outputLimit }),
@@ -209,9 +212,12 @@ const AddPlatformModal = ModalHOC<{
     [modelListState.data?.models]
   );
   const validation = useMemo(
-    () =>
-      validateModelDefinition(
-        definition,
+    () => {
+      const catalogEntry = catalogSuggestions.find((entry) =>
+        normalizeModelId(entry.value) === normalizeModelId(definition.model)
+      );
+      return validateModelDefinition(
+        withCatalogTaskEvidence(definition, catalogEntry ? { ...catalogEntry, model: catalogEntry.value } : undefined),
         manifestState.manifests,
         baseUrl,
         [],
@@ -222,9 +228,11 @@ const AddPlatformModal = ModalHOC<{
           pendingConnections.map((connection) => [connection.role, connection.auth_scheme])
         ),
         pendingConnections
-      ),
+      );
+    },
     [
       baseUrl,
+      catalogSuggestions,
       authScheme,
       definition,
       manifestState.loadingTasks,
@@ -242,8 +250,8 @@ const AddPlatformModal = ModalHOC<{
     if (!modalProps.visible) return;
     form.resetFields();
     setDefinition({
+      ...createModelDefinitionDraft(deepLinkData?.task ?? initialTask),
       model: deepLinkData?.model?.trim() ?? '',
-      capabilities: deepLinkData?.task ? [emptyCapabilityDraft(deepLinkData.task)] : [],
     });
     setPendingConnections([]);
     setBaseUrlDirty(Boolean(deepLinkData?.base_url));
@@ -273,7 +281,7 @@ const AddPlatformModal = ModalHOC<{
       bedrockSessionToken: '',
       bedrockProfile: '',
     });
-  }, [deepLinkData, form, modalProps.visible]);
+  }, [deepLinkData, form, initialTask, modalProps.visible]);
 
   useEffect(() => {
     if (!modalProps.visible || !providerManifest) return;
@@ -366,7 +374,7 @@ const AddPlatformModal = ModalHOC<{
 
   const selectPreset = (nextPreset: string) => {
     const platform = getPlatformByValue(nextPreset);
-    setDefinition(EMPTY_DEFINITION);
+    setDefinition(createModelDefinitionDraft(deepLinkData?.task ?? initialTask));
     setPendingConnections([]);
     setBaseUrlDirty(false);
     setAuthSchemeDirty(false);
@@ -410,7 +418,7 @@ const AddPlatformModal = ModalHOC<{
       message.warning(
         detail ||
           t('settings.completeCapabilityConfiguration', {
-            defaultValue: '请完成每个已选模态的协议、地址和连接配置。',
+            defaultValue: '请完成调用接口的协议、地址和连接配置。',
           })
       );
       return;
@@ -706,7 +714,9 @@ const AddPlatformModal = ModalHOC<{
           validationErrors={validation.errors}
           validationPending={autoConfiguration.isLoading}
           catalogSuggestions={catalogSuggestions}
-          catalogLoading={modelListState.isLoading}
+          catalogLoading={modelListState.isValidating}
+          catalogFetchReady={modelListState.canFetch}
+          catalogSource={modelListState.data?.catalogSource}
           catalogError={
             modelListState.error instanceof Error
               ? modelListState.error.message
@@ -714,7 +724,7 @@ const AddPlatformModal = ModalHOC<{
                 ? String(modelListState.error)
                 : undefined
           }
-          onRefreshCatalog={() => void modelListState.mutate()}
+          onRefreshCatalog={() => modelListState.mutate()}
           onCallConfigFocusChange={setFocusedCallConfigTask}
           callConfigFooterPlacement='modal'
           connections={pendingConnections}

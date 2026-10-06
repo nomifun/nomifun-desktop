@@ -5,9 +5,9 @@
 //! into a fresh, proxy-free reqwest client for that hop. This makes URL
 //! validation and the connection use the same DNS answer.
 //! A configured proxy or recognized Fake-IP tunnel may synthesize 198.18/15
-//! DNS answers. Only for those domain answers, public HTTPS DNS can recover
-//! real addresses; they undergo the same checks and direct pinning. Reserved
-//! ranges never become targets.
+//! and 2001:2::/48 DNS answers. Only for those domain answers, public HTTPS DNS
+//! can recover real addresses; they undergo the same checks and direct
+//! pinning. Reserved ranges never become targets.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -403,8 +403,21 @@ fn validate_url(url: Url) -> Result<Url, SafeHttpError> {
 /// System DNS and optional public DNS recovery are each bounded to 15 seconds.
 pub async fn validate_untrusted_url(raw: &str, allow_private: bool) -> Result<Url, SafeHttpError> {
     let url = parse_untrusted_url(raw)?;
-    resolve_validated(&url, allow_private, None).await?;
+    resolve_untrusted_url(&url, allow_private).await?;
     Ok(url)
+}
+
+/// Resolve a URL under the shared address policy, including recognized
+/// proxy/TUN Fake-IP recovery. Callers must pin these addresses into a
+/// proxy-free connection and validate every redirect hop separately.
+/// `allow_private` is only for an explicitly trusted local endpoint or tests;
+/// a public provider hostname must never receive that exception.
+pub async fn resolve_untrusted_url(
+    url: &Url,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, SafeHttpError> {
+    validate_url(url.clone())?;
+    resolve_validated(url, allow_private, None).await
 }
 
 async fn resolve_validated(
@@ -466,15 +479,24 @@ async fn resolve_validated(
     .await
 }
 
-fn fake_ip(ip: IpAddr) -> bool {
-    matches!(ip, IpAddr::V4(ip) if ip.octets()[0] == 198 && matches!(ip.octets()[1], 18 | 19))
+pub(crate) fn fake_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.octets()[0] == 198 && matches!(ip.octets()[1], 18 | 19),
+        IpAddr::V6(ip) => {
+            // RFC 5180's benchmarking prefix is used by IPv6 Fake-IP DNS
+            // (e.g. Clash Verge's 2001:2::/64). Do not treat other reserved
+            // IPv6 ranges or ULA as proxy artefacts. These are recovery
+            // candidates only; forbidden_ip still rejects the addresses.
+            ip.segments()[..3] == [0x2001, 0x0002, 0x0000]
+        }
+    }
 }
 
 async fn validate_dns_with_recovery<F, Fut>(
     host: &str,
     mut addresses: Vec<SocketAddr>,
     allow_private: bool,
-    proxy_selected: bool,
+    recovery_admitted: bool,
     recover: F,
 ) -> Result<Vec<SocketAddr>, SafeHttpError>
 where
@@ -486,9 +508,10 @@ where
         .filter(|address| forbidden_ip(address.ip()))
         .collect();
     // Never reinterpret real private/metadata answers, or mixed private and
-    // Fake-IP answers, as a proxy artefact. NO_PROXY also keeps fail-closed DNS.
+    // Fake-IP answers, as a proxy artefact. Recovery still requires a selected
+    // explicit proxy or an interface owning a recognized Fake-IP address.
     if !allow_private
-        && proxy_selected
+        && recovery_admitted
         && !forbidden.is_empty()
         && forbidden.iter().all(|address| fake_ip(address.ip()))
     {
@@ -678,6 +701,35 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
+    #[ignore = "requires external HTTPS and the host's real proxy/TUN configuration"]
+    async fn stepfun_artifact_egress_live() {
+        let url = "https://res.stepfun.com/";
+        let host = "res.stepfun.com";
+        let system_addresses: Vec<_> = tokio::time::timeout(
+            DNS_TIMEOUT, tokio::net::lookup_host((host, 443)),
+        ).await.expect("system DNS timeout").expect("system DNS").collect();
+        eprintln!(
+            "system addresses: {system_addresses:?}; explicit proxy: {}; Fake-IP interface: {}",
+            crate::proxy::domain_uses_detected_proxy(&Url::parse(url).unwrap()),
+            crate::proxy::fake_ip_interface_active(),
+        );
+        let resolved = resolve_untrusted_url(&Url::parse(url).unwrap(), false)
+            .await
+            .expect("public artifact DNS recovery");
+        assert!(resolved.iter().all(|address| !forbidden_ip(address.ip())));
+        eprintln!("validated public addresses: {resolved:?}");
+        // The CDN root need not be an existing artifact (404/403 is valid).
+        // Reaching an HTTP response proves DNS recovery, TLS and pinning work
+        // without invoking a billed model or exposing a signed artifact URL.
+        let response = SafeHttpClient::new(Duration::from_secs(30), 64 * 1024)
+            .overflow_policy(BodyOverflowPolicy::Truncate)
+            .get(url)
+            .await
+            .expect("DNS-pinned artifact HTTPS");
+        eprintln!("artifact CDN HTTP status: {}", response.status);
+    }
+
+    #[tokio::test]
     async fn fake_dns_recovery_requires_an_admitted_egress_and_preserves_public_pins() {
         let initial = vec!["198.18.0.12:443".parse().unwrap()];
         let expected = vec![
@@ -711,11 +763,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dual_stack_fake_dns_recovers_the_entire_answer_set() {
+        for initial in [
+            vec!["198.18.0.42:443", "[2001:2::2a]:443"],
+            vec!["[2001:2::2a]:443"],
+        ] {
+            let initial: Vec<SocketAddr> = initial
+                .into_iter().map(|ip| ip.parse().unwrap()).collect();
+            let expected: Vec<SocketAddr> = vec![
+                "1.1.1.1:443".parse().unwrap(),
+                "[2606:4700:4700::1111]:443".parse().unwrap(),
+            ];
+            assert_eq!(
+                validate_dns_with_recovery(
+                    "res.stepfun.com", initial.clone(), false, true,
+                    || async { Ok(expected.clone()) },
+                ).await.unwrap(),
+                expected,
+            );
+            assert_eq!(
+                validate_dns_with_recovery(
+                    "res.stepfun.com", initial, false, false,
+                    || async { panic!("unrecognized egress must not query public DNS"); },
+                ).await.unwrap_err().kind(),
+                SafeHttpErrorKind::ForbiddenTarget,
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn fake_dns_recovery_never_reinterprets_or_accepts_private_answers() {
-        for address in ["127.0.0.1:443", "10.0.0.1:443", "169.254.169.254:443"] {
+        for address in [
+            "127.0.0.1:443",
+            "10.0.0.1:443",
+            "169.254.169.254:443",
+            "[::1]:443",
+            "[fe80::1]:443",
+            "[fdfe:dcba:9876::1]:443",
+            "[2001:2:1::1]:443",
+        ] {
             let error = validate_dns_with_recovery(
                 "cdn.example",
-                vec!["198.18.0.12:443".parse().unwrap(), address.parse().unwrap()],
+                vec![
+                    "198.18.0.12:443".parse().unwrap(),
+                    "[2001:2::2a]:443".parse().unwrap(),
+                    address.parse().unwrap(),
+                ],
                 false,
                 true,
                 || async {
@@ -731,6 +824,7 @@ mod tests {
             "127.0.0.1:443",
             "169.254.169.254:443",
             "[::1]:443",
+            "[2001:2::2a]:443",
         ] {
             let error = validate_dns_with_recovery(
                 "cdn.example",
@@ -752,6 +846,7 @@ mod tests {
             "http://198.18.0.12/file",
             "https://198.19.0.2/file",
             "http://127.0.0.1/file",
+            "https://[2001:2::2a]/file",
         ] {
             assert_eq!(
                 resolve_validated(&Url::parse(raw).unwrap(), false, None)

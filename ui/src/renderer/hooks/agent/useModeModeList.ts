@@ -7,9 +7,11 @@
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IProvider, ModelTask, ModelTrait } from '@/common/config/storage';
+import type { FetchModelsResponse } from '@/common/protocolBindings/FetchModelsResponse';
+import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource';
 import type { ProviderId } from '@/common/types/ids';
 import type { ProviderCredentials } from '@/common/types/provider/providerApi';
-import { useRef } from 'react';
+import { useId, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 
@@ -18,6 +20,7 @@ interface FetchedModelOption {
   value: string;
   displayName?: string;
   tasks: ModelTask[];
+  tasksSource?: ModelTaskSource;
   traits: ModelTrait[];
   /**
    * Context window the provider's own catalog declared. Absent when it declared
@@ -56,6 +59,7 @@ const sortGeminiModels = (models: FetchedModelOption[]) =>
 
 const useModeModeList = (options: UseModeModelListOptions) => {
   const { t } = useTranslation();
+  const anonymousScope = useId();
   const credentialState = useRef({ snapshot: '', revision: 0 });
   const credentialSnapshot =
     options.credentials === undefined ? 'missing' : JSON.stringify(options.credentials);
@@ -66,12 +70,23 @@ const useModeModeList = (options: UseModeModelListOptions) => {
     };
   }
   const canFetchStored = Boolean(options.providerId);
-  const canFetchAnonymous = Boolean(options.authScheme) && options.credentials !== undefined;
+  const canFetchAnonymous =
+    Boolean(options.authScheme?.trim()) &&
+    (options.credentials !== undefined ||
+      (options.platform !== 'bedrock' && Boolean(options.baseUrl?.trim())));
+  // The backend knows which provider catalogs are public. Let the user request
+  // those before entering a key, without making unsolicited unauthenticated
+  // requests to suppliers whose catalog still needs credentials.
+  const manualDiscoveryOnly = !canFetchStored && options.credentials === undefined;
   const cacheKey = canFetchStored
     ? ['provider-models', options.providerId, options.tryFix]
     : canFetchAnonymous
       ? [
           'anonymous-provider-models',
+          // Anonymous modals can use different accounts against the same URL.
+          // Instance scoping prevents their local credential revisions from
+          // colliding without encoding credentials in the shared cache key.
+          anonymousScope,
           options.platform,
           options.baseUrl,
           options.authScheme,
@@ -83,9 +98,13 @@ const useModeModeList = (options: UseModeModelListOptions) => {
         ]
       : null;
 
-  return useSWR(
+  const modelListState = useSWR(
     cacheKey,
-    async (): Promise<{ models: FetchedModelOption[]; fix_base_url?: string }> => {
+    async (): Promise<{
+      models: FetchedModelOption[];
+      fix_base_url?: string;
+      catalogSource?: FetchModelsResponse['catalog_source'];
+    }> => {
       try {
         const response = options.providerId
           ? await ipcBridge.mode.fetchProviderModels.invoke({
@@ -105,6 +124,7 @@ const useModeModeList = (options: UseModeModelListOptions) => {
           value: model.id,
           ...(model.name && model.name !== model.id ? { displayName: model.name } : {}),
           tasks: model.tasks ?? [],
+          ...(model.tasks_source ? { tasksSource: model.tasks_source } : {}),
           traits: model.traits ?? [],
           // Only present when the provider's own catalog declares a window.
           ...(model.context_limit && model.context_limit > 0
@@ -123,10 +143,17 @@ const useModeModeList = (options: UseModeModelListOptions) => {
         return {
           models,
           ...(response.fixed_base_url ? { fix_base_url: response.fixed_base_url } : {}),
+          ...(response.catalog_source ? { catalogSource: response.catalog_source } : {}),
         };
       } catch (error) {
         if (isBackendHttpError(error)) {
           switch (error.code) {
+            case 'BAD_REQUEST':
+              throw new Error(t(
+                error.backendMessage.includes('Remote API rejected the model-list request')
+                  ? 'settings.modelCatalogBadRequest'
+                  : 'settings.modelCatalogInvalidConfiguration'
+              ));
             case 'UNAUTHORIZED':
               throw new Error(t('settings.modelCatalogUnauthorized'));
             case 'FORBIDDEN':
@@ -143,8 +170,18 @@ const useModeModeList = (options: UseModeModelListOptions) => {
         throw error;
       }
     },
-    { shouldRetryOnError: false }
+    {
+      shouldRetryOnError: false,
+      ...(manualDiscoveryOnly ? {
+        revalidateOnMount: false,
+        revalidateIfStale: false,
+        revalidateOnFocus: false,
+        revalidateOnReconnect: false,
+      } : {}),
+    }
   );
+
+  return { ...modelListState, canFetch: canFetchStored || canFetchAnonymous };
 };
 
 export default useModeModeList;

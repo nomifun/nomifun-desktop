@@ -142,8 +142,8 @@ pub(crate) fn domain_uses_detected_proxy(url: &url::Url) -> bool {
         && !domain_excluded_from_proxy(host, &exclusions)
 }
 
-/// Whether this host has an interface configured inside the RFC 2544 Fake-IP
-/// range.
+/// Whether this host has an interface configured inside a recognized IPv4
+/// or IPv6 benchmarking range used by Fake-IP tunnels.
 ///
 /// Clash/Mihomo TUN mode intentionally leaves the OS HTTP/SOCKS proxy switches
 /// disabled, but assigns `198.18/15` to a virtual adapter and returns addresses
@@ -166,11 +166,7 @@ pub(crate) fn fake_ip_interface_active() -> bool {
 }
 
 fn is_fake_ip_interface_address(ip: std::net::IpAddr) -> bool {
-    let std::net::IpAddr::V4(ip) = ip else {
-        return false;
-    };
-    let [first, second, _, _] = ip.octets();
-    first == 198 && matches!(second, 18 | 19)
+    crate::egress::fake_ip(ip)
 }
 
 // Domain-only NO_PROXY semantics used by reqwest: exact names, leading-dot
@@ -202,7 +198,9 @@ mod fake_dns_proxy_tests {
 
     #[test]
     fn fake_ip_recovery_requires_host_interface_ownership() {
-        for address in ["198.18.0.1", "198.19.255.254"] {
+        for address in [
+            "198.18.0.1", "198.19.255.254", "2001:2::1", "2001:2:0:ffff::1",
+        ] {
             assert!(
                 is_fake_ip_interface_address(address.parse().unwrap()),
                 "{address}"
@@ -214,6 +212,10 @@ mod fake_dns_proxy_tests {
             "10.0.0.1",
             "127.0.0.1",
             "::1",
+            "2001:2:1::1",
+            "2001:1:ffff::1",
+            "2001:3::1",
+            "fdfe:dcba:9876::1",
         ] {
             assert!(
                 !is_fake_ip_interface_address(address.parse().unwrap()),

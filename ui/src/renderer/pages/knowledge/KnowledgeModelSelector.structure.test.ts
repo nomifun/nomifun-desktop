@@ -13,6 +13,11 @@ const source = readFileSync(
 );
 
 describe('knowledge explicit model preference', () => {
+  test('adding a model for AI description generation carries the Chat use case', () => {
+    expect(source.includes("useModelsForTask('chat')")).toBe(true);
+    expect(source.includes("navigate(modelProviderManagementRoute('chat'))")).toBe(true);
+  });
+
   test('keeps a stale explicit pair visible and marks it unavailable', () => {
     expect(
       source.includes(

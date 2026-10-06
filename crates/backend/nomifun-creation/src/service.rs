@@ -4487,7 +4487,7 @@ mod http_e2e_tests {
     };
     use nomifun_model_invoke::AdapterRegistry;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_KEY: [u8; 32] = [0x37; 32];
@@ -4563,6 +4563,15 @@ mod http_e2e_tests {
     }
 
     async fn build(base_url: &str) -> (Arc<CreationService>, String, Arc<CountingSink>, nomifun_db::Database) {
+        build_with_image_provider(base_url, "openai", "gpt-image-1", "openai.images").await
+    }
+
+    async fn build_with_image_provider(
+        base_url: &str,
+        platform: &str,
+        model: &str,
+        protocol: &str,
+    ) -> (Arc<CreationService>, String, Arc<CountingSink>, nomifun_db::Database) {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         // seed a provider row pointed at the mock server
@@ -4574,7 +4583,7 @@ mod http_e2e_tests {
             NewProviderModelCapability {
                 task: "image_generation",
                 traits: "[]",
-                protocol: "openai.images",
+                protocol,
                 connection_role: "default",
                 provider_params: "{}",
                 ..Default::default()
@@ -4582,14 +4591,14 @@ mod http_e2e_tests {
             NewProviderModelCapability {
                 task: "image_edit",
                 traits: "[]",
-                protocol: "openai.images",
+                protocol,
                 connection_role: "default",
                 provider_params: "{}",
                 ..Default::default()
             },
         ];
         let initial_model = NewProviderModel {
-            model: "gpt-image-1",
+            model,
             enabled: true,
             sort_order: 0,
             description: None,
@@ -4599,7 +4608,7 @@ mod http_e2e_tests {
             .create(
                 nomifun_db::CreateProviderParams {
                 provider_id: None,
-                platform: "openai",
+                platform,
                 name: "Mock",
                 base_url,
                 auth_scheme: "bearer",
@@ -4621,7 +4630,7 @@ mod http_e2e_tests {
         for (model, task, protocol) in [
             ("sora-2", "video_generation", "openai.videos"),
             ("tts-1", "speech_synthesis", "openai.audio_speech"),
-        ] {
+        ].into_iter().filter(|_| platform == "openai") {
             let capabilities = [NewProviderModelCapability {
                 task,
                 traits: "[]",
@@ -4715,6 +4724,124 @@ mod http_e2e_tests {
         assert_eq!(done.result_asset_ids.len(), 1);
         WorkshopAssetId::parse(&done.result_asset_ids[0]).unwrap();
         assert_eq!(sink.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stepfun_images_downloads_url_artifact_and_persists_task() {
+        for (platform, prefix) in [("stepfun", "/v1"), ("stepfun-plan", "/step_plan/v1")] {
+            let provider = MockServer::start().await;
+            let cdn = MockServer::start().await;
+            let image = valid_png();
+            let artifact_url = format!("{}/generated.png?signature=mock-signature", cdn.uri());
+            Mock::given(method("POST"))
+                .and(path(format!("{prefix}/images/generations")))
+                .and(header("authorization", "Bearer sk-e2e"))
+                .and(body_partial_json(json!({
+                    "model": "step-image-edit-2",
+                    "prompt": "a campus",
+                    "size": "1024x1024"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": [{"url": artifact_url, "finish_reason": "success"}]
+                })))
+                .expect(1)
+                .mount(&provider)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/generated.png"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "image/png")
+                        .set_body_bytes(image.clone()),
+                )
+                .expect(1)
+                .mount(&cdn)
+                .await;
+
+            let (svc, provider_id, sink, db) = build_with_image_provider(
+                &format!("{}{prefix}", provider.uri()),
+                platform,
+                "step-image-edit-2",
+                "stepfun.images",
+            ).await;
+            let created = svc.create_test_task(NewCreationTask {
+                provider_id,
+                model: "step-image-edit-2".into(),
+                capability: "t2i".into(),
+                params: json!({"prompt": "a campus", "width": 1024, "height": 1024, "count": 1}),
+                inputs: vec![],
+            }).await.unwrap();
+            let done = wait_terminal(&svc, &created.creation_task_id).await;
+            assert_eq!(done.status, "succeeded", "platform={platform}; error={:?}", done.error);
+            assert!(done.error.is_none());
+            assert_eq!(done.result_asset_ids.len(), 1);
+            WorkshopAssetId::parse(&done.result_asset_ids[0]).unwrap();
+            assert_eq!(sink.count.load(Ordering::SeqCst), 1);
+            assert_eq!(*sink.persisted.lock().unwrap(), vec![("image/png".to_owned(), image)]);
+
+            let stored = SqliteCreationTaskRepository::new(db.pool().clone())
+                .get_task(&created.creation_task_id).await.unwrap().unwrap();
+            assert_eq!(stored.model, "step-image-edit-2");
+            assert_eq!(stored.status, "succeeded");
+            assert!(stored.error.is_none());
+            assert!(stored.finished_at.is_some());
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&stored.result_asset_ids).unwrap(),
+                done.result_asset_ids,
+            );
+            let downloads = cdn.received_requests().await.unwrap();
+            assert_eq!(downloads.len(), 1);
+            assert_eq!(downloads[0].url.query(), Some("signature=mock-signature"));
+            assert!(!downloads[0].headers.contains_key("authorization"));
+        }
+    }
+
+    #[tokio::test]
+    async fn stepfun_plan_rejects_url_image_content_type_mismatch() {
+        let server = MockServer::start().await;
+        let artifact_url = format!("{}/generated.png", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/step_plan/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"url": artifact_url, "finish_reason": "success"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/generated.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/mp4")
+                    .set_body_bytes(valid_png()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, provider_id, sink, db) = build_with_image_provider(
+            &format!("{}/step_plan/v1", server.uri()),
+            "stepfun-plan",
+            "step-image-edit-2",
+            "stepfun.images",
+        ).await;
+        let mut request = t2i(&provider_id);
+        request.model = "step-image-edit-2".into();
+        request.params["width"] = json!(1024);
+        request.params["height"] = json!(1024);
+        let created = svc.create_test_task(request).await.unwrap();
+        let done = wait_terminal(&svc, &created.creation_task_id).await;
+        assert_eq!(done.status, "failed");
+        assert_eq!(done.error.as_ref().unwrap()["kind"], "invalid_artifact");
+        assert!(done.error.as_ref().unwrap()["message"].as_str()
+            .is_some_and(|message| message.contains("MIME mismatch")));
+        assert!(done.result_asset_ids.is_empty());
+        assert_eq!(sink.count.load(Ordering::SeqCst), 0);
+        assert!(sink.persisted.lock().unwrap().is_empty());
+        let stored = SqliteCreationTaskRepository::new(db.pool().clone())
+            .get_task(&created.creation_task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "failed");
+        assert_eq!(stored.result_asset_ids, "[]");
     }
 
     #[tokio::test]
