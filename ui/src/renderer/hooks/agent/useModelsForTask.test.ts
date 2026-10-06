@@ -30,7 +30,7 @@ const model = (
     {
       task,
       traits,
-      protocol: `test.${task}`,
+      protocol: task === 'chat' ? 'openai.chat_text' : `test.${task}`,
       connection_role: 'default',
       allow_cross_origin_credentials: false,
       provider_params: {},
@@ -107,7 +107,7 @@ describe('buildTaskModelGroups', () => {
     expect(buildTaskModelGroups(providers, 'embedding')[0].models).toEqual(['embedder']);
   });
 
-  test('requires traits on the selected task capability', () => {
+  test('lets untagged models use native inputs through a configured Chat adapter', () => {
     const providers = [
       provider(PROVIDER_A, 'Traits', [
         model(PROVIDER_A, 'vision-chat', 'chat', ['vision_input']),
@@ -115,8 +115,18 @@ describe('buildTaskModelGroups', () => {
       ]),
     ];
     expect(buildTaskModelGroups(providers, 'chat', ['vision_input'])[0].models).toEqual([
-      'vision-chat',
+      'vision-chat', 'plain-chat',
     ]);
+  });
+
+  test('trait metadata cannot grant a different protocol missing input representation', () => {
+    const unsupported = model(PROVIDER_A, 'unknown-adapter', 'chat', ['vision_input']);
+    unsupported.capabilities[0]!.protocol = 'unknown.chat';
+    const providers = [provider(PROVIDER_A, 'Inputs', [
+      model(PROVIDER_A, 'unknown-model-id', 'chat'), unsupported,
+      model(PROVIDER_A, 'image-route', 'image_generation', ['vision_input']),
+    ])];
+    expect(buildTaskModelGroups(providers, 'chat', ['vision_input'])[0]?.models).toEqual(['unknown-model-id']);
   });
 
   test('treats technical capabilities as optimistic until negative evidence exists', () => {

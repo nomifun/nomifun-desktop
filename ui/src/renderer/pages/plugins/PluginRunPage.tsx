@@ -28,7 +28,7 @@ import { isDesktopShell } from '@/renderer/utils/platform';
 import PluginConfigurationDialog from './PluginConfigurationDialog';
 import { notifyPluginLibraryChanged } from './pluginLibraryState';
 import { pluginNeedsAttention, pluginShape, requiresDataLossWarning } from './pluginPlatformModel';
-import PluginWorkspace, { PluginVisual } from './PluginWorkspace';
+import PluginWorkspace, { PluginBetaNotice, PluginVisual } from './PluginWorkspace';
 import PluginSurfacePanel from './PluginSurfacePanel';
 import styles from './PluginPlatform.module.css';
 import { launchPluginConversation } from './pluginConversationLaunch';
@@ -258,12 +258,12 @@ export default function PluginRunPage() {
 
   if (loading) return (
     <PluginWorkspace>
-      <main className={styles.page}><div className={styles.emptyState}><Spin /></div></main>
+      <main className={styles.page}><PluginBetaNotice /><div className={styles.emptyState}><Spin /></div></main>
     </PluginWorkspace>
   );
   if (!detail) return (
     <PluginWorkspace>
-      <main className={styles.page}><Alert type='error' content={error || t('pluginPlatform.detail.notFound')} showIcon /></main>
+      <main className={styles.page}><PluginBetaNotice /><Alert type='error' content={error || t('pluginPlatform.detail.notFound')} showIcon /></main>
     </PluginWorkspace>
   );
 
@@ -278,6 +278,7 @@ export default function PluginRunPage() {
   return (
     <PluginWorkspace activeView={navView}>
       <main className={styles.page}>
+        <PluginBetaNotice />
         <div className={styles.breadcrumb}>
           <button type='button' onClick={() => navigate('/plugins')}>
             <ArrowLeft />{t('pluginPlatform.workspace.title')}

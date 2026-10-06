@@ -166,7 +166,7 @@ pub use model_protocol::{
 };
 pub use model_task::{
     ModelTask, ModelTechnicalCapability, ModelTrait, infer_catalog_tasks_and_traits,
-    parse_persisted_model_traits,
+    parse_persisted_model_traits, verified_catalog_tasks_and_traits,
 };
 pub use office::{
     GetSnapshotContentRequest, ListSnapshotsRequest,
@@ -179,7 +179,7 @@ pub use plugin_platform::*;
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus,
-    ModelContextLimitKind, ModelInfo, ModelTokenLimitSources,
+    ModelCatalogSource, ModelContextLimitKind, ModelInfo, ModelTaskSource, ModelTokenLimitSources,
     ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
     ProbeProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
     ProviderHealthCheckResponse, ProviderReachability, ProviderResponse, UpdateProviderRequest,

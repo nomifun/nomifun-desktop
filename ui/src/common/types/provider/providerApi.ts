@@ -16,6 +16,8 @@ import type { IProvider, ModelTask, ModelTrait } from '@/common/config/storage';
 import { parseProviderId, type ProviderId } from '@/common/types/ids';
 import type { ProviderConnectionInput } from '@/common/types/provider/providerConnection';
 import type { ProviderModelInput, ProviderModelResponse } from '@/common/types/provider/providerModel';
+import type { ModelCatalogSource } from '@/common/protocolBindings/ModelCatalogSource';
+import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource';
 
 /** Write-only credential payload selected by the explicit auth scheme. */
 export type ProviderCredentials = Record<string, unknown>;
@@ -137,6 +139,7 @@ interface FetchedModelInfo {
   id: string;
   name?: string | null;
   tasks?: ModelTask[];
+  tasks_source?: ModelTaskSource;
   traits?: ModelTrait[];
   context_limit?: number;
   /** Only a provider-declared output window; never a client-generated default. */
@@ -150,6 +153,8 @@ interface FetchedModelInfo {
 
 export interface FetchModelsResponse {
   models: FetchedModelInfo[];
+  /** Distinguishes a real provider response from official documentation suggestions. */
+  catalog_source?: ModelCatalogSource;
   /** Present when the backend identifies the official model-list origin. */
   fixed_base_url?: string;
 }

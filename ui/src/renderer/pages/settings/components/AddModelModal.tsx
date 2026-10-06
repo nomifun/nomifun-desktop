@@ -20,8 +20,10 @@ import ModelDefinitionEditor, {
 import {
   capabilityInputsFromDefinition,
   describeValidationErrors,
+  createModelDefinitionDraft,
   normalizeModelId,
   validateModelDefinition,
+  withCatalogTaskEvidence,
   type ModelDefinitionDraft,
 } from './providerModelAdvanced';
 import useModelProtocolManifests from './useModelProtocolManifests';
@@ -34,13 +36,11 @@ import {
 } from './providerAutoConfiguration';
 import useProviderAutoConfiguration from './useProviderAutoConfiguration';
 
-const EMPTY_DEFINITION: ModelDefinitionDraft = { model: '', capabilities: [] };
-
-const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvider) => void }>(
-  ({ modalProps, data, onSubmit, modalCtrl }) => {
+const AddModelModal = ModalHOC<{ data?: IProvider; initialTask?: ModelTask; onSubmit: (provider: IProvider) => void }>(
+  ({ modalProps, data, initialTask, onSubmit, modalCtrl }) => {
     const { t } = useTranslation();
     const [message, messageHolder] = useArcoMessage();
-    const [definition, setDefinition] = useState<ModelDefinitionDraft>(EMPTY_DEFINITION);
+    const [definition, setDefinition] = useState<ModelDefinitionDraft>(() => createModelDefinitionDraft(initialTask));
     const [saving, setSaving] = useState(false);
     const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
     const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
@@ -77,6 +77,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
           label: model.label,
           ...(model.displayName ? { displayName: model.displayName } : {}),
           tasks: model.tasks,
+          ...(model.tasksSource === undefined ? {} : { tasksSource: model.tasksSource }),
           traits: model.traits,
           ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
           ...(model.outputLimit === undefined ? {} : { outputLimit: model.outputLimit }),
@@ -86,9 +87,12 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
     );
     const existingModelIds = useMemo(() => data?.models.map((row) => row.model) ?? [], [data?.models]);
     const validation = useMemo(
-      () =>
-        validateModelDefinition(
-          definition,
+      () => {
+        const catalogEntry = catalogSuggestions.find((entry) =>
+          normalizeModelId(entry.value) === normalizeModelId(definition.model)
+        );
+        return validateModelDefinition(
+          withCatalogTaskEvidence(definition, catalogEntry ? { ...catalogEntry, model: catalogEntry.value } : undefined),
           manifests.manifests,
           data?.base_url ?? '',
           existingModelIds,
@@ -99,9 +103,11 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
             connectionState.connections.map((connection) => [connection.role, connection.auth_scheme])
           ),
           connectionState.connections
-        ),
+        );
+      },
       [
         connectionState.connections,
+        catalogSuggestions,
         data?.base_url,
         data?.auth_scheme,
         definition,
@@ -113,12 +119,12 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
 
     useEffect(() => {
       if (modalProps.visible) {
-        setDefinition(EMPTY_DEFINITION);
+        setDefinition(createModelDefinitionDraft(initialTask));
         setSaving(false);
         setFocusedCallConfigTask(undefined);
         appliedAutoConfigurationRef.current = '';
       }
-    }, [data?.id, modalProps.visible]);
+    }, [data?.id, initialTask, modalProps.visible]);
 
     useEffect(() => {
       const batch = autoConfiguration.data;
@@ -150,7 +156,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
         message.warning(
           detail ||
             t('settings.completeCapabilityConfiguration', {
-              defaultValue: '请完成每个已选模态的协议、地址和参数配置。',
+              defaultValue: '请完成调用接口的协议、地址和参数配置。',
             })
         );
         return;
@@ -180,7 +186,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
         modalCtrl.close();
       } catch (error) {
         console.error('provider model save failed', error);
-        message.error(t('settings.saveModelConfigFailed', { defaultValue: '模型能力保存失败' }));
+        message.error(t('settings.saveModelConfigFailed', { defaultValue: '模型配置保存失败' }));
       } finally {
         setSaving(false);
       }
@@ -268,7 +274,9 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
               }
               existingModelIds={existingModelIds}
               catalogSuggestions={catalogSuggestions}
-              catalogLoading={modelListState.isLoading}
+              catalogLoading={modelListState.isValidating}
+              catalogFetchReady={modelListState.canFetch}
+              catalogSource={modelListState.data?.catalogSource}
               catalogError={
                 modelListState.error instanceof Error
                   ? modelListState.error.message
@@ -276,7 +284,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (provider: IProvide
                     ? String(modelListState.error)
                     : undefined
               }
-              onRefreshCatalog={() => void modelListState.mutate()}
+              onRefreshCatalog={() => modelListState.mutate()}
               onCallConfigFocusChange={setFocusedCallConfigTask}
               callConfigFooterPlacement='modal'
               connections={connectionState.connections}

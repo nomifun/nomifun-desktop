@@ -7,17 +7,24 @@
 import { describe, expect, test } from 'bun:test';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import {
+  applyProviderAutoConfiguration,
+  applyProviderCompatibilityMode,
+  buildProviderAutoConfigurationTargets,
+} from './providerAutoConfiguration';
+import {
+  acknowledgeCatalogTaskConflict,
   addCapabilityTask,
-  applyCatalogSuggestionForTask,
-  catalogSuggestionsForTask,
+  applyCatalogSuggestion,
   capabilityDraftFromResponse,
   capabilityInputsFromDefinition,
-  capabilityHasConfiguration,
   capabilityValidationMessageKey,
   changeCapabilityProtocol,
+  changeModelDefinitionId,
+  createModelDefinitionDraft,
   describeValidationErrors,
   effectiveBaseUrl,
   emptyCapabilityDraft,
+  getCatalogTaskConflict,
   isProtocolAuthSchemeAllowed,
   isDuplicateModelId,
   normalizeModelId,
@@ -34,6 +41,7 @@ import {
   withProviderParamVoice,
   withProviderParamChainRounds,
   withProviderParamReasoningEffort,
+  withCatalogTaskEvidence,
   validateModelDefinition,
   type ModelCapabilityDraft,
   type ModelDefinitionDraft,
@@ -101,6 +109,213 @@ const manifest = (
 });
 
 describe('model definition capability selection', () => {
+  test('generic and specialized entries preserve explicit task intent without guessing chat', () => {
+    expect(createModelDefinitionDraft()).toEqual({ model: '', capabilities: [] });
+    for (const task of ['speech_recognition', 'speech_synthesis', 'image_generation', 'embedding'] as const) {
+      const draft = createModelDefinitionDraft(task);
+      expect(draft.capabilities).toEqual([{ ...emptyCapabilityDraft(task), routeSource: 'user' }]);
+      const selected = applyCatalogSuggestion(draft, {
+        model: 'known-text-model', tasks: ['chat'], traits: [], tasksSource: 'provider_declared',
+      });
+      expect(selected.capabilities).toEqual(draft.capabilities);
+      expect(getCatalogTaskConflict(selected)).toMatchObject({
+        configuredTasks: [task], declaredTasks: ['chat'], acknowledged: false,
+      });
+    }
+  });
+
+  test('inferred and missing task provenance never auto-confirm catalog purposes', () => {
+    for (const tasksSource of [undefined, 'inferred'] as const) {
+      for (const tasks of [['chat'], ['speech_recognition'], ['speech_synthesis']] as ModelTask[][]) {
+        const suggestion = { model: 'name-only-model', tasks, traits: [], tasksSource };
+        const generic = applyCatalogSuggestion(createModelDefinitionDraft(), suggestion);
+        expect(generic.capabilities).toEqual([]);
+        expect(validateModelDefinition(generic, {}, 'https://provider.example').errors).toEqual([
+          { code: 'capability_required' },
+        ]);
+        const explicit = createModelDefinitionDraft('speech_recognition');
+        expect(applyCatalogSuggestion(explicit, suggestion).capabilities).toEqual(explicit.capabilities);
+        expect(getCatalogTaskConflict(applyCatalogSuggestion(explicit, suggestion))).toBeUndefined();
+      }
+    }
+    for (const tasksSource of ['provider_declared', 'official_documentation'] as const) {
+      expect(applyCatalogSuggestion(createModelDefinitionDraft(), {
+        model: 'verified-asr', tasks: ['speech_recognition'], tasksSource, traits: [],
+      }).capabilities.map((capability) => capability.task)).toEqual(['speech_recognition']);
+    }
+  });
+
+  test('provider protocol presets and discovery never manufacture a purpose for an unknown ID', () => {
+    const unknown = changeModelDefinitionId(createModelDefinitionDraft(), 'unknown-voice-model');
+    const manifests = { chat: manifest('chat', 'openai.chat_text') };
+    for (const mode of ['auto', 'openai', 'anthropic'] as const) {
+      expect(applyProviderCompatibilityMode(unknown, mode, true).capabilities).toEqual([]);
+    }
+    expect(buildProviderAutoConfigurationTargets(unknown, manifests, 'bearer', false)).toEqual([]);
+    expect(applyProviderAutoConfiguration(unknown, [{
+      task: 'chat', protocol: 'openai.chat_text', authScheme: 'bearer', confidence: 'verified',
+    }]).capabilities).toEqual([]);
+  });
+
+  test('advisory token metadata can enrich an explicitly chosen matching purpose without establishing it', () => {
+    const suggestion = {
+      model: 'provider-model', tasks: ['chat' as const], traits: ['vision_input' as const],
+      tasksSource: 'inferred' as const, contextLimit: 128_000, outputLimit: 16_000,
+    };
+    expect(applyCatalogSuggestion(createModelDefinitionDraft(), suggestion).capabilities).toEqual([]);
+    const chat = applyCatalogSuggestion(createModelDefinitionDraft('chat'), suggestion);
+    expect(chat.capabilities[0]).toMatchObject({
+      task: 'chat', routeSource: 'user', contextLimit: 128_000, outputLimit: 16_000,
+    });
+    const asr = createModelDefinitionDraft('speech_recognition');
+    expect(applyCatalogSuggestion(asr, suggestion).capabilities).toEqual(asr.capabilities);
+  });
+
+  test('changing a model ID clears automatic purposes and stale evidence while retaining explicit routes', () => {
+    const automatic = applyCatalogSuggestion(createModelDefinitionDraft(), {
+      model: 'declared-chat', displayName: 'Declared model', tasks: ['chat'], traits: [], tasksSource: 'provider_declared',
+    });
+    expect(changeModelDefinitionId(automatic, 'manual-asr')).toEqual({ model: 'manual-asr', capabilities: [] });
+    expect(changeModelDefinitionId(automatic, ' declared-chat ')).toEqual({ ...automatic, model: ' declared-chat ' });
+    const tts = createModelDefinitionDraft('speech_synthesis');
+    const conflicted = applyCatalogSuggestion(tts, {
+      model: 'declared-chat', tasks: ['chat'], traits: [], tasksSource: 'provider_declared',
+    });
+    const updated = changeModelDefinitionId(acknowledgeCatalogTaskConflict(conflicted), 'manual-tts');
+    expect(updated.capabilities).toEqual(tts.capabilities);
+    expect(updated).not.toHaveProperty('catalogTaskConflict');
+  });
+
+  test('verified catalog conflicts require acknowledgement and permit manually confirmed incomplete catalogs', () => {
+    const manifests = { speech_recognition: manifest('speech_recognition', 'openai.audio_transcriptions') };
+    let configured = createModelDefinitionDraft('speech_recognition');
+    configured.capabilities = reconcileCapabilityRecommendations(configured.capabilities, manifests);
+    const selected = applyCatalogSuggestion(configured, {
+      model: 'opaque-account-alias', tasks: ['chat'], traits: [], tasksSource: 'provider_declared',
+    });
+    expect(validateModelDefinition(selected, manifests, 'https://provider.example/v1').errors).toEqual([
+      { code: 'catalog_task_conflict' },
+    ]);
+    const acknowledged = acknowledgeCatalogTaskConflict(selected);
+    expect(validateModelDefinition(acknowledged, manifests, 'https://provider.example/v1').valid).toBe(true);
+    expect(capabilityInputsFromDefinition(acknowledged)).toEqual([{
+      task: 'speech_recognition', protocol: 'openai.audio_transcriptions', connection_role: 'default',
+    }]);
+    expect(capabilityInputsFromDefinition(acknowledged)![0]).not.toHaveProperty('catalogTaskConflict');
+
+    const nextSelection = applyCatalogSuggestion(acknowledged, {
+      model: 'another-chat-model', tasks: ['chat'], traits: [], tasksSource: 'official_documentation',
+    });
+    expect(getCatalogTaskConflict(nextSelection)?.acknowledged).toBe(false);
+    const changedPurposes = { ...acknowledged, capabilities: addCapabilityTask(acknowledged.capabilities, 'speech_synthesis') };
+    expect(getCatalogTaskConflict(changedPurposes)).toMatchObject({
+      configuredTasks: ['speech_recognition', 'speech_synthesis'], acknowledged: false,
+    });
+    expect(getCatalogTaskConflict({ ...selected, model: 'changed-manual-id' })).toBeUndefined();
+    expect(getCatalogTaskConflict({ ...selected, capabilities: [] })).toBeUndefined();
+  });
+
+  test('a registered text protocol cannot be saved as ASR or TTS', () => {
+    for (const task of ['speech_recognition', 'speech_synthesis'] as const) {
+      const wrongManifest = manifest('chat', 'openai.chat_text');
+      const capability = { ...emptyCapabilityDraft(task), protocol: 'openai.chat_text' };
+      expect(validateModelDefinition({ model: 'audio-model', capabilities: [capability] }, {
+        [task]: wrongManifest,
+      }, 'https://provider.example/v1').errors).toContainEqual({ task, code: 'protocol_task_mismatch' });
+    }
+  });
+
+  test('manually typing a known model applies verified conflict evidence without changing configuration', () => {
+    const task = 'speech_recognition' as const;
+    const capability = patchCapabilityDraft(emptyCapabilityDraft(task), {
+      protocol: 'openai.audio_transcriptions', outputLimit: 8_000, providerParamsJson: '{"temperature":0.2}',
+    });
+    const definition: ModelDefinitionDraft = {
+      model: ' known-chat ', displayName: 'My recognizer', capabilities: [capability],
+    };
+    const suggestion = {
+      model: 'known-chat', displayName: 'Official title', tasks: ['chat' as const], traits: ['vision_input' as const],
+      tasksSource: 'provider_declared' as const, contextLimit: 100_000, outputLimit: 20_000,
+    };
+    const reconciled = withCatalogTaskEvidence(definition, suggestion);
+    expect(getCatalogTaskConflict(reconciled)).toMatchObject({
+      model: 'known-chat', configuredTasks: [task], declaredTasks: ['chat'], acknowledged: false,
+    });
+    expect(reconciled.model).toBe(definition.model);
+    expect(reconciled.displayName).toBe('My recognizer');
+    expect(reconciled.capabilities).toBe(definition.capabilities);
+    expect(reconciled.capabilities[0]).toBe(capability);
+    expect(validateModelDefinition(reconciled, {
+      [task]: manifest(task, 'openai.audio_transcriptions'),
+    }, 'https://provider.example/v1').errors).toContainEqual({ code: 'catalog_task_conflict' });
+
+    const acknowledged = acknowledgeCatalogTaskConflict(reconciled);
+    const typedAway = changeModelDefinitionId(acknowledged, 'known-cha');
+    expect(withCatalogTaskEvidence(typedAway, suggestion)).toBe(typedAway);
+    const typedBack = changeModelDefinitionId(typedAway, 'known-chat');
+    expect(getCatalogTaskConflict(withCatalogTaskEvidence(typedBack, suggestion))?.acknowledged).toBe(false);
+  });
+
+  test('late catalog evidence adds a conflict without assigning purposes and ignores unknown or unrelated entries', () => {
+    const definition = changeModelDefinitionId(createModelDefinitionDraft('speech_synthesis'), 'known-chat');
+    const suggestion = {
+      model: 'known-chat', tasks: ['chat' as const], traits: [], tasksSource: 'official_documentation' as const,
+    };
+    expect(withCatalogTaskEvidence(definition)).toBe(definition);
+    expect(withCatalogTaskEvidence(definition, { ...suggestion, tasksSource: undefined })).toBe(definition);
+    expect(withCatalogTaskEvidence(definition, { ...suggestion, tasksSource: 'inferred' })).toBe(definition);
+    expect(withCatalogTaskEvidence(definition, { ...suggestion, tasks: [] })).toBe(definition);
+    expect(withCatalogTaskEvidence(definition, { ...suggestion, model: 'other-model' })).toBe(definition);
+    const late = withCatalogTaskEvidence(definition, suggestion);
+    expect(late.capabilities).toBe(definition.capabilities);
+    expect(getCatalogTaskConflict(late)?.acknowledged).toBe(false);
+    expect(validateModelDefinition(late, {}, 'https://provider.example/v1').errors).toContainEqual({
+      code: 'catalog_task_conflict',
+    });
+
+    const general = changeModelDefinitionId(createModelDefinitionDraft(), suggestion.model);
+    expect(withCatalogTaskEvidence(general, suggestion)).toBe(general);
+    expect(general.capabilities).toEqual([]);
+  });
+
+  test('unchanged catalog evidence is referentially stable and preserves an acknowledgement', () => {
+    const definition = changeModelDefinitionId(createModelDefinitionDraft('speech_recognition'), 'known-model');
+    const suggestion = {
+      model: 'known-model', tasks: ['chat', 'embedding'] as ModelTask[], traits: [],
+      tasksSource: 'provider_declared' as const,
+    };
+    const reconciled = withCatalogTaskEvidence(definition, suggestion);
+    expect(withCatalogTaskEvidence(reconciled, suggestion)).toBe(reconciled);
+    const acknowledged = acknowledgeCatalogTaskConflict(reconciled);
+    expect(withCatalogTaskEvidence(acknowledged, suggestion)).toBe(acknowledged);
+    expect(withCatalogTaskEvidence(acknowledged, {
+      ...suggestion, model: ' known-model ', tasks: ['embedding', 'chat', 'embedding'],
+    })).toBe(acknowledged);
+    expect(getCatalogTaskConflict(acknowledged)?.acknowledged).toBe(true);
+  });
+
+  test('changed declared or configured task sets require fresh acknowledgement and resolved conflicts clear evidence', () => {
+    const definition = changeModelDefinitionId(createModelDefinitionDraft('speech_recognition'), 'known-model');
+    const suggestion = {
+      model: 'known-model', tasks: ['chat' as const], traits: [], tasksSource: 'provider_declared' as const,
+    };
+    const acknowledged = acknowledgeCatalogTaskConflict(withCatalogTaskEvidence(definition, suggestion));
+    const changedDeclaration = withCatalogTaskEvidence(acknowledged, { ...suggestion, tasks: ['embedding'] });
+    expect(getCatalogTaskConflict(changedDeclaration)).toMatchObject({
+      configuredTasks: ['speech_recognition'], declaredTasks: ['embedding'], acknowledged: false,
+    });
+    const changedConfiguration = withCatalogTaskEvidence({
+      ...acknowledged, capabilities: addCapabilityTask(acknowledged.capabilities, 'speech_synthesis'),
+    }, suggestion);
+    expect(getCatalogTaskConflict(changedConfiguration)).toMatchObject({
+      configuredTasks: ['speech_recognition', 'speech_synthesis'], acknowledged: false,
+    });
+    const resolved = withCatalogTaskEvidence(acknowledged, { ...suggestion, tasks: ['speech_recognition'] });
+    expect(resolved).not.toHaveProperty('catalogTaskConflict');
+    expect(resolved.capabilities).toBe(acknowledged.capabilities);
+    expect(withCatalogTaskEvidence(resolved, { ...suggestion, tasks: ['speech_recognition'] })).toBe(resolved);
+  });
+
   test('keeps free-text changes separate from the catalog onChange then onSelect event sequence', () => {
     let definition = { model: '', capabilities: [emptyCapabilityDraft('chat')] };
 
@@ -112,71 +327,69 @@ describe('model definition capability selection', () => {
     if (catalogInputChange !== undefined) definition = { ...definition, model: catalogInputChange };
     expect(definition.model).toBe('vendor/custom-chat');
 
-    definition = applyCatalogSuggestionForTask(
+    definition = applyCatalogSuggestion(
       definition,
-      { model: 'catalog/chat', tasks: ['chat', 'embedding'], traits: ['web_search'] },
-      'chat'
+      { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat', 'embedding'], traits: ['web_search'] }
     );
     expect(definition).toEqual({
       model: 'catalog/chat',
-      capabilities: [{ ...emptyCapabilityDraft('chat'), traits: ['web_search'] }],
+      capabilities: [{ ...emptyCapabilityDraft('chat'), traits: ['web_search'] }, emptyCapabilityDraft('embedding')],
     });
   });
 
-  test('filters catalog suggestions by the selected task without treating taskless models as universal', () => {
-    const suggestions = [
-      { model: 'chat-only', tasks: ['chat'] as ModelTask[], traits: [] },
-      { model: 'shared', tasks: ['chat', 'speech_synthesis'] as ModelTask[], traits: [] },
-      { model: 'unknown', tasks: [] as ModelTask[], traits: [] },
-    ];
-
-    expect(catalogSuggestionsForTask(suggestions, 'speech_synthesis').map((item) => item.model)).toEqual([
-      'shared',
-    ]);
-    expect(catalogSuggestionsForTask(suggestions, undefined)).toEqual([]);
+  test('taskless and future catalog entries require an explicit purpose', () => {
+    for (const capabilities of [[], [emptyCapabilityDraft('chat')]]) {
+      const applied = applyCatalogSuggestion({ model: '', capabilities }, {
+        model: 'vendor/future-model-2099', tasksSource: 'provider_declared' as const, tasks: [], traits: [],
+      });
+      expect(applied).toEqual({ model: 'vendor/future-model-2099', capabilities: [] });
+      const manifests = { chat: manifest('chat', 'openai.chat_text') };
+      const recommended = reconcileCapabilityRecommendations(applied.capabilities, manifests);
+      expect(validateModelDefinition({ ...applied, capabilities: recommended }, manifests, 'https://provider.example/v1').errors).toEqual([
+        { code: 'capability_required' },
+      ]);
+    }
   });
 
   test('adopting a catalog model preserves every other configured task', () => {
     const oldChat: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('chat'),
+      routeSource: 'user',
       traits: ['web_search'],
       protocol: 'old.chat',
       endpoint: '/old/chat',
       providerParamsJson: '{"old":true}',
     };
-    const applied = applyCatalogSuggestionForTask(
+    const applied = applyCatalogSuggestion(
       { model: 'old/model', capabilities: [oldChat] },
       {
         model: 'catalog/model',
-        tasks: ['speech_synthesis', 'chat', 'realtime_conversation', 'chat'],
+        tasksSource: 'provider_declared' as const, tasks: ['speech_synthesis', 'realtime_conversation'],
         traits: [
           'web_search',
           'vision_input',
           'audio_input',
         ],
-      },
-      'speech_synthesis'
+      }
     );
 
     expect(applied.model).toBe('catalog/model');
-    // The catalog is advisory. It may add the task it was chosen for; it may
-    // never discard a task the user already configured.
-    expect(applied.capabilities).toEqual([oldChat, emptyCapabilityDraft('speech_synthesis')]);
+    // Catalog selection never converts or extends authored call routes.
+    expect(applied.capabilities).toEqual([oldChat]);
     expect(applied.capabilities[0]).toBe(oldChat);
   });
 
-  test('adds the verified sibling task for a unified image catalog model', () => {
-    const applied = applyCatalogSuggestionForTask(
+  test('adopts each explicitly declared catalog route from an untouched automatic chat draft', () => {
+    const applied = applyCatalogSuggestion(
       {
         model: '',
-        capabilities: [emptyCapabilityDraft('image_generation')],
+        capabilities: [{ ...emptyCapabilityDraft('chat'), transportSource: 'recommendation', protocol: 'openai.chat_text' }],
       },
       {
         model: 'doubao-seedream-5-0-260128',
-        tasks: ['image_generation', 'image_edit'],
+        tasksSource: 'provider_declared' as const, tasks: ['image_generation', 'image_edit', 'image_generation'],
         traits: [],
-      },
-      'image_generation'
+      }
     );
 
     expect(applied.capabilities).toEqual([
@@ -184,17 +397,107 @@ describe('model definition capability selection', () => {
       emptyCapabilityDraft('image_edit'),
     ]);
 
-    const opaque = applyCatalogSuggestionForTask(
-      { model: '', capabilities: [emptyCapabilityDraft('image_generation')] },
-      { model: 'ep-opaque', tasks: ['image_generation'], traits: [] },
-      'image_generation'
+    const opaque = applyCatalogSuggestion(
+      { model: '', capabilities: [emptyCapabilityDraft('chat')] },
+      { model: 'ep-opaque', tasksSource: 'provider_declared' as const, tasks: ['image_generation'], traits: [] }
     );
     expect(opaque.capabilities).toEqual([emptyCapabilityDraft('image_generation')]);
+  });
+
+  test('automatic catalog routes switch Chat to image/edit and back without retaining old model metadata', () => {
+    const chatManifest = manifest('chat', 'openai.chat_text', 'https://automatic.example/v1');
+    chatManifest.recommendation!.base_url_override_required = true;
+    let definition: ModelDefinitionDraft = { model: '', capabilities: [emptyCapabilityDraft('chat')] };
+    definition = applyCatalogSuggestion(definition, {
+      model: 'chat-a', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: ['vision_input'],
+      contextLimit: 128_000, outputLimit: 16_000, contextLimitKind: 'input_only',
+    });
+    definition.capabilities = reconcileCapabilityRecommendations(definition.capabilities, { chat: chatManifest });
+    expect(definition.capabilities[0]).toMatchObject({
+      routeSource: 'automatic', baseUrlOverride: 'https://automatic.example/v1',
+      contextLimit: 128_000, outputLimit: 16_000, traits: ['vision_input'],
+    });
+
+    const changedChat = applyCatalogSuggestion(definition, {
+      model: 'chat-a2', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: ['audio_input'], contextLimit: 32_000,
+    });
+    expect(changedChat.capabilities[0]).toMatchObject({
+      protocol: 'openai.chat_text', baseUrlOverride: 'https://automatic.example/v1',
+      contextLimit: 32_000, outputLimit: undefined, traits: ['audio_input'], providerParamsJson: '',
+    });
+
+    definition = applyCatalogSuggestion(definition, {
+      model: 'image-b', tasksSource: 'provider_declared' as const, tasks: ['image_generation', 'image_edit'], traits: [],
+      contextLimit: 64_000, outputLimit: 4_000, contextLimitKind: 'combined',
+    });
+    expect(definition.capabilities.map((route) => route.task)).toEqual(['image_generation', 'image_edit']);
+    expect(definition.capabilities.every((route) => route.routeSource === 'automatic')).toBe(true);
+
+    definition = applyCatalogSuggestion(definition, {
+      model: 'chat-c', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [], contextLimit: 48_000,
+    });
+    expect(definition.capabilities).toEqual([{ ...emptyCapabilityDraft('chat'), contextLimit: 48_000 }]);
+    definition = applyCatalogSuggestion(definition, {
+      model: 'image-d', tasksSource: 'provider_declared' as const, tasks: ['image_generation'], traits: [], contextLimit: 64_000,
+    });
+    definition = applyCatalogSuggestion(definition, { model: 'future-unknown', tasksSource: 'provider_declared' as const, tasks: [], traits: [] });
+    expect(definition.capabilities).toEqual([]);
+    expect(capabilityInputsFromDefinition(definition)).toEqual([]);
+  });
+
+  test('manual limits, protocol choices, and explicitly added routes preserve existing interfaces on catalog changes', () => {
+    const initial = applyCatalogSuggestion({ model: '', capabilities: [emptyCapabilityDraft('chat')] }, {
+      model: 'chat-a', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: ['vision_input'], contextLimit: 128_000, outputLimit: 16_000,
+    });
+    const image = { model: 'image-b', tasksSource: 'provider_declared' as const, tasks: ['image_generation' as const], traits: [] };
+    for (const patch of [{ contextLimit: 96_000 }, { contextLimit: undefined }, { outputLimit: 2_000 }, { compactionThresholdPct: 60 }]) {
+      const authored = patchCapabilityDraft(initial.capabilities[0], patch);
+      expect(authored.routeSource).toBe('user');
+      expect(applyCatalogSuggestion({ ...initial, capabilities: [authored] }, image).capabilities).toEqual([authored]);
+    }
+    const confirmed = changeCapabilityProtocol(initial.capabilities[0], 'openai.chat_text');
+    expect(confirmed.routeSource).toBe('user');
+    expect(applyCatalogSuggestion({ ...initial, capabilities: [confirmed] }, image).capabilities).toEqual([confirmed]);
+    const manuallyExtended = addCapabilityTask(initial.capabilities, 'speech_synthesis');
+    expect(manuallyExtended[1].routeSource).toBe('user');
+    expect(applyCatalogSuggestion({ ...initial, capabilities: manuallyExtended }, image).capabilities).toEqual(manuallyExtended);
+    const persisted = capabilityDraftFromResponse({ task: 'chat', protocol: 'openai.chat_text', connection_role: 'default' });
+    expect(persisted.routeSource).toBe('persisted');
+    expect(applyCatalogSuggestion({ ...initial, capabilities: [persisted] }, image).capabilities).toEqual([persisted]);
+  });
+
+  test('provider-wide compatibility presets keep untouched catalog routes automatic', () => {
+    const initial = applyProviderCompatibilityMode({ model: '', capabilities: [emptyCapabilityDraft('chat')] }, 'openai', true);
+    expect(initial.capabilities[0]).toMatchObject({ routeSource: 'automatic', transportSource: 'user', protocol: 'openai.chat_text' });
+    const changedChat = applyCatalogSuggestion(initial, { model: 'chat-a', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [] });
+    expect(changedChat.capabilities[0].protocol).toBe('openai.chat_text');
+    const image = applyProviderCompatibilityMode(applyCatalogSuggestion(changedChat, {
+      model: 'image-b', tasksSource: 'provider_declared' as const, tasks: ['image_generation', 'image_edit'], traits: [],
+    }), 'openai');
+    expect(image.capabilities.map((route) => [route.task, route.protocol])).toEqual([
+      ['image_generation', 'openai.images'], ['image_edit', 'openai.images'],
+    ]);
+    const chat = applyProviderCompatibilityMode(applyCatalogSuggestion(image, { model: 'future-chat', tasksSource: 'provider_declared' as const, tasks: [], traits: [] }), 'openai');
+    expect(chat.capabilities).toEqual([]);
+  });
+
+  test('an explicit initial route survives selecting a taskless or differently classified model', () => {
+    for (const task of ['image_generation', 'embedding'] as const) {
+      const route: ModelCapabilityDraft = { ...emptyCapabilityDraft(task), routeSource: 'user' };
+      for (const tasks of [[], ['chat' as const]]) {
+        const selected = applyCatalogSuggestion({ model: 'deep-linked-model', capabilities: [route] }, {
+          model: 'future-model', tasks, traits: [],
+        });
+        expect(selected.capabilities).toEqual([route]);
+        expect(selected.capabilities[0]).toBe(route);
+      }
+    }
   });
 
   test('adopting a catalog model keeps the chosen task transport and only refreshes its traits', () => {
     const configuredChat: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('chat'),
+      routeSource: 'user',
       traits: ['audio_input'],
       protocol: 'openai.chat_text',
       endpoint: '/chat/completions',
@@ -202,10 +505,9 @@ describe('model definition capability selection', () => {
     };
 
     expect(
-      applyCatalogSuggestionForTask(
+      applyCatalogSuggestion(
         { model: 'old/model', capabilities: [configuredChat] },
-        { model: 'catalog/chat', tasks: ['chat'], traits: ['web_search', 'vision_input'] },
-        'chat'
+        { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: ['web_search', 'vision_input'] }
       )
     ).toEqual({
       model: 'catalog/chat',
@@ -216,52 +518,49 @@ describe('model definition capability selection', () => {
   test('prefills a provider-declared context window without overriding the user', () => {
     // Only an explicit provider declaration supplies a numeric window.
     expect(
-      applyCatalogSuggestionForTask(
+      applyCatalogSuggestion(
         { model: '', capabilities: [] },
-        { model: 'catalog/chat', tasks: ['chat'], traits: [], contextLimit: 32_000 },
-        'chat'
+        { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [], contextLimit: 32_000 }
       ).capabilities[0]?.contextLimit
     ).toBe(32_000);
 
     // An explicit user value wins: correcting the provider is the point.
     expect(
-      applyCatalogSuggestionForTask(
+      applyCatalogSuggestion(
         {
           model: '',
-          capabilities: [{ ...emptyCapabilityDraft('chat'), contextLimit: 8_000 }],
+          capabilities: [patchCapabilityDraft(emptyCapabilityDraft('chat'), { contextLimit: 8_000 })],
         },
-        { model: 'catalog/chat', tasks: ['chat'], traits: [], contextLimit: 32_000 },
-        'chat'
+        { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [], contextLimit: 32_000 }
       ).capabilities[0]?.contextLimit
     ).toBe(8_000);
 
     // A provider that declares nothing must not manufacture a window.
     expect(
-      applyCatalogSuggestionForTask(
+      applyCatalogSuggestion(
         { model: '', capabilities: [] },
-        { model: 'catalog/chat', tasks: ['chat'], traits: [] },
-        'chat'
+        { model: 'catalog/chat', tasksSource: 'provider_declared' as const, tasks: ['chat'], traits: [] }
       ).capabilities[0]?.contextLimit
     ).toBeUndefined();
   });
 
-  test('catalog limits and traits are advisory, including an explicit provider-default choice', () => {
-    const suggestion = { model: 'catalog/model', tasks: ['chat' as const], traits: ['vision_input' as const],
+  test('catalog limits are advisory, including an explicit provider-default choice', () => {
+    const suggestion = { model: 'catalog/model', tasksSource: 'provider_declared' as const, tasks: ['chat' as const], traits: ['vision_input' as const],
       contextLimit: 1_000_000, outputLimit: 100_000 };
-    const fresh = applyCatalogSuggestionForTask({model:'',capabilities:[emptyCapabilityDraft('chat')]},suggestion,'chat');
+    const fresh = applyCatalogSuggestion({model:'',capabilities:[emptyCapabilityDraft('chat')]},suggestion);
     expect(fresh.capabilities[0]).toMatchObject({contextLimit:1_000_000,outputLimit:100_000,traits:['vision_input']});
     const explicit = patchCapabilityDraft(emptyCapabilityDraft('chat'), {
-      contextLimit: undefined, outputLimit: undefined, traits: ['web_search'],
+      contextLimit: undefined, outputLimit: undefined,
       providerParamsJson:'{"reasoning_effort":"high"}',
     });
-    const preserved = applyCatalogSuggestionForTask({model:'old',capabilities:[explicit]},suggestion,'chat');
-    expect(preserved.capabilities[0]).toMatchObject({contextLimit:undefined,outputLimit:undefined,traits:['web_search'],
+    const preserved = applyCatalogSuggestion({model:'old',capabilities:[explicit]},suggestion);
+    expect(preserved.capabilities[0]).toMatchObject({contextLimit:undefined,outputLimit:undefined,
       providerParamsJson:explicit.providerParamsJson});
     const persisted = capabilityDraftFromResponse({task:'chat',traits:[],protocol:'openai.chat_text',connection_role:'default'});
-    const unchanged = applyCatalogSuggestionForTask({model:'old',capabilities:[persisted]},suggestion,'chat');
+    const unchanged = applyCatalogSuggestion({model:'old',capabilities:[persisted]},suggestion);
     expect(unchanged.capabilities[0]).toMatchObject({contextLimit:undefined,outputLimit:undefined,traits:[]});
     const numeric = patchCapabilityDraft(explicit,{contextLimit:2_000_000,outputLimit:200_000});
-    const kept = applyCatalogSuggestionForTask({model:'old',capabilities:[numeric]},suggestion,'chat');
+    const kept = applyCatalogSuggestion({model:'old',capabilities:[numeric]},suggestion);
     expect(kept.capabilities[0]).toMatchObject({contextLimit:2_000_000,outputLimit:200_000});
     expect(capabilityInputsFromDefinition(preserved)![0]).not.toHaveProperty('outputLimitSource');
   });
@@ -278,57 +577,50 @@ describe('model definition capability selection', () => {
   });
 
   test('catalog context semantics are imported only with a new declared window, never over user modes', () => {
-    const suggestion={model:'declared',tasks:['chat' as const],traits:[],contextLimit:1_000_000,
+    const suggestion={model:'declared',tasksSource: 'provider_declared' as const, tasks:['chat' as const],traits:[],contextLimit:1_000_000,
       outputLimit:100_000,contextLimitKind:'input_only' as const};
-    const applied=applyCatalogSuggestionForTask({model:'',capabilities:[emptyCapabilityDraft('chat')]},suggestion,'chat');
+    const applied=applyCatalogSuggestion({model:'',capabilities:[emptyCapabilityDraft('chat')]},suggestion);
     expect(JSON.parse(applied.capabilities[0].providerParamsJson)).toEqual({_nomifun_context_limit_kind:'input_only'});
     expect(capabilityInputsFromDefinition(applied)![0].provider_params).toEqual({_nomifun_context_limit_kind:'input_only'});
     for(const kind of [undefined,'combined' as const]) {
-      const adopted=applyCatalogSuggestionForTask({model:'',capabilities:[]},{...suggestion,contextLimitKind:kind},'chat');
+      const adopted=applyCatalogSuggestion({model:'',capabilities:[]},{...suggestion,contextLimitKind:kind});
       expect(adopted.capabilities[0].providerParamsJson).toBe(kind===undefined?'':JSON.stringify({_nomifun_context_limit_kind:'combined'},null,2));
     }
     for(const capability of [
       patchCapabilityDraft(emptyCapabilityDraft('chat'),{contextLimit:undefined}),
-      {...emptyCapabilityDraft('chat'),contextLimit:200_000},
+      patchCapabilityDraft(emptyCapabilityDraft('chat'),{contextLimit:200_000}),
       capabilityDraftFromResponse({task:'chat',traits:[],protocol:'openai.chat_text',connection_role:'default'}),
-      {...emptyCapabilityDraft('chat'),providerParamsJson:'{"_nomifun_context_limit_kind":"combined","temperature":0.2}'},
-      {...emptyCapabilityDraft('chat'),providerParamsJson:'{"temperature":'},
+      patchCapabilityDraft(emptyCapabilityDraft('chat'),{providerParamsJson:'{"_nomifun_context_limit_kind":"combined","temperature":0.2}'}),
+      patchCapabilityDraft(emptyCapabilityDraft('chat'),{providerParamsJson:'{"temperature":'}),
     ]) {
-      const updated=applyCatalogSuggestionForTask({model:'old',capabilities:[capability]},suggestion,'chat');
+      const updated=applyCatalogSuggestion({model:'old',capabilities:[capability]},suggestion);
       expect(updated.capabilities[0].providerParamsJson).toBe(capability.providerParamsJson);
     }
   });
 
-  test('the add-model sequence reaches a saveable draft', () => {
-    // Exactly what a user does now that the task picker comes first:
-    // declare a task, then type a model id. Regression guard: a reported
-    // "cannot save" after picking a task in the supported-task selector.
+  test('a generic manually entered ID requires purpose before reaching a saveable draft', () => {
     const manifests = { chat: manifest('chat', 'openai.chat_text') };
 
-    // 1. Empty draft — only the missing model and the missing task.
-    let definition: ModelDefinitionDraft = { model: '', capabilities: [] };
+    let definition = createModelDefinitionDraft();
     expect(
       validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1').errors.map(
         (error) => error.code
       )
     ).toEqual(['model_required', 'capability_required']);
 
-    // 2. Pick "对话" in the supported-task picker.
-    definition = {
-      ...definition,
-      capabilities: addCapabilityTask(definition.capabilities, 'chat'),
-    };
-    expect(definition.capabilities.map((capability) => capability.task)).toEqual(['chat']);
+    definition = changeModelDefinitionId(definition, 'step-3.7-flash');
+    expect(validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1').errors).toEqual([
+      { code: 'capability_required' },
+    ]);
+    definition = { ...definition, capabilities: addCapabilityTask(definition.capabilities, 'chat') };
 
-    // 3. The backend recommendation lands and fills the transport.
+    // Only after the explicit purpose selection may transport recommendations apply.
     definition = {
       ...definition,
       capabilities: reconcileCapabilityRecommendations(definition.capabilities, manifests),
     };
     expect(definition.capabilities[0]?.protocol).toBe('openai.chat_text');
 
-    // 4. Type the model id. Nothing else should be required.
-    definition = { ...definition, model: 'step-3.7-flash' };
     const result = validateModelDefinition(definition, manifests, 'https://api.stepfun.com/v1');
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
@@ -376,54 +668,19 @@ describe('model definition capability selection', () => {
     ).toBe('model_required · chat · base_url_required · embedding · base_url_required');
   });
 
-  test('only a configured capability is worth confirming before removal', () => {
-    // A task's capability IS its configuration, so removing the task deletes
-    // that work. The multi-select's tag "×" therefore has to confirm — but only
-    // when there is something to lose, or every stray click would nag.
-    expect(capabilityHasConfiguration(emptyCapabilityDraft('chat'))).toBe(false);
-    // Auto-applied recommendations are not the user's work.
-    expect(
-      capabilityHasConfiguration({
-        ...emptyCapabilityDraft('chat'),
-        transportSource: 'recommendation',
-        protocol: 'openai.chat_text',
-      })
-    ).toBe(false);
-
-    const worthKeeping: Array<Partial<ModelCapabilityDraft>> = [
-      { transportSource: 'user' },
-      { transportSource: 'persisted' },
-      { traits: ['vision_input'] },
-      { contextLimit: 32_000 },
-      { outputLimit: 4096 },
-      { allowCrossOriginCredentials: true },
-      { baseUrlOverride: 'https://override.example/v1' },
-      { endpoint: '/chat/completions' },
-      { pollEndpoint: '/jobs/{id}' },
-      { contentEndpoint: '/jobs/{id}/content' },
-      { realtimeEndpoint: 'wss://example/realtime' },
-      { providerParamsJson: '{"voice":"alloy"}' },
-    ];
-    for (const patch of worthKeeping) {
-      expect(
-        capabilityHasConfiguration({ ...emptyCapabilityDraft('chat'), ...patch })
-      ).toBe(true);
-    }
-  });
-
   test('does not touch traits when the selected task is absent from the entry', () => {
     const oldSpeech: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('speech_synthesis'),
+      routeSource: 'user',
       traits: [],
       protocol: 'old.speech',
       endpoint: '/old/speech',
     };
 
     expect(
-      applyCatalogSuggestionForTask(
+      applyCatalogSuggestion(
         { model: 'old/model', capabilities: [oldSpeech] },
-        { model: 'catalog/unknown', tasks: [], traits: ['audio_input'] },
-        'speech_synthesis'
+        { model: 'catalog/unknown', tasksSource: 'provider_declared' as const, tasks: [], traits: ['audio_input'] }
       )
     ).toEqual({ model: 'catalog/unknown', capabilities: [oldSpeech] });
   });
@@ -437,7 +694,7 @@ describe('model definition capability selection', () => {
     };
     const withSpeech = addCapabilityTask([chat], 'speech_synthesis');
 
-    expect(withSpeech).toEqual([chat, emptyCapabilityDraft('speech_synthesis')]);
+    expect(withSpeech).toEqual([chat, { ...emptyCapabilityDraft('speech_synthesis'), routeSource: 'user' }]);
     expect(withSpeech[0]).toBe(chat);
     expect(addCapabilityTask(withSpeech, 'chat')).toEqual(withSpeech);
     expect(removeCapabilityTask(withSpeech, 'speech_synthesis')).toEqual([chat]);
@@ -602,11 +859,13 @@ describe('model definition capability selection', () => {
 
     expect(changeCapabilityProtocol(current, current.protocol, taskManifest)).toEqual({
       ...current,
+      routeSource: 'user',
       transportSource: 'user',
     });
     const changed = changeCapabilityProtocol(current, 'openai.audio_speech', taskManifest);
     expect(changed).toEqual({
       ...current,
+      routeSource: 'user',
       transportSource: 'user',
       protocol: 'openai.audio_speech',
       connectionRole: 'default',
@@ -866,6 +1125,7 @@ describe('capability validation and serialization', () => {
     ).toEqual({
       task: 'speech_synthesis',
       traits: [],
+      routeSource: 'persisted',
       transportSource: 'persisted',
       protocol: 'stepfun.audio_speech',
       connectionRole: 'voice',

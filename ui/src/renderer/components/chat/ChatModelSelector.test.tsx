@@ -2,6 +2,7 @@ import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
@@ -33,7 +34,7 @@ const providerId = parseProviderId('0190f5fe-7c00-7a00-8000-000000000105');
 const chatCapability = (functionCallingUnsupported = false) => ({
   task: 'chat' as const,
   traits: ['vision_input' as const],
-  protocol: 'openai.chat_completions',
+  protocol: 'openai.chat_text',
   connection_role: 'default',
   allow_cross_origin_credentials: false,
   provider_params: {},
@@ -79,6 +80,11 @@ test('read-only model bindings never open a picker', () => {
   expect(within(document.body).queryByRole('menu')).toBeNull();
 });
 
+test('adding a model from the conversation picker preserves the Chat use case', () => {
+  const source = readFileSync(new URL('./ChatModelSelector.tsx', import.meta.url), 'utf8');
+  expect(source.includes("navigate(modelProviderManagementRoute('chat'))")).toBe(true);
+});
+
 test('a capability-constrained picker lists only models without negative evidence', () => {
   const groups = filterCompatibleChatModelGroups(
     [{ provider, models: ['allowed-model', 'restricted-model'] }],
@@ -86,6 +92,23 @@ test('a capability-constrained picker lists only models without negative evidenc
     ['function_calling']
   );
   expect(groups[0]?.models).toEqual(['allowed-model']);
+});
+
+test('vision picker includes untagged new models but excludes protocols without image representation', () => {
+  const untaggedProvider: IProvider = {
+    ...provider,
+    models: provider.models.map((model, index) => ({
+      ...model,
+      capabilities: model.capabilities.map(capability => ({
+        ...capability,
+        traits: [],
+        protocol: index === 0 ? 'openai.chat_text' : 'unknown.chat',
+      })),
+    })),
+  };
+  expect(filterCompatibleChatModelGroups([
+    { provider: untaggedProvider, models: ['allowed-model', 'restricted-model', 'unconfigured-model'] },
+  ], ['vision_input'])[0]?.models).toEqual(['allowed-model']);
 });
 
 test('an external recovery action can open the controlled compatible-model picker', () => {

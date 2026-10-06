@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     AgentResolvedSnapshot, CapabilityHealth, ExecutionModelPool, ExecutionModelRef, ModelTask,
-    ModelTechnicalCapability, ModelTrait, ParticipantCapability, parse_persisted_model_traits,
+    ModelTechnicalCapability, ParticipantCapability,
 };
 use nomifun_common::{
     AppError, MAX_AGENT_EXECUTION_MODELS, ProviderId, NOMI_AGENT_ID,
@@ -22,18 +22,18 @@ use nomifun_db::{
 #[derive(Debug, Clone)]
 struct ChatCatalogEntry {
     description: Option<String>,
-    traits: ChatTraitProjection,
+    traits: ChatCapabilityProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ChatTraitProjection {
+struct ChatCapabilityProjection {
     modalities: Vec<String>,
     function_calling: bool,
     reasoning: bool,
     web_search: bool,
 }
 
-impl ChatTraitProjection {
+impl ChatCapabilityProjection {
     fn apply_to(&self, capability: &mut ParticipantCapability) {
         capability.modalities.clone_from(&self.modalities);
         capability.tools = self.function_calling;
@@ -42,32 +42,25 @@ impl ChatTraitProjection {
     }
 }
 
-fn project_chat_traits(
+fn project_chat_capabilities(
     provider_id: &str,
     model: &str,
-    traits_json: &str,
+    protocol_id: &str,
     health_json: Option<&str>,
-) -> Result<ChatTraitProjection, AppError> {
-    let traits = parse_persisted_model_traits(traits_json).map_err(|error| {
+) -> Result<ChatCapabilityProjection, AppError> {
+    use nomifun_chat_model_broker::{ChatModelFeature, ChatProtocol, chat_protocol_for_id, protocol_features};
+    let protocol = chat_protocol_for_id(protocol_id).ok_or_else(|| {
         AppError::Internal(format!(
-            "stored Chat capability traits for {provider_id}/{model} are invalid: {error}"
+            "stored Chat capability protocol for {provider_id}/{model} is invalid: {protocol_id}"
         ))
     })?;
+    let representable = protocol_features(protocol);
     let mut modalities = Vec::new();
-    let mut web_search = false;
-    for model_trait in traits {
-        let modality = match model_trait {
-            ModelTrait::VisionInput => Some("vision"),
-            ModelTrait::VideoInput => Some("video"),
-            ModelTrait::AudioInput => Some("audio_input"),
-            ModelTrait::WebSearch => {
-                web_search = true;
-                None
-            }
-        };
-        if let Some(modality) = modality
-            && !modalities.iter().any(|value| value == modality)
-        {
+    for (feature, modality) in [
+        (ChatModelFeature::ImageInput, "vision"),
+        (ChatModelFeature::AudioInput, "audio_input"),
+    ] {
+        if representable.contains(&feature) {
             modalities.push(modality.to_owned());
         }
     }
@@ -81,11 +74,11 @@ fn project_chat_traits(
         })?
         .map(|health| health.unsupported_technical_capabilities)
         .unwrap_or_default();
-    Ok(ChatTraitProjection {
+    Ok(ChatCapabilityProjection {
         modalities,
         function_calling: !unsupported.contains(&ModelTechnicalCapability::FunctionCalling),
         reasoning: !unsupported.contains(&ModelTechnicalCapability::Reasoning),
-        web_search,
+        web_search: protocol == ChatProtocol::OpenaiResponses,
     })
 }
 
@@ -164,10 +157,10 @@ fn build_chat_catalog(
             let key = (provider.provider_id.clone(), model);
             let entry = ChatCatalogEntry {
                 description: row.description.clone(),
-                traits: project_chat_traits(
+                traits: project_chat_capabilities(
                     &key.0,
                     &key.1,
-                    &chat_capability.traits,
+                    &chat_capability.protocol,
                     chat_capability.health.as_deref(),
                 )?,
             };
@@ -653,7 +646,7 @@ mod tests {
             model: model.to_owned(),
             task: task.to_owned(),
             traits: traits.to_owned(),
-            protocol: "test.protocol".to_owned(),
+            protocol: "openai.chat_text".to_owned(),
             connection_role: "default".to_owned(),
             base_url_override: None,
             endpoint: None,
@@ -702,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn participant_capability_uses_user_traits_and_optimistic_technical_defaults() {
+    fn participant_capability_uses_protocol_inputs_and_optimistic_technical_defaults() {
         let providers = vec![provider(PROVIDER_1, true)];
         let models = vec![
             model_row(PROVIDER_1, "gpt-4o-vision-looking-name", true),
@@ -728,38 +721,37 @@ mod tests {
         let named_projection = &catalog
             [&(PROVIDER_1.to_owned(), "gpt-4o-vision-looking-name".to_owned())]
             .traits;
-        assert_eq!(named_projection.modalities, ["video"]);
-        assert!(!named_projection.modalities.iter().any(|value| value == "vision"));
+        assert_eq!(named_projection.modalities, ["vision", "audio_input"]);
         let mut named_capability = derive_capability(None);
         named_projection.apply_to(&mut named_capability);
         assert!(named_capability.tools);
-        assert!(named_capability.web_search);
+        assert!(!named_capability.web_search);
         assert_eq!(named_capability.reasoning, "high");
 
         let opaque_projection =
             &catalog[&(PROVIDER_1.to_owned(), "opaque-model".to_owned())].traits;
         assert_eq!(
             opaque_projection.modalities,
-            ["vision", "video", "audio_input"]
+            ["vision", "audio_input"]
         );
         let mut opaque_capability = derive_capability(None);
         opaque_projection.apply_to(&mut opaque_capability);
         assert!(opaque_capability.tools);
-        assert!(opaque_capability.web_search);
+        assert!(!opaque_capability.web_search);
         assert_eq!(opaque_capability.reasoning, "high");
 
-        let no_traits = project_chat_traits(PROVIDER_1, "plain", "[]", None).unwrap();
+        let no_traits = project_chat_capabilities(PROVIDER_1, "plain", "openai.chat_text", None).unwrap();
         let mut plain_capability = derive_capability(None);
         no_traits.apply_to(&mut plain_capability);
-        assert!(plain_capability.modalities.is_empty());
+        assert_eq!(plain_capability.modalities, ["vision", "audio_input"]);
         assert!(plain_capability.tools);
         assert!(!plain_capability.web_search);
         assert_eq!(plain_capability.reasoning, "high");
 
-        let observed = project_chat_traits(
+        let observed = project_chat_capabilities(
             PROVIDER_1,
             "observed-limited",
-            "[]",
+            "openai.chat_text",
             Some(
                 r#"{"status":"unknown","unsupported_technical_capabilities":["function_calling","reasoning"]}"#,
             ),
@@ -770,16 +762,28 @@ mod tests {
     }
 
     #[test]
-    fn malformed_persisted_chat_traits_fail_closed() {
+    fn invalid_persisted_chat_protocol_fails_closed() {
+        let mut invalid = capability_row(PROVIDER_1, "broken", "chat", "[]");
+        invalid.protocol = "unknown.chat".to_owned();
         let error = build_chat_catalog(
             &[provider(PROVIDER_1, true)],
             &[model_row(PROVIDER_1, "broken", true)],
-            &[capability_row(PROVIDER_1, "broken", "chat", "not-json")],
+            &[invalid],
         )
         .unwrap_err();
 
         assert!(matches!(error, AppError::Internal(_)));
-        assert!(error.to_string().contains("traits"));
+        assert!(error.to_string().contains("protocol"));
+    }
+
+    #[test]
+    fn participant_inputs_and_native_search_respect_protocol_boundaries() {
+        let anthropic = project_chat_capabilities(PROVIDER_1, "anthropic", "anthropic.messages", None).unwrap();
+        assert_eq!(anthropic.modalities, ["vision"]);
+        assert!(!anthropic.web_search);
+        let responses = project_chat_capabilities(PROVIDER_1, "responses", "openai.responses", None).unwrap();
+        assert_eq!(responses.modalities, ["vision", "audio_input"]);
+        assert!(responses.web_search);
     }
 
     #[test]

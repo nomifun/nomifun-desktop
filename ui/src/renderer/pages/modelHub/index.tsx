@@ -38,6 +38,7 @@ import MusicModelsContent from './MusicModelsContent';
 import EmbeddingModelsContent from './EmbeddingModelsContent';
 import RerankModelsContent from './RerankModelsContent';
 import ModelImportChat from './ModelImportChat';
+import { withoutModelAdditionTask } from './modelAdditionIntent';
 
 type Section =
   | 'models'
@@ -230,7 +231,7 @@ const ModelHubPage: React.FC = () => {
     (key: string) => {
       if (!isSection(key)) return;
       setSection(key);
-      const next = new URLSearchParams(searchParams);
+      const next = withoutModelAdditionTask(searchParams);
       next.set('section', key);
       setSearchParams(next, { replace: true });
     },

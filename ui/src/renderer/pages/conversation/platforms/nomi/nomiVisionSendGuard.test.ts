@@ -18,12 +18,14 @@ const provider = ({
   id,
   model,
   chatTraits = [],
+  chatProtocol = 'openai.chat_text',
   unsupportedTechnical = [],
   otherTask,
 }: {
   id: string;
   model: string;
   chatTraits?: ModelTrait[];
+  chatProtocol?: string;
   unsupportedTechnical?: ModelTechnicalCapability[];
   otherTask?: ModelTask;
 }): IProvider =>
@@ -47,7 +49,7 @@ const provider = ({
           {
             task: 'chat',
             traits: chatTraits,
-            protocol: 'openai.chat_text',
+            protocol: chatProtocol,
             connection_role: 'default',
             allow_cross_origin_credentials: false,
             provider_params: {},
@@ -99,7 +101,7 @@ const decision = ({
   evaluateNomiVisionSend({ providers, providerId, model, files, providerGraphResolved, visionModel });
 
 describe('Nomi image-send capability guard', () => {
-  test('allows images only when the exact provider/model Chat capability declares vision_input', () => {
+  test('allows images on an exact Chat adapter without requiring manual vision metadata', () => {
     expect(
       decision({
         providers: [
@@ -108,14 +110,15 @@ describe('Nomi image-send capability guard', () => {
       })
     ).toEqual({ allowed: true });
 
-    expect(decision({ providers: [provider({ id: 'provider-a', model: 'same-model' })] })).toEqual({
-      allowed: false,
-      reason: 'vision_not_supported',
-    });
+    expect(decision({ providers: [provider({ id: 'provider-a', model: 'same-model' })] }))
+      .toEqual({ allowed: true });
   });
 
-  test('never infers vision from platform, model name, another provider, model, or task', () => {
-    const selected = provider({ id: 'provider-a', model: 'gpt-4o', otherTask: 'image_generation' });
+  test('does not use names, unrelated routes, or stale traits to invent missing image encoding', () => {
+    const selected = provider({
+      id: 'provider-a', model: 'gpt-4o', chatProtocol: 'unknown.chat',
+      chatTraits: ['vision_input'], otherTask: 'image_generation',
+    });
     const otherProvider = provider({
       id: 'provider-b',
       model: 'gpt-4o',
@@ -132,12 +135,12 @@ describe('Nomi image-send capability guard', () => {
     ).toEqual({ allowed: false, reason: 'vision_not_supported' });
   });
 
-  test('allows an explicitly configured exact vision route without promoting the primary model', () => {
+  test('allows an exact untagged vision fallback while preserving observed tool-call exclusions', () => {
     expect(
       decision({
         providers: [
-          provider({ id: 'provider-a', model: 'text-only' }),
-          provider({ id: 'provider-b', model: 'vision', chatTraits: ['vision_input'] }),
+          provider({ id: 'provider-a', model: 'text-only', chatProtocol: 'unknown.chat' }),
+          provider({ id: 'provider-b', model: 'vision' }),
         ],
         model: 'text-only',
         visionModel: { provider_id: 'provider-b', model: 'vision' },
@@ -147,7 +150,7 @@ describe('Nomi image-send capability guard', () => {
     expect(
       decision({
         providers: [
-          provider({ id: 'provider-a', model: 'text-only' }),
+          provider({ id: 'provider-a', model: 'text-only', chatProtocol: 'unknown.chat' }),
           provider({
             id: 'provider-b',
             model: 'vision-only',
@@ -159,6 +162,15 @@ describe('Nomi image-send capability guard', () => {
         visionModel: { provider_id: 'provider-b', model: 'vision-only' },
       })
     ).toEqual({ allowed: false, reason: 'vision_not_supported' });
+  });
+
+  test('requires the selected model to have a configured Chat route', () => {
+    expect(decision({
+      providers: [provider({ id: 'provider-a', model: 'different-model', chatTraits: ['vision_input'] })],
+    })).toEqual({ allowed: false, reason: 'vision_not_supported' });
+    const imageOnly = provider({ id: 'provider-a', model: 'same-model', otherTask: 'image_generation' });
+    imageOnly.models[0]!.capabilities = imageOnly.models[0]!.capabilities.filter(capability => capability.task !== 'chat');
+    expect(decision({ providers: [imageOnly] })).toEqual({ allowed: false, reason: 'vision_not_supported' });
   });
 
   test('fails closed while the provider capability graph is unresolved', () => {

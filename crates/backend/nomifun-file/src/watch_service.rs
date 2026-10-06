@@ -323,9 +323,25 @@ fn forget_watch_aliases(aliases: &mut WatchAliases, owner: &str, canonical: &str
 fn confirm_unwatch(watcher: &mut RecommendedWatcher, path: &Path) -> Result<(), AppError> {
     match watcher.unwatch(path) {
         Ok(()) => Ok(()),
-        Err(error) if matches!(error.kind, notify::ErrorKind::WatchNotFound) => Ok(()),
+        Err(error) if unwatch_error_is_confirmed_removal(&error) => Ok(()),
         Err(error) => Err(AppError::Internal(format!("file watch cleanup is unconfirmed: {error}"))),
     }
+}
+
+fn unwatch_error_is_confirmed_removal(error: &notify::Error) -> bool {
+    matches!(error.kind, notify::ErrorKind::WatchNotFound) || unwatch_errno_is_confirmed_removal(error)
+}
+
+// A deleted directory's inotify watch is kernel-removed before a late unwatch
+// arrives; EINVAL then proves removal rather than unconfirmed cleanup.
+#[cfg(target_os = "linux")]
+fn unwatch_errno_is_confirmed_removal(error: &notify::Error) -> bool {
+    matches!(&error.kind, notify::ErrorKind::Io(inner) if inner.raw_os_error() == Some(libc::EINVAL))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unwatch_errno_is_confirmed_removal(_error: &notify::Error) -> bool {
+    false
 }
 
 impl FileWatchService {
@@ -603,6 +619,28 @@ mod tests {
             Some(parent) => builder.tempdir_in(parent).unwrap(),
             None => builder.tempdir().unwrap(),
         }
+    }
+
+    #[test]
+    fn unwatch_watch_not_found_counts_as_confirmed_removal() {
+        assert!(unwatch_error_is_confirmed_removal(&notify::Error::watch_not_found()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unwatch_inotify_einval_counts_as_confirmed_removal() {
+        let gone = notify::Error::io(std::io::Error::from_raw_os_error(libc::EINVAL));
+        assert!(unwatch_error_is_confirmed_removal(&gone));
+        let live = notify::Error::io(std::io::Error::from_raw_os_error(libc::EIO));
+        assert!(!unwatch_error_is_confirmed_removal(&live));
+        assert!(!unwatch_error_is_confirmed_removal(&notify::Error::generic("boom")));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unwatch_io_errors_stay_unconfirmed_off_linux() {
+        let err = notify::Error::io(std::io::Error::from_raw_os_error(22));
+        assert!(!unwatch_error_is_confirmed_removal(&err));
     }
 
     struct InventoryDeliveryEvents {

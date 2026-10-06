@@ -247,9 +247,7 @@ impl CatalogSearchProvider {
             .map_err(|error| SearchProviderError::new(SearchProviderErrorKind::NotConfigured, error.to_string()))?;
         let mut candidates = Vec::new();
         for capability in capabilities {
-            if capability.task != "chat" || capability.protocol != "openai.responses"
-                || !nomifun_api_types::parse_persisted_model_traits(&capability.traits)
-                    .is_ok_and(|traits| traits.contains(&nomifun_api_types::ModelTrait::WebSearch)) {
+            if capability.task != "chat" || capability.protocol != "openai.responses" {
                 continue;
             }
             // Reuse the Chat resolver's enabled-model, protocol, connection,
@@ -536,7 +534,7 @@ mod tests {
             base_url: &server.uri(), auth_scheme: "bearer", credentials_encrypted: &credential,
             enabled: true, bedrock_config: None, sort_order: None,
         }, &NewProviderModel { model: "search-only", enabled: true, sort_order: 0, description: None,
-            capabilities: &[NewProviderModelCapability { task: "chat", traits: r#"["web_search"]"#,
+            capabilities: &[NewProviderModelCapability { task: "chat", traits: "[]",
                 protocol: "openai.responses", connection_role: "default", endpoint: Some("/v1/responses"),
                 provider_params: "{}", context_limit: Some(131072), ..Default::default() }],
         }, &[]).await.unwrap();

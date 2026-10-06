@@ -16,8 +16,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::{ControlPlaneError, DefaultChatRouteResolver};
 use nomifun_api_types::{
-    CapabilityHealth, ModelFailoverConfig, ModelTechnicalCapability, ModelTrait,
-    parse_persisted_model_traits,
+    CapabilityHealth, ModelFailoverConfig, ModelTechnicalCapability,
 };
 use nomifun_chat_model_broker::ProviderIdRef;
 use nomifun_db::{
@@ -269,7 +268,6 @@ impl NomiCoreDefaultChatRouteResolver {
                 }
             };
             let features = features_for(
-                &capability.traits,
                 protocol,
                 capability.health.as_deref(),
             )?;
@@ -369,29 +367,31 @@ impl NomiCoreDefaultChatRouteResolver {
 }
 
 fn protocol_for(value: &str) -> Option<ChatRouteProtocol> {
-    match value {
-        "anthropic.messages" => Some(ChatRouteProtocol::Anthropic),
-        "openai.chat_text" => Some(ChatRouteProtocol::OpenaiChat),
-        "openai.responses" => Some(ChatRouteProtocol::OpenaiResponses),
-        "gemini.generate_text" => Some(ChatRouteProtocol::Gemini),
-        "bedrock.anthropic_messages" => Some(ChatRouteProtocol::Bedrock),
-        "vertex.anthropic_messages" => Some(ChatRouteProtocol::Vertex),
-        _ => None,
-    }
+    use nomifun_chat_model_broker::{ChatProtocol, chat_protocol_for_id};
+    chat_protocol_for_id(value).map(|protocol| match protocol {
+        ChatProtocol::Anthropic => ChatRouteProtocol::Anthropic,
+        ChatProtocol::OpenaiChat => ChatRouteProtocol::OpenaiChat,
+        ChatProtocol::OpenaiResponses => ChatRouteProtocol::OpenaiResponses,
+        ChatProtocol::Gemini => ChatRouteProtocol::Gemini,
+        ChatProtocol::Bedrock => ChatRouteProtocol::Bedrock,
+        ChatProtocol::Vertex => ChatRouteProtocol::Vertex,
+    })
 }
 
 fn features_for(
-    raw: &str,
     protocol: ChatRouteProtocol,
     health: Option<&str>,
 ) -> Result<BTreeSet<ChatRouteFeature>, ControlPlaneError> {
-    let traits = parse_persisted_model_traits(raw).map_err(|_| {
-        ControlPlaneError::canonical(
-            "MODEL_ROUTE_RECORD_INVALID",
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "a configured Chat capability has invalid trait metadata",
-        )
-    })?;
+    use nomifun_chat_model_broker::{ChatModelFeature, ChatProtocol, protocol_features};
+    let adapter_protocol = match protocol {
+        ChatRouteProtocol::Anthropic => ChatProtocol::Anthropic,
+        ChatRouteProtocol::OpenaiChat => ChatProtocol::OpenaiChat,
+        ChatRouteProtocol::OpenaiResponses => ChatProtocol::OpenaiResponses,
+        ChatRouteProtocol::Gemini => ChatProtocol::Gemini,
+        ChatRouteProtocol::Bedrock => ChatProtocol::Bedrock,
+        ChatRouteProtocol::Vertex => ChatProtocol::Vertex,
+    };
+    let representable = protocol_features(adapter_protocol);
     let mut features = BTreeSet::from([
         ChatRouteFeature::TextInput,
         ChatRouteFeature::TextOutput,
@@ -399,6 +399,14 @@ fn features_for(
         ChatRouteFeature::Reasoning,
         ChatRouteFeature::Streaming,
     ]);
+    for (adapter_feature, route_feature) in [
+        (ChatModelFeature::ImageInput, ChatRouteFeature::ImageInput),
+        (ChatModelFeature::AudioInput, ChatRouteFeature::AudioInput),
+    ] {
+        if representable.contains(&adapter_feature) {
+            features.insert(route_feature);
+        }
+    }
     if protocol == ChatRouteProtocol::OpenaiResponses {
         features.extend([
             ChatRouteFeature::AudioOutput,
@@ -424,15 +432,6 @@ fn features_for(
             ModelTechnicalCapability::Streaming => ChatRouteFeature::Streaming,
         });
     }
-    for model_trait in traits {
-        let feature = match model_trait {
-            ModelTrait::VisionInput => ChatRouteFeature::ImageInput,
-            ModelTrait::WebSearch => ChatRouteFeature::WebSearch,
-            ModelTrait::AudioInput => ChatRouteFeature::AudioInput,
-            ModelTrait::VideoInput => continue,
-        };
-        features.insert(feature);
-    }
     Ok(features)
 }
 
@@ -450,13 +449,8 @@ mod tests {
     use nomifun_db::{CreateProviderParams, NewProviderModel, NewProviderModelCapability};
 
     #[test]
-    fn stepfun_reasoning_profile_materializes_a_lossless_tool_route() {
-        let (_, traits) = nomifun_api_types::infer_catalog_tasks_and_traits(
-            "stepfun-plan",
-            "step-3.7-flash",
-        );
+    fn chat_protocol_materializes_media_and_tools_without_catalog_traits() {
         let features = features_for(
-            &serde_json::to_string(&traits).unwrap(),
             ChatRouteProtocol::OpenaiChat,
             None,
         )
@@ -465,6 +459,7 @@ mod tests {
         assert!(features.contains(&ChatRouteFeature::TextInput));
         assert!(features.contains(&ChatRouteFeature::TextOutput));
         assert!(features.contains(&ChatRouteFeature::ImageInput));
+        assert!(features.contains(&ChatRouteFeature::AudioInput));
         assert!(features.contains(&ChatRouteFeature::ToolCalls));
         assert!(features.contains(&ChatRouteFeature::Reasoning));
     }
@@ -472,7 +467,6 @@ mod tests {
     #[test]
     fn persisted_negative_observations_narrow_new_route_records() {
         let features = features_for(
-            "[]",
             ChatRouteProtocol::OpenaiChat,
             Some(
                 r#"{"status":"unknown","unsupported_technical_capabilities":["function_calling","streaming"]}"#,
@@ -482,6 +476,19 @@ mod tests {
         assert!(!features.contains(&ChatRouteFeature::ToolCalls));
         assert!(!features.contains(&ChatRouteFeature::Streaming));
         assert!(features.contains(&ChatRouteFeature::Reasoning));
+    }
+
+    #[test]
+    fn protocol_media_features_preserve_serializer_limits() {
+        for protocol in [ChatRouteProtocol::Anthropic, ChatRouteProtocol::Bedrock, ChatRouteProtocol::Vertex] {
+            let features = features_for(protocol, None).unwrap();
+            assert!(features.contains(&ChatRouteFeature::ImageInput));
+            assert!(!features.contains(&ChatRouteFeature::AudioInput));
+            assert!(!features.contains(&ChatRouteFeature::WebSearch));
+        }
+        for protocol in [ChatRouteProtocol::OpenaiChat, ChatRouteProtocol::OpenaiResponses, ChatRouteProtocol::Gemini] {
+            assert!(features_for(protocol, None).unwrap().contains(&ChatRouteFeature::AudioInput));
+        }
     }
 
     async fn create_chat_provider(
