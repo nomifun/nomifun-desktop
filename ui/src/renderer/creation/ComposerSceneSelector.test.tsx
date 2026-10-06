@@ -1,6 +1,6 @@
 import '../../../test/setup-dom.ts';
 import { act, cleanup, fireEvent, render, within } from '@testing-library/react';
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { useState } from 'react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -8,9 +8,11 @@ import messages from '@/renderer/services/i18n/locales/zh-CN/creation.json';
 import { CreationComposerContext } from './CreationComposerContext';
 import { ComposerSceneHeader } from './ComposerSceneSelector';
 import { useCreationDraft } from './useCreationDraft';
+import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { creation: messages } } } });
+beforeEach(() => { setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000176'); });
 afterEach(() => { cleanup(); localStorage.clear(); sessionStorage.clear(); });
 
 function mount({ preparing = false } = {}) {
@@ -88,4 +90,18 @@ test('preparing an Agent disables scene changes', () => {
     fireEvent.click(button);
   }
   expect(switches()).toBe(0);
+});
+
+test.each([
+  ['图像创作', 'image'], ['视频创作', 'video'], ['音乐创作', 'music'], ['日常对话', null],
+] as const)('%s is the selected tab after the renderer session restarts', (label, mode) => {
+  const first = mount();
+  fireEvent.click(first.page.getByRole('button', { name: '图像创作' }));
+  fireEvent.click(first.page.getByRole('button', { name: label }));
+  first.page.unmount();
+  sessionStorage.clear();
+  const reopened = mount();
+  expect(reopened.getDraft().draft.mode).toBe(mode);
+  expect(reopened.page.getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('true');
+  expect(reopened.page.getByTestId('composer-scene-selector').querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
 });

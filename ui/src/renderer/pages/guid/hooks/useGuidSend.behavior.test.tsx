@@ -557,15 +557,15 @@ describe('useGuidSend HTTP behavior', () => {
   test('official launch does not overwrite a draft already edited in the created conversation', async () => {
     resetBrowserStorage();
     installFetchRecorder();
-    const existing = { ...emptyCreationDraft(), selectedAgent: { kind: 'preset', presetId: PRESET_ID }, pendingPrompt: 'Keep my newer draft', parameters: { image: { count: 2 }, video: {}, music: { instrumental: true } } };
+    const existing = { ...emptyCreationDraft(), pendingPrompt: 'Keep my newer draft', parameters: { image: { count: 2 }, video: {}, music: { instrumental: true } } };
     const key = creationDraftStorageKey(PRESET_CONVERSATION_ID);
     const hook = renderHook(() => useGuidSend({
       ...createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' }, workspaceEnabled: false }),
       selectedTemplate: TEMPLATE,
-      applyAdvancedConfig: async () => { sessionStorage.setItem(key, JSON.stringify(existing)); },
+      applyAdvancedConfig: async () => { localStorage.setItem(key, JSON.stringify(existing)); },
     }));
     await act(async () => { await hook.result.current.handleSend(); });
-    expect(JSON.parse(sessionStorage.getItem(key)!)).toEqual(existing);
+    expect(JSON.parse(localStorage.getItem(key)!)).toEqual(existing);
   });
 
   test('failed official preparation does not create a session or navigate away', async () => {

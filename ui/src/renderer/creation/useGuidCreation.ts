@@ -10,7 +10,7 @@ import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentL
 import { resolveAgentResourceSelections } from '@/renderer/hooks/agent/agentResourceSelection';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { emitter } from '@/renderer/utils/emitter';
-import { useCreationDraft, creationDraftStorageKey } from './useCreationDraft';
+import { useCreationDraft, writeCreationDraft } from './useCreationDraft';
 import { useGenerationModel } from './useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from './submission';
 import { submitCreation } from './client';
@@ -85,7 +85,7 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       await submitCreation(id, request, key);
       acknowledgeCreationAttempt(id, key);
       try {
-        sessionStorage.setItem(creationDraftStorageKey(id), JSON.stringify({ ...creation.draft, references: creation.draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)), pendingFiles: files.filter(file => !request.files?.includes(file)) }));
+        writeCreationDraft(id, { ...creation.draft, references: creation.draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)), pendingFiles: files.filter(file => !request.files?.includes(file)) });
         sessionStorage.removeItem(pendingSessionKey);
       } catch { /* An accepted task still opens its canonical conversation. */ }
       pendingSession.current = null;
