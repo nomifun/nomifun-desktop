@@ -68,11 +68,7 @@ test('a live journal only animates its current thought and preserves completed t
   </I18nextProvider></MemoryRouter>;
   const page = render(view(true));
 
-  const thinkingActivity = page.getByTestId('conversation-current-activity');
-  expect(thinkingActivity.getAttribute('role')).toBe('status');
-  expect(thinkingActivity.getAttribute('data-activity-state')).toBe('thinking');
-  expect(thinkingActivity.textContent).toContain('Thinking...');
-  expect(thinkingActivity.querySelector('.arco-spin')).not.toBeNull();
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
 
   const thoughts = page.container.querySelectorAll('[data-thinking-process-state]');
   expect(thoughts).toHaveLength(2);
@@ -101,10 +97,7 @@ test('a live journal only animates its current thought and preserves completed t
   const completedHeader = completedThoughts[1].querySelector<HTMLButtonElement>('[data-thinking-process-header]')!;
   expect(completedHeader.textContent).toContain('Thought complete');
   expect(completedHeader.getAttribute('aria-expanded')).toBe('false');
-  const processingActivity = page.getByTestId('conversation-current-activity');
-  expect(processingActivity.getAttribute('data-activity-state')).toBe('processing');
-  expect(processingActivity.textContent).toContain('Processing...');
-  expect(processingActivity.querySelector('.arco-spin')).not.toBeNull();
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
   fireEvent.click(completedHeader);
   expect(completedHeader.getAttribute('aria-expanded')).toBe('true');
   expect(completedThoughts[1].querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('Second reasoning is in progress.');
@@ -112,7 +105,7 @@ test('a live journal only animates its current thought and preserves completed t
 
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
   expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
-  expect(page.getByTestId('conversation-current-activity').textContent).toContain('Processing...');
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
   page.rerender(view(false));
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
 });
@@ -148,7 +141,7 @@ test('canonical terminal metadata closes stale thinking while the session still 
   expect(messages[1].type === 'thinking' && messages[1].content.status).toBe('thinking');
 });
 
-test('the current activity row appears while waiting for the first response and changes to processing during a tool call', () => {
+test('waiting for the first response and running a tool call do not add a duplicate activity footer', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const messages: TMessage[] = [
     { ...base, id: 'user', message_id: turnId, msg_id: turnId, type: 'text', created_at: 1, position: 'right', content: { content: 'Inspect the files' } },
@@ -168,11 +161,7 @@ test('the current activity row appears while waiting for the first response and 
     </PreviewProvider>
   </I18nextProvider></MemoryRouter>);
 
-  const waitingActivity = page.getByTestId('conversation-current-activity');
-  expect(waitingActivity.getAttribute('role')).toBe('status');
-  expect(waitingActivity.getAttribute('data-activity-state')).toBe('processing');
-  expect(waitingActivity.textContent).toContain('Processing...');
-  expect(waitingActivity.querySelector('.arco-spin')).not.toBeNull();
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
 
   fireEvent.click(page.getByRole('button', { name: 'Start tool call' }));
   const thought = page.container.querySelector('[data-thinking-process-state]');
@@ -180,12 +169,11 @@ test('the current activity row appears while waiting for the first response and 
   expect(thought?.querySelector('.arco-spin')).toBeNull();
   expect(thought?.querySelector('[data-thinking-process-header]')?.textContent).toContain('Thought complete');
   expect(page.container.querySelector('[data-tool-call-id="read-active"]')).not.toBeNull();
-  const toolActivity = page.getByTestId('conversation-current-activity');
-  expect(toolActivity.getAttribute('data-activity-state')).toBe('processing');
-  expect(toolActivity.textContent).toContain('Processing...');
+  expect(page.container.querySelector('.turn-process-trace__row--current-activity')).not.toBeNull();
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
   expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
-  expect(page.getByTestId('conversation-current-activity').textContent).toContain('Processing...');
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
 });
 
 test('a completed journal defaults closed and expands its full reasoning and calls without hiding the final reply', () => {

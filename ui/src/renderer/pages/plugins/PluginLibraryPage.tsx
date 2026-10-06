@@ -19,7 +19,7 @@ import type {
 } from '@/common/types/pluginPlatform';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import PluginImportDialog from './PluginImportDialog';
-import PluginWorkspace, { PluginVisual } from './PluginWorkspace';
+import PluginWorkspace, { PluginBetaNotice, PluginVisual } from './PluginWorkspace';
 import {
   subscribePluginLibraryChanges,
   notifyPluginLibraryChanged,
@@ -162,6 +162,7 @@ export default function PluginLibraryPage() {
   return (
     <PluginWorkspace activeView={view} counts={counts} onImport={() => setImportVisible(true)}>
       <main className={styles.page}>
+        <PluginBetaNotice />
         <div className={styles.breadcrumb}>{t('pluginPlatform.workspace.title')} / {pageTitle}</div>
         <header className={styles.pageHeader}>
           <div className={styles.headerCopy}>
