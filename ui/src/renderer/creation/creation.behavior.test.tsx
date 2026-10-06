@@ -37,7 +37,7 @@ beforeEach(() => {
   spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
 });
-afterEach(() => { cleanup(); mock.restore(); sessionStorage.clear(); globalThis.fetch = realFetch; });
+afterEach(() => { cleanup(); mock.restore(); localStorage.clear(); sessionStorage.clear(); globalThis.fetch = realFetch; });
 
 function mount(generationProvider = provider, sessionCollaboration?: Parameters<typeof useGuidCreation>[5]) {
   const cache = new Map();
@@ -153,6 +153,14 @@ describe('conversation creation admission and draft behavior', () => {
     expect(collaborationIndex).toBe(-1);
     if (carryCollaboration) expect(collaboration.execution_model_pool.mode).toBe('range');
     expect(calls.some(call => call.url.endsWith('/messages') || call.url.includes('switch-preset'))).toBe(false);
+    const transferred = JSON.parse(localStorage.getItem(creationDraftStorageKey(conversationId))!);
+    expect(transferred.mode).toBe(mode);
+    expect(transferred.models[mode]).toEqual(model);
+    hook.unmount();
+    sessionStorage.clear();
+    const historical = renderHook(() => useCreationDraft(conversationId));
+    expect(historical.result.current.draft.mode).toBe(mode);
+    expect(historical.result.current.draft.models[mode]).toEqual(model);
   });
 
   test('failed generation admission retains the editable prompt and references', async () => {
