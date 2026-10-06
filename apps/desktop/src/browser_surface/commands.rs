@@ -2,7 +2,7 @@
 
 use nomifun_browser_platform::{
     runtime::BrowserSurfaceBounds,
-    workspace::{BrowserResource, BrowserResourceSnapshot},
+    workspace::{BrowserWorkspace, BrowserUserSnapshot},
 };
 use std::sync::{
     Arc,
@@ -21,7 +21,7 @@ pub(crate) struct BrowserSurfaceState {
 struct Attachment {
     id: u64,
     sequence: u64,
-    resource: Arc<BrowserResource>,
+    resource: Arc<BrowserWorkspace>,
     bounds: BrowserSurfaceBounds,
     stop: CancellationToken,
     layout: CancellationToken,
@@ -30,7 +30,7 @@ struct Attachment {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum BrowserViewEvent {
-    Snapshot { snapshot: BrowserResourceSnapshot },
+    Snapshot { snapshot: BrowserUserSnapshot },
     Unavailable { code: &'static str },
 }
 
@@ -73,7 +73,7 @@ async fn detach(current: &Mutex<Option<Attachment>>, id: u64) -> Result<(), Stri
             .resource
             .set_surface(attachment.bounds, false, attachment.layout.clone())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.code().to_owned())?;
         current.take();
     }
     Ok(())
@@ -116,7 +116,7 @@ async fn update(
     let result = resource
         .set_surface(bounds, visible, layout.clone())
         .await
-        .map_err(|error| error.to_string());
+        .map_err(|error| error.code().to_owned());
     if layout.is_cancelled() {
         return Ok(());
     }
@@ -139,7 +139,7 @@ pub(crate) async fn browser_surface_attach(
     let resource = server
         .browser_resource_for_local_surface(&agent_session_id)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "BROWSER_NATIVE_SURFACE_UNAVAILABLE".to_owned())?;
     let mut current = state.current.lock().await;
     if state.next.load(Ordering::Acquire) != id {
         return Err("Browser attachment was superseded.".into());
@@ -152,13 +152,13 @@ pub(crate) async fn browser_surface_attach(
             .resource
             .set_surface(previous.bounds, false, previous.layout.clone())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.code().to_owned())?;
     }
     let mut run = resource.run_changes();
     let mut page = resource
         .runtime_changes()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.code().to_owned())?;
     if state.next.load(Ordering::Acquire) != id {
         return Err("Browser attachment was superseded.".into());
     }
@@ -378,7 +378,7 @@ mod tests {
         let current = Arc::new(Mutex::new(Some(Attachment {
             id: 1,
             sequence: 0,
-            resource,
+            resource: resource.workspace().clone(),
             bounds,
             stop: CancellationToken::new(),
             layout: CancellationToken::new(),

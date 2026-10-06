@@ -1,21 +1,11 @@
 {
   "title": "Browser",
   "provider": {
-    "managed": "Built-in isolated browser",
-    "attachedChrome": "Authorized Chrome"
+    "managed": "Built-in isolated browser"
   },
-  "capabilityUnavailableTitle": "Browser isn't enabled for this Agent",
-  "capabilityUnavailableHint": "Enable the Browser module in Agent Workbench, then start a new session with that setup.",
-  "providerUnavailableTitle": "Browser provider unavailable",
-  "providerUnavailableHint": "Browser is enabled, but its selected provider is not connected. Check the provider and retry.",
-  "surfaceUnavailableHint": "This device cannot present the selected Browser provider.",
-  "loadingHint": "Checking this session's Browser access and provider…",
-  "attachedChromeHint": "Pages stay in your authorized Chrome while the Agent and this panel use the same bound Browser resource.",
-  "attachedChromeStatus": "Connected in Chrome",
-  "limitedAccessStatus": "Limited Browser access",
-  "limitedAccessHint": "This Agent can use only the Browser actions selected in its setup. Unavailable controls stay disabled.",
-  "capabilityStartHint": "Enter an address above. This Browser resource belongs to the current session and is shared with its Agent.",
-  "actionUnavailableHint": "This Agent setup does not grant that Browser action.",
+  "surfaceUnavailableHint": "The built-in browser host is unavailable. Use the complete desktop application with its browser runtime.",
+  "loadingHint": "Opening the built-in browser for this session…",
+  "capabilityStartHint": "Enter an address above. You can browse directly; the Agent can use the same page only with Browser authorization.",
   "search": {
     "title": "Nomi local web search",
     "searching": "Searching…",
@@ -68,7 +58,14 @@
   "downloadEmpty": "No downloads in this Browser resource",
   "downloadCancel": "Cancel download: {{filename}}",
   "downloadCancelFailed": "Could not confirm cancellation. Check the download status and retry when the Agent has stopped.",
-  "downloadStates": { "choosing": "Choosing destination", "in_progress": "Downloading", "cancelling": "Cancelling", "completed": "Completed", "cancelled": "Cancelled", "failed": "Failed" },
+  "downloadStates": {
+    "choosing": "Choosing destination",
+    "in_progress": "Downloading",
+    "cancelling": "Cancelling",
+    "completed": "Completed",
+    "cancelled": "Cancelled",
+    "failed": "Failed"
+  },
   "rebuild": "Reopen browser",
   "rebuildTitle": "Reopen Browser?",
   "rebuildWarning": "All page tabs will close and unsaved page content will be lost. Session messages and project files will not be cleared.",
@@ -108,7 +105,16 @@
   "permissionAllow": "Allow this time",
   "permissionDeny": "Deny",
   "permissionExpired": "This permission request ended or the page changed. Request access again from the page.",
-  "permissionKinds": { "camera": "camera", "microphone": "microphone", "camera_microphone": "camera and microphone", "geolocation": "location", "notifications": "notifications", "clipboard-read": "clipboard", "midi": "MIDI devices" },
+  "permissionKinds": {
+    "camera": "camera",
+    "microphone": "microphone",
+    "camera_microphone": "camera and microphone",
+    "geolocation": "location",
+    "notifications": "notifications",
+    "clipboard-read": "clipboard",
+    "midi": "MIDI devices"
+  },
   "start": "Start browsing",
-  "startHint": "Enter a URL above. This Browser resource belongs to the current session. When the Agent starts, it can read and interact with these pages."
+  "startHint": "Enter an address above. You can browse directly; the Agent can use the same page only with Browser authorization.",
+  "initializationFailed": "The built-in browser could not initialize. Restart the application and try again."
 }

@@ -299,6 +299,18 @@ impl BrowserRunCoordinator {
         Ok(())
     }
 
+    /// Drain a failed start without restoring hardware input. Terminal
+    /// publication or confirmed native destruction still owns final release.
+    pub async fn settle_failed_start(self: &Arc<Self>) -> Result<(), RunAdmissionError> {
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            let _transition = coordinator.transition.lock().await;
+            let _operation = coordinator.operation.lock().await;
+            if coordinator.state.lock().await.active.is_some() { return Err(RunAdmissionError::Busy); }
+            coordinator.gate.release_pressed_input().await
+        }).await.map_err(|_| RunAdmissionError::WorkerFailed)?
+    }
+
     /// Recover a failed *start*, for which no run authority was issued. This is
     /// a host lifecycle action, never a human unlock/takeover command.
     pub async fn recover_failed_start(self: &Arc<Self>) -> Result<(), RunAdmissionError> {

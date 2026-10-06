@@ -1,21 +1,45 @@
 # Browser Workspace
 
-> The current source still implements a Conversation-scoped BrowserWorkspace, but its product model is scheduled for correction.
-> The dedicated “session browser” entry will be removed; the underlying workspace becomes a Browser resource available to any
-> authorized AgentSession, and attached Chrome becomes a provider of the same `browser` capability module. See the
-> [Current Agent Session architecture](agent-session.md), “Browser 产品模型纠正”.
-
-Status: implementing Browser Workspace v2. The [approved design](../specs/2026-09-13-browser-workspace-v2.zh.md) defines the full target; the [implementation record](../specs/2026-09-13-browser-workspace-v2-progress.zh.md) lists actual evidence and remaining work.
+This document, the [Agent Session architecture](agent-session.md), and current source define the development contract.
+The built-in side browser is a user work surface. Agent Browser Use is a separately authorized tool consumer.
 
 ## Product boundary
 
-The browser belongs to a conversation. Open it with the Browser button in that conversation's work surface. The global Browser management page, its Settings tab, the old sidebar inventory and its polling, and the browser settings redirect have been removed. There is no migration or compatibility redirect for those UI paths.
+The Browser domain owns one managed browser per authenticated owner and canonical AgentSession. The side-rail Browser
+button permits direct user browsing without a Browser Module grant, Provider selection, or Agent resource binding.
+Opening, retrying and user commands never create Agent authority or a second Session. Retired global management and
+browser Settings surfaces remain removed.
 
 The page is a native embedded WebView, not an iframe, screenshot stream, canvas viewer, or JPEG transport. The user and Agent operate the same page. While the Agent runs, native user input and page-changing chrome controls are locked. A run must stop and its pending operations must settle before user input is restored. There is no takeover or hand-back state.
 
-Hiding the browser surface does not destroy its tabs. Provider changes must not silently reuse a workspace bound to a different exact provider.
+Hiding the surface preserves its tabs. The Session has one managed runtime, profile and input coordinator.
+`BrowserResource` wraps exact frozen Agent authority over the same `BrowserWorkspace`; a different authorization
+definition never selects another page or profile. Agent operations still require the frozen action allowlist,
+exact Provider, typed resource binding and current BrowserRunGuard. A user opening a page never grants Agent tools.
+An Agent using attached Chrome leaves the user's managed browser independent. A different exact managed Provider
+cannot silently reuse the existing entity.
 
-Embedded browser data is isolated by authenticated user and conversation, not shared by project. Persistent data lives under `browser-v2/conversations/<identity-hash>/`; temporary or workspace-less conversations remain ephemeral. User and Agent admission call the same profile selector. Project paths do not determine profile identity or need to exist. There is no separate profile metadata file, old-profile reader or migration. This does not change the separate `nomi_system_browser` capability for the user's logged-in system browser.
+Every Agent Turn, including ordinary chat without Browser tools and attached Chrome Agents, acquires the managed
+browser input gate during Runtime preparation. Creating the entity does not call `cef_initialize` or create a Context. A native child first
+created during a run starts with user input disabled. When the canonical Turn is already running but its native
+gate is not proven yet, user commands and first opening fail closed. Retained preparation owners drain cancellation
+and failure while keeping hardware input locked. Only the exact durable Turn terminal permits final release; downstream
+cleanup and terminal write failures cannot unlock input. A start that issued no guard uses the same drain/terminal/recovery boundary.
+
+Terminal publication and native final release are separate receipts. If release fails after publication, an SDK retry
+must match the same root's canonical receipt, original Runtime terminal, delivery, Snapshot and route before retrying
+finish. It does not append another terminal or change failure into cancellation. Cancellation before execution keeps
+its separate exact witness for generation zero. After complete Runtime teardown, the Kernel resource context retires
+from its Weak cache by exact Arc identity. Old handles may remain alive, but replacements cannot reuse a closed
+context and late old cleanup cannot evict the successor.
+
+Production profile identity is the authenticated owner and Session, with namespace
+`nomifun.browser.session-managed-profile.v2` and directory `browser-v4/agent-sessions/<identity-hash>/`.
+Agent resource definition IDs, project paths and Agent persistence parameters do not select profiles.
+Old profiles are not read, scanned or migrated. Standalone native conformance fixtures may still use ephemeral data.
+Canonical Session deletion closes the physical runtime and safely deletes its exact user profile even without an
+Agent Browser binding, including after restart. No second profile or Agent authorization ledger is introduced;
+historical Agent resource definitions remain available for settled effect receipts.
 
 The embedded browser does not expose F12, Inspect, or a user-visible DevTools window. Ordinary pages, popups, and host maintenance views explicitly disable that entry point, and the boundary scanner prevents it from returning. Low-level WebView2 protocol calls still implement Agent observation, native input, frames, and lifecycle; they are host-internal transport, not a DevTools product feature.
 
@@ -23,9 +47,46 @@ The conversation browser uses the native WebView2/operating-system network stack
 
 Before compiling Agent configuration, a native host derives the Browser Role v2 default binding from its materialized bundled Provider. This is exact boot composition, not a user-facing Role setting or a migration of old installation bindings.
 
-The browser menu offers an explicitly confirmed Reopen browser action. It closes page tabs and loses unsaved page content, but does not clear conversation messages or project files. The backend validates the browser generation at an idle conversation boundary, retires the cached Agent, then destroys the old Workspace. This action cannot cancel an Agent that is starting, running or finishing cleanup.
+The browser menu offers an explicitly confirmed Reopen browser action. It closes page tabs and loses unsaved page content, but does not clear conversation messages or project files. The backend holds the same Session operation fence and validates the generation at a canonical idle boundary.
+Without a native guard it uses ordinary idle close. If an issued guard's final unlock failed, closing requires that
+exact Operation's canonical terminal, proven native settlement and matching old Workspace instance/generation.
+Canonical running and unproven settlement still reject reopening; this user operation never cancels an active Agent
+or manufactures a terminal. `turn/paused` retains the same active Operation and native checkpoint resume authority,
+so it is not a final terminal for this close path. Reopening remains rejected while paused; the user must first finish
+the Operation through the formal Stop/cancel path and prove Runtime cleanup before reopening. The old Workspace's confirmed destruction lets the SDK acknowledge its existing terminal
+and retry final release. The new user Workspace has another generation and cannot be released by the old owner;
+the model is not replayed and the original outcome is not rewritten.
+
+macOS separates loading the CEF library from initializing the engine. The process entry validates its owned `.app`
+framework and complete helper layout, then preloads the fixed CEF library on the startup main thread before Tauri,
+Tokio or other host workers begin. The library constructor changes macOS malloc zones; loading it after SQLite or
+other workers have allocated memory can race allocator registration and corrupt the host heap. Once loaded, the
+library stays resident until process exit, including after page closure, `cef_shutdown` or an unused host shutdown.
+
+Preloading does not call `cef_initialize`, start the guardian/helpers, create contexts/profiles or access Keychain.
+The first actual native runtime demand installs CefAppProtocol and initializes CEF on the established application
+main thread. A retained owner then holds the guardian, contexts and pages. An unused host closes without
+manufacturing initialization; an initialized host still proves page, context, helper and native shutdown cleanup
+before joining the guardian. A resident library is not a cleanup receipt and does not change canonical Session
+ownership, Agent grants, RunGuard or the exact durable Turn terminal boundary for releasing user input.
 
 ## Current implementation
+
+macOS first-use authorization and complete cold acceptance remain unverified. In the latest native run, the bootstrap
+document reached Ready in about 25 ms, but a newly ad-hoc-signed application's first persistent navigation still hit
+the 30-second protocol deadline. Restarting the same artifact completed cold navigation in about 120 ms and passed
+the native suite and exit. An independent ephemeral comparison navigated successfully, but a shutdown worker was
+observed waiting in `SecItemCopyMatching` / Keychain decrypt for over 260 seconds. Forced runner cleanup was recorded
+as failure, not successful native shutdown. Warm runs, same-artifact restarts and partial native tests do not prove
+all first cold runs of freshly signed applications.
+
+Initial Keychain authorization may require the user to handle a native system prompt. Repeated ad-hoc signing changes
+application code identity and may increase repeated authorization or waiting risk; a stable development signing identity
+must be explicitly selected by the user. The host does not choose signing identities, enter passwords or change Keychain
+ACLs. Longer deadlines, killed helpers and skipped pending work cannot manufacture completion. Framework preloading fixes
+allocator startup order, not Keychain permission. Checked CEF 152 and 154 stable do not expose the required official
+Keychain namespace setting; the implementation does not invent a field or substitute an unverified upgrade for diagnosis.
+
 
 The conversation menu now wires user-only site-data clearing with explicit confirmation. The runtime closes its pages, awaits native Profile clearing on an inert, hidden, same-profile controller, then destroys that controller. It is not a tab or an automation browser. Unknown work is not released by a timeout; recovery teardown still waits for native pending work. The two-persistent-profile regression, pre-dispatch cancellation, generation/Agent rejection and UI confirmation tests pass. Main-GUI clicking and the complete in-flight crash/shutdown matrix remain unfinished; the latest isolated preview includes the code but has not yet been launched manually.
 
@@ -34,7 +95,7 @@ The Windows main GUI now has live-model counter-repair evidence: capabilities se
 Application plugin scripts must not replace website APIs. The desktop uses adapters that keep explicit native dialog APIs without the upstream global `alert`/async `confirm` shim. The notification initializer runs only in first-party top-level app documents, where the official notification API needs it; browser pages keep native `Notification`. IPC ACLs remain unchanged. This boundary was added after real main-app inspection found `confirm()` returning a Promise despite the standalone native smoke passing; the smoke now includes these adapters.
 
 - The desktop host creates native child views and owns their lifetime and input gate.
-- BrowserWorkspace scopes runtime and tab authority to the authenticated user and conversation.
+- BrowserWorkspace scopes user operations to the authenticated owner and canonical Session; Agent wrappers independently enforce exact grants.
 - BrowserRunGuard is supplied by the authoritative Agent turn lifecycle, never by UI or model JSON.
 - Element references include runtime, document, and observation generations. Native actions consume observations.
 - The Nomi Browser tool is limited by the frozen capability set and exact provider.

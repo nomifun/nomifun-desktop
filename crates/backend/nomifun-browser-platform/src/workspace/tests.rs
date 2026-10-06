@@ -497,15 +497,11 @@ async fn restart_delete_removes_only_exact_persistent_frozen_profiles() {
     }
 
     // The process-local map is intentionally empty: deletion must derive the
-    // profile identities from the frozen binding set after restart.
+    // stable domain profile from the authenticated Session after restart.
     service
         .delete_agent_session(
             "alice",
             "restart-session",
-            &[
-                BrowserProfileBinding::persistent("persistent-binding").unwrap(),
-                BrowserProfileBinding::ephemeral("ephemeral-binding").unwrap(),
-            ],
         )
         .await
         .unwrap();
@@ -513,11 +509,8 @@ async fn restart_delete_removes_only_exact_persistent_frozen_profiles() {
     assert!(!profile_path(&store, &exact).exists());
     assert!(profile_path(&store, &foreign).exists());
     assert!(profile_path(&store, &other_session).exists());
-    assert!(profile_path(&store, &other_binding).exists());
-    assert!(
-        profile_path(&store, &ephemeral).exists(),
-        "ephemeral policy must never authorize persistent-directory deletion"
-    );
+    assert!(!profile_path(&store, &other_binding).exists(), "Agent definition identities share the domain profile");
+    assert!(!profile_path(&store, &ephemeral).exists(), "deletion owns the user profile independently of Agent binding policy");
 }
 
 #[tokio::test]
@@ -527,7 +520,6 @@ async fn native_close_failure_blocks_profile_delete_until_exact_retry() {
     let (service, store) = service_with_profiles(factory.clone(), data_dir.path());
     let bound = authority("alice", "delete-retry", "managed", all_actions());
     let key = bound.key();
-    let binding_id = key.resource_binding_id.clone();
     let profile = store
         .profile_for(&key, BrowserProfilePersistence::Persistent)
         .unwrap();
@@ -538,16 +530,15 @@ async fn native_close_failure_blocks_profile_delete_until_exact_retry() {
     resource.user_command(create()).await.unwrap();
 
     factory.fail_close_once.store(true, Ordering::SeqCst);
-    let bindings = [BrowserProfileBinding::persistent(binding_id).unwrap()];
     assert_eq!(
         service
-            .delete_agent_session("alice", "delete-retry", &bindings)
+            .delete_agent_session("alice", "delete-retry")
             .await,
         Err(WorkspaceError::NativeCommandFailed)
     );
     assert!(profile_path.exists());
     service
-        .delete_agent_session("alice", "delete-retry", &bindings)
+        .delete_agent_session("alice", "delete-retry")
         .await
         .unwrap();
     assert!(!profile_path.exists());
@@ -570,11 +561,10 @@ async fn profile_symlink_fails_closed_and_retry_deletes_only_replacement_directo
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(outside.path().join("sentinel"), b"outside").unwrap();
     symlink(outside.path(), &profile).unwrap();
-    let bindings = [BrowserProfileBinding::persistent("symlink-binding").unwrap()];
 
     assert_eq!(
         service
-            .delete_agent_session("alice", "symlink-session", &bindings)
+            .delete_agent_session("alice", "symlink-session")
             .await,
         Err(WorkspaceError::ProfileCleanupFailed)
     );
@@ -583,7 +573,7 @@ async fn profile_symlink_fails_closed_and_retry_deletes_only_replacement_directo
     std::fs::create_dir(&profile).unwrap();
     std::fs::write(profile.join("state"), b"retry").unwrap();
     service
-        .delete_agent_session("alice", "symlink-session", &bindings)
+        .delete_agent_session("alice", "symlink-session")
         .await
         .unwrap();
     assert!(!profile.exists());
@@ -605,11 +595,10 @@ async fn profile_junction_fails_closed_and_retry_deletes_only_replacement_direct
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(outside.path().join("sentinel"), b"outside").unwrap();
     junction::create(outside.path(), &profile).unwrap();
-    let bindings = [BrowserProfileBinding::persistent("junction-binding").unwrap()];
 
     assert_eq!(
         service
-            .delete_agent_session("alice", "junction-session", &bindings)
+            .delete_agent_session("alice", "junction-session")
             .await,
         Err(WorkspaceError::ProfileCleanupFailed)
     );
@@ -618,7 +607,7 @@ async fn profile_junction_fails_closed_and_retry_deletes_only_replacement_direct
     std::fs::create_dir_all(&profile).unwrap();
     std::fs::write(profile.join("state"), b"retry").unwrap();
     service
-        .delete_agent_session("alice", "junction-session", &bindings)
+        .delete_agent_session("alice", "junction-session")
         .await
         .unwrap();
     assert!(!profile.exists());
@@ -1006,4 +995,62 @@ fn native_bounds_reject_invalid_geometry() {
         ..bounds
     }
     .is_valid());
+}
+
+#[tokio::test]
+async fn user_browser_exists_without_agent_authority_and_authorized_agent_borrows_the_same_page() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let user = service.ensure_user("alice", "user-first", BrowserProfile::Ephemeral).await.unwrap();
+    let page = user.user_command(create()).await.unwrap();
+    let authority = authority("alice", "user-first", "managed", [BrowserCapabilityAction::Observe]);
+    let agent = service.ensure(authority, BrowserProfile::Ephemeral).await.unwrap();
+    assert!(Arc::ptr_eq(&user, agent.workspace()));
+    assert_eq!(agent.snapshot().await.unwrap().runtime.unwrap().tabs, page.tabs);
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+    let run = user.begin_run().await.unwrap();
+    assert_eq!(user.user_command(create()).await, Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)));
+    assert!(agent.agent_snapshot(&run).await.is_ok());
+    assert_eq!(agent.agent_command(&run, create()).await, Err(WorkspaceError::ActionDenied));
+    user.finish_run(&run).await.unwrap();
+    assert_eq!(user.user_command(create()).await.unwrap().tabs.len(), 2);
+}
+
+#[tokio::test]
+async fn new_agent_resource_definition_preserves_the_domain_runtime_and_old_authority_stays_narrow() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let old_authority = authority("alice", "definition-change", "managed", [BrowserCapabilityAction::Observe]);
+    let old = service.ensure(old_authority.clone(), BrowserProfile::Ephemeral).await.unwrap();
+    old.user_command(create()).await.unwrap();
+    let new_authority = BrowserSessionAuthority::new("alice", "definition-change", all_actions(),
+        BrowserResourceBinding::new("new-exact-definition", "same-physical-managed-browser", "alice", descriptor("managed"),
+            BrowserCapabilityAction::all().map(BrowserCapabilityAction::resource_operation)).unwrap()).unwrap();
+    let new = service.ensure(new_authority, BrowserProfile::Ephemeral).await.unwrap();
+    assert!(Arc::ptr_eq(old.workspace(), new.workspace()));
+    assert_eq!(old.runtime_generation(), new.runtime_generation());
+    assert_eq!(new.snapshot().await.unwrap().runtime.unwrap().tabs.len(), 1);
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+    let run = new.begin_run().await.unwrap();
+    assert_eq!(old.agent_command(&run, create()).await, Err(WorkspaceError::ActionDenied));
+    assert_eq!(new.agent_command(&run, create()).await.unwrap().tabs.len(), 2);
+    new.finish_run(&run).await.unwrap();
+}
+
+#[tokio::test]
+async fn deletion_closes_and_deletes_a_user_profile_without_any_agent_binding() {
+    let data = tempfile::tempdir().unwrap();
+    let factory = Arc::new(Factory::default());
+    let (service, store) = service_with_profiles(factory, data.path());
+    let key = managed_workspace_key("alice", "user-only-delete").unwrap();
+    let profile = store.profile_for(&key, BrowserProfilePersistence::Persistent).unwrap();
+    let path = profile_path(&store, &key);
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("state"), b"user login").unwrap();
+    let user = service.ensure_user("alice", "user-only-delete", profile).await.unwrap();
+    user.user_command(create()).await.unwrap();
+    service.delete_agent_session("alice", "user-only-delete").await.unwrap();
+    assert!(user.native_close_proven().await);
+    assert!(!path.exists());
+    assert!(matches!(service.ensure_user("alice", "user-only-delete", BrowserProfile::Ephemeral).await, Err(WorkspaceError::WorkspaceClosed)));
 }

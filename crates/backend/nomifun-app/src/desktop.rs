@@ -924,9 +924,9 @@ impl DesktopServer {
     }
 
     /// Trusted desktop Surface commands can attach only a Browser Resource
-    /// already authorized for the exact AgentSession.
+    /// owned by the authenticated user and exact canonical Session.
     #[cfg(feature = "browser-use")]
-    pub async fn browser_resource_for_local_surface(&self, agent_session_id: &str) -> Result<Arc<nomifun_browser_platform::workspace::BrowserResource>> {
+    pub async fn browser_resource_for_local_surface(&self, agent_session_id: &str) -> Result<Arc<nomifun_browser_platform::workspace::BrowserWorkspace>> {
         let services = self._keep_alive.services().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
         let resources = services.browser_resources.as_ref().ok_or_else(|| anyhow::anyhow!("Native browser is unavailable."))?;
         resources

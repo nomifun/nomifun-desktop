@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   DEVELOPMENT_SCHEMA_FINGERPRINT,
   createMacosDevLifetime,
+  developmentTauriArguments,
   developmentEnvironment,
   ensureGeneratedDevelopmentDataDirectory,
   generatedDevelopmentDataDirectory,
@@ -128,6 +129,28 @@ describe('development data generation', () => {
       createDirectory,
     )).toBeNull();
     expect(calls).toEqual([]);
+  });
+});
+
+describe('development launch arguments', () => {
+  test('Mac keeps the Tauri watcher and Vite while selecting its complete app runner', () => {
+    const args = developmentTauriArguments(['--no-watch', '--config', '{"build":{"devUrl":"http://localhost:5184"}}', '--', '--', '--fixture'], 'darwin', '/workspace');
+    expect(args).toEqual([
+      'dev', '--config', 'apps/desktop/tauri.conf.json', '--config', 'apps/desktop/tauri.dev.conf.json',
+      '--runner', '/workspace/scripts/run-macos-dev-runner.mjs',
+      '--no-watch', '--config', '{"build":{"devUrl":"http://localhost:5184"}}', '--', '--', '--fixture',
+    ]);
+    expect(() => developmentTauriArguments(['--runner', 'cargo'], 'darwin')).toThrow('bypass');
+    expect(developmentTauriArguments(['--', '--', '--runner'], 'darwin')).toContain('--runner');
+  });
+
+  test('other desktop platforms keep their original runner and forwarded arguments', () => {
+    for (const platform of ['win32', 'linux']) {
+      expect(developmentTauriArguments(['--runner', 'cargo', '--no-watch'], platform)).toEqual([
+        'dev', '--config', 'apps/desktop/tauri.conf.json', '--config', 'apps/desktop/tauri.dev.conf.json',
+        '--runner', 'cargo', '--no-watch',
+      ]);
+    }
   });
 });
 

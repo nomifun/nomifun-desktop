@@ -1166,7 +1166,6 @@ impl ProductResourceAuthority {
             connection_config_ref: None,
             typed_parameters: BTreeMap::from([
                 ("provider_kind".to_owned(), provider_kind.to_owned()),
-                ("persistence".to_owned(), "persistent".to_owned()),
             ]),
         })
     }

@@ -16,6 +16,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createMacosDevSupervisor } from './lib/macos-dev-supervisor.mjs';
+import { macosDevelopmentSigningNotice } from './lib/macos-dev-signing.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CANONICAL_DATABASE_BASELINE = join(
@@ -518,11 +520,29 @@ export async function createMacosDevLifetime() {
   };
 }
 
+export function developmentTauriArguments(args, platform = process.platform, root = ROOT) {
+  const separator = args.indexOf('--');
+  const cli = separator < 0 ? args : args.slice(0, separator);
+  if (platform === 'darwin' && cli.some(arg => arg === '--runner' || arg === '-r' || arg.startsWith('--runner='))) {
+    throw new Error('macOS development uses the complete native Browser app runner; a custom runner would bypass that bundle');
+  }
+  return [
+    'dev', '--config', 'apps/desktop/tauri.conf.json',
+    '--config', 'apps/desktop/tauri.dev.conf.json',
+    ...(platform === 'darwin' ? ['--runner', join(root, 'scripts/run-macos-dev-runner.mjs')] : []),
+    ...args,
+  ];
+}
+
 async function main() {
   let environment;
   let generatedDataDirectory;
+  let tauriArguments;
+  let signingNotice;
   try {
+    tauriArguments = developmentTauriArguments(process.argv.slice(2));
     environment = developmentEnvironment(loadWindowsToolchainEnvironment(process.env));
+    if (process.platform === 'darwin') signingNotice = macosDevelopmentSigningNotice(environment);
     generatedDataDirectory = ensureGeneratedDevelopmentDataDirectory(environment, process.env);
   } catch (error) {
     console.error(`[dev] ${error instanceof Error ? error.message : String(error)}`);
@@ -549,21 +569,15 @@ async function main() {
     console.log(`[dev] data directory: ${dataDirectory} (explicit)`);
   }
 
+  if (signingNotice) console.error(signingNotice);
   const lifetime = process.platform === 'darwin'
-    ? await createMacosDevLifetime()
+    ? await createMacosDevSupervisor({ root: ROOT, createLifetime: createMacosDevLifetime })
     : null;
-  if (lifetime) environment.NOMIFUN_DEV_LIFETIME_SOCKET = lifetime.socketPath;
+  if (lifetime) environment.NOMIFUN_DEV_SUPERVISOR_SOCKET = lifetime.socketPath;
 
   const child = spawn(
     tauri,
-    [
-      'dev',
-      '--config',
-      'apps/desktop/tauri.conf.json',
-      '--config',
-      'apps/desktop/tauri.dev.conf.json',
-      ...process.argv.slice(2),
-    ],
+    tauriArguments,
     {
       cwd: ROOT,
       env: environment,

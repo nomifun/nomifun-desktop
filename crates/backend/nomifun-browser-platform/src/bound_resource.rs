@@ -3,13 +3,10 @@
 use std::sync::Arc;
 
 use crate::{
-    attached_browser::{
-        AttachedBrowserCommand, AttachedBrowserRuntimeError,
-        AuthorizedAttachedBrowserResource,
-    },
+    attached_browser::AuthorizedAttachedBrowserResource,
     product::{BrowserProviderKind, BrowserSessionAuthority},
-    run_guard::{BrowserInputState, BrowserRunSnapshot, RunAdmissionError},
-    runtime::{BrowserTabCommand, WorkspaceError},
+    run_guard::{BrowserInputState, BrowserRunSnapshot},
+    runtime::WorkspaceError,
     workspace::{BrowserResource, BrowserResourceSnapshot},
 };
 
@@ -63,74 +60,4 @@ impl BoundBrowserProviderResource {
         }
     }
 
-    /// Human Browser panel commands still enter through the selected provider's
-    /// Resource and run authority. The attached Provider deliberately exposes
-    /// only operations it can prove against an existing tab; managed-only tab,
-    /// profile, download and site-data controls fail closed.
-    pub async fn user_command(
-        &self,
-        command: BrowserTabCommand,
-    ) -> Result<BrowserResourceSnapshot, WorkspaceError> {
-        match self {
-            Self::Managed(resource) => {
-                resource.user_command(command).await?;
-                resource.snapshot().await
-            }
-            Self::AttachedChrome(resource) => {
-                let command = attached_user_command(command)?;
-                let turn = resource
-                    .begin_run()
-                    .await
-                    .map_err(map_attached_error)?;
-                let outcome = turn.invoke(command).await.map_err(map_attached_error);
-                let cleanup = match turn.settle().await {
-                    Ok(()) => turn.finish().await.map_err(map_attached_error),
-                    Err(error) => Err(map_attached_error(error)),
-                };
-                cleanup?;
-                outcome?;
-                Ok(self.inactive_snapshot())
-            }
-        }
-    }
-}
-
-fn attached_user_command(command: BrowserTabCommand) -> Result<AttachedBrowserCommand, WorkspaceError> {
-    match command {
-        BrowserTabCommand::Navigate { target, url } => Ok(AttachedBrowserCommand::Navigate {
-            tab_id: target.tab_id,
-            url,
-        }),
-        BrowserTabCommand::Dialog {
-            target,
-            request_id,
-            accept,
-            text,
-        } => Ok(AttachedBrowserCommand::Dialog {
-            tab_id: target.tab_id,
-            dialog_id: request_id,
-            accept,
-            prompt_text: text,
-        }),
-        _ => Err(WorkspaceError::UnsupportedAction),
-    }
-}
-
-fn map_attached_error(error: AttachedBrowserRuntimeError) -> WorkspaceError {
-    match error {
-        AttachedBrowserRuntimeError::Unavailable | AttachedBrowserRuntimeError::Disconnected => {
-            WorkspaceError::NativeUnavailable
-        }
-        AttachedBrowserRuntimeError::StaleRun => {
-            WorkspaceError::Admission(RunAdmissionError::StaleRun)
-        }
-        AttachedBrowserRuntimeError::Busy => WorkspaceError::Admission(RunAdmissionError::Busy),
-        AttachedBrowserRuntimeError::TabDenied => WorkspaceError::TabNotFound,
-        AttachedBrowserRuntimeError::ActionDenied => WorkspaceError::ActionDenied,
-        AttachedBrowserRuntimeError::InvalidInput => WorkspaceError::StaleObservation,
-        AttachedBrowserRuntimeError::ExecutionFailed => WorkspaceError::ActionInterrupted,
-        AttachedBrowserRuntimeError::Cancelled => {
-            WorkspaceError::Admission(RunAdmissionError::Cancelled)
-        }
-    }
 }

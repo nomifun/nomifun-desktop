@@ -12,7 +12,7 @@ import { BackendHttpError } from '@/common/adapter/httpBridge';
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', interpolation: { escapeValue: false }, resources: { 'en-US': { translation: { browserWorkspace: words } } } });
 const target = { tab_id: 'browser-1', runtime_generation: 1, document_generation: 1 };
-const initial: BrowserSnapshot = { agent_session_id: 'session-1', resource_binding_id: 'browser-binding-1', provider_id: 'managed', provider_kind: 'managed', allowed_actions: ['browser/observe', 'browser/navigate', 'browser/act', 'browser/render_content', 'browser/download', 'browser/upload', 'browser/evaluate'], run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', can_go_back: false, can_go_forward: false, zoom_percent: 100 }] } };
+const initial: BrowserSnapshot = { agent_session_id: 'session-1', browser_id: 'managed-browser', run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', can_go_back: false, can_go_forward: false, zoom_percent: 100 }] } };
 const originalRect = HTMLElement.prototype.getBoundingClientRect;
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 const originalSecureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
@@ -42,7 +42,6 @@ function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLi
     async listenShortcuts(_id, listener) { shortcut = listener; return () => { shortcut = () => {}; }; },
     async closeResource() {},
     async ensure() { return initial; },
-    async attachedProvider() { return { incarnation: 'attached-1', state: 'connected', chromium_major: 140 }; },
     async command(_id, command) { commands.push(command); return initial; },
     async attach(_id, _bounds, onEvent) { emit = onEvent; attached = true; return 1; },
     async update() {}, async detach(id) { detached.push(id); }, async scaleFactor() { return 1; },
@@ -53,6 +52,17 @@ function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLi
 }
 
 const websitePrompt: BrowserDialog = { target, request_id: 'website-dialog-1', kind: 'prompt', message: 'Enter a project name', default_text: '默认项目', origin: 'http://localhost:3000', text_truncated: false };
+test('the user side browser has navigation and page controls without Agent grants or an attached provider', async () => {
+  const screen = fixture();
+  await screen.ready();
+  expect('allowed_actions' in initial).toBe(false);
+  expect('resource_binding_id' in initial).toBe(false);
+  expect('attachedProvider' in screen.client).toBe(false);
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement).disabled).toBe(false);
+});
+
 test('opening does not claim manual input is ready before the host responds', async () => {
   let finish!: (value: BrowserSnapshot) => void;
   const screen = fixture({ ensure: () => new Promise(resolve => { finish = resolve; }) });
@@ -95,84 +105,9 @@ test('desktop WebUI reports the missing native surface without probing or retryi
   expect(attaches).toBe(0);
 });
 
-test('a missing Browser grant explains how to enable the capability without retrying or creating a surface', async () => {
-  let attaches = 0;
-  const screen = fixture({
-    async ensure() {
-      throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/private-id/browser', status: 403,
-        body: { code: 'FORBIDDEN', error: 'private authority details' } });
-    },
-    async attach() { attaches++; return 1; },
-  });
-  expect(await screen.findByText(words.capabilityUnavailableHint)).toBeTruthy();
-  expect(screen.getByText(words.capabilityUnavailableTitle)).toBeTruthy();
-  expect(screen.queryByRole('button', { name: words.retry })).toBeNull();
-  expect(screen.getByRole('alert').textContent).not.toContain('private authority details');
-  expect(attaches).toBe(0);
-});
-
-test('a missing bound provider has distinct guidance and an explicit retry', async () => {
-  const screen = fixture({
-    async ensure() {
-      throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/browser', status: 422,
-        body: { code: 'UNPROCESSABLE_ENTITY', error: 'private binding details' } });
-    },
-  });
-  expect(await screen.findByText(words.providerUnavailableHint)).toBeTruthy();
-  expect(screen.getByText(words.providerUnavailableTitle)).toBeTruthy();
-  expect(screen.getByRole('button', { name: words.retry })).toBeTruthy();
-  expect(screen.getByRole('alert').textContent).not.toContain('private binding details');
-});
-
-test('attached Chrome reports its provider without trying to mount a WebView2 surface', async () => {
-  let attaches = 0;
-  const attached: BrowserSnapshot = { ...initial, provider_id: 'attached-chrome', provider_kind: 'attached_chrome', runtime: null };
-  const screen = fixture({
-    async ensure() { return attached; },
-    async attach() { attaches++; return 1; },
-  });
-  expect(await screen.findAllByText(words.provider.attachedChrome)).toHaveLength(2);
-  expect(screen.getByText(words.attachedChromeHint)).toBeTruthy();
-  expect(screen.getByText(words.attachedChromeStatus)).toBeTruthy();
-  expect(screen.queryByText(words.userReady)).toBeNull();
-  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
-  expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(true);
-  await act(async () => screen.shortcut({ agent_session_id: 'session-1', target, action: 'new_tab' }));
-  expect(screen.commands).toEqual([]);
-  expect(attaches).toBe(0);
-});
-
-test('attached Chrome connection loss is provider-unavailable and never claims connection', async () => {
-  const attached: BrowserSnapshot = { ...initial, provider_id: 'attached-chrome', provider_kind: 'attached_chrome', runtime: null };
-  const screen = fixture({
-    async ensure() { return attached; },
-    async attachedProvider() { return { incarnation: 'attached-1', state: 'connection_lost', chromium_major: 140 }; },
-  });
-  expect(await screen.findByText(words.providerUnavailableHint)).toBeTruthy();
-  expect(screen.queryByText(words.attachedChromeStatus)).toBeNull();
-  expect(screen.getByRole('button', { name: words.retry })).toBeTruthy();
-});
-
-test('exact Action grants disable unsupported controls before dispatch', async () => {
-  const navigateOnly: BrowserSnapshot = {
-    ...initial,
-    allowed_actions: ['browser/navigate'],
-  };
-  const screen = fixture({ async ensure() { return navigateOnly; } });
-  await screen.ready();
-  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
-  expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(false);
-  for (const tab of screen.getAllByRole('tab')) expect((tab as HTMLButtonElement).disabled).toBe(false);
-  expect((screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement).disabled).toBe(false);
-  fireEvent.change(screen.getByRole('textbox', { name: words.address }), { target: { value: 'https://example.test' } });
-  fireEvent.submit(screen.getByRole('textbox', { name: words.address }).closest('form')!);
-  await waitFor(() => expect(screen.commands.some(command => command.command === 'navigate')).toBe(true));
-  expect(screen.commands.every(command => command.command === 'navigate')).toBe(true);
-});
-
-test('a navigation-only Agent can switch tabs and the active page follows the returned snapshot', async () => {
+test('the user can switch tabs and the active page follows the returned snapshot', async () => {
   const secondTarget = { ...target, tab_id: 'browser-2' };
-  let current: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'], runtime: { ...initial.runtime!, tabs: [
+  let current: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, tabs: [
     initial.runtime!.tabs[0]!,
     { ...initial.runtime!.tabs[0]!, target: secondTarget, title: 'Second', url: 'https://second.example/' },
   ] } };
@@ -188,16 +123,16 @@ test('a navigation-only Agent can switch tabs and the active page follows the re
   await screen.ready();
   fireEvent.click(screen.getByRole('tab', { name: 'Second' }));
   await waitFor(() => expect(screen.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true'));
-  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('https://second.example/');
+  await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('https://second.example/'));
   fireEvent.click(screen.getByRole('tab', { name: 'Fixture' }));
   await waitFor(() => expect(screen.getByRole('tab', { name: 'Fixture' }).getAttribute('aria-selected')).toBe('true'));
-  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost:3000/');
+  await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost:3000/'));
   expect(sent).toEqual([{ command: 'activate', target: secondTarget }, { command: 'activate', target }]);
 });
 
-test('the tab close button restores the remaining page with navigation-only access', async () => {
+test('the tab close button restores the remaining page with user access', async () => {
   const secondTarget = { ...target, tab_id: 'browser-2' };
-  let current: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'], runtime: { ...initial.runtime!, active_tab_id: secondTarget.tab_id, tabs: [
+  let current: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, active_tab_id: secondTarget.tab_id, tabs: [
     initial.runtime!.tabs[0]!,
     { ...initial.runtime!.tabs[0]!, target: secondTarget, title: 'Second', url: 'https://second.example/' },
   ] } };
@@ -221,63 +156,6 @@ test('the tab close button restores the remaining page with navigation-only acce
   expect(sent).toEqual([{ command: 'close', target: secondTarget }]);
 });
 
-test('tab close stays disabled when neither navigation nor interaction is granted', async () => {
-  const screen = fixture({ async ensure() { return { ...initial, allowed_actions: ['browser/observe'] }; } });
-  await screen.ready();
-  const close = screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement;
-  expect(close.disabled).toBe(true);
-  fireEvent.click(close);
-  expect(screen.commands).toEqual([]);
-});
-
-test('an interaction-only grant retains tab close access', async () => {
-  const screen = fixture({ async ensure() { return { ...initial, allowed_actions: ['browser/act'] }; } });
-  await screen.ready();
-  const close = screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement;
-  expect(close.disabled).toBe(false);
-  fireEvent.click(close);
-  await waitFor(() => expect(screen.commands).toEqual([{ command: 'close', target }]));
-});
-
-test('limited Browser guidance opens from the address icon and closes without a permanent row', async () => {
-  const limited: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'] };
-  const visibility: boolean[] = [];
-  const screen = fixture({
-    async ensure() { return limited; },
-    async update(_id, _sequence, _bounds, visible) { visibility.push(visible); },
-  });
-  await screen.ready();
-  await waitFor(() => expect(visibility.at(-1)).toBe(true));
-  const trigger = screen.getByRole('button', { name: words.limitedAccessStatus });
-  expect(screen.queryByRole('tooltip')).toBeNull();
-  expect(screen.queryByText(words.limitedAccessHint)).toBeNull();
-  fireEvent.mouseEnter(trigger);
-  const tooltip = await screen.findByRole('tooltip');
-  await waitFor(() => expect(visibility.at(-1)).toBe(false));
-  expect(tooltip.textContent).toContain(words.limitedAccessStatus);
-  expect(tooltip.textContent).toContain(words.provider.managed);
-  expect(tooltip.textContent).toContain(words.limitedAccessHint);
-  fireEvent.mouseLeave(trigger, { relatedTarget: tooltip });
-  fireEvent.mouseEnter(tooltip, { relatedTarget: trigger });
-  expect(screen.getByRole('tooltip')).toBeTruthy();
-  fireEvent.mouseLeave(tooltip, { relatedTarget: document.body });
-  expect(screen.queryByRole('tooltip')).toBeNull();
-  await waitFor(() => expect(visibility.at(-1)).toBe(true));
-  act(() => trigger.focus());
-  expect(await screen.findByRole('tooltip')).toBeTruthy();
-  fireEvent.keyDown(trigger, { key: 'Escape' });
-  expect(screen.queryByRole('tooltip')).toBeNull();
-});
-
-test('backend Action denial is terminal capability guidance, not a retryable panel failure', () => {
-  const failure = browserFailure(new BackendHttpError({
-    method: 'POST',
-    path: '/api/agent-sessions/session-1/browser/commands',
-    status: 403,
-    body: { code: 'BROWSER_ACTION_DENIED', error: 'private authority details' },
-  }));
-  expect(failure).toMatchObject({ kind: 'capability', retryable: false });
-});
 
 test('transient host failures have a safe message and explicit retry can restore readiness', async () => {
   let attempts = 0;
@@ -368,7 +246,7 @@ test('the Browser menu exposes keyboard focus, disabled semantics and Escape res
 });
 
 test('page zoom controls update the active native tab and reset to 100%', async () => {
-  let current: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'] };
+  let current: BrowserSnapshot = { ...initial, };
   const sent: BrowserCommand[] = [];
   const screen = fixture({
     async ensure() { return current; },
@@ -1090,4 +968,33 @@ test('a command from the previous AgentSession cannot overwrite the new page sta
   await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost/session-2'));
   await act(async () => finish(initial));
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost/session-2');
+});
+
+test('an initialization failure explains restart and never offers a futile retry', async () => {
+  const screen = fixture({ async ensure() {
+    throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/browser', status: 503,
+      body: { code: 'BROWSER_NATIVE_INITIALIZATION_FAILED', error: 'private initialization details' } });
+  } });
+  expect(await screen.findByText(words.initializationFailed)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: words.retry })).toBeNull();
+  expect(screen.getByRole('alert').textContent).not.toContain('private initialization details');
+});
+
+test('validation and native command failures use request guidance instead of claiming an Agent provider is disconnected', () => {
+  for (const [status, code] of [[422, 'UNPROCESSABLE_ENTITY'], [502, 'BROWSER_NATIVE_COMMAND_FAILED']] as const) {
+    expect(browserFailure(new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/browser', status,
+      body: { code, error: 'private failure' } }))).toEqual({ kind: 'request', message: 'browserWorkspace.requestFailed', retryable: true });
+  }
+});
+
+test('a canonical preparation lock tells the user to stop the Agent without opening a native surface', async () => {
+  let attaches = 0;
+  const screen = fixture({
+    async ensure() { throw new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/browser', status: 409,
+      body: { code: 'BROWSER_USER_INPUT_LOCKED', error: 'private preparation' } }); },
+    async attach() { attaches++; return 1; },
+  });
+  expect(await screen.findByText(words.stopHint)).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  expect(attaches).toBe(0);
 });

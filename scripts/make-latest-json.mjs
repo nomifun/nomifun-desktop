@@ -45,6 +45,8 @@ function flag(name, fallback = undefined) {
 const repo = flag('repo', DEFAULT_REPO);
 const out = flag('out', DEFAULT_OUT);
 const collect = flag('collect', false) === true;
+// Current macOS managed Browser ships only an arm64 CEF runtime.
+const macosArm64Only = flag('macos-arm64-only', false) === true;
 const targetDirArg = flag('target-dir', join(ROOT, 'target'));
 if (typeof targetDirArg !== 'string') {
   console.error('✗ --target-dir 需要目录路径。');
@@ -204,7 +206,7 @@ if (!existsSync(TARGET)) {
 // 候选 bundle 目录：target/release/bundle（默认 host 构建）+ target/<triple>/release/bundle（指定 target）。
 const bundleDirs = [];
 const directDefault = join(TARGET, 'release', 'bundle');
-if (existsSync(directDefault)) bundleDirs.push({ dir: directDefault, triple: hostTriple() });
+if (existsSync(directDefault)) bundleDirs.push({ dir: directDefault, triple: flag('target-triple') || hostTriple() });
 for (const entry of listDirs(TARGET)) {
   if (entry === 'release' || entry === 'debug') continue;
   const nested = join(TARGET, entry, 'release', 'bundle');
@@ -218,6 +220,10 @@ for (const { dir, triple } of bundleDirs) {
   if (keys.length === 0) {
     console.warn(`  ! 跳过无法识别的 triple: ${triple}`);
     continue;
+  }
+  if (macosArm64Only && keys.some(key => key.startsWith('darwin-') && key !== 'darwin-aarch64')) {
+    console.error(`✗ macOS Browser 发布不支持 ${triple}；不能使用旧 Intel/Universal 更新产物。`);
+    process.exit(1);
   }
   for (const { artifact, sig } of findSigs(dir)) {
     const name = basename(artifact);
@@ -267,6 +273,7 @@ manifest.notes = notes || readChangelogNotes(version) || `NomiFun v${version}`;
 for (const key of foundKeys) {
   manifest.platforms[key] = { signature: collected[key].signature, url: collected[key].url };
 }
+if (macosArm64Only) delete manifest.platforms['darwin-x86_64'];
 
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(manifest, null, 2) + '\n');

@@ -41,14 +41,20 @@ struct Fixture {
 
 impl Fixture {
     async fn new(scenario: &str) -> Self {
-        Self::build_delivery(scenario, vec![], vec![], None, false).await
+        Self::build_delivery(scenario, vec![], vec![], None, false,
+            #[cfg(feature = "browser-use")] None,
+        ).await
     }
 
     async fn with_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>) -> Self {
-        Self::build_delivery(scenario, files, inject_skills, origin, true).await
+        Self::build_delivery(scenario, files, inject_skills, origin, true,
+            #[cfg(feature = "browser-use")] None,
+        ).await
     }
 
-    async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool) -> Self {
+    async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,
+        #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
             .map(|root| PathBuf::from(root).join(scenario))
@@ -63,11 +69,22 @@ impl Fixture {
         let database_path = config.database_path();
         let database = nomifun_db::init_database(&database_path).await.unwrap();
         let services = crate::services::AppServices::from_config(database, &config).await.unwrap();
+        #[cfg(feature = "browser-use")]
+        let mut services = services;
+        #[cfg(feature = "browser-use")]
+        if let Some((factory, _)) = &browser {
+            services.browser_resources = Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(factory.clone())
+                .with_profile_store(nomifun_browser_platform::runtime::BrowserProfileStore::new(config.data_dir.clone()).unwrap())));
+        }
         let (states, _components) = super::super::state::try_build_module_states(&services).await.unwrap();
         let owner = states.nomi_core_agent_api.session_owner.clone();
         let router = super::super::create_router_with_states(&services, states);
+        #[cfg(feature = "browser-use")]
+        let model_base = browser.as_ref().map(|(_, url)| url.as_str()).unwrap_or("http://127.0.0.1:9/v1");
+        #[cfg(not(feature = "browser-use"))]
+        let model_base = "http://127.0.0.1:9/v1";
         let provider = api(&router, "/api/providers", json!({
-            "platform":"custom", "name":"cleanup fixture", "base_url":"http://127.0.0.1:9/v1",
+            "platform":"custom", "name":"cleanup fixture", "base_url":model_base,
             "auth_scheme":"bearer", "credentials":{"api_keys":["local-fixture-not-a-secret"]}, "enabled":true,
             "initial_model":{"model":"cleanup-fixture", "enabled":true, "capabilities":[{
                 "task":"chat", "traits":[], "protocol":"openai.chat_text", "connection_role":"default", "output_limit":4096
@@ -91,6 +108,17 @@ impl Fixture {
             "resource_selections":[{"resource_kind":"workspace", "resource_id":"default-workspace"}]
         })).await;
         let id = session["agent_session_id"].as_str().unwrap();
+        #[cfg(feature = "browser-use")]
+        if browser.is_some() {
+            use nomifun_browser_platform::runtime::{BrowserProfileStore, BrowserProfilePersistence, BrowserTabCommand, WorkspaceError};
+            let key = nomifun_browser_platform::workspace::managed_workspace_key(services.authoritative_user_id.as_ref(), id).unwrap();
+            let profile = BrowserProfileStore::new(config.data_dir.clone()).unwrap()
+                .profile_for(&key, BrowserProfilePersistence::Persistent).unwrap();
+            let user = services.browser_resources.as_ref().unwrap().ensure_user(services.authoritative_user_id.as_ref(), id, profile).await.unwrap();
+            if let Err(error) = user.user_command(BrowserTabCommand::Create { url: "http://127.0.0.1/browser-fixture".into() }).await {
+                assert_eq!(error, WorkspaceError::NativeCommandFailed, "the fixture navigation failure poisons its protocol before Chat starts");
+            }
+        }
         let projection = owner.get_session(services.authoritative_user_id.as_ref(), id).await.unwrap();
         let workspace = projection.extra["workspace"].as_str().unwrap().to_owned();
         let options = AgentRuntimeBuildOptions {
@@ -669,4 +697,186 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     fixture.host.cleanup_turn(&fixture.message).await.unwrap();
     assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before_repeat);
     fixture.finish().await;
+}
+
+#[cfg(feature = "browser-use")]
+mod browser_terminal_recovery {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use nomifun_browser_platform::{
+        run_guard::{NativeInputGate, RunAdmissionError},
+        runtime::{BrowserNativeSurfacePort, BrowserRuntime, BrowserRuntimeFactory, BrowserRuntimeSnapshot, BrowserTabCommand, CreateBrowserRuntime, WorkspaceError},
+    };
+
+    #[derive(Default)]
+    struct FaultBrowserFactory { creates: AtomicUsize, closes: Arc<AtomicUsize>, poison_only_final_unlock: bool }
+    struct FaultBrowser { generation: u64, poisoned: bool, poison_only_final_unlock: bool, closed: AtomicBool, closes: Arc<AtomicUsize>, locked: AtomicBool }
+    #[async_trait]
+    impl BrowserRuntimeFactory for FaultBrowserFactory {
+        async fn create(&self, request: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
+            Ok(Arc::new(FaultBrowser { generation: request.runtime_generation,
+                poisoned: self.creates.fetch_add(1, Ordering::SeqCst) == 0, poison_only_final_unlock: self.poison_only_final_unlock, closed: AtomicBool::new(false),
+                closes: self.closes.clone(), locked: AtomicBool::new(!request.user_input_enabled) }))
+        }
+    }
+    #[async_trait]
+    impl NativeInputGate for FaultBrowser {
+        async fn lock_user_input(&self) -> Result<(), RunAdmissionError> {
+            self.locked.store(true, Ordering::SeqCst);
+            if self.poisoned && !self.poison_only_final_unlock { Err(RunAdmissionError::InputGateFailed) } else { Ok(()) }
+        }
+        async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> { Ok(()) }
+        async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
+            if self.poisoned { return Err(RunAdmissionError::InputGateFailed); }
+            self.locked.store(false, Ordering::SeqCst); Ok(())
+        }
+    }
+    #[async_trait]
+    impl BrowserRuntime for FaultBrowser {
+        fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort> { None }
+        async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+            Ok(BrowserRuntimeSnapshot { runtime_generation: self.generation, revision: 1, active_tab_id: None, tabs: vec![], downloads: vec![] })
+        }
+        async fn execute(&self, _: BrowserTabCommand, _: CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+            if self.poisoned && !self.poison_only_final_unlock { Err(WorkspaceError::NativeCommandFailed) } else { self.snapshot().await }
+        }
+        async fn close(&self) -> Result<(), WorkspaceError> {
+            if !self.closed.swap(true, Ordering::SeqCst) { self.closes.fetch_add(1, Ordering::SeqCst); }
+            Ok(())
+        }
+    }
+
+    async fn model_fixture(expected_calls: usize) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let header_end = loop {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0); bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") { break index + 4; }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let length = headers.lines().filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap()).unwrap_or(0);
+                while bytes.len() < header_end + length {
+                    let read = socket.read(&mut chunk).await.unwrap(); assert!(read > 0); bytes.extend_from_slice(&chunk[..read]);
+                }
+                if headers.starts_with("GET ") {
+                    let body = r#"{"object":"list","data":[{"id":"cleanup-fixture","object":"model"}]}"#;
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    socket.write_all(response.as_bytes()).await.unwrap(); continue;
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                let body = concat!(
+                    "data: {\"id\":\"browser-recovery\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"cleanup-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"The successor completed after Browser reopen.\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"id\":\"browser-recovery\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"cleanup-fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n");
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                if counted.load(Ordering::SeqCst) == expected_calls { break; }
+            }
+        });
+        (url, calls, task)
+    }
+
+    #[tokio::test]
+    async fn published_failed_turn_retries_native_finish_after_user_reopen_and_the_sdk_successor_completes() {
+        recovery_scenario(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_valid_native_guard_with_committed_terminal_can_reopen_after_failed_unlock_and_run_a_successor() {
+        recovery_scenario(true).await;
+    }
+
+    async fn recovery_scenario(poison_only_final_unlock: bool) {
+        let factory = Arc::new(FaultBrowserFactory { poison_only_final_unlock, ..Default::default() });
+        let (model, calls, model_task) = model_fixture(if poison_only_final_unlock { 2 } else { 1 }).await;
+        let fixture = Fixture::build_delivery("browser-native-failure-reopen-successor", vec![], vec![], None, false,
+            Some((factory.clone(), model))).await;
+        let session: AgentSessionId = fixture.host.options.conversation_id.clone().into();
+        let store = fixture.owner.canonical().store();
+        let binding_before = store.get_live_session(&session).await.unwrap().agent_binding;
+        assert!(fixture.host.resources.compiled().resolved_capability(&CapabilityId::from("browser")).is_none(), "ordinary Chat has no Browser Tool authority");
+        fixture.runtime.send_message(fixture.message.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while fixture.runtime.is_transport_healthy() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(fixture.state().await, if poison_only_final_unlock { "completed" } else { "failed" });
+        assert!(fixture.host.active.lock().await.is_none());
+        assert!(fixture.host.terminal_already_recorded(fixture.host.root(&fixture.message)).unwrap());
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(poison_only_final_unlock));
+        let original = store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap();
+        let original_event = original.terminal_event.unwrap();
+        let cursor = store.current_cursor(&session).await.unwrap();
+        let resources = fixture.services.browser_resources.as_ref().unwrap();
+        let user = resources.get_for_agent_session(fixture.services.authoritative_user_id.as_ref(), session.as_ref()).await.unwrap().unwrap();
+        let generation = user.runtime_generation();
+        let response = fixture._router.clone().oneshot(Request::builder().method("DELETE")
+            .uri(format!("/api/agent-sessions/{}/browser", session.as_ref()))
+            .header("x-nomi-local-trust", "cleanup-fixture-local-trust").header("content-type", "application/json")
+            .body(Body::from(json!({"runtime_generation":generation}).to_string())).unwrap()).await.unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(factory.closes.load(Ordering::SeqCst), 1);
+        api(&fixture._router, &format!("/api/agent-sessions/{}/browser", session.as_ref()), json!({})).await;
+        api(&fixture._router, &format!("/api/agent-sessions/{}/browser/commands", session.as_ref()),
+            json!({"command":"create","url":"http://127.0.0.1/browser-fixture"})).await;
+        assert_eq!(factory.creates.load(Ordering::SeqCst), 2);
+        // Strict retry rejects altered terminal outcome and altered delivery.
+        assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled { model_steps: 0 }).await.is_err());
+        let mut altered = fixture.message.clone(); altered.content.push_str(" changed");
+        let facts = store.chat_causality_facts(&session, &"cleanup-retry-turn".into()).await.unwrap();
+        let terminal_name = if poison_only_final_unlock { "turn_completed" } else { "turn_failed" };
+        let recorded: AgentEngineEvent = facts.event_payloads.values().filter_map(|payload| payload.get("event"))
+            .find(|event| event.get("event").and_then(Value::as_str) == Some(terminal_name))
+            .cloned().map(|value| serde_json::from_value(value).unwrap()).unwrap();
+        assert!(fixture.host.record_event(&altered, &recorded).await.is_err());
+        assert_eq!(store.current_cursor(&session).await.unwrap(), cursor);
+        // SDK teardown retries the already published failure and only finishes
+        // the closed native owner; it must not append another terminal.
+        fixture.runtime.kill_and_wait(None).await.unwrap();
+        assert_eq!(store.current_cursor(&session).await.unwrap(), cursor);
+        assert_eq!(store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap().terminal_event.unwrap().event_id, original_event.event_id);
+        let (input, accepted) = store.start_turn(&session, "session_api".into(), "browser-recovery-successor".into(),
+            "browser-recovery-successor".into(), StrictJsonValue(json!({"content":"complete the successor", "admission":{
+                "route_identity":fixture.host.route,"resolved_snapshot_ref":fixture.host.snapshot_ref}}))).await.unwrap();
+        let generation = accepted.record.unwrap().seq;
+        let runtime = fixture.services.agent_runtime_sessions.get_or_create_runtime_for_turn(session.as_ref(), generation,
+            CancellationToken::new(), fixture.registry_options()).await.unwrap();
+        let message = SendMessageData { content: "complete the successor".into(), msg_id: "browser-recovery-successor-wire".into(),
+            source_message_id: Some(input.record.unwrap().event_id.as_ref().into()), files: vec![], inject_skills: vec![], origin: None };
+        let successor_host = HOSTS.get().unwrap().lock().unwrap().remove(session.as_ref()).unwrap().upgrade().unwrap();
+        assert!(fixture.host.resources.teardown_proven().unwrap());
+        assert!(!Arc::ptr_eq(&fixture.host.resources, &successor_host.resources),
+            "a still-referenced closed resource context cannot be reused by replacement");
+        fixture.host.cleanup_session().await.unwrap();
+        let admitted = successor_host.session_host.read_turn_receipt(&successor_host.options, &successor_host.binding,
+            &successor_host.snapshot_ref, &message).await.unwrap();
+        assert!(Arc::ptr_eq(&successor_host.resources, &successor_host.session_host.open_kernel_session(admitted.session()).unwrap()),
+            "late old teardown cannot evict the successor's exact resource context");
+        runtime.send_message(message).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let receipt = store.read_turn_receipt(&session, &"browser-recovery-successor".into()).await.unwrap();
+                if receipt.status == nomifun_agent_session::TurnReceiptStatus::Completed { break; }
+                assert_eq!(receipt.status, nomifun_agent_session::TurnReceiptStatus::Running, "unexpected successor terminal: {receipt:?}");
+                assert!(runtime.is_transport_healthy());
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), if poison_only_final_unlock { 2 } else { 1 });
+        assert_eq!(store.get_live_session(&session).await.unwrap().agent_binding, binding_before);
+        assert_eq!(store.read_turn_receipt(&session, &"cleanup-retry-turn".into()).await.unwrap().terminal_event.unwrap().event_id, original_event.event_id);
+        runtime.kill_and_wait(None).await.unwrap();
+        model_task.await.unwrap();
+        fixture.services.shutdown_nomi_core_host().await.unwrap();
+    }
 }

@@ -361,7 +361,7 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **A real browser inside the conversation** — on Windows today, the desktop embeds native WebView2 in the conversation work surface; a future macOS backend will follow the same contract and Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
+- **A real browser inside the conversation** — the desktop embeds native WebView2 on Windows and native CEF on Apple Silicon macOS; Linux is deferred. The user and the Agent see and operate the same live page, with real tabs, navigation, forms, history, site storage, sign-in state, WebSocket, and HMR — never an iframe, video stream, or sequence of screenshots.
 - **One simple input rule** — while the Agent is running, browser input belongs to the Agent and the user watches the real interaction. When the turn ends, the user can operate the page directly. There is no pause-and-take-control workflow.
 - **Frontend testing without a separate test product** — an enabled Agent can observe rendered elements and use real mouse, keyboard, drag, upload, download, and dialog interactions to test an app it is building. There is no Browser console, problem list, test-step panel, or special test mode.
 - **Conversation-owned state** — each persistent conversation has its own browser profile and tabs. The Browser opens from that conversation rather than a global management page or Browser settings center; site data and downloads stay in the small in-context browser menu.
@@ -626,25 +626,51 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 
 - **arch** — zero or more architectures. Omit to use the per-OS default below.
 - **`--signed`** — sign (and, on macOS, notarize). Requires local signing config; see each OS.
-- **`-- …`** — everything after `--` is forwarded verbatim to `tauri build`
-  (e.g. `-- --bundles nsis`). `build:mac` and `build:win` also forward unknown `--xxx`
-  options directly. For updater builds, layer on the committed overlay as a **file path**:
+- **`-- …`** — forwards supported arguments to `tauri build`
+  (e.g. Windows `-- --bundles nsis`). macOS product packaging fixes the release
+  profile, arm64 target and complete App/DMG output; flags that bypass this contract
+  are rejected. For updater builds, layer on the committed overlay as a **file path**:
   `bun run build:<os> --config apps/desktop/tauri.updater.conf.json` — pass the file, not
   inline JSON, because Windows PowerShell 5.1 strips the quotes from `--config '{...}'`.
 
-**macOS — `build:mac`** (produces `.dmg`; default arch: `universal`)
+**macOS — `build:mac`** (produces a complete `.app` and `.dmg`; Apple Silicon arm64)
 
 | Goal | Command |
 | --- | --- |
-| Universal (Intel + Apple Silicon, one fat package) | `bun run build:mac` |
-| Universal, signed + notarized | `bun run build:mac --signed` |
-| Apple Silicon only | `bun run build:mac arm` |
-| Intel only | `bun run build:mac intel` |
-| Intel only, signed + notarized | `bun run build:mac --signed intel` |
-| All three separately (ARM + Intel + Universal) | `bun run build:mac arm intel universal` |
+| Apple Silicon local test package | `bun run build:mac` or `bun run build` |
+| Developer ID signature + configured notarization | `bun run build:mac --signed` or `bun run build:signed` |
+| Complete signed updater archive | `bun run build:updater` |
+| Developer ID package and updater archive | `bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json` |
+| Complete development `.app` with embedded Browser | `bun run build:fast` |
 
-Arch aliases: `arm`/`aarch64`/`silicon`, `intel`/`x64`/`x86_64`, `universal`/`all-arch`.
-Signing reads `apps/desktop/signing/.env.signing` (gitignored); missing → it errors with setup hints.
+The pinned CEF runtime supports arm64; Intel and Universal builds are rejected.
+Arch aliases are `arm`/`aarch64`/`silicon`. All macOS product commands use the same
+CEF framework/helper staging and signing pipeline. DMG and updater `.app.tar.gz`
+are generated from the final App after its CEF components have been installed and
+signed; updater signing also requires the configured Tauri updater private key.
+
+`bun run dev` launches a complete development `.app` and waits for native browser
+cleanup before a Rust watch restart. `build:fast` also creates a complete `.app`
+and prints its path. A bare Cargo binary lacks the embedded browser bundle.
+
+For a stable installed development signing identity, explicitly set
+`NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"` for
+`bun run dev` or `bun run build:fast`. The same identity signs the main App, CEF
+framework and all Helpers, including incremental rebuilds; bundle caches are
+separate for each configured identity. The scripts do not select or create a
+certificate. With no setting, builds use ad-hoc signing and print one startup
+notice that rebuilding may require macOS Keychain authorization again.
+
+The pinned CEF currently uses the default **Chromium Safe Storage** Keychain
+item. macOS controls explicit access to it, separately from Agent Browser grants.
+A stable signing identity and bundle identifier let Keychain recognize updates;
+they do not replace the user's initial authorization. See the
+[macOS signing notes](apps/desktop/signing/README.md) for this SDK limitation.
+
+Developer ID signing reads `apps/desktop/signing/.env.signing` (gitignored) and
+requires an installed `APPLE_SIGNING_IDENTITY`. Configured notarization applies
+to the final App and DMG. `release:mac` publishes arm64 artifacts and reads only
+that build target when generating its updater entry.
 
 **Windows — `build:win`** (produces a single NSIS `.exe`; default arch: the host's, usually `x64`)
 
@@ -672,8 +698,8 @@ Arch aliases: `x64`/`x86_64`, `arm64`/`aarch64`/`arm`. Linux has no signing/nota
 ⚠️ Cross-arch (e.g. building arm64 on an x64 host) needs the target's sysroot/toolchain and often
 fails on the webkit2gtk link — build on the target architecture's machine/container instead.
 
-> `bun run build` stays as the simple "just build for whatever OS I'm on" shortcut; the
-> `build:<os>` commands above add explicit arch selection, signing, and `dist/desktop/` collection.
+> `bun run build` builds for the current OS. On macOS it uses the complete arm64
+> CEF packaging pipeline; Windows and Linux retain their existing Tauri build path.
 
 <details>
 <summary><b>Full script catalog</b></summary>
@@ -688,12 +714,12 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
-| `bun run build:fast` | 快速构建可直接运行的 debug 桌面二进制（不打安装包） |
+| `bun run build:fast` | 快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制 |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
-| `bun run build:mac` | 打 macOS 安装包（.dmg），汇总到 dist/desktop/ |
+| `bun run build:mac` | 装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
-| `bun run build:signed` | 打桌面包并签名+公证（仅 macOS） |
-| `bun run build:updater` | 打桌面包并产出自更新 .sig 制品 |
+| `bun run build:signed` | 装配完整 macOS CEF App，签名并执行已配置的公证 |
+| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包 |
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |

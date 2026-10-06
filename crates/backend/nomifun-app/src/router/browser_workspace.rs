@@ -1,9 +1,6 @@
-//! Canonical AgentSession Browser Resource API.
-//!
-//! A route can materialize a provider-backed resource only after reloading the
-//! immutable AgentSession binding, exact Browser Action allowlist, exact Role
-//! Provider, and typed Browser Resource binding. Resource existence is never
-//! treated as authority, and delegated AgentSessions use this same path.
+//! Authenticated user access to one managed browser per canonical Session.
+//! This surface never creates Agent grants or resource bindings. Agent tools
+//! independently validate frozen authority in the Browser Role owner.
 
 use axum::{
     Json, Router,
@@ -13,20 +10,14 @@ use axum::{
     routing::{get, post},
 };
 use nomifun_agent_contracts::{
-    AgentSessionId, ExecutionRoleId, PrincipalRef, TypedResourceBinding,
+    AgentSessionId, PrincipalRef,
 };
-use nomifun_agent_control_plane::AgentControlPlane;
-use nomifun_api_types::{AgentBindingValueDto, ApiResponse};
+use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_browser_platform::{
-    bound_resource::BoundBrowserProviderResource,
-    product::{
-        BrowserProviderKind, BrowserSessionAuthority, BROWSER_MODULE_ID,
-        BROWSER_RESOURCE_KIND,
-    },
     run_guard::{BrowserInputState, BrowserRunSnapshot, RunAdmissionError},
-    runtime::{BrowserTabCommand, WorkspaceError},
-    workspace::{BrowserResourceService, BrowserResourceSnapshot},
+    runtime::{BrowserTabCommand, WorkspaceError, BrowserProfileStore, BrowserProfilePersistence},
+    workspace::{BrowserResourceService, BrowserWorkspace, BrowserUserSnapshot, managed_workspace_key},
 };
 use nomifun_common::AppError;
 use nomifun_conversation::CanonicalAgentSessionOwner;
@@ -37,8 +28,9 @@ pub(crate) struct BrowserResourceApiState {
     pub resources: Option<Arc<BrowserResourceService>>,
     pub attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
     pub sessions: CanonicalAgentSessionOwner,
-    pub control_plane: Arc<AgentControlPlane>,
     pub data_dir: PathBuf,
+    pub operation_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    pub close_owner: Arc<dyn crate::browser_workspace_provider::BrowserUserClosePort>,
 }
 
 pub(crate) fn routes(state: BrowserResourceApiState) -> Router {
@@ -117,6 +109,7 @@ impl IntoResponse for BrowserApiError {
             }
             WorkspaceError::ActionDenied => StatusCode::FORBIDDEN,
             WorkspaceError::InvalidUrl | WorkspaceError::InvalidZoom => StatusCode::BAD_REQUEST,
+            WorkspaceError::NativeInitializationFailed => StatusCode::SERVICE_UNAVAILABLE,
             WorkspaceError::NativeCommandFailed => StatusCode::BAD_GATEWAY,
             WorkspaceError::Admission(
                 RunAdmissionError::InputGateFailed | RunAdmissionError::WorkerFailed,
@@ -137,173 +130,38 @@ impl IntoResponse for BrowserApiError {
 
 impl BrowserResourceApiState {
     fn require_service(&self) -> Result<&Arc<BrowserResourceService>, BrowserApiError> {
-        self.resources
-            .as_ref()
-            .ok_or(BrowserApiError(WorkspaceError::NativeUnavailable))
+        self.resources.as_ref().ok_or(BrowserApiError(WorkspaceError::NativeUnavailable))
     }
 
-    async fn authority(
-        &self,
-        user: &CurrentUser,
-        agent_session_id: &str,
-    ) -> Result<(BrowserSessionAuthority, bool), Response> {
-        let session_id = AgentSessionId::from(agent_session_id.to_owned());
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: user.id.to_string(),
-        };
-        let observation = self
-            .sessions
-            .get(&principal, &session_id)
-            .await
-            .map_err(IntoResponse::into_response)?;
-        let active = self
-            .sessions
-            .active_capability_ids(&principal, &session_id)
-            .await
-            .map_err(IntoResponse::into_response)?;
-        if !active.iter().any(|id| id == BROWSER_MODULE_ID) {
-            return Err(AppError::Forbidden(
-                "This AgentSession does not have an active Browser Module grant.".into(),
-            )
-            .into_response());
+    /// User ownership and an existing canonical Session authorize the side
+    /// browser. Agent grants and bindings are deliberately not consulted here.
+    async fn require_user_session(&self, user: &CurrentUser, agent_session_id: &str) -> Result<nomifun_agent_session::SessionObservation, Response> {
+        let principal = PrincipalRef { principal_kind: "user".to_owned(), principal_id: user.id.to_string() };
+        self.sessions.get(&principal, &AgentSessionId::from(agent_session_id.to_owned()))
+            .await.map_err(IntoResponse::into_response)
+    }
+
+    async fn user_workspace(&self, user: &CurrentUser, agent_session_id: &str, allow_running: bool) -> Result<Arc<BrowserWorkspace>, Response> {
+        let observation = self.require_user_session(user, agent_session_id).await?;
+        if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+            // During canonical preparation, a native input gate may still be
+            // joining. Never create/reveal a user-ready child in that window.
+            let existing = self.require_service().map_err(IntoResponse::into_response)?
+                .get_for_agent_session(&user.id.to_string(), agent_session_id).await
+                .map_err(|error| BrowserApiError(error).into_response())?;
+            if !allow_running || match existing { Some(workspace) => !workspace.has_active_run().await, None => true } {
+                return Err(BrowserApiError(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)).into_response());
+            }
         }
-
-        let binding_value = serde_json::to_value(&observation.session.agent_binding)
-            .map_err(|error| {
-                AppError::Internal(format!("serialize canonical Agent binding: {error}"))
-                    .into_response()
-            })?;
-        let binding_dto: AgentBindingValueDto = serde_json::from_value(binding_value)
-            .map_err(|error| {
-                AppError::Internal(format!("project canonical Agent binding: {error}"))
-                    .into_response()
-            })?;
-        let owner = nomifun_agent_contracts::UserId::from(user.id.to_string());
-        let (_, _, snapshot) = self
-            .control_plane
-            .saved_binding_artifacts(&owner, &binding_dto)
-            .await
-            .map_err(IntoResponse::into_response)?;
-        if snapshot.snapshot_ref != observation.session.agent_binding.resolved_snapshot_ref {
-            return Err(AppError::Conflict(
-                "Browser authority Snapshot differs from the canonical AgentSession binding."
-                    .into(),
-            )
-            .into_response());
-        }
-        let capability = snapshot
-            .content
-            .enabled_capabilities
-            .iter()
-            .find(|capability| capability.capability.id.as_ref() == BROWSER_MODULE_ID)
-            .ok_or_else(|| {
-                AppError::Forbidden(
-                    "The frozen AgentSession Snapshot has no Browser Module grant.".into(),
-                )
-                .into_response()
-            })?;
-        if capability.action_allowlist.is_empty() {
-            return Err(AppError::Forbidden(
-                "The frozen Browser Module grant has no Browser Actions.".into(),
-            )
-            .into_response());
-        }
-        let provider = snapshot
-            .content
-            .resolved_role_providers
-            .get(&ExecutionRoleId::from(
-                nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID,
-            ))
-            .map(|lock| lock.provider.clone())
-            .ok_or_else(|| {
-                AppError::UnprocessableEntity(
-                    "The frozen Browser Module has no exact Provider lock.".into(),
-                )
-                .into_response()
-            })?;
-        let binding = exact_browser_binding(
-            &observation.session.agent_binding.typed_resource_bindings,
-        )?;
-        let ephemeral = crate::browser_workspace_provider::browser_resource_ephemeral(
-            &binding,
-        )
-        .map_err(IntoResponse::into_response)?;
-        let provider = crate::browser_workspace_provider::provider_descriptor(
-            &provider,
-            &binding,
-        )
-        .map_err(IntoResponse::into_response)?;
-        let resource = crate::browser_workspace_provider::browser_resource_binding(
-            binding,
-            provider,
-        )
-        .map_err(IntoResponse::into_response)?;
-        let granted_actions = capability
-            .action_allowlist
-            .iter()
-            .map(|action| {
-                nomifun_browser_platform::product::BrowserCapabilityAction::parse(
-                    action.as_ref(),
-                )
-                .ok_or_else(|| {
-                    AppError::UnprocessableEntity(
-                        "The frozen Browser Module contains a non-canonical Action ID."
-                            .into(),
-                    )
-                    .into_response()
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let authority = BrowserSessionAuthority::new(
-            user.id.to_string(),
-            agent_session_id,
-            granted_actions,
-            resource,
-        )
-        .map_err(|error| {
-            AppError::UnprocessableEntity(error.to_string()).into_response()
-        })?;
-        Ok((authority, ephemeral))
+        let key = managed_workspace_key(&user.id.to_string(), agent_session_id)
+            .map_err(|error| BrowserApiError(error).into_response())?;
+        let profile = BrowserProfileStore::new(self.data_dir.clone())
+            .and_then(|store| store.profile_for(&key, BrowserProfilePersistence::Persistent))
+            .map_err(|error| BrowserApiError(error).into_response())?;
+        self.require_service().map_err(IntoResponse::into_response)?
+            .ensure_user(&user.id.to_string(), agent_session_id, profile)
+            .await.map_err(|error| BrowserApiError(error).into_response())
     }
-
-    async fn bind_resource(
-        &self,
-        user: &CurrentUser,
-        agent_session_id: &str,
-    ) -> Result<BoundBrowserProviderResource, Response> {
-        let (authority, ephemeral) = self.authority(user, agent_session_id).await?;
-        crate::browser_workspace_provider::bind_authorized_resource(
-            self.resources.clone(),
-            self.attached_chrome.clone(),
-            &self.data_dir,
-            authority,
-            ephemeral,
-        )
-            .await
-            .map_err(IntoResponse::into_response)
-    }
-}
-
-fn exact_browser_binding(
-    bindings: &[TypedResourceBinding],
-) -> Result<TypedResourceBinding, Response> {
-    let mut matches = bindings
-        .iter()
-        .filter(|binding| binding.resource_kind.as_ref() == BROWSER_RESOURCE_KIND);
-    let binding = matches.next().cloned().ok_or_else(|| {
-        AppError::UnprocessableEntity(
-            "The frozen AgentSession has no Browser Resource binding.".into(),
-        )
-        .into_response()
-    })?;
-    if matches.next().is_some() {
-        return Err(AppError::UnprocessableEntity(
-            "The frozen AgentSession has multiple Browser Resource bindings.".into(),
-        )
-        .into_response());
-    }
-    Ok(binding)
 }
 
 async fn close(
@@ -312,59 +170,42 @@ async fn close(
     Path(agent_session_id): Path<String>,
     Json(request): Json<CloseRequest>,
 ) -> Result<Json<ApiResponse<()>>, Response> {
-    let (authority, _) = state.authority(&user, &agent_session_id).await?;
-    match authority.resource().provider().kind() {
-        BrowserProviderKind::Managed => {
-            state
-                .require_service()
-                .map_err(IntoResponse::into_response)?
-                .clone()
-                .close_idle(authority.key(), request.runtime_generation)
-                .await
-                .map_err(|error| BrowserApiError(error).into_response())?;
+    state.require_user_session(&user, &agent_session_id).await?;
+    let operation_lock = state.operation_locks.entry(agent_session_id.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(()))).clone();
+    let fence = operation_lock.write_owned().await;
+    tokio::spawn(async move {
+        let _fence = fence;
+        let observation = state.require_user_session(&user, &agent_session_id).await?;
+        if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+            return Err(BrowserApiError(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)).into_response());
         }
-        BrowserProviderKind::AttachedChrome => {
-            return Err(BrowserApiError(WorkspaceError::UnsupportedAction).into_response());
-        }
-    }
-    Ok(Json(ApiResponse::ok(())))
+        state.close_owner.close_user_workspace(&user.id.to_string(), &agent_session_id, request.runtime_generation)
+            .await.map_err(|error| BrowserApiError(error).into_response())?;
+        Ok(Json(ApiResponse::ok(())))
+    }).await.map_err(|_| BrowserApiError(WorkspaceError::Admission(RunAdmissionError::WorkerFailed)).into_response())?
 }
 
 async fn snapshot(
     State(state): State<BrowserResourceApiState>,
     Extension(user): Extension<CurrentUser>,
     Path(agent_session_id): Path<String>,
-) -> Result<Json<ApiResponse<BrowserResourceSnapshot>>, Response> {
-    let (authority, ephemeral) = state.authority(&user, &agent_session_id).await?;
-    let snapshot = match authority.resource().provider().kind() {
-        BrowserProviderKind::Managed => match state
-            .require_service()
-            .map_err(IntoResponse::into_response)?
-            .get(&authority)
-            .await
-            .map_err(|error| BrowserApiError(error).into_response())?
-        {
-            Some(resource) => resource
-                .snapshot()
-                .await
-                .map_err(|error| BrowserApiError(error).into_response())?,
-            None => inactive_snapshot(&authority),
+) -> Result<Json<ApiResponse<BrowserUserSnapshot>>, Response> {
+    let observation = state.require_user_session(&user, &agent_session_id).await?;
+    let workspace = state.require_service().map_err(IntoResponse::into_response)?
+        .get_for_agent_session(&user.id.to_string(), &agent_session_id).await
+        .map_err(|error| BrowserApiError(error).into_response())?;
+    let mut snapshot = match workspace {
+        Some(workspace) => workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?,
+        None => BrowserUserSnapshot {
+            agent_session_id, browser_id: "managed-browser".to_owned(),
+            run: BrowserRunSnapshot { revision: 0, input_state: BrowserInputState::UserReady, input_gate_failed: false },
+            runtime: None,
         },
-        BrowserProviderKind::AttachedChrome => {
-            crate::browser_workspace_provider::bind_authorized_resource(
-                state.resources.clone(),
-                state.attached_chrome.clone(),
-                &state.data_dir,
-                authority,
-                ephemeral,
-            )
-            .await
-            .map_err(IntoResponse::into_response)?
-            .snapshot()
-            .await
-            .map_err(|error| BrowserApiError(error).into_response())?
-        }
     };
+    if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+        snapshot.run.input_state = BrowserInputState::AgentRunning;
+    }
     Ok(Json(ApiResponse::ok(snapshot)))
 }
 
@@ -372,11 +213,9 @@ async fn ensure(
     State(state): State<BrowserResourceApiState>,
     Extension(user): Extension<CurrentUser>,
     Path(agent_session_id): Path<String>,
-) -> Result<Json<ApiResponse<BrowserResourceSnapshot>>, Response> {
-    let resource = state.bind_resource(&user, &agent_session_id).await?;
-    Ok(Json(ApiResponse::ok(resource.snapshot().await.map_err(
-        |error| BrowserApiError(error).into_response(),
-    )?)))
+) -> Result<Json<ApiResponse<BrowserUserSnapshot>>, Response> {
+    let workspace = state.user_workspace(&user, &agent_session_id, true).await?;
+    Ok(Json(ApiResponse::ok(workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?)))
 }
 
 async fn command(
@@ -384,33 +223,10 @@ async fn command(
     Extension(user): Extension<CurrentUser>,
     Path(agent_session_id): Path<String>,
     Json(command): Json<BrowserTabCommand>,
-) -> Result<Json<ApiResponse<BrowserResourceSnapshot>>, Response> {
-    let resource = state.bind_resource(&user, &agent_session_id).await?;
-    let snapshot = resource
-        .user_command(command)
-        .await
-        .map_err(|error| BrowserApiError(error).into_response())?;
-    Ok(Json(ApiResponse::ok(snapshot)))
-}
-
-fn inactive_snapshot(authority: &BrowserSessionAuthority) -> BrowserResourceSnapshot {
-    BrowserResourceSnapshot {
-        agent_session_id: authority.agent_session_id().to_owned(),
-        resource_binding_id: authority.resource().binding_id().to_owned(),
-        provider_id: authority.resource().provider().provider_id().to_owned(),
-        provider_kind: authority.resource().provider().kind(),
-        allowed_actions: nomifun_browser_platform::product::BrowserCapabilityAction::all()
-            .into_iter()
-            .filter(|action| authority.authorize(*action).is_ok())
-            .map(|action| action.action_id().to_owned())
-            .collect(),
-        run: BrowserRunSnapshot {
-            revision: 0,
-            input_state: BrowserInputState::UserReady,
-            input_gate_failed: false,
-        },
-        runtime: None,
-    }
+) -> Result<Json<ApiResponse<BrowserUserSnapshot>>, Response> {
+    let workspace = state.user_workspace(&user, &agent_session_id, false).await?;
+    workspace.user_command(command).await.map_err(|error| BrowserApiError(error).into_response())?;
+    Ok(Json(ApiResponse::ok(workspace.snapshot().await.map_err(|error| BrowserApiError(error).into_response())?)))
 }
 
 async fn attached_snapshot(

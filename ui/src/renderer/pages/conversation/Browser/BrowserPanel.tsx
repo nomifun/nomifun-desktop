@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
-import { Add, ArrowLeft, ArrowRight, Close, Earth, Info, Lock, Refresh } from '@icon-park/react';
-import { browserClient, browserCommandAction, navigationUrl, newerSnapshot, type AttachedProviderState, type BrowserClient, type BrowserCommand, type BrowserSnapshot, type SurfaceBounds, type BrowserShortcut, type BrowserShortcutAction } from './client';
+import { Add, ArrowLeft, ArrowRight, Close, Earth, Lock, Refresh } from '@icon-park/react';
+import { browserClient, navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserSnapshot, type SurfaceBounds, type BrowserShortcut, type BrowserShortcutAction } from './client';
 import { browserShortcut } from './keyboardShortcuts';
 import styles from './BrowserPanel.module.css';
 import type { BrowserLinkRequest } from './BrowserLinkContext';
@@ -13,8 +13,8 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 
 type Props = { agentSessionId: string; onClose: () => void; client?: BrowserClient; linkRequest?: BrowserLinkRequest; onLinkConsumed?: (id: number, handled: boolean) => void; onLinkAvailabilityChange?: (available: boolean) => void; hostSurfaceAvailable?: boolean; panelId?: string };
-type BrowserFailureKind = 'capability' | 'provider' | 'host' | 'request' | 'clear';
-type BrowserFailure = { kind: BrowserFailureKind; message: 'browserWorkspace.hostUnavailableHint' | 'browserWorkspace.requestFailed' | 'browserWorkspace.clearSiteDataFailed'; retryable: boolean };
+type BrowserFailureKind = 'host' | 'initialization' | 'locked' | 'request' | 'clear';
+type BrowserFailure = { kind: BrowserFailureKind; message: 'browserWorkspace.hostUnavailableHint' | 'browserWorkspace.requestFailed' | 'browserWorkspace.clearSiteDataFailed' | 'browserWorkspace.initializationFailed' | 'browserWorkspace.stopHint'; retryable: boolean };
 const ZOOM_LEVELS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200] as const;
 
 export function browserFailure(reason: unknown): BrowserFailure {
@@ -23,13 +23,11 @@ export function browserFailure(reason: unknown): BrowserFailure {
   if (code === 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' || http?.status === 501) {
     return { kind: 'host', message: 'browserWorkspace.hostUnavailableHint', retryable: false };
   }
-  if (code === 'PROVIDER_UNAVAILABLE' || code === 'BROWSER_PROVIDER_ERROR' || http?.status === 422) {
-    return { kind: 'provider', message: 'browserWorkspace.requestFailed', retryable: true };
+  if (code === 'BROWSER_NATIVE_INITIALIZATION_FAILED') {
+    return { kind: 'initialization', message: 'browserWorkspace.initializationFailed', retryable: false };
   }
-  if ((code === 'FORBIDDEN' || code === 'BROWSER_ACTION_DENIED') && !http?.authExpired) {
-    return { kind: 'capability', message: 'browserWorkspace.requestFailed', retryable: false };
-  }
-  return { kind: 'request', message: 'browserWorkspace.requestFailed', retryable: true };
+  if (code === 'BROWSER_USER_INPUT_LOCKED') return { kind: 'locked', message: 'browserWorkspace.stopHint', retryable: true };
+  return { kind: 'request', message: 'browserWorkspace.requestFailed', retryable: http?.status !== 403 };
 }
 
 export default function BrowserPanel({ agentSessionId, onClose, client = browserClient, linkRequest, onLinkConsumed, onLinkAvailabilityChange, hostSurfaceAvailable = true, panelId }: Props) {
@@ -43,8 +41,6 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const [draftTab, setDraftTab] = useState(false);
   const [notice, setNotice] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
-  const [authorityOpen, setAuthorityOpen] = useState(false);
-  const [attachedState, setAttachedState] = useState<AttachedProviderState | null>(null);
   const consumedLink = useRef<BrowserLinkRequest | undefined>(undefined);
   const slot = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -59,10 +55,10 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const commandSequence = useRef(0);
   const shortcutHandler = useRef<(action: BrowserShortcutAction, source?: BrowserShortcut) => void>(() => {});
   const [confirmation, setConfirmation] = useState<{ kind: 'rebuild' | 'clear_site_data'; agentSessionId: string; generation: number } | null>(null);
-  useEffect(() => { setConfirmation(null); setMenuOpen(false); setAuthorityOpen(false); }, [agentSessionId]);
+  useEffect(() => { setConfirmation(null); setMenuOpen(false); }, [agentSessionId]);
   currentAgentSession.current = agentSessionId;
   draft.current = draftTab;
-  useEffect(() => { requestLayout.current(); }, [draftTab, authorityOpen]);
+  useEffect(() => { requestLayout.current(); }, [draftTab]);
   const tabs = snapshot?.runtime?.tabs ?? [];
   const downloads = snapshot?.runtime?.downloads ?? [];
   const active = tabs.find(tab => tab.target.tab_id === snapshot?.runtime?.active_tab_id);
@@ -78,13 +74,12 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   );
   const dialog = active?.script_dialog;
   const locked = snapshot?.run.input_state === 'agent_running';
-  const attachedProvider = snapshot?.provider_kind === 'attached_chrome';
-  const controlsDisabled = !snapshot || attachedProvider || locked || snapshot.run.input_gate_failed || busy || Boolean(failure);
-  const canNavigate = !controlsDisabled && Boolean(snapshot?.allowed_actions.includes('browser/navigate'));
+  const controlsDisabled = !snapshot || locked || snapshot.run.input_gate_failed || busy || Boolean(failure);
+  const canNavigate = !controlsDisabled;
   const canZoom = canNavigate && Boolean(active) && !draftTab;
-  const canAct = !controlsDisabled && Boolean(snapshot?.allowed_actions.includes('browser/act'));
-  const canDownload = !controlsDisabled && Boolean(snapshot?.allowed_actions.includes('browser/download'));
-  const canAcceptLinks = hostSurfaceAvailable && snapshot?.provider_kind === 'managed' && canNavigate;
+  const canAct = !controlsDisabled;
+  const canDownload = !controlsDisabled;
+  const canAcceptLinks = hostSurfaceAvailable && canNavigate;
   useEffect(() => {
     onLinkAvailabilityChange?.(Boolean(canAcceptLinks));
     return () => onLinkAvailabilityChange?.(false);
@@ -103,16 +98,16 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
 
   useEffect(() => { if (!draftTab) setAddress(active?.url === 'about:blank' ? '' : active?.url ?? ''); }, [active?.url, active?.target.tab_id, draftTab]);
   useEffect(() => {
-    if (snapshot?.provider_kind !== 'managed' || tabs.length !== 0 || locked || snapshot.run.input_gate_failed || failure) return;
+    if (!snapshot || tabs.length !== 0 || locked || snapshot.run.input_gate_failed || failure) return;
     if (focusedEmptySession.current === agentSessionId) return;
     focusedEmptySession.current = agentSessionId;
     input.current?.focus();
-  }, [agentSessionId, failure, locked, snapshot?.provider_kind, snapshot?.run.input_gate_failed, tabs.length]);
+  }, [agentSessionId, failure, locked, snapshot?.run.input_gate_failed, tabs.length]);
 
   useEffect(() => {
     if (!hostSurfaceAvailable) {
       setSnapshot(null); setAddress(''); setBusy(false); setNotice(''); setClearFailed(false);
-      setAttachedState(null); ++commandSequence.current;
+      ++commandSequence.current;
       blocked.current = true;
       setFailure({ kind: 'host', message: 'browserWorkspace.hostUnavailableHint', retryable: false });
       return () => { requestLayout.current = () => {}; hide.current = () => {}; };
@@ -120,12 +115,10 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     let disposed = false;
     let attachment: number | undefined;
     let initialized = false;
-    let nativeSurface = false;
     let attaching = false;
     let frame = 0;
     let sequence = 0;
     let measurement = 0;
-    let providerTimer: number | undefined;
     let lastLayout = '';
     let lastBounds: SurfaceBounds = { x: 0, y: 0, width: 1, height: 1 };
     const measure = async () => {
@@ -165,7 +158,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     };
     const refresh = async () => {
       const issued = ++measurement;
-      if (disposed || !initialized || !nativeSurface) return;
+      if (disposed || !initialized) return;
       try {
         const bounds = await measure();
         if (disposed || issued !== measurement) return;
@@ -204,7 +197,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     window.addEventListener('scroll', schedule, true);
     document.addEventListener('visibilitychange', schedule);
     setFailure(null);
-    setSnapshot(null); setAddress(''); setBusy(false); setNotice(''); setClearFailed(false); setAttachedState(null); ++commandSequence.current;
+    setSnapshot(null); setAddress(''); setBusy(false); setNotice(''); setClearFailed(false); ++commandSequence.current;
     blocked.current = false;
     void (async () => {
       try {
@@ -212,43 +205,13 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
         if (disposed) return;
         setSnapshot(current => newerSnapshot(current, initial));
         initialized = true;
-        nativeSurface = initial.provider_kind === 'managed';
-        if (nativeSurface) schedule();
-        else {
-          const verifyAttached = async () => {
-            try {
-              const provider = await client.attachedProvider();
-              if (disposed) return false;
-              if (!provider || provider.state !== 'connected') {
-                setAttachedState(provider?.state ?? 'connection_lost');
-                setFailure({ kind: 'provider', message: 'browserWorkspace.requestFailed', retryable: true });
-                return false;
-              }
-              setAttachedState(provider.state);
-              return true;
-            } catch {
-              if (!disposed) {
-                setAttachedState(null);
-                setFailure({ kind: 'provider', message: 'browserWorkspace.requestFailed', retryable: true });
-              }
-              return false;
-            }
-          };
-          if (await verifyAttached() && !disposed) {
-            providerTimer = window.setInterval(() => {
-              void verifyAttached().then(connected => {
-                if (!connected && providerTimer !== undefined) window.clearInterval(providerTimer);
-              });
-            }, 3000);
-          }
-        }
+        schedule();
       } catch (reason) { if (!disposed) setFailure(browserFailure(reason)); }
     })();
     return () => {
       disposed = true;
       ++commandSequence.current;
       cancelAnimationFrame(frame);
-      if (providerTimer !== undefined) window.clearInterval(providerTimer);
       resized.disconnect(); overlays.disconnect();
       window.removeEventListener('resize', schedule);
       window.removeEventListener('scroll', schedule, true);
@@ -261,13 +224,6 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
 
   const run = useCallback(async (command: BrowserCommand, fromLink = false) => {
     if (controlsDisabled) return;
-    // Human tab close accepts either navigation or interaction authority.
-    const allowed = snapshot?.allowed_actions.includes(browserCommandAction(command))
-      || (command.command === 'close' && snapshot?.allowed_actions.includes('browser/navigate'));
-    if (!allowed) {
-      setNotice(t('browserWorkspace.actionUnavailableHint'));
-      return;
-    }
     const issued = ++commandSequence.current;
     const current = () => currentAgentSession.current === agentSessionId && commandSequence.current === issued;
     setBusy(true);
@@ -289,7 +245,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       else { blocked.current = true; hide.current(); setFailure(browserFailure(reason)); }
     } }
     finally { if (current()) setBusy(false); }
-  }, [client, agentSessionId, controlsDisabled, snapshot?.allowed_actions, t]);
+  }, [client, agentSessionId, controlsDisabled, t]);
   shortcutHandler.current = (action, source) => {
     if (controlsDisabled || confirmation || dialog || permission) return;
     if (source && (draftTab || source.agent_session_id !== agentSessionId || !active ||
@@ -329,7 +285,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   }, [canAcceptLinks, linkRequest, onLinkConsumed, snapshot, failure, controlsDisabled, tabs, run, t]);
   const navigate = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!canNavigate) { setNotice(t('browserWorkspace.actionUnavailableHint')); return; }
+    if (!canNavigate) { setNotice(t('browserWorkspace.requestFailed')); return; }
     const url = navigationUrl(input.current?.value ?? address);
     if (!url) { input.current?.setCustomValidity(t('browserWorkspace.invalidUrl')); input.current?.reportValidity(); return; }
     const command: BrowserCommand = active && !draftTab ? { command: 'navigate', target: active.target, url } : { command: 'create', url };
@@ -378,28 +334,11 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   };
 
   const browserTitle = t('settings.openCapabilities.domainBrowserTitle', { defaultValue: 'Browser' });
-  const providerLabel = snapshot?.provider_kind === 'attached_chrome'
-    ? t('browserWorkspace.provider.attachedChrome', { defaultValue: 'Authorized Chrome' })
-    : t('browserWorkspace.provider.managed', { defaultValue: 'Built-in isolated browser' });
-  const failureTitle = failure?.kind === 'capability'
-    ? t('browserWorkspace.capabilityUnavailableTitle', { defaultValue: 'Browser capability unavailable' })
-    : failure?.kind === 'provider'
-      ? t('browserWorkspace.providerUnavailableTitle', { defaultValue: 'Browser provider unavailable' })
-      : t('browserWorkspace.unavailable');
-  const failureHint = failure?.kind === 'capability'
-    ? t('browserWorkspace.capabilityUnavailableHint', { defaultValue: "This session's Agent does not include Browser. Enable the Browser module in Agent Workbench, then start a new session." })
-    : failure?.kind === 'provider'
-      ? t('browserWorkspace.providerUnavailableHint', { defaultValue: 'The Browser module is enabled, but its selected provider is not connected. Check the provider and retry.' })
-      : failure?.kind === 'host'
-        ? t('browserWorkspace.surfaceUnavailableHint', { defaultValue: 'This device cannot present the selected Browser provider.' })
-        : failure ? t(failure.message) : '';
-  const limitedActions = snapshot?.provider_kind === 'managed'
-    && (!snapshot.allowed_actions.includes('browser/navigate')
-      || !snapshot.allowed_actions.includes('browser/act')
-      || !snapshot.allowed_actions.includes('browser/download'));
-  useEffect(() => { if (!limitedActions) setAuthorityOpen(false); }, [limitedActions]);
-  const authorityHintId = `${panelId ?? 'agent-session-browser'}-authority-hint`;
-  const showAuthority = () => { hide.current(); setAuthorityOpen(true); };
+  const providerLabel = t('browserWorkspace.provider.managed', { defaultValue: 'Built-in isolated browser' });
+  const failureTitle = t(failure?.kind === 'locked' ? 'browserWorkspace.agentRunning' : 'browserWorkspace.unavailable');
+  const failureHint = failure?.kind === 'host'
+    ? t('browserWorkspace.surfaceUnavailableHint')
+    : failure ? t(failure.message) : '';
   const changeZoom = (percent: number) => {
     if (!canZoom || !active) return;
     setMenuOpen(false);
@@ -466,14 +405,6 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       <button className={styles.icon} type='button' disabled={!canNavigate || !active?.can_go_forward} aria-label={t('browserWorkspace.forward')} onClick={() => active && void run({ command: 'forward', target: active.target })}><ArrowRight size={16} /></button>
       <button className={styles.icon} type='button' disabled={!canNavigate || !active} aria-label={t(active?.lifecycle === 'loading' ? 'browserWorkspace.stopLoading' : 'browserWorkspace.reload')} onClick={() => active && void run({ command: active.lifecycle === 'loading' ? 'stop_loading' : 'reload', target: active.target })}>{active?.lifecycle === 'loading' ? <Close size={15} /> : <Refresh size={15} />}</button>
       <input ref={input} value={address} disabled={!canNavigate} placeholder={t('browserWorkspace.addressPlaceholder')} aria-label={t('browserWorkspace.address')} onChange={event => { event.target.setCustomValidity(''); setAddress(event.target.value); }} spellCheck={false} autoComplete='off' />
-      {limitedActions && <div className={styles.authorityHost} onMouseEnter={showAuthority} onMouseLeave={() => setAuthorityOpen(false)} onFocus={showAuthority} onBlur={() => setAuthorityOpen(false)}>
-        <button type='button' className={`${styles.icon} ${styles.authorityTrigger}`} aria-label={t('browserWorkspace.limitedAccessStatus')} aria-describedby={authorityOpen ? authorityHintId : undefined} onKeyDown={event => {
-          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setAuthorityOpen(false); }
-        }}><Info size={15} /></button>
-        {authorityOpen && <div id={authorityHintId} className={styles.authorityPopover} role='tooltip'><div className={styles.authorityContent}>
-          <strong>{t('browserWorkspace.limitedAccessStatus')}</strong><span>{providerLabel}</span><p>{t('browserWorkspace.limitedAccessHint')}</p>
-        </div></div>}
-      </div>}
       <div className={styles.menuHost}>
         <button ref={menuButton} type='button' className={styles.icon} aria-label={t('browserWorkspace.menu')} aria-haspopup='menu' aria-expanded={menuOpen} disabled={!snapshot?.runtime || busy || (locked && !snapshot.run.input_gate_failed)} onClick={() => setMenuOpen(open => !open)} onKeyDown={event => {
           if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
@@ -491,8 +422,8 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
           <div className={styles.menuDivider} />
           <button type='button' role='menuitem' disabled={controlsDisabled || draftTab || !active?.url} onClick={() => { setMenuOpen(false); void copyAddress(); }}>{t('browserWorkspace.copyAddress')}</button>
           <button type='button' role='menuitem' disabled={!canAct || draftTab || !active || !/^https?:\/\//i.test(active.url)} onClick={() => { setMenuOpen(false); if (active && !draftTab) void run({ command: 'open_external', target: active.target }); }}>{t('browserWorkspace.openExternal')}</button>
-          <button type='button' role='menuitem' disabled={!canDownload || snapshot?.provider_kind !== 'managed'} onClick={() => { setMenuOpen(false); if (snapshot?.runtime) void run({ command: 'open_downloads', runtime_generation: snapshot.runtime.runtime_generation }); }}>{t('browserWorkspace.openDownloads')}</button>
-          <button type='button' role='menuitem' disabled={!canAct || !active || draftTab || snapshot?.provider_kind !== 'managed'} onClick={() => {
+          <button type='button' role='menuitem' disabled={!canDownload} onClick={() => { setMenuOpen(false); if (snapshot?.runtime) void run({ command: 'open_downloads', runtime_generation: snapshot.runtime.runtime_generation }); }}>{t('browserWorkspace.openDownloads')}</button>
+          <button type='button' role='menuitem' disabled={!canAct || !active || draftTab} onClick={() => {
             setMenuOpen(false);
             if (!controlsDisabled && active && !draftTab && snapshot?.runtime) setConfirmation({ kind: 'clear_site_data', agentSessionId, generation: snapshot.runtime.runtime_generation });
           }}>{t('browserWorkspace.clearSiteDataTitle')}</button>
@@ -511,14 +442,14 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
           </div>
           <div className={styles.menuDivider} />
           <button type='button' role='menuitem' disabled={!canAct || tabs.length === 0} onClick={() => { setMenuOpen(false); if (snapshot?.runtime && tabs.length > 0) void run({ command: 'close_all', runtime_generation: snapshot.runtime.runtime_generation }); }}>{t('browserWorkspace.closeAllPages')}</button>
-          <button type='button' role='menuitem' disabled={snapshot?.provider_kind !== 'managed'} onClick={() => { setMenuOpen(false); rebuild(); }}>{t('browserWorkspace.rebuild')}</button>
+          <button type='button' role='menuitem' disabled={false} onClick={() => { setMenuOpen(false); rebuild(); }}>{t('browserWorkspace.rebuild')}</button>
         </div>}
       </div>
     </form>
-    {!limitedActions && <div className={styles.status} role='status' aria-live='polite'>
-      <span className={styles.state}><span className={styles.dot} data-locked={locked} />{t(failure || snapshot?.run.input_gate_failed ? 'browserWorkspace.notReady' : !snapshot || (attachedProvider && attachedState !== 'connected') ? 'browserWorkspace.opening' : locked ? 'browserWorkspace.agentRunning' : attachedProvider ? 'browserWorkspace.attachedChromeStatus' : 'browserWorkspace.userReady')}</span>
-      {snapshot && <span className={styles.provider} data-kind={snapshot.provider_kind}>{providerLabel}</span>}
-    </div>}
+    <div className={styles.status} role='status' aria-live='polite'>
+      <span className={styles.state}><span className={styles.dot} data-locked={locked} />{t(failure || snapshot?.run.input_gate_failed ? 'browserWorkspace.notReady' : !snapshot ? 'browserWorkspace.opening' : locked ? 'browserWorkspace.agentRunning' : 'browserWorkspace.userReady')}</span>
+      {snapshot && <span className={styles.provider} data-kind='managed'>{providerLabel}</span>}
+    </div>
     {locked && <div className={styles.runLock} role='status'><Lock size={15} /><span><strong>{t('browserWorkspace.agentRunning')}</strong>{t('browserWorkspace.stopHint')}</span></div>}
     {snapshot?.run.input_gate_failed && <div className={styles.runLock} data-error role='alert'><Lock size={15} /><span><strong>{t('browserWorkspace.notReady')}</strong>{t('browserWorkspace.requestFailed')}</span></div>}
     {notice && <div className={styles.notice} role='status'><span>{notice}</span><button type='button' className={styles.icon} aria-label={t('browserWorkspace.dismissNotice')} onClick={() => setNotice('')}><Close size={12} /></button></div>}
@@ -533,12 +464,11 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       <button type='button' disabled={!canAct} onClick={() => void run({ command: 'permission', target: active.target, request_id: permission.request_id, allow: false })}>{t('browserWorkspace.permissionDeny')}</button>
       <button type='button' disabled={!canAct} onClick={() => void run({ command: 'permission', target: active.target, request_id: permission.request_id, allow: true })}>{t('browserWorkspace.permissionAllow')}</button></div>
     </div>}
-    <div ref={slot} className={styles.surface} data-browser-surface data-provider={snapshot?.provider_kind} aria-busy={!snapshot && !failure}>
+    <div ref={slot} className={styles.surface} data-browser-surface data-provider='managed' aria-busy={!snapshot && !failure}>
       {dialog && !draftTab && !failure && <WebsiteDialog key={`${agentSessionId}:${dialog.request_id}`} dialog={dialog} locked={Boolean(!canAct || locked || snapshot?.run.input_gate_failed)} busy={busy} onReply={command => void run(command)} />}
       {failure ? <div className={styles.empty} role='alert'><Earth size={28} /><strong>{failureTitle}</strong><p>{failureHint}</p>{failure.retryable && <button type='button' onClick={() => clearFailed ? rebuild() : setRetry(value => value + 1)}>{t(clearFailed ? 'browserWorkspace.rebuild' : 'browserWorkspace.retry')}</button>}</div>
         : !snapshot ? <div className={styles.empty} role='status'><span className={styles.loadingMark} aria-hidden='true' /><strong>{t('browserWorkspace.opening')}</strong><p>{t('browserWorkspace.loadingHint', { defaultValue: "Checking this session's Browser access and provider…" })}</p></div>
-          : snapshot.provider_kind === 'attached_chrome' && !draftTab ? <div className={`${styles.empty} ${styles.providerEmpty}`}><Earth size={30} /><strong>{providerLabel}</strong><p>{t('browserWorkspace.attachedChromeHint', { defaultValue: 'Pages stay in your authorized Chrome while the Agent and this panel use the same bound Browser resource.' })}</p></div>
-            : (tabs.length === 0 || draftTab) && <div className={styles.empty}><Earth size={30} /><strong>{t('browserWorkspace.start')}</strong><p>{t('browserWorkspace.capabilityStartHint', { defaultValue: 'Enter an address above. This Browser resource belongs to the current session and is shared with its Agent.' })}</p></div>}
+          : (tabs.length === 0 || draftTab) && <div className={styles.empty}><Earth size={30} /><strong>{t('browserWorkspace.start')}</strong><p>{t('browserWorkspace.capabilityStartHint', { defaultValue: 'Enter an address above. This Browser resource belongs to the current session and is shared with its Agent.' })}</p></div>}
     </div>
   </section>;
 }

@@ -1,24 +1,41 @@
 # Browser Workspace 浏览器工作区
 
-> 当前源码仍按 Conversation BrowserWorkspace 工作；该产品模型已进入整改计划。
-> 目标是删除“会话浏览器”专属入口，把底层 Workspace 作为任意获授权 AgentSession 的
-> Browser Resource，并将 attached Chrome 收敛为同一 `browser` Module 的 Provider。
-> 实施范围见 [Agent Session 当前架构](agent-session.zh.md)“Browser 产品模型纠正”。
-
-状态：Browser Workspace v2 实施中。[批准的设计](../specs/2026-09-13-browser-workspace-v2.zh.md)定义完整目标，[实施记录](../specs/2026-09-13-browser-workspace-v2-progress.zh.md)列出已取得的证据与剩余工作。
+当前开发合同由本文、[Agent Session 当前架构](agent-session.zh.md)及源码共同定义。
+内置侧栏浏览器是用户工作区；Agent Browser Use 是对该工作区或已授权 Chrome 的受限工具入口。
 
 ## 产品边界
 
-浏览器属于会话，通过该会话工作区的“浏览器”按钮打开。旧全局浏览器管理页、设置 Tab、侧栏库存与轮询、旧浏览器设置重定向均已移除；不为这些 UI 路径保留迁移或兼容入口。
+内置浏览器由 Browser domain 按已认证用户与同一个 canonical AgentSession 持有。点击会话右侧的浏览器按钮
+即可人工浏览，不要求当前 Agent 启用 Browser Module、配置 Provider 或已有 Browser Resource binding。
+打开、重试与用户地址栏命令不写入 Agent binding，不赋予 Agent 工具权限，也不新建第二个 Session。
+旧全局浏览器管理页、设置 Tab、侧栏库存和浏览器设置重定向仍保持退役。
 
 页面由原生嵌入 WebView 承载，不使用 iframe、截图流、canvas viewer 或 JPEG 传输充当浏览器。用户和 Agent 操作同一个真实页面。Agent 工作期间，原生用户输入及会改变页面的浏览器栏操作被锁定；必须先停止运行、等待在途操作完成清理，再恢复用户输入。没有用户接管或交还状态。
 
-隐藏浏览器面板不销毁标签页。更换 Provider 时，不能静默复用绑定于另一份 exact Provider 的 Workspace。
+隐藏面板不销毁标签页。同一用户与 Session 只持有一个 managed 原生 runtime、Profile 和输入协调器；
+Agent 的资源定义 ID 改变不会选择新页面或 Profile。`BrowserResource` 只封装 frozen Agent authority，
+指向用户已经打开的同一个 `BrowserWorkspace`。每个 Agent operation 仍校验 frozen Actions、exact Provider、
+typed Resource binding 和当前 BrowserRunGuard。没有该授权的 Agent 无法观察或操作用户网页。
+Agent 选择 attached Chrome 不改变用户的内置浏览器，也不会把用户浏览器按钮变成 Chrome 连接授权。
+不同 exact managed Provider 不能静默借用既有实体，必须明确重建原生浏览器。
 
-内嵌浏览器数据按已认证用户与会话隔离，不按项目共享。持久目录为 `browser-v2/conversations/<identity-hash>/`，
-临时或无 workspace 会话仍使用临时数据目录。用户入口和 Agent 入口调用同一个目录选择函数；项目路径不参与
-目录身份计算，也不要求项目目录存在。不另建 Profile 元数据文件，不迁移或读取旧项目共享目录。
-这是内嵌浏览器的边界，不改变独立 `nomi_system_browser` 使用用户已登录系统浏览器的能力。
+所有 Agent Turn（包括没有 Browser 工具的普通聊天及 attached Chrome Agent）均在 Runtime 预备阶段取得
+同 Session 内置浏览器的输入锁。实体创建本身不调用 `cef_initialize` 或创建 Context；运行中首次创建原生 child 时输入已禁用。
+canonical Turn 已进入 running、但输入锁尚未得到证明时，用户命令及首次打开明确拒绝，不能短暂显示 UserReady。
+预备失败或取消必须等待 retained owner 排空输入操作；settle 阶段保持硬件输入锁，只有 exact Turn 终态成功持久化后才 finish 并恢复用户输入。begin 未发出 guard 时也分为排空与终态后 failed-start recovery 两阶段，终态写入或下游清理失败不能提前解锁。
+
+终态提交与原生 final release 是不同的完成证据。终态已经写入而 release 失败时，SDK 重试必须核对
+同一 root 的 canonical receipt、原 Runtime terminal、delivery、Snapshot 与 route，再只重试 finish；
+不追加第二个终态、不把失败改成取消。执行代际为零的启动前取消仍使用独立的 exact cancellation witness。
+完整 Runtime teardown 成功后，Kernel 资源上下文只按对应实例的 Arc 身份退出 Weak cache；即使旧 handle 仍被持有，
+后继 Runtime 也不能复用已关闭上下文，迟到的旧 cleanup 不能驱逐新的实例。
+
+正式内置浏览器 Profile 固定按认证 owner 与 Session 隔离，持久目录为
+`browser-v4/agent-sessions/<identity-hash>/`。Profile namespace 为 `nomifun.browser.session-managed-profile.v2`，
+身份不含 Agent resource definition、项目路径或 Agent persistence 参数。旧 Profile 不读取、扫描或迁移。
+独立原生 conformance fixture 可以使用 Ephemeral Profile，不改变正式用户侧栏的策略。
+canonical Session 删除先关闭真实 runtime，再安全删除该 Session 的精确用户 Profile，即使它从未拥有 Agent Browser binding；
+重启后也按同一身份计算，无第二份 Profile/授权账本。已结算效果引用的 Agent 资源定义仍按 canonical 契约保留。
 
 内嵌浏览器不提供 F12、Inspect 或用户可见 DevTools 窗口。普通页、popup 与宿主维护 view 都显式
 禁用该入口，边界扫描防止重新开启。底层 WebView2 协议调用仍用于 Agent 观察、原生输入、
@@ -30,7 +47,14 @@ HTTP(S)，并且 Browser child 无 Tauri capability、local trust、backend cred
 后台 `nomi_local_websearch` / render 仍是不同消费者，保留严格公网 DNS/IP pinning，不与可见浏览器混用。
 
 浏览器菜单的“重新打开浏览器”需要明确确认：关闭所有网页并丢弃未保存网页内容，但不清空会话消息或项目文件。
-后端在会话空闲边界校验浏览器代际，先退出缓存的 Agent，再销毁旧 Workspace；正在启动/运行/收尾的 Agent 不会被这个入口取消。
+后端持有同一 Session 的 operation fence，在 canonical 空闲边界校验浏览器代际。
+没有原生 guard 时按普通空闲关闭处理；已经发出 guard 且 final unlock 失败时，必须确认同一 Operation 的
+canonical 终态、已完成的 native settlement 与对应旧 Workspace 身份，才允许确认关闭 exact generation。
+canonical running 或未完成的 settlement 仍明确拒绝，重建入口不取消活跃 Agent、不生成终态。
+`turn/paused` 保留同一 active Operation 与 native checkpoint 恢复权，不属于这里的最终终态。
+暂停时仍拒绝重建；用户须先经正式 Stop/cancel 终结该 Operation，并取得相应 Runtime 清理证明后再重开。
+旧 Workspace 的真实关闭证明供 SDK 随后确认既有终态并重试 final release；新的用户 Workspace 是另一代实体，
+不会被旧 owner cleanup 释放，模型不会重放、原终态不会改写。
 
 菜单已有“打开系统下载目录”，默认保存对话框也使用宿主解析的 OS Downloads 目录，不再默认 Home。
 用户另选保存位置仍由原生保存对话框决定，菜单不会声称该系统目录包含所有自选位置的文件。
@@ -38,7 +62,31 @@ HTTP(S)，并且 Browser child 无 Tauri capability、local trust、backend cred
 打开失败只显示轻量提示，不销毁当前网页、不自动重试。Windows 原生 OS handoff 与页面保留已有 smoke 证据，
 不将 OS 接受请求等同于完整 Explorer 视觉验收；macOS 实现仍后置。
 
+macOS 的 CEF 库加载与引擎初始化分为两个阶段。桌面进程入口先校验所属 `.app` 的 framework 与完整 helper
+布局，然后在 Tauri、Tokio 和其他宿主 worker 启动前，于启动主线程预加载固定 CEF 动态库。库 constructor
+会调整 macOS malloc zone；在 SQLite 等 worker 已分配内存后才加载，会引入 allocator race 与堆损坏。
+该库从预加载成功起一直 resident 到进程退出，不在关闭网页、`cef_shutdown` 或闲置宿主退出时卸载。
+
+预加载不调用 `cef_initialize`，不启动 guardian/helper，不创建 Context/Profile，也不触发 Keychain。
+首次真正需要原生 runtime 时，才在已经建立主应用的主线程安装 CefAppProtocol 并初始化 CEF，再由 retained owner
+持有 guardian、Context 与页面。没有使用过浏览器的宿主可直接结束闲置生命周期；使用过的宿主仍等待页面、
+Context、helper 与 native shutdown 的真实清理证明，再结束 guardian。库 resident 不替代这些资源的关闭证明，
+也不改变 canonical Session、Agent grant、RunGuard 或 exact Turn 终态后的用户输入恢复边界。
+
 ## 当前实现
+
+macOS 首次系统授权与完整 cold 验收仍未闭环。最新实机中，bootstrap 原生文档约 25 ms 达到 Ready，
+新 ad-hoc 签名应用的首次 persistent 导航仍出现 30 秒协议超时；同一 artifact 重启后的 cold 导航约 120 ms
+完成，原生测试与退出通过。独立 Ephemeral 对照导航可通过，但一次 shutdown worker 的栈明确停在
+`SecItemCopyMatching` / Keychain decrypt，等待超过 260 秒；runner 被迫清理，按失败记录，不作为退出成功证明。
+因此不能把暖启动、同 artifact 重启或部分 native 测试等同于所有新签名应用的首次 cold 成功。
+
+首次 Keychain 系统授权可能需要用户处理原生提示。开发构建反复 ad-hoc 重签会改变应用代码身份，可能增加
+重复授权或等待的风险；应由用户明确选择稳定开发签名身份。宿主不能自动挑选签名身份、代输入密码或修改
+钥匙串 ACL，也不能用加长超时、强杀 helper 或跳过待完成操作伪造成功。CEF 库预加载只处理 allocator 启动
+顺序，不处理 Keychain 授权；CEF 152 与已检查的 154 stable 未提供所需的官方 Keychain namespace 设置，
+当前实现不添加猜测的配置字段或以未验收升级替代问题定位。
+
 
 - 会话菜单已接用户专用站点数据清理：明确确认后关闭此会话网页，在相同 Profile 的短生命周期空白原生 controller
   上等待清理回调，再销毁该 controller；无其他站点浏览/工具能力，也不进入 Tab 列表。未知任务不按超时放行，
@@ -51,7 +99,7 @@ HTTP(S)，并且 Browser child 无 Tauri capability、local trust、backend cred
   本地搜索、原生搜索和 citation.render 时，两种工具名/Provider/引用 URL 保持独立。共存用例的本地搜索使用真实
   Chrome 公网结果，原生搜索使用本机协议夹具，不是远端 OpenAI 服务可用性或 GUI 验收。
 - 桌面宿主创建原生 child view，拥有视图生命周期和输入门。
-- BrowserWorkspace 将 Runtime/Tab 权限限定到已认证用户与 Conversation。
+- BrowserWorkspace 由已认证 owner 与 canonical Session 限定用户操作；Agent wrapper 单独校验其 exact 授权。
 - BrowserRunGuard 来自权威 Agent turn 生命周期，不接受 UI 或模型 JSON 创建/解除。
 - 元素引用包含 Runtime、文档和观察代际；原生操作消耗观察引用。
 - Nomi Browser Tool 受冻结的 capability set 和 exact Provider 限制。
