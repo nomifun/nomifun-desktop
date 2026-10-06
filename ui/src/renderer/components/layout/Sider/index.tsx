@@ -13,6 +13,7 @@ import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/s
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
+import { PLUGIN_FEATURE_VISIBLE } from '@renderer/utils/plugins/pluginFeatureAvailability';
 import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 import { FileText, FullScreen, PageTemplate } from '@icon-park/react';
 import SiderResourceEntry from './SiderNav/SiderResourceEntry';
@@ -269,13 +270,15 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleSkillsClick}
             />
-            <SiderPluginEntry
+            {PLUGIN_FEATURE_VISIBLE && <>
+              <SiderPluginEntry
                 isActive={pathname.startsWith('/plugins')}
                 collapsed={collapsed}
                 siderTooltipProps={siderTooltipProps}
                 onClick={handlePluginClick}
               />
-            <PluginPinnedEntries collapsed={collapsed} />
+              <PluginPinnedEntries collapsed={collapsed} />
+            </>}
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry
               isActive={pathname.startsWith('/mcp')}

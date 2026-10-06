@@ -3,7 +3,7 @@
     "createPrompt": "帮我创建一个插件",
     "templatePrompt": "请创建一个工具调用前拦截插件，使用 agent.before_tool 模板。先询问我希望采用的拦截规则，再实现、验证并保存。",
     "resumePrompt": "已授权草稿 {{id}} 的实际权限。请继续这个已有草稿，完成试运行、业务验证、安装与交付检查，不要新建草稿。",
-    "title": "创建插件与小程序",
+    "title": "创建插件与小程序（Beta）",
     "conversationHint": "使用当前默认 Agent，在此会话描述需求。系统将实现、验证、修复并保存可用插件。",
     "moduleNeeded": "请先在 Agent 工作台开启插件与小程序功能。",
     "editPrompt": "请继续修改插件 {{id}}，以版本 {{revision}} 为基线，先读取实现并等待我补充修改需求。",
@@ -70,7 +70,7 @@
     "trash": "移入回收站"
   },
   "workspace": {
-    "title": "插件与小程序",
+    "title": "插件与小程序（Beta）",
     "subtitle": "本机能力中心",
     "navigation": "插件工作区导航",
     "collapse": "收起插件导航",
@@ -109,7 +109,7 @@
     "draft": "请在桌面 App 中打开此草稿并继续编辑。"
   },
   "library": {
-    "title": "插件与小程序",
+    "title": "插件与小程序（Beta）",
     "subtitle": "App 与系统能力共用同一种 Package、一个本地身份、一个 DataRoot 和一套生命周期。",
     "search": "搜索插件与草稿",
     "loading": "正在加载插件…",

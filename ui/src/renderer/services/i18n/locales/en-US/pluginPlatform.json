@@ -3,7 +3,7 @@
     "createPrompt": "Help me create a plugin",
     "templatePrompt": "Create a before-tool guard using the agent.before_tool template. Ask for my guard rules first, then implement, verify and install it.",
     "resumePrompt": "The actual permissions for draft {{id}} have been approved. Continue this existing draft through preview, business verification, installation and delivery checks; do not create another draft.",
-    "title": "Create a plugin or small app",
+    "title": "Create a plugin or small app (Beta)",
     "conversationHint": "Describe the requirement here using your default Agent. It will implement, verify, repair and install a usable plugin.",
     "moduleNeeded": "Enable plugins and small apps in the Agent workbench first.",
     "editPrompt": "Continue editing plugin {{id}} from revision {{revision}}. Read the implementation first and wait for my requested changes.",
@@ -70,7 +70,7 @@
     "trash": "Move to trash"
   },
   "workspace": {
-    "title": "Plugins & Apps",
+    "title": "Plugins & Apps (Beta)",
     "subtitle": "Local capability center",
     "navigation": "Plugin workspace navigation",
     "collapse": "Collapse plugin navigation",
@@ -109,7 +109,7 @@
     "draft": "Open this draft in the desktop app to continue editing."
   },
   "library": {
-    "title": "Plugins & Apps",
+    "title": "Plugins & Apps (Beta)",
     "subtitle": "Apps and system capabilities share one package, identity, data root, and lifecycle.",
     "search": "Search plugins and drafts",
     "loading": "Loading plugins…",
