@@ -33,4 +33,9 @@ describe('IDMM control defaults', () => {
     expect(source.includes('if (embedded) return panel')).toBe(true);
     expect(source.includes("embedded ? 'min-w-0'")).toBe(true);
   });
+  test('keeps policy controls separate from decision history', () => {
+    expect(source.includes('recent_interventions')).toBe(false);
+    expect(source.includes('ipcBridge.idmm.setConfig')).toBe(true);
+    expect(source.includes('ipcBridge.idmm.evaluateNow')).toBe(true);
+  });
 });

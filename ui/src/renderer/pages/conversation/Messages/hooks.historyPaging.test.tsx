@@ -245,7 +245,7 @@ test('StrictMode effect replay never admits the first abandoned request', async 
 test('unmounting a history reader fences its pending page from a surviving message store', async () => {
   const h = mockHistoryTransport();
   let current: TMessage[] = [];
-  let loadOlder: () => Promise<void> = async () => {};
+  let loadOlder: ReturnType<typeof useMessageLstCache>['loadOlder'] = async () => false;
   const Loader = () => { loadOlder = useMessageLstCache(a).loadOlder; return null; };
   const Observer = () => { current = useMessageList(); return null; };
   const View = ({ active }: { active: boolean }) => (

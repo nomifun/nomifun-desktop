@@ -14,7 +14,36 @@
   "bypassModel": "旁路模型",
   "scanScope": "旁路阅读范围",
   "contextMessages": "最近消息数",
-  "recentActivity": "最近介入",
+  "explanation": {
+    "ruleSource": "规则值守",
+    "modelSource": "{{model}} 决策",
+    "bypassSource": "旁路模型",
+    "recoverySource": "自动恢复",
+    "showBasis": "决策依据",
+    "hideBasis": "收起依据",
+    "viewQuestion": "查看原问题",
+    "noBasis": "未记录简短依据",
+    "basis": {
+      "recommendedOption": "候选项有明确推荐的安全选项，按规则采用该项。",
+      "firstSafeOption": "按规则选择第一个通过安全检查的选项。",
+      "safeOption": "按规则采用通过安全检查的选项。",
+      "providerRecovery": "上一回合遇到可重试供应商故障，从现有上下文继续。",
+      "modelRecovery": "模型超过静默阈值，取消当前回合后恢复任务。",
+      "stalledTool": "工具仍无进展，为避免重复操作，等待人工处理。",
+      "recoveryLimit": "故障恢复达到配置上限，停止自动重试等待人工处理。",
+      "sensitiveInput": "问题涉及凭据、付款或权限，等待人工处理。",
+      "destructiveAnswer": "候选回答涉及不可逆操作，未自动发送。",
+      "unresolvedQuestion": "问题尚未确定，规则无法安全代答，等待人工确认。",
+      "bypassFailed": "旁路模型未返回有效决策，本次未自动发送答案。"
+    }
+  },
+  "notice": {
+    "waitingTitle": "此处需要人工决定",
+    "waitingDescription": "智能决策在这一步保留了问题，等待你补充信息或作出选择。",
+    "failedTitle": "此处的自动决策未完成",
+    "failedDescription": "智能决策未能为这一步提供可发送的回答；原问题和已完成的操作仍保留。",
+    "addInput": "补充输入"
+  },
   "mode": {
     "label": "值守模式",
     "off": "关闭",
@@ -30,7 +59,7 @@
   },
   "state": {
     "off": "已关闭",
-    "monitoring": "值守中",
+    "monitoring": "已启用",
     "intervening": "正在介入",
     "degraded": "介入失败"
   },

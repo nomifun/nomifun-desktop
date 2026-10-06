@@ -13,6 +13,7 @@
 /.tmp-*.out
 /.tmp-*.err
 /.tmp-*.txt
+/.tmp-idmm-demo-report.json
 # Local VMware HGFS/ext4 bind-mount rollback directories
 /*.hgfs-before-bind-*/
 Cargo.lock.bak

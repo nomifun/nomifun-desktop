@@ -7,6 +7,8 @@ export interface ChatMessageJumpDetail {
   msgId?: MessageId;
   align?: 'start' | 'center' | 'end';
   behavior?: 'auto' | 'smooth';
+  /** Explicit question references may request older canonical history pages. */
+  loadOlder?: boolean;
 }
 
 export function dispatchChatMessageJump(detail: ChatMessageJumpDetail) {

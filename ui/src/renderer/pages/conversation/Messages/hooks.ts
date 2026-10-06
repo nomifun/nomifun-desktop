@@ -19,6 +19,7 @@ import type {
   TMessage,
 } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
+import { normalizeIdmmDecisionExplanation, normalizeIdmmDecisionNotice } from '@/common/types/idmm';
 import { isConversationAgentTemplateKey } from '@/renderer/components/agent/conversationAgentCatalog';
 import {
   composeMessage,
@@ -246,6 +247,13 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
         }
         // User messages (right position) are complete — skip if already exists to prevent duplicates
         if (message.position === 'right') {
+          if (message.content.idmm_decision) {
+            const newList = list.slice();
+            newList[existingIdx] = { ...existingMsg, content: {
+              ...existingMsg.content, idmm_decision: message.content.idmm_decision,
+            } };
+            return newList;
+          }
           return list;
         }
         // Complete inter-Agent messages are not streaming chunks — skip if already present.
@@ -676,6 +684,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
         normalizeAgentStreamError({ ...parsed, message: parsed.content }))
       : undefined;
   const recovery = normalizeTruncatedTurnRecovery(parsed.recovery);
+  const notice = normalizeIdmmDecisionNotice(parsed.idmm_notice);
   const agentTransition = tipType === 'success' ? normalizeAgentTransition(parsed.agent_transition) : undefined;
   const startedAtMs =
     typeof parsed.started_at_ms === 'number' && Number.isFinite(parsed.started_at_ms) && parsed.started_at_ms > 0
@@ -694,6 +703,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       type: tipType,
       ...(structuredError ? { error: structuredError } : {}),
       ...(recovery ? { recovery } : {}),
+      ...(notice ? { idmm_notice: notice } : {}),
       ...(agentTransition ? { agent_transition: agentTransition } : {}),
       ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
       ...(finishedAtMs !== undefined ? { finished_at_ms: finishedAtMs } : {}),
@@ -702,7 +712,9 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
 };
 
 const normalizeDecodedTextMetadata = (parsed: Record<string, unknown>): Partial<IMessageText['content']> => {
+  const decision = normalizeIdmmDecisionExplanation(parsed.idmm_decision);
   const metadata: Partial<IMessageText['content']> = {
+    ...(decision ? { idmm_decision: decision } : {}),
     ...normalizeTextContinuation(parsed),
     ...(typeof parsed.display_at_ms === 'number' && Number.isFinite(parsed.display_at_ms) && parsed.display_at_ms > 0
       ? { display_at_ms: parsed.display_at_ms } : {}),
@@ -1050,9 +1062,11 @@ export const useMessageLstCache = (key: ConversationId) => {
     }
   }, [key, mergeIntoList, publishPaging, scope, setLoading]);
 
-  const loadOlder = useCallback(async (): Promise<void> => {
-    if (!scope.active || scope.loadingNewest || scope.older || !scope.hasMore || !scope.cursor) return;
+  /** True only when this request advanced the authoritative history page. */
+  const loadOlder = useCallback(async (): Promise<boolean> => {
+    if (!scope.active || scope.loadingNewest || scope.older || !scope.hasMore || !scope.cursor) return false;
     const revision = scope.revision;
+    const requestedCursor = scope.cursor;
     const request = {};
     const isCurrent = () => scope.active && scope.revision === revision && scope.older === request;
     scope.older = request;
@@ -1062,15 +1076,17 @@ export const useMessageLstCache = (key: ConversationId) => {
         conversation_id: key, cursor: scope.cursor,
         page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
       });
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
       scope.hasMore = Boolean(result.has_more) && messages.length > 0;
       if (messages.length) scope.cursor = messageCursorOf(messages[0]);
       // A refresh can leave previously loaded older pages in the list. Merge
       // chronologically instead of prepending a page into the wrong position.
       mergeIntoList(messages, revision);
+      return !scope.hasMore || scope.cursor !== requestedCursor;
     } catch (error) {
       if (isCurrent()) console.error('[useMessageLstCache] Failed to load older messages:', error);
+      return false;
     } finally {
       if (isCurrent()) {
         scope.older = null;

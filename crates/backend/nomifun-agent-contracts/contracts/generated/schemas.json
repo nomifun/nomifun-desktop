@@ -3243,6 +3243,222 @@
     "title": "ContributionLock",
     "type": "object"
   },
+  "idmm_decision_explanation": {
+    "$defs": {
+      "IdmmDecisionModel": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "type": "object"
+      },
+      "IdmmDecisionSource": {
+        "enum": [
+          "rule",
+          "bypass_model",
+          "recovery"
+        ],
+        "type": "string"
+      },
+      "IdmmQuestionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "sequence",
+          "fingerprint"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "intervention_id": {
+        "type": "string"
+      },
+      "model": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IdmmDecisionModel"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "question": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IdmmQuestionRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "rationale": {
+        "type": "string"
+      },
+      "reason_code": {
+        "type": "string"
+      },
+      "source": {
+        "$ref": "#/$defs/IdmmDecisionSource"
+      }
+    },
+    "required": [
+      "intervention_id",
+      "source",
+      "reason_code",
+      "rationale"
+    ],
+    "title": "IdmmDecisionExplanation",
+    "type": "object"
+  },
+  "idmm_decision_notice": {
+    "$defs": {
+      "IdmmDecisionExplanation": {
+        "additionalProperties": false,
+        "properties": {
+          "intervention_id": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IdmmDecisionModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "question": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IdmmQuestionRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/IdmmDecisionSource"
+          }
+        },
+        "required": [
+          "intervention_id",
+          "source",
+          "reason_code",
+          "rationale"
+        ],
+        "type": "object"
+      },
+      "IdmmDecisionModel": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "type": "object"
+      },
+      "IdmmDecisionNoticeStatus": {
+        "enum": [
+          "waiting_for_human",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "IdmmDecisionSource": {
+        "enum": [
+          "rule",
+          "bypass_model",
+          "recovery"
+        ],
+        "type": "string"
+      },
+      "IdmmQuestionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "sequence",
+          "fingerprint"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "created_at": {
+        "format": "int64",
+        "type": "integer"
+      },
+      "decision": {
+        "$ref": "#/$defs/IdmmDecisionExplanation"
+      },
+      "status": {
+        "$ref": "#/$defs/IdmmDecisionNoticeStatus"
+      }
+    },
+    "required": [
+      "decision",
+      "status",
+      "created_at"
+    ],
+    "title": "IdmmDecisionNotice",
+    "type": "object"
+  },
   "official_preset_seed": {
     "$defs": {
       "CapabilityRef": {

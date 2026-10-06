@@ -7,6 +7,7 @@ use nomifun_agent_contracts::{
     AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
+    IdmmDecisionExplanation, IdmmDecisionNotice,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload,
     CanonicalErrorRegistryPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
@@ -510,6 +511,8 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentBindingValue>(&mut schemas, "agent_binding")?;
     add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
+    add_schema::<IdmmDecisionExplanation>(&mut schemas, "idmm_decision_explanation")?;
+    add_schema::<IdmmDecisionNotice>(&mut schemas, "idmm_decision_notice")?;
     add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
     add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;

@@ -193,7 +193,9 @@ import type { SessionReasoningEffort } from '../types/reasoningEffort';
 import type {
   IIdmmConfig,
   IIdmmState,
+  IdmmDecisionExplanation,
 } from '../types/idmm';
+import { normalizeIdmmDecisionExplanation } from '../types/idmm';
 export type {
   IdmmInterventionKind,
   IdmmInterventionStatus,
@@ -906,6 +908,7 @@ const fromApiUserMessageCreatedEvent = (
   event: IUserMessageCreatedEvent
 ): IUserMessageCreatedEvent => ({
   ...event,
+  idmm_decision: normalizeIdmmDecisionExplanation(event.idmm_decision),
   conversation_id: parseConversationId(event.conversation_id),
   msg_id: parseMessageId(event.msg_id),
   companion_id:
@@ -3275,6 +3278,7 @@ export interface IResponseMessage {
  *  channel inbound messages — the companion window renders those as incoming
  *  bubble headers). Same companion wire markers as IResponseMessage. */
 export interface IUserMessageCreatedEvent {
+  idmm_decision?: IdmmDecisionExplanation;
   interaction?: import('../chat/chatLib').IMessageText['content']['interaction'];
   conversation_id: ConversationId;
   msg_id: MessageId;

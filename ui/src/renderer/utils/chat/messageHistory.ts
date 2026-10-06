@@ -15,6 +15,7 @@ export function getConversationInputHistory(messages: TMessage[], conversation_i
       message.conversation_id !== conversation_id ||
       message.type !== 'text' ||
       message.position !== 'right' ||
+      message.content.idmm_decision != null ||
       !message.content.content.trim()
     ) {
       continue;

@@ -62,6 +62,9 @@ mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
 use native_execution::reject_unleased_native_turn_tx;
 
+#[path = "idmm_notice.rs"]
+mod idmm_notice;
+
 #[path = "native_recovery.rs"]
 mod native_recovery;
 pub use native_recovery::{NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED};
@@ -555,6 +558,14 @@ impl AgentSessionStore {
         input: StrictJsonValue,
         initial_only: bool,
     ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        let idmm_decision = input.0.get("idmm_decision").map(|value| {
+            let decision: nomifun_agent_contracts::IdmmDecisionExplanation =
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    SessionStoreError::InvalidPayload(format!("invalid IDMM input explanation: {error}"))
+                })?;
+            decision.validate().map_err(|error| SessionStoreError::InvalidPayload(error.into()))?;
+            Ok::<_, SessionStoreError>(decision)
+        }).transpose()?;
         if input
             .0
             .get("content")
@@ -650,6 +661,14 @@ impl AgentSessionStore {
             _ => {
                 return Err(SessionStoreError::IdempotencyConflict(
                     "turn start idempotency pair is incomplete".to_owned(),
+                ));
+            }
+        }
+
+        if let Some(question) = idmm_decision.as_ref().and_then(|decision| decision.question.as_ref()) {
+            if !idmm_notice::question_is_current_tx(&mut tx, session_id, question).await? {
+                return Err(SessionStoreError::Conflict(
+                    "IDMM question was already answered or replaced by newer Session input".into(),
                 ));
             }
         }
@@ -2720,7 +2739,7 @@ impl AgentSessionStore {
                     projection_json, semantic_digest \
              FROM agent_messages \
              WHERE session_id = ? AND first_seq < ? \
-               AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking') \
+                AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking', 'idmm_notice') \
              ORDER BY first_seq DESC, projection_id DESC LIMIT ?",
         )
         .bind(session_id.as_ref())
@@ -2766,7 +2785,7 @@ impl AgentSessionStore {
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
-               AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking')",
+                AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking', 'idmm_notice')",
         )
         .bind(session_id.as_ref())
         .fetch_one(&mut *tx)

@@ -283,6 +283,10 @@ const SendBox: React.FC<{
   // Listen for reply events from message actions
   useAddEventListener('sendbox.reply', (quote) => setReplyQuote(quote), []);
   useAddEventListener('sendbox.reply.clear', () => setReplyQuote(null), []);
+  useAddEventListener('sendbox.focus', (targetConversationId) => {
+    if (targetConversationId !== conversationContext?.conversation_id) return;
+    containerRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+  }, [conversationContext?.conversation_id]);
 
   // 编辑已发送消息：把原文回填输入框，进入"编辑模式"，提交即截断重跑（仅 Nomi 提供 onEditResubmit）
   useAddEventListener(
