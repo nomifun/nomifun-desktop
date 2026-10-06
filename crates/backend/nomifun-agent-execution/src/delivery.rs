@@ -23,3 +23,15 @@ pub struct AgentExecutionDelivery {
     /// Whether the terminal failure is safe to retry automatically.
     pub result_error_retryable: Option<bool>,
 }
+
+/// Read-only output of one canonical Turn. Paths are verified against successful
+/// owner receipts in that Turn; no Message projection or directory discovery
+/// participates in this query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExecutionTurnOutput {
+    pub canonical_operation_id: String,
+    pub terminal_event_id: Option<String>,
+    pub delivery: AgentExecutionDelivery,
+    pub output_files: Vec<String>,
+    pub integrity_ok: bool,
+}

@@ -14,6 +14,7 @@ const retiredPrefixes = [
   'crates/backend/nomifun-agent-contracts/contracts/historical/',
 ];
 const retiredFiles = new Set([
+  'crates/backend/nomifun-agent-execution/src/artifact_contract.rs',
   'ui/src/renderer/creation/legacyDraftImport.ts',
   'ui/src/renderer/pages/conversation/Messages/planToolVisibility.ts',
   'ui/src/renderer/pages/conversation/platforms/nomi/localCronCommands.ts',
@@ -33,6 +34,7 @@ const retiredFiles = new Set([
   'crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json',
 ]);
 const rules = [
+  { roots: ['crates/backend/nomifun-agent-execution/src/'], pattern: /\b(?:MessageResponse|MessageListResponse|ListMessagesQuery|TurnArtifactProjection|artifact_delivery_committed|validate_required_artifacts|requires_artifact_delivery)\b/, reason: 'Execution output and recovery must consume exact canonical Turn facts, not UI or inferred artifact contracts' },
   { roots: ['crates/backend/nomifun-app/src/router/engine_history.rs', 'crates/backend/nomifun-app/src/router/unified_runtime_history.rs', 'crates/backend/nomifun-app/src/router/runtime_history_port.rs', 'crates/backend/nomifun-agent-session/src/context_snapshot.rs'], pattern: /\b(?:MessageProjection|read_message_history|message_history_before|messages_before)\b/, reason: 'Model context cannot consume UI projection readers' },
   { roots: ['crates/backend/nomifun-app/src/router/'], pattern: /\b(?:EngineHistoryMessage|EngineMessageHistoryWindow|read_message_history_before_turn|project_messages)\b/, reason: 'Runtime history must read typed canonical events' },
   { roots: ['crates/backend/nomifun-agent-session/src/', 'crates/backend/nomifun-db/migrations/'], pattern: /\breasoning_effort_v\d+\b/, reason: 'Session reasoning has one native source' },

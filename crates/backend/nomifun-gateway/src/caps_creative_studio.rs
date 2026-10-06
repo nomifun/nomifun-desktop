@@ -806,6 +806,7 @@ mod tests {
         let mut document = CreativeProjectDocument::empty(canvas_id.into_string());
         document.nodes.push(CreativeNode {
             id: NODE_ID.to_owned(),
+            name: None,
             node_type: CreativeNodeType::Text,
             position: CreativePoint { x: 1.0, y: 2.0 },
             size: CreativeSize {

@@ -92,11 +92,10 @@ impl std::fmt::Debug for AgentExecutionLeaseToken {
 
 /// Durable authority for one Agent Execution-owned Conversation turn.
 ///
-/// The scheduler lease owner is the aggregate generation. Step and attempt
-/// versions bind the effect to the exact invocation generation, while the
-/// active attempt link binds it to one Conversation. The SQLite claim path
-/// validates every field and inserts the Conversation delivery receipt in the
-/// same transaction.
+/// The scheduler lease owner is the aggregate generation. Exact Step version,
+/// immutable Attempt identity/status and active link bind the invocation to
+/// one Session. Attempt version is an optimistic metadata revision: enqueue
+/// and acknowledgement of a steer may advance it without replacing the Turn.
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionTurnAuthority {
@@ -104,6 +103,7 @@ pub struct AgentExecutionTurnAuthority {
     pub step_id: String,
     pub attempt_id: String,
     pub expected_step_version: i64,
+    /// Minimum observed metadata revision, not a Turn-generation identity.
     pub expected_attempt_version: i64,
     pub lease_owner: String,
 }
@@ -158,6 +158,21 @@ pub enum AgentExecutionAttemptRecoveryDisposition {
 pub struct AgentExecutionAttemptRecoveryResult {
     pub detail: AgentExecutionStepDetailRow,
     pub disposition: AgentExecutionAttemptRecoveryDisposition,
+}
+
+/// Exact terminal output read through the canonical Session owner. This is
+/// transient reconciliation input, not a second completion receipt or log.
+#[derive(Debug, Clone)]
+pub struct RecoveredAgentExecutionAttemptOutput {
+    pub attempt_id: String,
+    pub conversation_id: String,
+    pub canonical_operation_id: String,
+    pub terminal_event_id: String,
+    pub ok: bool,
+    pub text: Option<String>,
+    pub output_files: Vec<String>,
+    pub error: Option<String>,
+    pub tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -337,8 +352,17 @@ pub struct LoopRepeatResetParams {
     pub expected_steps: Vec<RetryAgentExecutionStep>,
 }
 
+/// Transient command precondition for a Native Agent decision request. It is
+/// checked in the settlement transaction and is never persisted as a ledger.
+#[derive(Debug, Clone)]
+pub struct AgentExecutionActiveTurnGuard {
+    pub conversation_id: String,
+    pub canonical_operation_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SettleAgentExecutionAttemptParams {
+    pub expected_active_session_turn: Option<AgentExecutionActiveTurnGuard>,
     pub attempt_status: ExecutionAttemptStatus,
     pub step_status: ExecutionStepStatus,
     pub execution_status: Option<AgentExecutionStatus>,
@@ -415,15 +439,15 @@ pub trait IAgentExecutionRepository: Send + Sync {
         params: &UpdateAgentExecutionParams,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionRow, DbError>;
-    /// Atomically freezes dispatch: queued attempts are cancelled, running
-    /// attempts are interrupted, their active links become cleanup work, and
-    /// running steps return to Pending. WaitingInput attempts/questions remain
-    /// durable so Resume can restore the correct aggregate attention state.
+    /// Pause revokes the scheduler lease atomically. Already closed Turns are
+    /// settled only from exact typed canonical outputs; ambiguous running
+    /// effects are review blocked instead of being returned to Pending.
     async fn pause_execution(
         &self,
         user_id: &str,
         execution_id: &str,
         expected_version: i64,
+        recovered_outputs: &[RecoveredAgentExecutionAttemptOutput],
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionRow, DbError>;
     /// Resume from Paused to WaitingInput when any durable question remains,
@@ -647,9 +671,9 @@ pub trait IAgentExecutionRepository: Send + Sync {
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;
 
-    /// Atomically validates one exact live Agent Execution invocation and
-    /// claims its Conversation receipt. Existing accepted/completed receipts
-    /// are absorbing; only `claimed_new` grants effect authority.
+    /// Reconcile one interrupted invocation. Queued reservations can return
+    /// to Pending; started invocations require exact canonical terminal
+    /// output or are parked for review without automatic effect replay.
     async fn reconcile_recovered_attempt(
         &self,
         _user_id: &str,
@@ -659,6 +683,7 @@ pub trait IAgentExecutionRepository: Send + Sync {
         _attempt_id: &str,
         _expected_attempt_version: i64,
         _lease: &AgentExecutionLeaseToken,
+        _recovered_output: Option<&RecoveredAgentExecutionAttemptOutput>,
         _event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionAttemptRecoveryResult, DbError> {
         Err(DbError::Init(

@@ -11,6 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
+use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use nomifun_api_types::{
     AgentErrorCode, AgentExecution, AgentExecutionDetail, ExecutionModelRef,
@@ -27,6 +28,7 @@ use nomifun_db::{
     AgentExecutionTurnAuthority, AttemptConversationEffectParams,
     CreateAgentExecutionAttemptParams, IAgentExecutionRepository, LoopRepeatResetParams,
     NewAgentExecutionEvent, RetryAgentExecutionStep,
+    RecoveredAgentExecutionAttemptOutput,
     SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
 };
 use serde_json::json;
@@ -35,7 +37,6 @@ use tokio::sync::{Notify, watch};
 use crate::attempt_runner::{
     AttemptOutcome, AttemptRunner, AttemptSessionTarget, MISSING_DELIVERY_RECEIPT_CODE,
 };
-use crate::artifact_contract::{requires_artifact_delivery, validate_required_artifacts};
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
 use crate::domain_mapper;
@@ -200,6 +201,8 @@ struct AttemptSettlementFence {
     attempt_version: i64,
 }
 
+type ScheduledAgentJobs = FuturesUnordered<BoxFuture<'static, (String, Result<(), AppError>)>>;
+
 #[async_trait]
 pub(crate) trait ConversationEffects: Send + Sync {
     async fn cancel_attempt(
@@ -213,6 +216,7 @@ pub(crate) trait ConversationEffects: Send + Sync {
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
+        target_operation_id: &str,
         text: &str,
     ) -> Result<(), AppError>;
 
@@ -221,6 +225,7 @@ pub(crate) trait ConversationEffects: Send + Sync {
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
+        target_operation_id: &str,
     ) -> Result<(), AppError>;
 
     async fn report_lead(
@@ -799,12 +804,13 @@ impl ExecutionScheduler {
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
+        target_operation_id: &str,
         text: &str,
     ) -> Result<(), AppError> {
         self.inner
             .deps
             .conversation_effects
-            .steer_attempt(owner_id, conversation_id, operation_id, text)
+            .steer_attempt(owner_id, conversation_id, operation_id, target_operation_id, text)
             .await
     }
 
@@ -813,35 +819,24 @@ impl ExecutionScheduler {
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
+        target_operation_id: &str,
     ) -> Result<(), AppError> {
         self.inner
             .deps
             .conversation_effects
-            .stop_attempt_turn(owner_id, conversation_id, operation_id)
+            .stop_attempt_turn(owner_id, conversation_id, operation_id, target_operation_id)
             .await
     }
 
-    pub async fn read_attempt_output(
+    pub(crate) async fn read_adoptable_attempt_output(
         &self,
         owner_id: &str,
         conversation_id: &str,
-    ) -> Option<String> {
+    ) -> Result<Option<AttemptOutcome>, AppError> {
         self.inner
             .deps
             .attempt_runner
-            .read_final_output(owner_id, conversation_id)
-            .await
-    }
-
-    pub async fn read_attempt_output_files(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Vec<String> {
-        self.inner
-            .deps
-            .attempt_runner
-            .read_output_files(owner_id, conversation_id)
+            .read_adoptable_output(owner_id, conversation_id)
             .await
     }
 
@@ -877,16 +872,16 @@ impl ExecutionScheduler {
         );
 
         let result: Result<SchedulerLoopExit, AppError> = async {
+            let mut running_jobs = ScheduledAgentJobs::new();
+            let mut in_flight_step_ids = HashSet::new();
             // Decision answers and steers are write-ahead effects in attempt
             // runtime_state.  Recover them before classifying a running
             // attempt as process-interrupted.
             while self
-                .process_one_pending_conversation_effect(owner_id, execution_id, &lease)
+                .process_one_pending_conversation_effect(owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids)
                 .await?
             {}
-            self.recover_interrupted(owner_id, execution_id, &lease).await?;
-            let mut running_jobs = FuturesUnordered::new();
-            let mut in_flight_step_ids = HashSet::new();
+            self.recover_interrupted(owner_id, execution_id, &lease, &in_flight_step_ids).await?;
             let mut deferred_error: Option<AppError> = None;
             loop {
                 if self.inner.deps.lifecycle.is_cancelled() || *cancelled.borrow() {
@@ -939,7 +934,7 @@ impl ExecutionScheduler {
                     | AgentExecutionStatus::Cancelled => return Ok(SchedulerLoopExit::Normal),
                 }
                 if self
-                    .process_one_pending_conversation_effect(owner_id, execution_id, &lease)
+                    .process_one_pending_conversation_effect(owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids)
                     .await?
                 {
                     continue;
@@ -987,7 +982,7 @@ impl ExecutionScheduler {
                             .execute_agent_step(&owner_id, &execution_id, step, &lease)
                             .await;
                         (step_id, outcome)
-                    });
+                    }.boxed());
                 }
                 if !running_jobs.is_empty() {
                     tokio::select! {
@@ -1215,6 +1210,8 @@ impl ExecutionScheduler {
         owner_id: &str,
         execution_id: &str,
         lease: &AgentExecutionLeaseToken,
+        running_jobs: &mut ScheduledAgentJobs,
+        in_flight_step_ids: &mut HashSet<String>,
     ) -> Result<bool, AppError> {
         let detail = self.detail(owner_id, execution_id).await?;
         let mut candidate = None;
@@ -1246,6 +1243,14 @@ impl ExecutionScheduler {
             if effects.review_blocked.is_some() {
                 continue;
             }
+            if effects.pending_conversation_effects.first().is_some_and(|effect| {
+                matches!(effect, PendingConversationEffect::DecisionInput { .. })
+            }) && in_flight_step_ids.contains(&step.step_id) {
+                // Let an earlier invocation of this Step finish unwinding
+                // before reserving its continuation. Stop/steer effects may
+                // still be delivered while the original job is in flight.
+                continue;
+            }
             if !effects.pending_conversation_effects.is_empty() {
                 candidate = Some((step.clone(), attempt.clone(), effects));
                 break;
@@ -1262,11 +1267,11 @@ impl ExecutionScheduler {
         })?;
         let effect = effects.pending_conversation_effects.remove(0);
         let (operation_id, effect_name) = match effect {
-            PendingConversationEffect::StopTurn { operation_id } => {
+            PendingConversationEffect::StopTurn { operation_id, target_operation_id } => {
                 self.inner
                     .deps
                     .conversation_effects
-                    .stop_attempt_turn(owner_id, conversation_id, &operation_id)
+                    .stop_attempt_turn(owner_id, conversation_id, &operation_id, &target_operation_id)
                     .await
                     .map_err(|error| {
                         AppError::BadGateway(format!(
@@ -1282,55 +1287,65 @@ impl ExecutionScheduler {
                 // A decision resumes the existing model turn.  Keep the
                 // write-ahead state intact until attempt settlement; transport
                 // failure is retried under the same stable operation identity.
-                let outcome = self
-                    .inner
-                    .deps
-                    .attempt_runner
-                    .continue_with_input(
-                        owner_id,
-                        conversation_id,
-                        &operation_id,
-                        AgentExecutionTurnAuthority {
-                            execution_id: execution_id.to_owned(),
-                            step_id: step.step_id.clone(),
-                            attempt_id: attempt.attempt_id.clone(),
-                            expected_step_version: step.version,
-                            expected_attempt_version: attempt.version,
-                            lease_owner: lease.owner().to_owned(),
-                        },
-                        &content,
-                        self.inner.deps.attempt_timeout,
-                    )
-                    .await
-                    .map_err(|error| {
-                        AppError::BadGateway(format!(
-                            "durable decision delivery {operation_id} failed: {error}"
-                        ))
-                    })?;
-                self.settle_agent_outcome(
-                    owner_id,
-                    execution_id,
-                    &step.step_id,
-                    &attempt.attempt_id,
-                    Ok(outcome),
-                    attempt.attempt_no,
-                    AttemptSettlementFence {
-                        step_version: step.version,
-                        attempt_version: attempt.version,
-                    },
-                    Some(lease),
-                )
-                .await?;
+                let scheduler = self.clone();
+                let owner_id = owner_id.to_owned();
+                let execution_id = execution_id.to_owned();
+                let conversation_id = conversation_id.to_owned();
+                let lease = lease.clone();
+                let step_id = step.step_id.clone();
+                in_flight_step_ids.insert(step_id.clone());
+                running_jobs.push(async move {
+                    let outcome = scheduler.inner.deps.attempt_runner
+                        .continue_with_input(
+                            &owner_id,
+                            &conversation_id,
+                            &operation_id,
+                            AgentExecutionTurnAuthority {
+                                execution_id: execution_id.clone(),
+                                step_id: step.step_id.clone(),
+                                attempt_id: attempt.attempt_id.clone(),
+                                expected_step_version: step.version,
+                                expected_attempt_version: attempt.version,
+                                lease_owner: lease.owner().to_owned(),
+                            },
+                            &content,
+                            scheduler.inner.deps.attempt_timeout,
+                        )
+                        .await
+                        .map_err(|error| {
+                            AppError::BadGateway(format!(
+                                "durable decision delivery {operation_id} failed: {error}"
+                            ))
+                        });
+                    let result = match outcome {
+                        Ok(outcome) => scheduler.settle_agent_outcome(
+                            &owner_id,
+                            &execution_id,
+                            &step.step_id,
+                            &attempt.attempt_id,
+                            Ok(outcome),
+                            attempt.attempt_no,
+                            AttemptSettlementFence {
+                                step_version: step.version,
+                                attempt_version: attempt.version,
+                            },
+                            Some(&lease),
+                        ).await,
+                        Err(error) => Err(error),
+                    };
+                    (step_id, result)
+                }.boxed());
                 return Ok(true);
             }
             PendingConversationEffect::Steer {
                 operation_id,
+                target_operation_id,
                 content,
             } => {
                 self.inner
                     .deps
                     .conversation_effects
-                    .steer_attempt(owner_id, conversation_id, &operation_id, &content)
+                    .steer_attempt(owner_id, conversation_id, &operation_id, &target_operation_id, &content)
                     .await
                     .map_err(|error| {
                         AppError::BadGateway(format!(
@@ -1376,11 +1391,13 @@ impl ExecutionScheduler {
         owner_id: &str,
         execution_id: &str,
         lease: &AgentExecutionLeaseToken,
+        in_flight_step_ids: &HashSet<String>,
     ) -> Result<(), AppError> {
         loop {
             let detail = self.detail(owner_id, execution_id).await?;
             let Some(attempt) = detail.attempts.iter().find(|attempt| {
                 matches!(attempt.status, ExecutionAttemptStatus::Queued | ExecutionAttemptStatus::Running)
+                    && !in_flight_step_ids.contains(&attempt.step_id)
             }) else {
                 return Ok(());
             };
@@ -1399,6 +1416,11 @@ impl ExecutionScheduler {
                     .discard_unlinked_creation(owner_id, &attempt.attempt_id)
                     .await?;
             }
+            let recovered_output = if was_queued {
+                None
+            } else {
+                self.recover_attempt_output(owner_id, attempt).await?
+            };
             let recovered = self.inner
                 .deps
                 .repository
@@ -1410,6 +1432,7 @@ impl ExecutionScheduler {
                     &attempt.attempt_id,
                     attempt.version,
                     lease,
+                    recovered_output.as_ref(),
                     &system_event(
                         AgentExecutionEventKind::AttemptChanged,
                         Some(&step.step_id),
@@ -1443,6 +1466,50 @@ impl ExecutionScheduler {
             self.publish().await;
             self.reconcile_conversation_cleanup(Some(execution_id)).await;
         }
+    }
+
+    pub(crate) async fn recover_attempt_output(
+        &self,
+        owner_id: &str,
+        attempt: &nomifun_api_types::ExecutionAttempt,
+    ) -> Result<Option<RecoveredAgentExecutionAttemptOutput>, AppError> {
+        let effects = attempt.runtime_state.clone()
+            .map(serde_json::from_value::<AttemptConversationEffects>)
+            .transpose().map_err(|error| AppError::Internal(format!(
+                "attempt {} has malformed durable conversation effects: {error}", attempt.attempt_id
+            )))?;
+        if effects.as_ref().is_some_and(|effects| effects.pending_conversation_effects.iter()
+            .any(|effect| matches!(effect, PendingConversationEffect::Steer { .. }))) {
+            return Ok(None);
+        }
+        let operation_key = effects.unwrap_or_default().current_turn_operation_key(&attempt.attempt_id)?;
+        let Some(conversation_id) = attempt.conversation_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(recovered) = self.inner.deps.attempt_runner.recover_outcome(
+            owner_id, conversation_id, &operation_key,
+        ).await? else {
+            return Ok(None);
+        };
+        let outcome = recovered.outcome;
+        let ok = agent_outcome_can_complete(&outcome);
+        let error = if ok { None } else {
+            let reason = outcome.error.clone().unwrap_or_else(|| {
+                "Canonical Agent Turn ended without a successful public delivery".to_owned()
+            });
+            Some(durable_attempt_failure_reason(&outcome, reason))
+        };
+        Ok(Some(RecoveredAgentExecutionAttemptOutput {
+            attempt_id: attempt.attempt_id.clone(),
+            conversation_id: outcome.conversation_id,
+            canonical_operation_id: recovered.canonical_operation_id,
+            terminal_event_id: recovered.terminal_event_id,
+            ok,
+            text: outcome.text,
+            output_files: outcome.output_files,
+            error,
+            tokens: outcome.tokens,
+        }))
     }
 
     /// Resolve and provision the execution workspace before the first Attempt
@@ -1920,17 +1987,33 @@ impl ExecutionScheduler {
         if attempt.status.is_terminal() || attempt.status == ExecutionAttemptStatus::WaitingInput {
             return Ok(());
         }
-        // A concrete model turn owns exactly the Step/Attempt generations it
-        // started with. A question, answer, pause, retry, or replacement bumps
-        // either version; its late callback must never settle that successor.
+        // Step version and immutable Attempt identity are the invocation
+        // generation. Question/answer/pause/retry/replacement change that
+        // Step generation. Attempt version also CASes outbox metadata: a
+        // successful steer and its acknowledgement advance it without
+        // replacing this Turn, so they must not discard its valid callback.
         if step.version != settlement_fence.step_version
-            || attempt.version != settlement_fence.attempt_version
+            || attempt.version < settlement_fence.attempt_version
+            || attempt.step_id != step_id
         {
             return Ok(());
         }
+        let effects = attempt.runtime_state.clone()
+            .map(serde_json::from_value::<AttemptConversationEffects>)
+            .transpose().map_err(|error| AppError::Internal(format!(
+                "attempt {attempt_id} has malformed durable conversation effects: {error}"
+            )))?;
+        if effects.is_some_and(|effects| effects.pending_conversation_effects.iter()
+            .any(|effect| matches!(effect, PendingConversationEffect::Steer { .. }))) {
+            // Do not erase a committed correction that has not reached its
+            // canonical owner. Reload/reconcile the same intent before
+            // settling this exact invocation; never repeat the model Turn.
+            return Err(AppError::Conflict("a canonical steering intent is still pending acknowledgement".to_owned()));
+        }
+        let expected_attempt_version = attempt.version;
 
         let (attempt_status, step_status, error, output, output_files, tokens, retry_after) = match outcome {
-            Ok(outcome) if agent_outcome_can_complete(&outcome, &step.spec) => (
+            Ok(outcome) if agent_outcome_can_complete(&outcome) => (
                 ExecutionAttemptStatus::Completed,
                 ExecutionStepStatus::Completed,
                 None,
@@ -1940,54 +2023,23 @@ impl ExecutionScheduler {
                 None,
             ),
             Ok(outcome) => {
-                let artifact_contract_error = outcome
-                    .ok
-                    .then(|| validate_required_artifacts(&step.spec, &outcome.output_files).err())
-                    .flatten();
-                let (retryable, has_marker, mut reason) = if let Some(error) =
-                    artifact_contract_error
-                {
-                    // The turn itself finished, but its verified delivery did
-                    // not satisfy the immutable Step requirement. This is a
-                    // deterministic contract violation: replaying the same
-                    // Step only creates another Attempt and can duplicate
-                    // side effects without changing the contract.
-                    (false, true, format!("Agent artifact delivery failed: {error}"))
+                let (retryable, has_marker, mut reason) = if outcome.ok {
+                    // A closed canonical Turn with no public answer or
+                    // verified output is an invalid delivery, not a timeout.
+                    // Replaying its settled effects cannot repair that fact.
+                    (false, true, "Agent turn completed without a public answer or verified output".to_owned())
                 } else {
-                    let retryable = match outcome.error_retryable {
-                        Some(value) => value,
-                        None => {
-                            self.inner
-                                .deps
-                                .attempt_runner
-                                .last_error_retryable(owner_id, &outcome.conversation_id)
-                                .await
-                        }
-                    };
+                    let retryable = outcome.error_retryable.unwrap_or(false);
                     let has_marker = outcome.error.is_some()
-                        || outcome.error_code.is_some()
-                        || self
-                            .inner
-                            .deps
-                            .attempt_runner
-                            .last_error_present(owner_id, &outcome.conversation_id)
-                            .await;
+                        || outcome.error_code.is_some();
                     let reason = if let Some(error) = outcome.error.clone() {
                         error
                     } else if let Some(code) = outcome.error_code.clone() {
                         format!("Agent attempt failed ({code})")
-                    } else if let Some(summary) = self
-                        .inner
-                        .deps
-                        .attempt_runner
-                        .last_error_summary(owner_id, &outcome.conversation_id)
-                        .await
-                    {
-                        summary
                     } else if has_marker {
                         "Agent attempt failed".to_owned()
                     } else {
-                        "Agent attempt timed out".to_owned()
+                        "Agent turn failed without a structured terminal reason".to_owned()
                     };
                     let retry_class = attempt_outcome_retry_class(&outcome, has_marker, retryable);
                     let retryable = has_marker
@@ -2014,9 +2066,12 @@ impl ExecutionScheduler {
                     reason = %reason,
                     "classifying Agent attempt outcome for settlement"
                 );
+                let retry_limit = match attempt_outcome_retry_class(&outcome, has_marker, retryable) {
+                    AttemptRetryClass::Timeout => MAX_TIMEOUT_RETRIES,
+                    _ => MAX_PROVIDER_RETRIES,
+                };
                 let can_retry = detail.execution.adaptation_policy == AdaptationPolicy::Adaptive
-                    && ((retryable && attempt_no <= MAX_PROVIDER_RETRIES)
-                        || (!has_marker && attempt_no <= MAX_TIMEOUT_RETRIES));
+                    && retryable && attempt_no <= retry_limit;
                 (
                     ExecutionAttemptStatus::Failed,
                     if can_retry { ExecutionStepStatus::Pending } else { ExecutionStepStatus::Failed },
@@ -2056,9 +2111,10 @@ impl ExecutionScheduler {
                 step_id,
                 settlement_fence.step_version,
                 attempt_id,
-                settlement_fence.attempt_version,
+                expected_attempt_version,
                 lease,
                 &SettleAgentExecutionAttemptParams {
+                    expected_active_session_turn: None,
                     attempt_status,
                     step_status,
                     execution_status: None,
@@ -2092,7 +2148,6 @@ impl ExecutionScheduler {
                 current.step.version != settlement_fence.step_version
                     || current.current_attempt.as_ref().is_none_or(|attempt| {
                         attempt.attempt.attempt_id != attempt_id
-                            || attempt.attempt.version != settlement_fence.attempt_version
                     })
             }) {
                 return Ok(());
@@ -2201,6 +2256,7 @@ impl ExecutionScheduler {
                 current.attempt.version,
                 Some(lease),
                 &SettleAgentExecutionAttemptParams {
+                    expected_active_session_turn: None,
                     attempt_status,
                     step_status,
                     execution_status: None,
@@ -2582,10 +2638,9 @@ fn attempt_outcome_retry_class(
     retryable: bool,
 ) -> AttemptRetryClass {
     if !has_marker {
-        // A completed provider turn without a terminal error marker has no
-        // durable evidence of a deterministic rejection. Treat it as the
-        // bounded timeout path, and never as an open-ended provider retry.
-        return AttemptRetryClass::Timeout;
+        // Missing evidence is not a proven timeout and never authorizes
+        // replay of an already-admitted Turn's tools or model effects.
+        return AttemptRetryClass::Deterministic;
     }
     if !retryable {
         return AttemptRetryClass::Deterministic;
@@ -2594,13 +2649,6 @@ fn attempt_outcome_retry_class(
         Some("USER_LLM_PROVIDER_RATE_LIMITED") => AttemptRetryClass::RateLimited,
         Some("USER_LLM_PROVIDER_TIMEOUT") => AttemptRetryClass::Timeout,
         Some(code) if is_transient_agent_error_code_name(code) => AttemptRetryClass::Provider,
-        _ if outcome
-            .error
-            .as_deref()
-            .is_some_and(is_transient_provider_message) =>
-        {
-            AttemptRetryClass::Provider
-        }
         _ => AttemptRetryClass::Deterministic,
     }
 }
@@ -2639,34 +2687,17 @@ fn is_transient_agent_error_code_name(code: &str) -> bool {
     )
 }
 
-fn is_transient_provider_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    [
-        "rate limit",
-        "rate_limit",
-        "quota",
-        "timeout",
-        "timed out",
-        "deadline exceeded",
-        "gateway",
-        "network",
-        "connection",
-        "provider stream truncated",
-        "empty response",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-fn agent_outcome_can_complete(outcome: &AttemptOutcome, step_spec: &str) -> bool {
-    if !outcome.ok || validate_required_artifacts(step_spec, &outcome.output_files).is_err() {
+pub(crate) fn agent_outcome_can_complete(outcome: &AttemptOutcome) -> bool {
+    if !outcome.ok {
         return false;
     }
     let has_text = outcome
         .text
         .as_ref()
         .is_some_and(|text| !text.trim().is_empty());
-    has_text || (requires_artifact_delivery(step_spec) && !outcome.output_files.is_empty())
+    // The canonical Runtime owns accepted requirements and delivery review.
+    // A prose spec is task data, never a second inferred completion contract.
+    has_text || !outcome.output_files.is_empty()
 }
 
 fn ready_steps(detail: &AgentExecutionDetail, now: i64) -> Vec<&ExecutionStep> {
@@ -3532,25 +3563,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_contract_mismatch_is_deterministic_and_never_retryable() {
-        let outcome = AttemptOutcome {
-            conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
-            text: Some("done".to_owned()),
-            output_files: vec!["/workspace/result.jpg".to_owned()],
-            ok: true,
-            tokens: Some(1),
-            error: None,
-            error_code: None,
-            error_retryable: None,
-        };
-        assert!(!agent_outcome_can_complete(&outcome, "Generate 2 PNG images"));
-        assert_eq!(
-            attempt_outcome_retry_class(&outcome, true, true),
-            AttemptRetryClass::Deterministic
-        );
-    }
-
-    #[test]
     fn only_explicit_transient_provider_outcomes_are_retryable() {
         let transient = |error_code: &str| AttemptOutcome {
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000202".to_owned(),
@@ -3611,8 +3623,12 @@ mod tests {
         );
         assert_eq!(
             attempt_outcome_retry_class(&timeout_without_marker, false, true),
-            AttemptRetryClass::Timeout
+            AttemptRetryClass::Deterministic
         );
+        let mut unclassified = transient("UNKNOWN_OWNER_ERROR");
+        unclassified.error = Some("A network timeout was mentioned in the tool output".to_owned());
+        assert_eq!(attempt_outcome_retry_class(&unclassified, true, true), AttemptRetryClass::Deterministic,
+            "error prose cannot authorize a replay without a structured transient owner code");
     }
 
     #[test]
@@ -3639,36 +3655,46 @@ mod tests {
     }
 
     #[test]
-    fn failed_or_textless_agent_outcome_can_never_complete() {
-        let outcome = |ok, text: Option<&str>| AttemptOutcome {
+    fn canonical_failure_and_empty_delivery_cannot_complete() {
+        let mut outcome = AttemptOutcome {
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
-            text: text.map(str::to_owned),
-            output_files: vec!["/untrusted/stale-output.png".to_owned()],
-            ok,
+            text: Some("authoritative public answer".to_owned()),
+            output_files: Vec::new(),
+            ok: false,
             tokens: None,
             error: None,
             error_code: None,
             error_retryable: None,
         };
+        assert!(!agent_outcome_can_complete(&outcome));
+        outcome.ok = true;
+        assert!(agent_outcome_can_complete(&outcome));
+        outcome.text = Some("  \n".to_owned());
+        assert!(!agent_outcome_can_complete(&outcome));
+        outcome.text = None;
+        assert!(!agent_outcome_can_complete(&outcome));
+        outcome.output_files = vec!["/workspace/index.html".to_owned()];
+        assert!(agent_outcome_can_complete(&outcome));
+        outcome.ok = false;
+        assert!(!agent_outcome_can_complete(&outcome));
+    }
 
-        // Even a stale/concurrent assistant result cannot override ok=false.
-        let non_artifact_spec = "Analyze the issue and answer in chat";
-        assert!(!agent_outcome_can_complete(
-            &outcome(false, Some("another turn completed")),
-            non_artifact_spec,
-        ));
-        assert!(!agent_outcome_can_complete(
-            &outcome(true, None),
-            non_artifact_spec,
-        ));
-        assert!(!agent_outcome_can_complete(
-            &outcome(true, Some("  \n")),
-            non_artifact_spec,
-        ));
-        assert!(agent_outcome_can_complete(
-            &outcome(true, Some("authoritative receipt output")),
-            non_artifact_spec,
-        ));
+    #[test]
+    fn canonical_delivery_is_not_reinterpreted_from_task_prose() {
+        // The reported game task referred to snake-game-design.md and
+        // snake-game-ui.md as inputs while delivering index.html. Settlement
+        // must not manufacture a competing Markdown-output requirement.
+        let outcome = AttemptOutcome {
+            conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
+            text: Some("已完成 index.html，参考设计文档 snake-game-design.md 和 snake-game-ui.md".to_owned()),
+            output_files: vec!["/workspace/index.html".to_owned()],
+            ok: true,
+            tokens: None,
+            error: None,
+            error_code: None,
+            error_retryable: Some(false),
+        };
+        assert!(agent_outcome_can_complete(&outcome));
     }
 
     #[test]
@@ -3697,33 +3723,6 @@ mod tests {
             assert!(resolve_requested_work_dir(root, r"nested\outside").is_err());
             assert!(resolve_requested_work_dir(root, r"C:\outside").is_err());
         }
-    }
-
-    #[test]
-    fn artifact_step_cannot_complete_on_text_or_insufficient_files() {
-        let outcome = |output_files: Vec<String>| AttemptOutcome {
-            conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
-            text: Some("done".to_owned()),
-            output_files,
-            ok: true,
-            tokens: None,
-            error: None,
-            error_code: None,
-            error_retryable: None,
-        };
-
-        assert!(!agent_outcome_can_complete(
-            &outcome(Vec::new()),
-            "Generate 2 PNG images",
-        ));
-        assert!(!agent_outcome_can_complete(
-            &outcome(vec!["/workspace/one.png".to_owned(), "/workspace/two.jpg".to_owned()]),
-            "Generate 2 PNG images",
-        ));
-        assert!(agent_outcome_can_complete(
-            &outcome(vec!["/workspace/one.png".to_owned(), "/workspace/two.png".to_owned()]),
-            "Generate 2 PNG images",
-        ));
     }
 
     #[test]
@@ -3833,6 +3832,7 @@ mod tests {
             _owner_id: &str,
             _conversation_id: &str,
             operation_id: &str,
+            _target_operation_id: &str,
             _text: &str,
         ) -> Result<(), AppError> {
             self.conversation_operations.lock().unwrap().push(operation_id.to_owned());
@@ -3844,6 +3844,7 @@ mod tests {
             _owner_id: &str,
             _conversation_id: &str,
             operation_id: &str,
+            _target_operation_id: &str,
         ) -> Result<(), AppError> {
             self.conversation_operations.lock().unwrap().push(operation_id.to_owned());
             if self.fail_stop_once.swap(false, Ordering::SeqCst) {
@@ -3879,6 +3880,12 @@ mod tests {
         RetryOnce {
             remaining_failures: Arc<AtomicUsize>,
         },
+        DecisionContinuation {
+            started: Arc<AtomicBool>,
+            calls: Arc<AtomicUsize>,
+            release: Arc<Notify>,
+        },
+        SteeredTurn { started: Arc<AtomicBool>, release: Arc<Notify> },
     }
 
     #[derive(Clone)]
@@ -3956,6 +3963,25 @@ mod tests {
                 pool: Arc::new(Mutex::new(None)),
                 owner_id: Arc::new(Mutex::new(None)),
             }
+        }
+
+        fn decision_continuation() -> Self {
+            let mut runner = Self::overlap_probe();
+            runner.mode = HarnessRunnerMode::DecisionContinuation {
+                started: Arc::new(AtomicBool::new(false)),
+                calls: Arc::new(AtomicUsize::new(0)),
+                release: Arc::new(Notify::new()),
+            };
+            runner
+        }
+
+        fn steered_turn() -> Self {
+            let mut runner = Self::overlap_probe();
+            runner.mode = HarnessRunnerMode::SteeredTurn {
+                started: Arc::new(AtomicBool::new(false)),
+                release: Arc::new(Notify::new()),
+            };
+            runner
         }
 
         fn bind_pool(&self, pool: SqlitePool) {
@@ -4114,7 +4140,8 @@ mod tests {
                 } => remaining_failures
                     .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok(),
-                HarnessRunnerMode::ParallelRoots { .. } | HarnessRunnerMode::OverlapProbe => false,
+                HarnessRunnerMode::ParallelRoots { .. } | HarnessRunnerMode::OverlapProbe
+                    | HarnessRunnerMode::DecisionContinuation { .. } | HarnessRunnerMode::SteeredTurn { .. } => false,
             };
             if failure {
                 let (error, error_code, retryable) = match &self.mode {
@@ -4158,6 +4185,10 @@ mod tests {
             if matches!(&self.mode, HarnessRunnerMode::OverlapProbe) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+            if let HarnessRunnerMode::SteeredTurn { started, release } = &self.mode {
+                started.store(true, Ordering::SeqCst);
+                release.notified().await;
+            }
 
             self.completed_successes.fetch_add(1, Ordering::SeqCst);
             finish(self);
@@ -4170,6 +4201,33 @@ mod tests {
                 error: None,
                 error_code: None,
                 error_retryable: None,
+            })
+        }
+
+        async fn continue_with_input(
+            &self,
+            _owner_id: &str,
+            conversation_id: &str,
+            _operation_id: &str,
+            _authority: AgentExecutionTurnAuthority,
+            _input: &str,
+            _timeout: Duration,
+        ) -> Result<AttemptOutcome, AppError> {
+            let HarnessRunnerMode::DecisionContinuation { started, calls, release } = &self.mode else {
+                return Err(AppError::BadRequest("not a continuation fixture".into()));
+            };
+            calls.fetch_add(1, Ordering::SeqCst);
+            started.store(true, Ordering::SeqCst);
+            release.notified().await;
+            Ok(AttemptOutcome {
+                conversation_id: conversation_id.to_owned(),
+                text: Some("completed decision continuation".to_owned()),
+                output_files: Vec::new(),
+                ok: true,
+                tokens: Some(1),
+                error: None,
+                error_code: None,
+                error_retryable: Some(false),
             })
         }
     }
@@ -4446,8 +4504,8 @@ mod tests {
         let step = &detail.steps[0];
         let pending = AttemptConversationEffects {
             pending_conversation_effects: vec![
-                PendingConversationEffect::StopTurn { operation_id: "stop-id".into() },
-                PendingConversationEffect::Steer { operation_id: "steer-id".into(), content: "next".into() },
+                PendingConversationEffect::StopTurn { operation_id: "stop-id".into(), target_operation_id: "target-turn".into() },
+                PendingConversationEffect::Steer { operation_id: "steer-id".into(), target_operation_id: "target-turn".into(), content: "next".into() },
             ],
             ..Default::default()
         };
@@ -4481,18 +4539,136 @@ mod tests {
             &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(attempt_id), json!({})),
         ).await.unwrap();
         let lease = AgentExecutionLeaseToken::new("effects-test".into());
-        assert!(scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease).await.is_err());
+        let mut jobs = ScheduledAgentJobs::new();
+        let mut in_flight = HashSet::new();
+        assert!(scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease, &mut jobs, &mut in_flight).await.is_err());
         for expected in ["stop_turn", "steer"] {
-            assert!(scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease).await.unwrap());
+            assert!(scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease, &mut jobs, &mut in_flight).await.unwrap());
             let events = repository.list_events(&owner, &execution_id, 0, 100).await.unwrap();
             let event: serde_json::Value = serde_json::from_str(&events.last().unwrap().payload).unwrap();
             assert_eq!(event["effect"], expected);
         }
-        assert!(!scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease).await.unwrap());
+        assert!(!scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease, &mut jobs, &mut in_flight).await.unwrap());
         assert_eq!(*effects.conversation_operations.lock().unwrap(), ["stop-id", "stop-id", "steer-id"]);
         assert!(scheduler.detail(&owner, &execution_id).await.unwrap().attempts[0].runtime_state.is_none());
         scheduler.shutdown().await.unwrap();
         pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn decision_continuation_keeps_sibling_dag_and_cancellation_responsive() {
+        let runner = Arc::new(HarnessAttemptRunner::decision_continuation());
+        let HarnessRunnerMode::DecisionContinuation { started, calls, release: _ } = &runner.mode else {
+            unreachable!();
+        };
+        let (scheduler, repository, execution_id, data_dir, owner) = make_scheduler_harness_with_policies(
+            runner.clone(), &["decision-step", "sibling-root", "sibling-downstream"],
+            &[("sibling-root", "sibling-downstream")],
+            2, AdaptationPolicy::Fixed, None,
+            &[("decision-step", AgentToolPolicy::ReadOnly), ("sibling-root", AgentToolPolicy::ReadOnly), ("sibling-downstream", AgentToolPolicy::ReadOnly)],
+        ).await;
+        let detail = scheduler.detail(&owner, &execution_id).await.unwrap();
+        let step = detail.steps.iter().find(|step| step.title == "decision-step").unwrap();
+        let pending = AttemptConversationEffects {
+            pending_conversation_effects: vec![PendingConversationEffect::DecisionInput {
+                operation_id: "decision-answer".into(), content: "continue".into(),
+            }],
+            ..Default::default()
+        };
+        let created = repository.create_attempt(
+            &owner, &execution_id, &step.step_id, step.version, None,
+            &CreateAgentExecutionAttemptParams {
+                participant_id: step.assigned_participant_id.clone(), start_immediately: false,
+                trigger_reason: "decision-fixture".into(), effective_config: "{}".into(),
+                retry_after: None, runtime_state: Some(pending.encode().unwrap()),
+            }, &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), None, json!({})),
+        ).await.unwrap();
+        let attempt = &created.current_attempt.as_ref().unwrap().attempt;
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.path().join("harness.sqlite")),
+        ).await.unwrap();
+        let conversation_id = generate_id();
+        sqlx::query(
+            "INSERT INTO agent_sessions (agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) \
+             VALUES (?,?,'live','decision',0,0,'{}',1,1)"
+        ).bind(&conversation_id).bind(json!({"principal_kind":"user","principal_id":owner}).to_string())
+            .execute(&pool).await.unwrap();
+        repository.start_attempt(
+            &owner, &execution_id, &step.step_id, created.step.version,
+            &attempt.attempt_id, attempt.version, &conversation_id,
+            AgentExecutionAttemptSessionKind::ChildAttempt, None,
+            &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(&attempt.attempt_id), json!({})),
+        ).await.unwrap();
+        scheduler.start(owner.clone(), execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = scheduler.detail(&owner, &execution_id).await.unwrap();
+                if started.load(Ordering::SeqCst) && current.steps.iter().any(|step| {
+                    step.title == "sibling-downstream" && step.status == ExecutionStepStatus::Completed
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("a blocked decision must not starve independent sibling dispatch or settlement");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // A nudge must not enqueue the same write-ahead continuation twice.
+        scheduler.start(owner.clone(), execution_id.clone());
+        scheduler.stop(&execution_id);
+        tokio::time::timeout(Duration::from_secs(1), scheduler.shutdown())
+            .await.expect("cancellation must not await the blocked continuation").unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let current = scheduler.detail(&owner, &execution_id).await.unwrap();
+        let decision = current.attempts.iter().find(|attempt| attempt.step_id == step.step_id).unwrap();
+        assert_eq!(decision.status, ExecutionAttemptStatus::Running);
+        assert!(decision.runtime_state.is_some(), "cancellation must retain the durable continuation identity");
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn successful_steer_metadata_does_not_discard_the_running_turn_completion() {
+        let runner = Arc::new(HarnessAttemptRunner::steered_turn());
+        let HarnessRunnerMode::SteeredTurn { started, release } = &runner.mode else {
+            unreachable!();
+        };
+        let (scheduler, repository, execution_id, _data_dir, owner) = make_scheduler_harness(
+            runner.clone(), &["steered-step"], &[], 1, AdaptationPolicy::Fixed, None,
+        ).await;
+        scheduler.start(owner.clone(), execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("the original Turn must start");
+        let detail = scheduler.detail(&owner, &execution_id).await.unwrap();
+        let step = &detail.steps[0];
+        let attempt = &detail.attempts[0];
+        let original_attempt_version = attempt.version;
+        let mut effects = AttemptConversationEffects::default();
+        effects.push_steer("steer-one".into(), "target-turn".into(), "incorporate this correction".into()).unwrap();
+        let enqueued = repository.enqueue_attempt_conversation_effect(
+            &owner, &execution_id, detail.execution.version, &step.step_id, step.version,
+            &attempt.attempt_id, attempt.version,
+            &AttemptConversationEffectParams { runtime_state: Some(effects.encode().unwrap()) },
+            &system_event(AgentExecutionEventKind::StepChanged, Some(&step.step_id), Some(&attempt.attempt_id), json!({"effect":"steer"})),
+        ).await.unwrap();
+        let acknowledged = repository.acknowledge_attempt_conversation_effect(
+            &owner, &execution_id, &step.step_id, &attempt.attempt_id,
+            enqueued.detail.current_attempt.as_ref().unwrap().attempt.version,
+            &AttemptConversationEffectParams { runtime_state: None },
+            &system_event(AgentExecutionEventKind::StepChanged, Some(&step.step_id), Some(&attempt.attempt_id), json!({"effect":"steer_delivered"})),
+        ).await.unwrap();
+        assert_eq!(acknowledged.step.version, step.version, "a steer does not replace the invocation generation");
+        assert!(acknowledged.current_attempt.as_ref().unwrap().attempt.version > original_attempt_version,
+            "metadata commands still need their own optimistic CAS");
+        release.notify_one();
+        let terminal = wait_for_terminal(&repository, &owner, &execution_id).await;
+        assert_eq!(terminal.execution.status, "completed");
+        assert_eq!(terminal.attempts.len(), 1, "steering must not duplicate the model Turn");
+        assert_eq!(terminal.attempts[0].attempt.status, "completed");
+        assert_eq!(terminal.attempts[0].attempt.output_summary.as_deref(), Some("completed steered-step"));
+        assert_eq!(runner.call_count("steered-step"), 1);
+        scheduler.shutdown().await.unwrap();
     }
 
     async fn wait_for_terminal(

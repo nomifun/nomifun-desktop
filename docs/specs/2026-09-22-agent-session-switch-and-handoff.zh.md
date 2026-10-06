@@ -77,7 +77,7 @@ AgentExecution 已验证 Attempt 的 `output_files`，但 `scheduler::compose_br
 - `role`；
 - `tool_policy`。
 
-它没有类型化的 acceptance criteria 或 deliverables；当前 artifact contract 仍从 step prose 保守推断。这会造成上游已产出文件、下游却不知道精确产物位置，或自然语言“完成”与机器可验证交付混淆。
+Execution 不维护另一份 acceptance criteria 或 deliverables 账本。当前完成和交付合同由唯一 Runtime 的 typed requirements、completion 和 delivery 执行；Attempt 的正文与产物从精确 canonical Turn 查询，不能从 step prose 推断验收门槛。当前边界见 [Agent Session 架构](../architecture/agent-session.zh.md)。
 
 ## 3. 目标与非目标
 
@@ -438,16 +438,9 @@ Store 不负责解析 Preset、模型或资源；调用者提交已经由 host/c
 
 不得把 assistant prose 中出现的路径当作 artifact；只使用 Attempt settlement 保存的 verified files。
 
-### 9.2 第二阶段 typed deliverables
+### 9.2 当前交付合同
 
-在共享 `AgentDelegationTask` 中增加可选字段，并保持旧调用兼容：
-
-```text
-acceptance_criteria[]
-deliverables[]
-```
-
-建议 deliverable 包含 kind、format/category、minimum_count 和 description。它应持久化为 ExecutionStep 的 typed output contract，并逐步替代 `artifact_contract.rs` 的自然语言推断。首期 quick win 不要求完成 schema 改造，但最终高质量交付目标不能长期依赖 prose heuristic。
+调度器消费 canonical Runtime 回执和该 Turn 的 verified outputs。旧自然语言产物推断已退役，不保留以 Step spec 猜测格式、数量或文件名的第二验收链。要求和交付证据使用现有 Runtime typed 合同；正常结算、暂停和重启恢复遵循同一 Session 输出查询。
 
 ## 10. 分阶段实施任务
 

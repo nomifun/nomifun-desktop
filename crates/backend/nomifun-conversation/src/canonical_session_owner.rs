@@ -365,6 +365,25 @@ impl CanonicalAgentSessionOwner {
         })
     }
 
+    pub async fn steer_exact_turn(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+        target_operation_id: &OperationId,
+        input: Value,
+    ) -> Result<AgentMutationReceipt, AppError> {
+        self.require_owner(owner, session_id).await?;
+        let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
+        let (target_operation_id, result) = self.store.steer_exact_turn(
+            session_id, target_operation_id, IdempotencyKey::from(format!("{key}:steer")),
+            EventProducerId::from("session_api"), StrictJsonValue(input),
+        ).await.map_err(store_error)?;
+        let event_id = result.record.as_ref().map(|record| record.event_id.clone())
+            .ok_or_else(|| AppError::Conflict("canonical steering has no durable Turn receipt".into()))?;
+        Ok(AgentMutationReceipt { target_operation_id, event_id, cursor: result.cursor, duplicate: result.duplicate })
+    }
+
     pub async fn cancel(
         &self,
         owner: &PrincipalRef,
@@ -393,6 +412,24 @@ impl CanonicalAgentSessionOwner {
             cursor: result.cursor,
             duplicate: result.duplicate,
         })
+    }
+
+    pub async fn cancel_exact_turn(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+        target_operation_id: &OperationId,
+    ) -> Result<AgentMutationReceipt, AppError> {
+        self.require_owner(owner, session_id).await?;
+        let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
+        let (target_operation_id, result) = self.store.cancel_exact_turn(
+            session_id, target_operation_id, IdempotencyKey::from(format!("{key}:cancel")),
+            EventProducerId::from("session_api"),
+        ).await.map_err(store_error)?;
+        let event_id = result.record.as_ref().map(|record| record.event_id.clone())
+            .ok_or_else(|| AppError::Conflict("canonical cancellation has no durable Turn receipt".into()))?;
+        Ok(AgentMutationReceipt { target_operation_id, event_id, cursor: result.cursor, duplicate: result.duplicate })
     }
 
     pub async fn fork(
@@ -645,6 +682,97 @@ mod tests {
             typed_resource_bindings: Vec::new(),
             binding_version: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn exact_cancel_replay_and_late_delivery_cannot_cancel_a_successor_turn() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let opened = service.open(owner(), binding(), None, Vec::new(), "cancel-isolation", 1).await.unwrap();
+        let session = &opened.session.agent_session_id;
+        let original = service.start_turn(&owner(), session, "original", json!({"content":"first"})).await.unwrap();
+        let cancelled = service.cancel_exact_turn(&owner(), session, "stop-original", &original.operation_id).await.unwrap();
+        let successor = service.start_turn(&owner(), session, "successor", json!({"content":"second"})).await.unwrap();
+        let before = service.store.head(session).await.unwrap();
+
+        let replay = service.cancel(&owner(), session, "stop-original").await.unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.target_operation_id, original.operation_id);
+        assert_eq!(replay.event_id, cancelled.event_id);
+        let delayed = service.cancel_exact_turn(&owner(), session, "late-stop-original", &original.operation_id).await.unwrap();
+        assert!(delayed.duplicate);
+        assert_eq!(delayed.event_id, cancelled.event_id);
+        assert_eq!(service.store.head(session).await.unwrap(), before);
+        assert_eq!(before.active_turn_id.as_deref(), Some(successor.operation_id.as_ref()));
+        assert!(matches!(service.cancel_exact_turn(&owner(), session, "stop-original", &successor.operation_id).await,
+            Err(AppError::Conflict(_))), "an idempotency replay cannot change its target");
+        assert!(service.cancel_exact_turn(&owner(), session, "unknown-stop", &"missing-turn".into()).await.is_err());
+        assert!(service.cancel_exact_turn(&owner(), session, "empty-stop", &"".into()).await.is_err());
+        let foreign = PrincipalRef { principal_kind:"user".into(), principal_id:"foreign".into() };
+        assert!(service.cancel_exact_turn(&foreign, session, "foreign-stop", &successor.operation_id).await.is_err());
+        assert_eq!(service.store.head(session).await.unwrap(), before);
+        assert_eq!(service.turn_receipt(&owner(), session, &successor.operation_id).await.unwrap().status,
+            nomifun_agent_session::TurnReceiptStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn late_cancel_of_a_completed_turn_returns_its_fact_without_rewriting_completion() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let opened = service.open(owner(), binding(), None, Vec::new(), "cancel-completed", 1).await.unwrap();
+        let session = &opened.session.agent_session_id;
+        let first = service.start_turn(&owner(), session, "completed-original", json!({"content":"first"})).await.unwrap();
+        let started = service.turn_receipt(&owner(), session, &first.operation_id).await.unwrap().started_event.unwrap();
+        let append = SessionEventAppend {
+            agent_session_id:session.clone(), event_id:"completed-before-stop".into(), producer_id:"runtime_supervisor".into(),
+            idempotency_key:"completed-before-stop".into(), semantic_event:SemanticSessionEventDraft {
+                kind:SessionEventKind("turn/completed".into()),kind_version:1,correlation_id:first.operation_id.as_ref().into(),
+                causation_event_id:Some(started.event_id),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"output":"done"}))),
+            },
+        };
+        service.store.append_turn_terminal(&append, &first.operation_id).await.unwrap();
+        let successor = service.start_turn(&owner(), session, "after-completion", json!({"content":"second"})).await.unwrap();
+        let before = service.store.head(session).await.unwrap();
+        let late = service.cancel_exact_turn(&owner(), session, "delayed-stop", &first.operation_id).await.unwrap();
+        assert_eq!(late.target_operation_id, first.operation_id);
+        assert_eq!(late.event_id, append.event_id);
+        assert!(late.duplicate);
+        assert_eq!(service.store.head(session).await.unwrap(), before);
+        assert_eq!(before.active_turn_id.as_deref(), Some(successor.operation_id.as_ref()));
+        assert_eq!(service.turn_receipt(&owner(), session, &first.operation_id).await.unwrap().status,
+            nomifun_agent_session::TurnReceiptStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn exact_steer_replay_and_first_late_delivery_cannot_inject_a_successor_turn() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let opened = service.open(owner(), binding(), None, Vec::new(), "steer-isolation", 1).await.unwrap();
+        let session = &opened.session.agent_session_id;
+        let original = service.start_turn(&owner(), session, "original", json!({"content":"first"})).await.unwrap();
+        let input = json!({"content":"focus on this original task","files":[],"inject_skills":[]});
+        let accepted = service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, input.clone()).await.unwrap();
+        let repeated = service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, input.clone()).await.unwrap();
+        assert!(repeated.duplicate);
+        assert_eq!(repeated.event_id, accepted.event_id);
+        service.cancel_exact_turn(&owner(), session, "original-stop", &original.operation_id).await.unwrap();
+        let original_terminal = service.turn_receipt(&owner(), session, &original.operation_id).await.unwrap().terminal_event.unwrap();
+        let successor = service.start_turn(&owner(), session, "successor", json!({"content":"second"})).await.unwrap();
+        let before = service.store.head(session).await.unwrap();
+        let replay = service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, input.clone()).await.unwrap();
+        assert_eq!(replay.event_id, accepted.event_id);
+        assert!(replay.duplicate);
+        let late = service.steer_exact_turn(&owner(), session, "first-late-steer", &original.operation_id, input.clone()).await.unwrap();
+        assert_eq!(late.event_id, original_terminal.event_id);
+        assert!(late.duplicate);
+        assert!(service.steer_exact_turn(&owner(), session, "original-steer", &successor.operation_id, input.clone()).await.is_err());
+        assert!(service.steer_exact_turn(&owner(), session, "original-steer", &original.operation_id, json!({"content":"changed"})).await.is_err());
+        assert!(service.steer_exact_turn(&owner(), session, "missing-target", &"missing".into(), input).await.is_err());
+        assert_eq!(service.store.head(session).await.unwrap(), before);
+        assert_eq!(before.active_turn_id.as_deref(), Some(successor.operation_id.as_ref()));
+        let count: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
+            .bind(session.as_ref()).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]

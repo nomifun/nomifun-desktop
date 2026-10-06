@@ -11,6 +11,7 @@ pub(crate) mod agent_wave2_vcs_push;
 pub(crate) mod agent_wave3_creation_host;
 mod automatic_collaboration_route;
 mod automatic_creation_route;
+mod automatic_turn_intent;
 mod engine_creation_tools;
 pub(crate) mod agent_wave3_host;
 pub(crate) mod agent_wave3_template_runner;

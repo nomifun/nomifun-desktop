@@ -62,6 +62,115 @@ async fn coding_preset_creates_nested_game_in_default_conversation_workspace() {
     scenario("coding.codex", false, false, false, false).await;
 }
 
+/// The reported subagent failure crosses routing, canonical file effects and
+/// Execution settlement. Exercise all three through a real child Session.
+#[tokio::test(flavor="multi_thread", worker_threads=4)]
+async fn delegated_file_steps_keep_tools_and_settle_canonical_outputs() {
+    let root = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()),
+        ..Default::default()
+    };
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let upstream = wiremock::MockServer::start().await;
+    let writes = Arc::new(AtomicUsize::new(0));
+    let seen_writes = writes.clone();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let messages = body["messages"].as_array().unwrap();
+            let input = messages.iter().filter(|message| message["role"] == "user")
+                .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+            let (name, path, content) = if input.contains("STEP_ID=code") {
+                ("code", "index.html", HTML)
+            } else if input.contains("STEP_ID=ui") {
+                ("ui", "snake-game-ui.md", "# UI\nCSS animation specification\n")
+            } else {
+                assert!(input.contains("STEP_ID=design"), "unexpected model task: {input}");
+                ("design", "snake-game-design.md", "# Game design\nSnake game rules\n")
+            };
+            assert!(body["tools"].as_array().unwrap().iter().any(|tool|
+                tool["function"]["name"] == "write_file"),
+                "file tool disappeared from the delegated {name} step: {body}");
+            let call_id = format!("write-{name}");
+            if messages.iter().any(|message|
+                message["role"] == "tool" && message["tool_call_id"] == call_id)
+            {
+                stream(None, &format!("Saved {path}."))
+            } else {
+                seen_writes.fetch_add(1, Ordering::SeqCst);
+                stream(Some((&call_id, "write_file", json!({"path":path,"content":content}))), "")
+            }
+        }).mount(&upstream).await;
+    let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let app = AppServices::from_config(database, &config).await.unwrap();
+    let router = create_router(&app).await;
+    let provider = call(&router, "POST", "/api/providers", json!({
+        "platform":"custom", "name":"delegated file regression", "base_url":format!("{}/v1",upstream.uri()),
+        "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
+        "initial_model":{"model":"file-fixture","enabled":true,"capabilities":[{
+            "task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096
+        }]}
+    })).await;
+    let model = json!({"provider_id":provider["provider_id"],"model":"file-fixture"});
+    let preset = call(&router, "POST", "/api/agent-presets/from-template/chat.minimal",
+        json!({"reuse_existing":false,"display_name":"delegated file fixture","model":model})).await;
+    let preset_id = preset["preset"]["preset_id"].as_str().unwrap();
+    let mut draft = preset["draft"].clone();
+    draft["document"]["enabled_capabilities"] = json!([
+        {"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"]},
+        {"capability":{"id":"creation.media"},"action_allowlist":["creation.media/video","creation.media/audio"]}
+    ]);
+    call(&router, "POST", &format!("/api/agent-presets/{preset_id}/revisions"), json!({
+        "expected_current_revision":draft["current_revision"],"draft":draft,"reason":"file and media routing regression"
+    })).await;
+    let session = call(&router, "POST", "/api/agent-sessions", json!({
+        "preset_id":preset_id,"model":model,
+        "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}]
+    })).await;
+    let session_id = session["agent_session_id"].as_str().unwrap();
+    let execution = call(&router, "POST", "/api/agent-executions", json!({
+        "goal":"Create the Snake game and its design notes", "model_pool":{"mode":"single","model":model},
+        "lead_model":model,"lead_conversation_id":session_id,"max_parallel":3,
+        "steps":[
+            {"title":"design","spec":"STEP_ID=design。输出一份完整设计文档，写入工作区文件 snake-game-design.md。"},
+            {"title":"ui","spec":"STEP_ID=ui。输出 UI 样式文档，写入 snake-game-ui.md。描述食物脉动 CSS 动画。"},
+            {"title":"code","spec":"STEP_ID=code。实现完整 H5 贪吃蛇，写入 index.html。基于设计要点（与 snake-game-design.md 和 snake-game-ui.md 一致）：音效用 Web Audio API 合成；食物脉动 CSS/Canvas 动画。"}
+        ]
+    })).await;
+    let execution_id = execution["execution_id"].as_str().unwrap();
+    let detail = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let detail = call(&router, "GET", &format!("/api/agent-executions/{execution_id}"), Value::Null).await;
+            match detail["execution"]["status"].as_str().unwrap() {
+                "completed" => break detail,
+                "planning" | "running" | "ready" => {},
+                _ => panic!("delegated file execution failed: {detail}"),
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("delegated steps must settle without retries");
+    assert_eq!(writes.load(Ordering::SeqCst), 3, "each child writes exactly once");
+    let attempts = detail["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 3);
+    let mut output_names = std::collections::BTreeSet::new();
+    for attempt in attempts {
+        assert_eq!(attempt["status"], "completed", "{attempt}");
+        let files = attempt["output_files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "successful canonical write must be delivered: {attempt}");
+        let file = std::path::Path::new(files[0].as_str().unwrap());
+        assert!(file.is_file());
+        output_names.insert(file.file_name().unwrap().to_string_lossy().into_owned());
+    }
+    assert_eq!(output_names, std::collections::BTreeSet::from([
+        "index.html".to_owned(), "snake-game-design.md".to_owned(), "snake-game-ui.md".to_owned()
+    ]));
+    app.shutdown_browser_platform().await.unwrap();
+    app.database.close().await;
+}
+
 #[cfg(all(feature="browser-use", feature="computer-use"))]
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn general_preset_repairs_native_protocol_then_creates_nested_game_in_selected_workspace() {
