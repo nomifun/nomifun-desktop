@@ -316,7 +316,7 @@ impl AppCompanionSlots {
             .ok()
     }
 
-    /// Whether a catalog row carries the vision-input trait.
+    /// Whether the configured Chat serializer can carry image input.
     async fn model_sees_images(&self, provider_id: &str, model: &str) -> bool {
         self
             .model_invoke
@@ -329,9 +329,13 @@ impl AppCompanionSlots {
             )
             .await
             .is_ok_and(|resolved| {
-                resolved
-                    .traits
-                    .contains(&nomifun_api_types::ModelTrait::VisionInput)
+                nomifun_chat_model_broker::chat_protocol_for_id(&resolved.protocol)
+                    .is_some_and(|protocol| {
+                        nomifun_chat_model_broker::protocol_features(protocol)
+                            .contains(&nomifun_chat_model_broker::ChatModelFeature::ImageInput)
+                    })
+                    && !nomifun_common::VisionUnsupportedRegistry::global()
+                        .is_unsupported(provider_id, model)
             })
     }
 }
@@ -356,9 +360,8 @@ impl CompanionSlotReader for AppCompanionSlots {
                 .await
                 .then_some((vision.provider_id, vision.model));
         }
-        // No dedicated slot: the main chat model may still be able to look, and
-        // the catalog is the authority on that. Guessing from the model name is
-        // how you end up sending a JPEG to a text-only endpoint.
+        // Without a dedicated slot, the exact configured Chat protocol decides
+        // whether the main model can receive images; catalog metadata is advisory.
         let chat = profile.model?;
         self.model_sees_images(&chat.provider_id, &chat.model)
             .await

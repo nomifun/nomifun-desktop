@@ -6,11 +6,12 @@ import type {
 } from '@/common/config/storage';
 import { compositeKey } from '@/common/utils/compositeKey';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
-import { capabilityOf } from '@/common/utils/providerModels';
+import { modelSupportsTask } from '@/common/utils/providerModels';
 import { exactChatHealthDotColor } from './chatModelHealth';
 import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import { modelProviderManagementRoute } from '@/renderer/pages/modelHub/modelAdditionIntent';
 import { Button, Dropdown, Menu } from '@arco-design/web-react';
 import { Brain, Check, Down, Plus } from '@icon-park/react';
 import { useState } from 'react';
@@ -28,11 +29,10 @@ export const filterCompatibleChatModelGroups = (
     .map(group => ({
       ...group,
       models: group.models.filter(name => {
-        const capability = capabilityOf(group.provider, name, 'chat');
-        const traits = capability?.traits ?? [];
-        const unsupported = capability?.health?.unsupported_technical_capabilities ?? [];
-        return requiredTraits.every(trait => traits.includes(trait))
-          && requiredTechnicalCapabilities.every(technical => !unsupported.includes(technical));
+        const model = group.provider.models.find(candidate => candidate.model === name);
+        return Boolean(model && modelSupportsTask(
+          model, 'chat', requiredTraits, requiredTechnicalCapabilities
+        ));
       }),
     }))
     .filter(group => group.models.length > 0);
@@ -120,7 +120,7 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
         </Menu.Item>;
       })}
     </Menu.ItemGroup>)}
-    <Menu.Item key='add-model' onClick={() => navigate('/models?section=models')}><Plus size={12} />{t('settings.addModel')}</Menu.Item>
+    <Menu.Item key='add-model' onClick={() => navigate(modelProviderManagementRoute('chat'))}><Plus size={12} />{t('settings.addModel')}</Menu.Item>
   </Menu>;
   const modelControl = disabled ? modelTrigger : <Dropdown
     trigger='click'

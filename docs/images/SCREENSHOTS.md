@@ -24,7 +24,7 @@ numbered gallery.
 | File | Current surface |
 | --- | --- |
 | `readme/en/workspace.png` / `readme/zh/workspace.png` | Current Desktop workspace and session hub |
-| `readme/en/models.png` / `readme/zh/models.png` | Model Management and task-aware model catalog |
+| `readme/en/models.png` / `readme/zh/models.png` | Model Management and provider model configuration |
 | `readme/en/companions.png` / `readme/zh/companions.png` | Current workspace with the live desktop companion visible |
 | `readme/en/skills.png` / `readme/zh/skills.png` | Skills Hub with Creative Studio skills |
 

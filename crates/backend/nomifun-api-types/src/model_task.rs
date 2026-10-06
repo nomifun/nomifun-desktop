@@ -4,8 +4,8 @@
 //! - [`ModelTask`] is the stable task key on an exact provider-model capability
 //!   row. That row selects a protocol descriptor, which owns the transport and
 //!   endpoint contract.
-//! - [`ModelTrait`] is a user-declared semantic refinement for Chat input and
-//!   search. Transport/runtime details are deliberately not user traits.
+//! - [`ModelTrait`] is advisory provider/catalog metadata for Chat input and
+//!   search. It never disables input representable by the selected protocol.
 //! - [`ModelTechnicalCapability`] is host-managed, optimistic runtime state:
 //!   capabilities are available unless a complete provider error proves that
 //!   one is unsupported.
@@ -47,10 +47,11 @@ pub enum ModelTask {
     Rerank,
 }
 
-/// User-declared semantic refinement of a Chat model.
+/// Advisory semantic metadata from a provider or model catalog.
 ///
 /// Function calling, reasoning and streaming are intentionally absent. They
-/// are runtime capabilities, not configuration checkboxes. Realtime is a
+/// are runtime capabilities, not configuration checkboxes. Missing metadata
+/// does not disable a model's native input or search support. Realtime is a
 /// standalone [`ModelTask::RealtimeConversation`] and must never be duplicated
 /// as a Chat trait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
@@ -172,17 +173,17 @@ fn is_unified_ark_seedream_model(model: &str) -> bool {
     .any(|family| base.contains(family))
 }
 
-/// Provider/model combinations whose official task is known and whose name is
-/// either ambiguous or actively misleading to generic substring inference.
-/// Keep this table intentionally small: live provider catalogs decide which
-/// model IDs are available, while this function only supplies their task
-/// metadata to the provider -> modality -> model picker.
-fn verified_provider_profile(
+/// Exact provider/model combinations whose official task is known. Family or
+/// substring matches belong only in [`infer_catalog_tasks_and_traits`], so a
+/// newly encountered model cannot inherit a documented task from its name.
+/// Keep this table intentionally small: live catalogs determine availability,
+/// while these profiles supply task suggestions with documented provenance.
+pub fn verified_catalog_tasks_and_traits(
     platform: &str,
     model: &str,
 ) -> Option<(Vec<ModelTask>, Vec<ModelTrait>)> {
     use ModelTask::*;
-    let base = base_model_name(model);
+    let base = model.trim().to_ascii_lowercase();
 
     match platform {
         "agnes" => match base.as_str() {
@@ -192,9 +193,6 @@ fn verified_provider_profile(
             "agnes-video-v2.0" => Some((vec![VideoGeneration], vec![])),
             _ => None,
         },
-        "ark" | "volcengine" if is_unified_ark_seedream_model(model) => {
-            Some((vec![ImageGeneration, ImageEdit], vec![]))
-        }
         "mimo" | "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams" => {
             match base.as_str() {
                 "mimo-v2.5-pro" | "mimo-v2.5-pro-ultraspeed" => Some((vec![Chat], vec![])),
@@ -299,9 +297,6 @@ fn verified_provider_profile(
             "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" => {
                 Some((vec![Chat], vec![ModelTrait::VisionInput]))
             }
-            _ if base.contains("vision-preview") => {
-                Some((vec![Chat], vec![ModelTrait::VisionInput]))
-            }
             _ => None,
         },
         "lingyi" if base == "yi-vision-v2" => Some((vec![Chat], vec![ModelTrait::VisionInput])),
@@ -329,8 +324,19 @@ pub fn infer_catalog_tasks_and_traits(
     platform: &str,
     model: &str,
 ) -> (Vec<ModelTask>, Vec<ModelTrait>) {
-    if let Some(profile) = verified_provider_profile(platform, model) {
+    if let Some(profile) = verified_catalog_tasks_and_traits(platform, model) {
         return profile;
+    }
+
+    // Family matching is still useful as an advisory suggestion, but it must
+    // not acquire the evidence of an exact officially documented model ID.
+    if matches!(platform, "ark" | "volcengine") && is_unified_ark_seedream_model(model) {
+        return (vec![ModelTask::ImageGeneration, ModelTask::ImageEdit], vec![]);
+    }
+    if matches!(platform, "moonshot-cn" | "moonshot-global")
+        && base_model_name(model).contains("vision-preview")
+    {
+        return (vec![ModelTask::Chat], vec![ModelTrait::VisionInput]);
     }
 
     let base = base_model_name(model);
@@ -392,6 +398,16 @@ mod tests {
     fn chat_model_is_chat() {
         assert_eq!(tasks_of("openai", "gpt-4o-mini"), vec![ModelTask::Chat]);
         assert_eq!(tasks_of("deepseek", "deepseek-chat"), vec![ModelTask::Chat]);
+    }
+
+    #[test]
+    fn only_exact_documented_profiles_confirm_a_task() {
+        assert!(verified_catalog_tasks_and_traits("mimo", "mimo-v2.5-asr").is_some());
+        assert!(verified_catalog_tasks_and_traits("mimo", "mimo-v2.5-asr-future").is_none());
+        assert!(verified_catalog_tasks_and_traits("openai", "opaque-future-id").is_none());
+        assert!(verified_catalog_tasks_and_traits("openai", "my-whisper-model").is_none());
+        assert!(verified_catalog_tasks_and_traits("ark", "seedream-5.0-custom").is_none());
+        assert!(verified_catalog_tasks_and_traits("moonshot-cn", "custom-vision-preview").is_none());
     }
 
     #[test]

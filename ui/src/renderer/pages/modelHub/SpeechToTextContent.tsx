@@ -23,6 +23,7 @@ import {
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import ModalityModelsPanel from './ModalityModelsPanel';
 import ModelHubPageHeader from './ModelHubPageHeader';
+import { modelProviderManagementRoute } from './modelAdditionIntent';
 
 /**
  * 语音识别（ASR）分区：哪个目录里的模型负责把说话转成文字，外加本机 VAD 说明。
@@ -86,7 +87,7 @@ const SpeechToTextContent: React.FC = () => {
               size='small'
               className='shrink-0'
               icon={<LinkCloud theme='outline' size='14' />}
-              onClick={() => navigate('/models?section=models')}
+              onClick={() => navigate(modelProviderManagementRoute('speech_recognition'))}
             >
               {t('settings.modelHub.speech.manageProviders')}
             </Button>

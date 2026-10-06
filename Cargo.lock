@@ -5968,6 +5968,7 @@ dependencies = [
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
+ "nomifun-chat-model-broker",
  "nomifun-common",
  "nomifun-db",
  "nomifun-file",

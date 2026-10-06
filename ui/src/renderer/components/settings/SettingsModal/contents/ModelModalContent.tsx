@@ -60,6 +60,7 @@ import {
   modelConfigurationTarget,
   withoutModelConfigurationTarget,
 } from '@/renderer/pages/modelHub/modelConfigurationRoute';
+import { modelAdditionTask } from '@/renderer/pages/modelHub/modelAdditionIntent';
 import '../model-provider.css';
 
 /**
@@ -112,7 +113,7 @@ const ModelHealthCheckAction: React.FC<{
           onClick={(event) => event.stopPropagation()}
         >
           <div className='px-8px pb-2px text-12px text-t-secondary'>
-            {label} · {t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
+            {label} · {t('settings.modelCallRoutes', { defaultValue: '调用接口' })}
           </div>
           {tasks.map((task) => (
             <Button
@@ -479,6 +480,7 @@ const ModelModalContent: React.FC = () => {
     () => modelConfigurationTarget(searchParams),
     [searchParams]
   );
+  const initialTask = modelAdditionTask(searchParams);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -852,9 +854,9 @@ const ModelModalContent: React.FC = () => {
   useEffect(() => {
     const pending = consumePendingDeepLink();
     if (pending) {
-      addPlatformModalCtrl.open({ deepLinkData: pending });
+      addPlatformModalCtrl.open({ deepLinkData: pending, initialTask: pending.task ?? initialTask });
     }
-  }, [addPlatformModalCtrl]);
+  }, [addPlatformModalCtrl, initialTask]);
 
   const [addModelModalCtrl, addModelModalContext] = AddModelModal.useModal({
     onSubmit(platform) {
@@ -916,7 +918,7 @@ const ModelModalContent: React.FC = () => {
               type='outline'
               shape='round'
               icon={<Plus size='16' />}
-              onClick={() => addPlatformModalCtrl.open()}
+              onClick={() => addPlatformModalCtrl.open({ initialTask, deepLinkData: undefined })}
               className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
             >
               {t('settings.addProvider', { defaultValue: '添加供应商' })}
@@ -1056,7 +1058,7 @@ const ModelModalContent: React.FC = () => {
                                 className='model-provider-action-btn !w-28px !h-28px !min-w-28px text-t-secondary hover:text-t-primary'
                                 icon={<Plus size='14' />}
                                 aria-label={t('settings.addModel')}
-                                onClick={() => addModelModalCtrl.open({ data: platform })}
+                                onClick={() => addModelModalCtrl.open({ data: platform, initialTask })}
                               />
                             </Tooltip>
                             <Popconfirm
@@ -1145,8 +1147,8 @@ const ModelModalContent: React.FC = () => {
                                         </div>
                                         {checkedCapability && (
                                           <div className='text-12px mt-4px'>
-                                            {t('settings.modelSupportedTasks', {
-                                              defaultValue: '支持的任务',
+                                            {t('settings.modelCallRoutes', {
+                                              defaultValue: '调用接口',
                                             })}
                                             :{' '}
                                             {t(`settings.modelTask.${checkedCapability.task}`, {

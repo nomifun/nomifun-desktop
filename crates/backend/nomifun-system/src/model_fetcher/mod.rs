@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     BedrockConfig, FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse,
-    ModelInfo, infer_catalog_tasks_and_traits,
+    ModelCatalogSource, ModelInfo, ModelTaskSource, infer_catalog_tasks_and_traits,
+    verified_catalog_tasks_and_traits,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::IProviderRepository;
@@ -119,17 +120,20 @@ impl ModelFetchService {
         try_fix: bool,
     ) -> Result<FetchModelsResponse, AppError> {
         let http_client = self.http_client();
+        let catalog_platform = fetchers::catalog_platform(&config.platform, &config.base_url);
         match fetchers::fetch_for_platform(&http_client, &config).await {
-            Ok(models) => Ok(fetch_models_response(&config.platform, models, None)),
+            Ok(catalog) => Ok(fetch_models_response(catalog_platform, catalog.models, catalog.source, None)),
             Err(err)
                 if try_fix
-                    && supports_url_fix(&config.platform)
+                    && supports_url_fix(catalog_platform)
+                    && !(catalog_platform == "dashscope"
+                        && fetchers::dashscope_native_models_url(&config.base_url).is_some())
                     && is_url_fix_candidate(&err) =>
             {
                 url_fixer::try_fix_url(&http_client, &config)
                     .await
                     .map(|mut response| {
-                        enrich_model_suggestions(&config.platform, &mut response.models);
+                        enrich_model_suggestions(catalog_platform, &mut response.models);
                         response
                     })
                     .map_err(|_| err)
@@ -187,6 +191,11 @@ fn enrich_model_suggestions(platform: &str, models: &mut [ModelInfo]) {
         let (tasks, traits) = infer_catalog_tasks_and_traits(platform, &model.id);
         if model.tasks.is_empty() {
             model.tasks = tasks;
+            model.tasks_source = Some(if verified_catalog_tasks_and_traits(platform, &model.id).is_some() {
+                ModelTaskSource::OfficialDocumentation
+            } else {
+                ModelTaskSource::Inferred
+            });
         }
         if model.traits.is_empty() {
             model.traits = traits;
@@ -197,10 +206,11 @@ fn enrich_model_suggestions(platform: &str, models: &mut [ModelInfo]) {
 fn fetch_models_response(
     platform: &str,
     mut models: Vec<ModelInfo>,
+    source: ModelCatalogSource,
     fixed_base_url: Option<String>,
 ) -> FetchModelsResponse {
     enrich_model_suggestions(platform, &mut models);
-    FetchModelsResponse { models, fixed_base_url }
+    FetchModelsResponse { models, catalog_source: Some(source), fixed_base_url }
 }
 
 impl FetchConfig {
@@ -211,12 +221,49 @@ impl FetchConfig {
     }
 }
 
-/// Validate the full anonymous default-connection proposal before network I/O.
+fn credentials_are_empty(credentials: &serde_json::Value) -> bool {
+    credentials.as_object().is_some_and(|value| value.is_empty())
+}
+
+/// Public discovery is tied to an exact official URL. A custom relay never
+/// inherits permission to skip authentication merely by its provider label.
+pub(crate) fn is_public_catalog(platform: &str, base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else { return false; };
+    if url.scheme() != "https" || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty() || url.password().is_some()
+        || url.query().is_some() || url.fragment().is_some()
+    { return false; }
+    let source = (url.host_str().unwrap_or_default(), url.path().trim_end_matches('/'));
+    matches!((platform, source),
+        ("openrouter", ("openrouter.ai", "/api/v1"))
+        | ("poe", ("api.poe.com", "/v1"))
+        | ("modelscope", ("api-inference.modelscope.cn", "/v1"))
+        | ("deepgram", ("api.deepgram.com", "" | "/v1"))
+    )
+}
+
+fn catalog_needs_credentials(platform: &str, base_url: &str) -> bool {
+    !is_public_catalog(platform, base_url) && !matches!(
+        fetchers::catalog_platform(platform, base_url),
+        "mimo-token-plan-cn" | "mimo-token-plan-sgp" | "mimo-token-plan-ams"
+        | "minimax-coding-plan" | "zhipu" | "ark-coding-plan" | "ark-agent-plan"
+        | "stepfun-plan" | "dashscope-coding" | "glm-coding-plan" | "qianfan-coding-plan"
+    )
+}
+
+/// Validate discovery independently of save/invocation. Public lists and
+/// documentation suggestions do not need a model invocation credential.
 fn validate_anonymous_request(req: &FetchModelsAnonymousRequest) -> Result<(), AppError> {
     if req.platform.trim().is_empty() {
         return Err(AppError::BadRequest("platform is required".into()));
     }
     validate_provider_base_url(&req.platform, &req.base_url)?;
+    parse_auth_scheme(&req.auth_scheme)?;
+    if credentials_are_empty(&req.credentials)
+        && !catalog_needs_credentials(&req.platform, &req.base_url)
+    {
+        return Ok(());
+    }
     validate_provider_auth(
         &req.platform,
         &req.auth_scheme,
@@ -294,6 +341,50 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
+
+    #[test]
+    fn public_catalog_preview_is_exact_and_independent_of_save_credentials() {
+        for (platform, base_url, scheme) in [
+            ("openrouter", "https://openrouter.ai/api/v1", "bearer"),
+            ("poe", "https://api.poe.com/v1", "bearer"),
+            ("modelscope", "https://api-inference.modelscope.cn/v1", "bearer"),
+            ("deepgram", "https://api.deepgram.com", "token"),
+            ("deepgram", "https://api.deepgram.com/v1", "token"),
+        ] {
+            assert!(is_public_catalog(platform, base_url));
+            assert!(validate_anonymous_request(&FetchModelsAnonymousRequest {
+                platform: platform.into(), base_url: base_url.into(), auth_scheme: scheme.into(),
+                credentials: serde_json::json!({}), bedrock_config: None, try_fix: false,
+            }).is_ok());
+            // Saving/invoking still validates the provider credential separately.
+            assert!(validate_provider_auth(platform, scheme, &serde_json::json!({}), None).is_err());
+        }
+        for base in [
+            "http://openrouter.ai/api/v1", "https://openrouter.ai.evil.example/api/v1",
+            "https://openrouter.ai:444/api/v1", "https://openrouter.ai/api/v1?key=x",
+            "https://user@openrouter.ai/api/v1", "https://openrouter.ai/custom",
+        ] {
+            assert!(!is_public_catalog("openrouter", base), "{base}");
+            assert!(validate_anonymous_request(&FetchModelsAnonymousRequest {
+                platform: "openrouter".into(), base_url: base.into(), auth_scheme: "bearer".into(),
+                credentials: serde_json::json!({}), bedrock_config: None, try_fix: false,
+            }).is_err());
+        }
+        assert!(!is_public_catalog("custom", "https://openrouter.ai/api/v1"));
+    }
+
+    #[tokio::test]
+    async fn documentation_catalog_preview_does_not_require_an_invocation_key() {
+        let (service, _) = setup().await;
+        let response = service.fetch_models_anonymous(&FetchModelsAnonymousRequest {
+            platform: "stepfun".into(), base_url: "https://api.stepfun.com/step_plan/v1".into(),
+            auth_scheme: "bearer".into(), credentials: serde_json::json!({}),
+            bedrock_config: None, try_fix: true,
+        }).await.unwrap();
+        assert_eq!(response.catalog_source, Some(ModelCatalogSource::OfficialDocumentation));
+        assert!(response.models.iter().any(|model| model.id == "step-5-preview"));
+        assert!(response.fixed_base_url.is_none());
+    }
 
     async fn setup() -> (ModelFetchService, nomifun_db::Database) {
         let db = init_database_memory().await.unwrap();
@@ -429,13 +520,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_models_minimax_returns_hardcoded() {
+    async fn fetch_models_minimax_uses_saved_credentials_for_the_live_catalog() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/v1/models"))
+            .and(header("authorization", "Bearer fake-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data":[{"id":"MiniMax-future-account-model"}]
+            }))).expect(1).mount(&server).await;
         let (svc, db) = setup().await;
-        let id = create_provider(&db, "minimax", "https://unused", "fake-key").await;
+        let id = create_provider(&db, "minimax", &format!("{}/v1", server.uri()), "fake-key").await;
         let req = FetchModelsRequest { try_fix: false };
         let resp = svc.fetch_models(&id, &req).await.unwrap();
-        assert!(resp.models.iter().any(|model| model.id == "MiniMax-M3"));
-        assert!(!resp.models.iter().any(|model| model.id == "MiniMax-Text-01"));
+        assert_eq!(resp.models.len(), 1);
+        assert_eq!(resp.models[0].id, "MiniMax-future-account-model");
+        assert_eq!(resp.catalog_source, Some(ModelCatalogSource::Remote));
     }
 
     #[tokio::test]
@@ -492,19 +590,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_models_anonymous_minimax_returns_hardcoded() {
+    async fn fetch_models_anonymous_minimax_reads_the_live_catalog() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/v1/models"))
+            .and(header("authorization", "Bearer fake-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data":[{"id":"MiniMax-future-preview-model"}]
+            }))).expect(1).mount(&server).await;
         let (svc, _db) = setup().await;
         let req = FetchModelsAnonymousRequest {
             platform: "minimax".into(),
-            base_url: "https://unused".into(),
+            base_url: format!("{}/v1", server.uri()),
             auth_scheme: "bearer".into(),
             credentials: serde_json::json!({"api_keys":["fake-key"]}),
             bedrock_config: None,
             try_fix: false,
         };
         let resp = svc.fetch_models_anonymous(&req).await.unwrap();
-        assert!(resp.models.iter().any(|model| model.id == "MiniMax-M3"));
-        assert!(!resp.models.iter().any(|model| model.id == "MiniMax-Text-01"));
+        assert_eq!(resp.models.len(), 1);
+        assert_eq!(resp.models[0].id, "MiniMax-future-preview-model");
+        assert_eq!(resp.catalog_source, Some(ModelCatalogSource::Remote));
         assert!(resp.fixed_base_url.is_none());
     }
 
@@ -624,6 +729,7 @@ mod tests {
                 id: "amazon.nova-pro-v1:0".into(),
                 name: Some("Nova Pro".into()),
                 tasks: Vec::new(),
+                tasks_source: None,
                 traits: Vec::new(),
                 context_limit: None,
                 output_limit: None,
@@ -633,6 +739,7 @@ mod tests {
                 id: "us.anthropic.claude-sonnet-4-v1:0".into(),
                 name: Some("Claude Sonnet".into()),
                 tasks: vec![nomifun_api_types::ModelTask::Chat],
+                tasks_source: Some(ModelTaskSource::ProviderDeclared),
                 traits: Vec::new(),
                 context_limit: None,
                 output_limit: None,
@@ -652,6 +759,7 @@ mod tests {
             id: "gemini-3.1-pro".into(),
             name: None,
             tasks: Vec::new(),
+            tasks_source: None,
             traits: Vec::new(),
             context_limit: Some(1_048_576),
             output_limit: Some(65_536),
@@ -661,5 +769,44 @@ mod tests {
         assert_eq!(models[0].context_limit, Some(1_048_576));
         assert_eq!(models[0].output_limit, Some(65_536));
         assert!(!models[0].tasks.is_empty());
+    }
+
+    #[test]
+    fn live_ids_do_not_confirm_tasks_inferred_from_names_or_missing_metadata() {
+        let mut models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"opaque-future-id"},
+            {"id":"future-asr-model"},
+            {"id":"my-whisper-model"},
+            {"id":"gpt-image-1"}
+        ])).unwrap();
+        enrich_model_suggestions("openai", &mut models);
+        assert_eq!(models[0].tasks, vec![nomifun_api_types::ModelTask::Chat]);
+        assert_eq!(models[1].tasks, vec![nomifun_api_types::ModelTask::SpeechRecognition]);
+        for model in &models[..3] {
+            assert_eq!(model.tasks_source, Some(ModelTaskSource::Inferred), "{}", model.id);
+        }
+        assert_eq!(models[3].tasks_source, Some(ModelTaskSource::OfficialDocumentation));
+    }
+
+    #[test]
+    fn declared_tasks_keep_their_evidence_and_are_not_replaced_by_name_guesses() {
+        let mut models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"opaque-speech-id", "tasks":["speech_synthesis"], "tasks_source":"provider_declared"},
+            {"id":"opaque-old-id", "tasks":["chat"]}
+        ])).unwrap();
+        enrich_model_suggestions("openai", &mut models);
+        assert_eq!(models[0].tasks, vec![nomifun_api_types::ModelTask::SpeechSynthesis]);
+        assert_eq!(models[0].tasks_source, Some(ModelTaskSource::ProviderDeclared));
+        assert_eq!(models[1].tasks_source, None, "older task metadata remains unconfirmed");
+    }
+
+    #[test]
+    fn documentation_catalog_ids_are_not_all_assumed_to_have_confirmed_tasks() {
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"mimo-v2.5-asr"}, {"id":"mimo-v2.6-future"}
+        ])).unwrap();
+        let response = fetch_models_response("mimo", models, ModelCatalogSource::OfficialDocumentation, None);
+        assert_eq!(response.models[0].tasks_source, Some(ModelTaskSource::OfficialDocumentation));
+        assert_eq!(response.models[1].tasks_source, Some(ModelTaskSource::Inferred));
     }
 }

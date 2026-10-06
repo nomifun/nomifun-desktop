@@ -103,6 +103,62 @@ async fn create_provider(db: &nomifun_db::Database, platform: &str, name: &str) 
 }
 
 #[tokio::test]
+async fn task_protocol_mismatches_cannot_create_or_replace_saved_model_configuration() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Task protocol contract").await;
+    let app = system_routes(build_state(&db));
+    let list_uri = format!("/api/provider-models?provider_id={provider_id}");
+    let before = body_json(app.clone().oneshot(request("GET", &list_uri, None)).await.unwrap()).await;
+
+    // Model IDs are intentionally arbitrary: validation is about the exact
+    // task/protocol contract, independent of names or catalog suggestions.
+    for (task, protocol) in [
+        (ModelTask::ImageGeneration, "openai.chat_text"),
+        (ModelTask::ImageEdit, "openai.chat_text"),
+        (ModelTask::VideoGeneration, "openai.chat_text"),
+        (ModelTask::MusicGeneration, "openai.chat_text"),
+        (ModelTask::SpeechRecognition, "openai.chat_text"),
+        (ModelTask::SpeechSynthesis, "openai.chat_text"),
+        (ModelTask::Embedding, "openai.chat_text"),
+        (ModelTask::Rerank, "openai.chat_text"),
+        (ModelTask::Chat, "openai.audio_speech"),
+        (ModelTask::SpeechRecognition, "openai.audio_speech"),
+        (ModelTask::SpeechSynthesis, "openai.audio_transcriptions"),
+    ] {
+        for model in ["new-unknown-model", "seed-chat"] {
+            let response = app.clone().oneshot(request(
+                "PUT",
+                "/api/provider-models",
+                Some(json!({
+                    "provider_id": provider_id,
+                    "model": {
+                        "model": model,
+                        "description": "must never persist",
+                        "capabilities": [{
+                            "task": task,
+                            "protocol": protocol,
+                            "connection_role": "default",
+                            "provider_params": {}
+                        }]
+                    }
+                })),
+            )).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{model}: {task:?}/{protocol}");
+            let error = body_json(response).await;
+            assert!(error.to_string().contains("task-incompatible"), "unexpected error: {error}");
+        }
+    }
+
+    let after = body_json(app.oneshot(request("GET", &list_uri, None)).await.unwrap()).await;
+    assert_eq!(after["data"], before["data"], "failed task/protocol validation must occur before any write");
+    let resolved = build_invoke(&db).resolve_task_config(
+        &ModelRef { provider_id, model: "seed-chat".into() },
+        ModelTask::Chat,
+    ).await.unwrap();
+    assert_eq!(resolved.protocol, "openai.chat_text");
+}
+
+#[tokio::test]
 async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
     let db = init_database_memory().await.unwrap();
     let provider_id = create_provider(&db, "custom", "Trait contract").await;

@@ -160,6 +160,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
       <Select
         value={selectValue}
         options={presetOptions}
+        aria-label={t('settings.outputLimit', { defaultValue: '最大输出（tokens）' })}
         style={{ width: '100%' }}
         getPopupContainer={() => document.body}
         onChange={(nextValue) => {

@@ -7,6 +7,7 @@
 import type { IProvider } from '@/common/config/storage';
 import {
   capabilityOf,
+  capabilitySupportsTrait,
   capabilitySupportsTechnicalCapability,
 } from '@/common/utils/providerModels';
 import { imageExts } from '@/renderer/services/FileService';
@@ -22,11 +23,12 @@ const containsImageAttachment = (files: readonly string[]): boolean =>
   });
 
 /**
- * Fail-closed image-send decision for Nomi chat.
+ * Image-send decision for a configured Nomi Chat route.
  *
  * The sole capability authority is the exact `(provider id, model id, chat)`
- * row nested in `ProviderResponse.models[].capabilities[]`. Provider platform,
- * model-name patterns and traits on another task/model never grant vision.
+ * row nested in `ProviderResponse.models[].capabilities[]`. The adapter must
+ * encode image input; catalog/manual traits never disable an untested model.
+ * The runtime retains explicit upstream image rejections as negative evidence.
  */
 export const evaluateNomiVisionSend = ({
   files,
@@ -55,7 +57,7 @@ export const evaluateNomiVisionSend = ({
     const chatCapability = candidateModel
       ? capabilityOf(provider, candidateModel, 'chat')
       : undefined;
-    return chatCapability?.traits.includes('vision_input') === true
+    return capabilitySupportsTrait(chatCapability, 'vision_input')
       && (!requireToolCalls || capabilitySupportsTechnicalCapability(
         chatCapability,
         'function_calling'

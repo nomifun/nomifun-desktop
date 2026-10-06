@@ -23,7 +23,7 @@ const providerId = (suffix: string) =>
 const capability = (task: ModelTask, traits: ModelTrait[] = []) => ({
   task,
   traits,
-  protocol: `test.${task}`,
+  protocol: task === 'chat' ? 'openai.chat_text' : `test.${task}`,
   connection_role: 'default',
   allow_cross_origin_credentials: false,
   provider_params: {},
@@ -114,14 +114,21 @@ describe('Creative Studio model catalog', () => {
     });
   });
 
-  test('requires traits on the same task capability', () => {
+  test('native Chat inputs do not require a saved trait and cannot broaden other tasks', () => {
+    expect(
+      buildCreativeModelGroups(providers, {
+        capability: 'task',
+        task: 'chat',
+        traits: ['vision_input'],
+      })[0].models.map((model) => model.model)
+    ).toEqual(['chat-only']);
     expect(
       buildCreativeModelGroups(providers, {
         capability: 'task',
         task: 'image_generation',
         traits: ['vision_input'],
-      })[0].models.map((model) => model.model)
-    ).toEqual(['image-with-vision']);
+      })
+    ).toEqual([]);
     expect(
       buildCreativeModelGroups(providers, {
         capability: 'task',
