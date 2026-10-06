@@ -62,7 +62,7 @@ test('remote WebUI keeps Plugin reads while every local mutation is desktop-gate
   expect(configuration).toContain('if (!desktopShell || !detail) return');
   expect(organization).toContain('if (!isDesktopShell())');
   expect(surface).toContain('const source = desktopShell ?');
-  expect(agentTemplate).toContain('if (!desktopShell || disabled || pending.current) return');
+  expect(agentTemplate).toContain('if (!PLUGIN_FEATURE_VISIBLE || !desktopShell || disabled || pending.current) return');
 });
 
 test('Preview and Config bind only listed Host Credential references', () => {

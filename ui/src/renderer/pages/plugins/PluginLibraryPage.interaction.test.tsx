@@ -71,12 +71,15 @@ function mountLibrary() {
 test('creation enters conversation and returning lists its draft and installed result with usable links', async () => {
   const v = mountLibrary();
   await v.findByText(en.library.emptyTitle);
+  expect(v.getByText(en.workspace.betaTitle)).toBeTruthy();
+  expect(v.getByText(en.workspace.betaNotice)).toBeTruthy();
   fireEvent.click(v.getByRole('button', { name: en.actions.create }));
   await v.findByRole('heading', { name: 'Plugin conversation' });
   expect(v.preflight.mock.calls[0][0]).toEqual({ selection: { kind: 'template', templateKey: 'assistant.general' } });
   v.setData([], [draft]);
   fireEvent.click(v.getByRole('button', { name: 'Return to library' }));
   await v.findByText(draft.display_name);
+  expect(v.getByText(en.workspace.betaNotice)).toBeTruthy();
   fireEvent.click(v.getByRole('button', { name: en.library.continue }));
   await v.findByRole('heading', { name: 'Source conversation' });
   v.setData([plugin], [{ ...draft, plugin_id: plugin.plugin_id, base_plugin_revision: 1 }]);

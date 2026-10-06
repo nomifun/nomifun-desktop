@@ -334,6 +334,7 @@ Skill若影响命令生成，保留正确注入/来源/不扩权检查；不建�
 - PROGRESS-SHARED.zh.md：C01～C08共同根因及复用依据。
 - PROGRESS-WINDOWS.zh.md：A/B/C正式场景和Windows入口，使用待验/失败待修/阻断/本轮已验状态。
 - PROGRESS-MACOS.zh.md：保留对应平台已有修复及另行验收，本机不代判。
+- PROGRESS-LINUX.zh.md：Linux走查清单与WSL2能力边界；WSL2不可验项记范围外，不代判其他平台。
 - HIGH-ORDER-OPERATIONS-CASE-CATALOG.zh.md：历史全产品Case与发布回归库，本轮按本计划选取。
 
 本轮停止使用675/82/2,374完成率，报告当前场景缺口、核心问题闭环和残余风险。

@@ -71,6 +71,8 @@
   },
   "workspace": {
     "title": "插件与小程序（Beta）",
+    "betaTitle": "Beta 版本",
+    "betaNotice": "暂时不推荐使用",
     "subtitle": "本机能力中心",
     "navigation": "插件工作区导航",
     "collapse": "收起插件导航",

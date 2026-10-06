@@ -5168,6 +5168,8 @@ export type I18nKey =
   | 'pluginPlatform.shape.service'
   | 'pluginPlatform.shape.ui'
   | 'pluginPlatform.shape.ui_only'
+  | 'pluginPlatform.workspace.betaNotice'
+  | 'pluginPlatform.workspace.betaTitle'
   | 'pluginPlatform.workspace.capabilityTypes'
   | 'pluginPlatform.workspace.collapse'
   | 'pluginPlatform.workspace.expand'
