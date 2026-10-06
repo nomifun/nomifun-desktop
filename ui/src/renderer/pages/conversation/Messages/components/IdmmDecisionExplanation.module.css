@@ -1,0 +1,12 @@
+.explanation { margin-top: 6px; max-width: min(580px, 100%); color: var(--text-secondary); font-size: 12px; line-height: 18px; }
+.header { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.source { min-width: 0; max-width: 100%; overflow-wrap: anywhere; font-weight: 500; color: color-mix(in srgb, var(--success) 70%, var(--text-primary)); }
+.button { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.button:hover { color: var(--text-primary); text-decoration: underline; }
+.button:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; border-radius: 2px; }
+.basis { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.autoBubble { background: color-mix(in srgb, var(--success) 13%, var(--bg-2)); }
+.notice { display: flex; min-width: 0; flex-direction: column; gap: 7px; border: 1px solid var(--border-base); border-radius: 10px; padding: 12px; color: var(--text-primary); background: var(--bg-2); }
+.noticeTitle { font-size: 12px; font-weight: 500; }
+.noticeDescription { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 18px; }
+.noticeActions { display: flex; align-items: center; gap: 12px; font-size: 12px; }

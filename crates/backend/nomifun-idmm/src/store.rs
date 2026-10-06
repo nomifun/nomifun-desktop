@@ -147,7 +147,7 @@ impl IdmmStore {
         let rows: Vec<String> = nomifun_db::sqlx::query_scalar(
             "SELECT value FROM client_preferences WHERE key GLOB ? ORDER BY key",
         )
-        .bind(format!("{KEY_PREFIX}%"))
+        .bind(format!("{KEY_PREFIX}*"))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| AppError::Internal(format!("list IDMM states: {error}")))?;

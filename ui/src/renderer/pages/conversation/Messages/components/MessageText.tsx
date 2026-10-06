@@ -27,6 +27,8 @@ import { parseMessageFileMarker } from './messageFileMarker';
 import { projectAssistantText } from '../processTraceDisplayModel';
 import AssistantProtocolNotice from './AssistantProtocolNotice';
 import { projectCompletionOutcomes } from '../completionOutcomeDisplayModel';
+import { IdmmDecisionExplanation } from './IdmmDecisionExplanation';
+import decisionStyles from './IdmmDecisionExplanation.module.css';
 
 /**
  * Format a timestamp for message display.
@@ -124,6 +126,7 @@ const MessageText: React.FC<{
   const { data, json } = useFormatContent(text);
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const isUserMessage = message.position === 'right';
+  const decision = isUserMessage ? message.content.idmm_decision : undefined;
   const isAgentMessage = message.position === 'left' && message.content.agentMessage === true;
   const shouldRenderPlainText = isUserMessage;
   const conversationContext = useConversationContextSafe();
@@ -180,6 +183,7 @@ const MessageText: React.FC<{
     conversationContext?.type === 'nomi' &&
     conversationContext.isProcessing !== true &&
     isUserMessage &&
+    !decision &&
     message.type === 'text' &&
     editableMessageId != null &&
     message.created_at != null &&
@@ -195,6 +199,7 @@ const MessageText: React.FC<{
   const editButton = canEdit ? (
     <Tooltip content={t('conversation.editMessage.action', { defaultValue: 'Edit' })}>
       <div
+        data-testid='message-edit-action'
         className='p-4px rd-4px cursor-pointer hover:bg-3 transition-colors opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto'
         onClick={handleEdit}
         style={{ lineHeight: 0 }}
@@ -282,8 +287,9 @@ const MessageText: React.FC<{
         {hasRenderableContent && (
           <div
             className={classNames('min-w-0 max-w-full [&>p:first-child]:mt-0px [&>p:last-child]:mb-0px', {
-              'bg-aou-2 p-6px md:p-8px': isUserMessage || cronMeta,
-              'bg-3 p-6px md:p-8px': isAgentMessage,
+              'bg-aou-2 p-8px': (isUserMessage || cronMeta) && !decision,
+              [`${decisionStyles.autoBubble} p-8px`]: Boolean(decision),
+              'bg-3 p-8px': isAgentMessage,
               'w-full': !(isUserMessage || cronMeta || isAgentMessage),
             })}
             style={{
@@ -332,6 +338,7 @@ const MessageText: React.FC<{
             <span className='text-13px whitespace-pre-wrap break-words'>{observation.answer}</span>
           </div>
         ))}
+        {decision && <IdmmDecisionExplanation decision={decision} conversationId={message.conversation_id} />}
         {actionsRow}
       </div>
       {copyAlert}

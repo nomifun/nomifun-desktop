@@ -14,7 +14,36 @@
   "bypassModel": "Bypass model",
   "scanScope": "Bypass reading range",
   "contextMessages": "Recent message count",
-  "recentActivity": "Recent interventions",
+  "explanation": {
+    "ruleSource": "Rule guard",
+    "modelSource": "{{model}} decision",
+    "bypassSource": "Bypass model",
+    "recoverySource": "Automatic recovery",
+    "showBasis": "Decision basis",
+    "hideBasis": "Hide basis",
+    "viewQuestion": "View original question",
+    "noBasis": "No brief basis was recorded",
+    "basis": {
+      "recommendedOption": "Chose the recommended safe option.",
+      "firstSafeOption": "Chose the first option that passed safety checks.",
+      "safeOption": "Chose an option that passed safety checks.",
+      "providerRecovery": "A retryable provider fault interrupted the task; resumed from existing context.",
+      "modelRecovery": "The model exceeded the silence threshold; cancelled the turn and resumed the task.",
+      "stalledTool": "The tool stalled; waited for a person to avoid repeating effects.",
+      "recoveryLimit": "Recovery reached its configured limit; stopped automatic retries.",
+      "sensitiveInput": "Credentials, payment, or permission require a person.",
+      "destructiveAnswer": "The candidate involved an irreversible action; no reply was sent.",
+      "unresolvedQuestion": "Rules cannot safely answer this unresolved question; human input is needed.",
+      "bypassFailed": "The bypass model returned no valid decision; no reply was sent."
+    }
+  },
+  "notice": {
+    "waitingTitle": "Human input was needed here",
+    "waitingDescription": "Smart Decision kept this question for you to provide information or make a choice.",
+    "failedTitle": "Automatic decision did not complete here",
+    "failedDescription": "Smart Decision could not provide a reply for this step. The original question and completed work are preserved.",
+    "addInput": "Add input"
+  },
   "mode": {
     "label": "Guard mode",
     "off": "Off",
@@ -30,7 +59,7 @@
   },
   "state": {
     "off": "Off",
-    "monitoring": "Monitoring",
+    "monitoring": "Enabled",
     "intervening": "Intervening",
     "degraded": "Intervention failed"
   },

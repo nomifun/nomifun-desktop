@@ -740,6 +740,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
 | `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
 | `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
+| `bun run demo:idmm` | 用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告 |
 | `bun run test:agent-reliability-report` | 验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查 |
 | **静态检查** | |
 | `bun run check:windows-installer` | 校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同 |

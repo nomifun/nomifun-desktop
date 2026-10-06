@@ -120,6 +120,8 @@ pub use file::{
     WorkspaceOfficeWatchRequest, WriteFileRequest, ZipFileEntry, ZipRequest,
 };
 pub use idmm::{
+    IdmmDecisionExplanation, IdmmDecisionModel, IdmmDecisionNotice, IdmmDecisionNoticeStatus,
+    IdmmDecisionSource, IdmmQuestionRef,
     IdmmBypassModelRef, IdmmConfig, IdmmIntervention, IdmmInterventionKind,
     IdmmInterventionStatus, IdmmMode, IdmmRunState, IdmmScanScope, IdmmState,
 };

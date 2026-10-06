@@ -11,7 +11,7 @@ import { isToolGroupStatusActive, normalizeToolGroupStatus } from '@/common/chat
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import type { TChatConversation, TokenUsageData } from '@/common/config/storage';
-import { useAddOrUpdateMessage } from '@/renderer/pages/conversation/Messages/hooks';
+import { mergeFetchedMessagesForConversation, normalizeDbMessage, useAddOrUpdateMessage, useUpdateMessageList } from '@/renderer/pages/conversation/Messages/hooks';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import {
   isCompleteMessageProjection,
@@ -92,6 +92,7 @@ export const useNomiMessage = (
 ) => {
   const onError = options?.onError;
   const addOrUpdateMessage = useAddOrUpdateMessage();
+  const updateMessageList = useUpdateMessageList();
   // Single source of truth for the turn's activity state (design §3.2): a pure
   // reducer over lifecycle events replaces three hand-synced booleans.
   const [turnState, dispatchTurn] = useReducer(nomiTurnReducer, initialNomiTurnState);
@@ -358,11 +359,25 @@ export const useNomiMessage = (
     const off = ipcBridge.conversation.messageAnnotated.on((event) => {
       if (event.conversation_id !== conversation_id) return;
       void ipcBridge.database.getConversationMessage.invoke(event).then((message) => {
-        if (!disposed) addOrUpdateMessage(message);
+        if (disposed || message.conversation_id !== conversation_id
+          || (message.message_id ?? message.msg_id) !== event.message_id) return;
+        const canonical = normalizeDbMessage(message);
+        if (canonical.type === 'text' && message.type === 'text') {
+          // Existing camera annotations carry typed presentation facts that
+          // the history normalizer does not reconstruct. Keep those facts.
+          canonical.content = { ...canonical.content,
+            ...(message.content.interaction ? { interaction: message.content.interaction } : {}),
+            ...(message.content.observations ? { observations: message.content.observations } : {}),
+          };
+        }
+        // Single-row annotations can arrive after newer live messages. Merge
+        // with canonical ordering without replacing a longer active stream.
+        updateMessageList(current => disposed ? current
+          : mergeFetchedMessagesForConversation(current, [canonical], conversation_id));
       }).catch((error) => console.error('[Companion] Failed to refresh observation:', error));
     });
     return () => { disposed = true; off(); };
-  }, [conversation_id, addOrUpdateMessage]);
+  }, [conversation_id, updateMessageList]);
 
   useEffect(() => {
     return ipcBridge.conversation.responseStream.on((message) => {

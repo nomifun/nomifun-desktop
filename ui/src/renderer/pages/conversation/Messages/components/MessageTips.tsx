@@ -21,6 +21,7 @@ import { useMessageList } from '../hooks';
 import { parseMessageFileMarker } from './messageFileMarker';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
+import { IdmmDecisionNotice } from './IdmmDecisionNotice';
 
 const icon = {
   success: <CheckOne theme='filled' size='16' fill={theme.Color.FunctionalColor.success} className='m-t-2px' />,
@@ -70,6 +71,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
   const messageList = useMessageList();
   return useMemo(() => {
     if (message.content.type !== 'error') return null;
+    if (message.content.idmm_notice) return null;
     if (message.content.recovery) return null;
     if (message.content.error?.retryable === false) return null;
     if (conversationContext?.type !== 'nomi') return null;
@@ -77,6 +79,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
     if (conversationContext.isProcessing === true) return null;
     const lastRight = messageList.findLast((entry) => entry.type === 'text' && entry.position === 'right');
     if (!lastRight || lastRight.type !== 'text') return null;
+    if (lastRight.content.idmm_decision) return null;
     const retryMessageId = lastRight.message_id ?? lastRight.msg_id;
     const retryCreatedAt = lastRight.created_at;
     if (!retryMessageId || retryCreatedAt == null) return null;
@@ -122,6 +125,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const recoveryButton = retryButton;
 
   const displayContent = json ? '' : content;
+  if (message.content.idmm_notice) return <IdmmDecisionNotice message={message} />;
   if (transition) {
     return (
       <div className='agent-transition-boundary' role='note' aria-label={content}>
