@@ -27,6 +27,7 @@ import {
   missingComputerPermissionKinds,
 } from '@/renderer/hooks/system/systemPermissionModel';
 import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
+import { isVisibleAgentModule } from '@/renderer/utils/plugins/pluginFeatureAvailability';
 import {
   MODULE_CATEGORIES,
   isBuiltinModule,
@@ -238,7 +239,9 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
       }
       visible.add(key);
     }
-    return direct.sort((left, right) => {
+    return direct.filter((entry) =>
+      isVisibleAgentModule(String((entry.missing ? entry.module : entry.module.module).id))
+    ).sort((left, right) => {
       const leftRef = left.missing ? left.module : left.module.module;
       const rightRef = right.missing ? right.module : right.module.module;
       return MODULE_CATEGORIES.indexOf(moduleCategory(leftRef)) -

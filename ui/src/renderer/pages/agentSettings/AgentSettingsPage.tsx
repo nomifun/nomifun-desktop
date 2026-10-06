@@ -19,12 +19,15 @@ import { useAgentWorkbenchEntry } from './useAgentWorkbenchEntry';
 import styles from './AgentSettingsPage.module.css';
 import { configService } from '@/common/config/configService';
 import { launchPluginConversation } from '../plugins/pluginConversationLaunch';
+import { PLUGIN_FEATURE_VISIBLE } from '@/renderer/utils/plugins/pluginFeatureAvailability';
 
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
-  const pluginIntent = new URLSearchParams(location.search).get('pluginIntent');
+  const pluginIntent = PLUGIN_FEATURE_VISIBLE
+    ? new URLSearchParams(location.search).get('pluginIntent')
+    : null;
   const [pluginLaunchError, setPluginLaunchError] = useState('');
   const continuePlugin = async (preset?: AgentPresetSummary) => {
     if (!pluginIntent) return;
