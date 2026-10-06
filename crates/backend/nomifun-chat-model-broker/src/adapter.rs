@@ -123,6 +123,22 @@ impl EncodedRequestBody for Result<Value, ChatModelError> {
     }
 }
 
+/// Resolve an explicit persisted Chat protocol to its serializer. Model names
+/// and catalog suggestions never participate in transport selection.
+pub fn chat_protocol_for_id(protocol_id: &str) -> Option<ChatProtocol> {
+    match protocol_id {
+        "anthropic.messages" => Some(ChatProtocol::Anthropic),
+        "openai.chat_text" => Some(ChatProtocol::OpenaiChat),
+        "openai.responses" => Some(ChatProtocol::OpenaiResponses),
+        "gemini.generate_text" => Some(ChatProtocol::Gemini),
+        "bedrock.anthropic_messages" => Some(ChatProtocol::Bedrock),
+        "vertex.anthropic_messages" => Some(ChatProtocol::Vertex),
+        _ => None,
+    }
+}
+
+/// Request features the serializer can carry. Provider acceptance remains an
+/// upstream fact; missing catalog metadata never disables representable input.
 pub fn protocol_features(protocol: ChatProtocol) -> BTreeSet<ChatModelFeature> {
     use ChatModelFeature as Feature;
 

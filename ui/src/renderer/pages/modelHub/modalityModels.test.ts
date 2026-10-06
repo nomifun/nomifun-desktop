@@ -28,7 +28,7 @@ const row = (
     {
       task,
       traits: [],
-      protocol: `test.${task}`,
+      protocol: task === 'chat' ? 'openai.chat_text' : `test.${task}`,
       connection_role: 'default',
       allow_cross_origin_credentials: false,
       provider_params: {},
@@ -75,12 +75,20 @@ describe('modality specs', () => {
     expect(MODALITY_SPECS.vision.traits).toEqual(['vision_input']);
   });
 
-  test('matches task and traits on the same capability', () => {
+  test('matches task and native adapter image representation without manual metadata', () => {
     const vision = row(A, 'vision-chat', 'chat');
-    vision.capabilities[0].traits = ['vision_input'];
+    expect(vision.capabilities[0].traits).toEqual([]);
     expect(rowMatchesModality(vision, MODALITY_SPECS.chat)).toBe(true);
     expect(rowMatchesModality(vision, MODALITY_SPECS.vision)).toBe(true);
     expect(rowMatchesModality(vision, MODALITY_SPECS.realtime)).toBe(false);
+  });
+
+  test('does not claim vision for an unknown adapter even when stale metadata declares it', () => {
+    const stale = row(A, 'stale-trait', 'chat');
+    stale.capabilities[0]!.protocol = 'unknown.chat';
+    stale.capabilities[0]!.traits = ['vision_input'];
+    expect(rowMatchesModality(stale, MODALITY_SPECS.vision)).toBe(false);
+    expect(rowMatchesModality(stale, MODALITY_SPECS.chat)).toBe(true);
   });
 
   test('never merges edit with generation or rerank with embedding', () => {

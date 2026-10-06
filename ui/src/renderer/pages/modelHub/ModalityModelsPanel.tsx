@@ -13,12 +13,15 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Button, Input, Popover, Switch, Tag } from '@arco-design/web-react';
+import { Button, Switch, Tag } from '@arco-design/web-react';
 import { Edit, LinkCloud } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
 import type { ConfigKeyMap } from '@/common/config/configKeys';
 import type { ProviderId } from '@/common/types/ids';
+import type { IProvider } from '@/common/config/storage';
+import type { ModelTask } from '@/common/protocolBindings/ModelTask';
+import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
 import { toProviderModelInput } from '@/common/utils/providerModels';
 import {
   modelDisplayLabel,
@@ -44,6 +47,8 @@ import {
 } from './modalityModels';
 import { SerializedLatestWriteQueue } from './serializedLatestWriteQueue';
 import ModelHubPageHeader from './ModelHubPageHeader';
+import { modelProviderManagementRoute } from './modelAdditionIntent';
+import ModelAdvancedEditor, { type ModelAdvancedPatch } from '@/renderer/pages/settings/components/ModelAdvancedEditor';
 
 type GenerationDefaultModel = NonNullable<
   ConfigKeyMap['models.default.imageGeneration']
@@ -229,7 +234,21 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   const [defaultModel, setDefaultModel] = useState(
     () => configService.get('nomi.defaultModel') ?? null,
   );
-  const [draftDescription, setDraftDescription] = useState('');
+  const editSequence = useRef(0);
+  const [editingModel, setEditingModel] = useState<{
+    provider: IProvider;
+    definition: ProviderModelResponse;
+    task: ModelTask;
+    request: string;
+  }>();
+  const editingProvider = editingModel
+    ? providers.find((provider) => provider.id === editingModel.provider.id) ?? editingModel.provider
+    : undefined;
+  const editingDefinition = editingModel
+    ? editingProvider?.models.find((model) => model.model === editingModel.definition.model) ?? editingModel.definition
+    : undefined;
+
+  useEffect(() => { setEditingModel(undefined); }, [modality]);
 
   const groups = useMemo(
     () =>
@@ -240,7 +259,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   const saveRow = useCallback(
     async (
       row: ModalityModelRow,
-      patch: { enabled?: boolean; description?: string },
+      patch: { enabled?: boolean },
     ) => {
       const definition = {
         ...row.definition,
@@ -267,20 +286,36 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
     [message, saveRow, t],
   );
 
-  const saveDescription = useCallback(
-    async (row: ModalityModelRow, description: string) => {
-      try {
-        await saveRow(row, { description: description.trim() || undefined });
-      } catch (error) {
-        console.error(
-          '[ModalityModels] Failed to save a model description:',
-          error,
-        );
-        message.error(t('settings.modelHub.modality.descriptionFailed'));
-      }
-    },
-    [message, saveRow, t],
-  );
+  const editModel = (row: ModalityModelRow) => {
+    const provider = providers.find((candidate) => candidate.id === row.providerId);
+    if (!provider) return;
+    setEditingModel({ provider, definition: row.definition, task: MODALITY_SPECS[modality].task, request: `scenario-model-edit-${++editSequence.current}` });
+  };
+
+  const saveModelConfiguration = async (patch: ModelAdvancedPatch) => {
+    if (!editingModel) return;
+    const current = providers.find((provider) => provider.id === editingModel.provider.id)
+      ?.models.find((model) => model.model === editingModel.definition.model);
+    if (!current) {
+      message.error(t('settings.modelHub.modality.editModelUnavailable'));
+      throw new Error('The selected model is no longer available');
+    }
+    try {
+      await ipcBridge.providerModel.save.invoke({
+        provider_id: editingModel.provider.id,
+        model: {
+          ...toProviderModelInput(current),
+          display_name: patch.display_name ?? undefined,
+          ...(patch.description === undefined ? {} : { description: patch.description ?? undefined }),
+          capabilities: patch.capabilities,
+        },
+      });
+      await mutate();
+    } catch (error) {
+      message.error(t('settings.modelHub.modality.editModelSaveFailed'));
+      throw error;
+    }
+  };
 
   const persistDefault = useCallback(
     (provider_id: ProviderId, model: string) => {
@@ -373,38 +408,16 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
                   checked={row.enabled}
                   onChange={(enabled: boolean) => void toggleRow(row, enabled)}
                 />
-                <Popover
-                  trigger='click'
-                  onVisibleChange={(visible) => {
-                    if (visible) setDraftDescription(row.description ?? '');
-                  }}
-                  content={
-                    <div className='flex w-260px flex-col gap-8px'>
-                      <Input.TextArea
-                        autoSize={{ minRows: 2, maxRows: 5 }}
-                        value={draftDescription}
-                        placeholder={t(
-                          'settings.modelHub.modality.descriptionPlaceholder',
-                        )}
-                        onChange={setDraftDescription}
-                      />
-                      <Button
-                        size='mini'
-                        type='primary'
-                        onClick={() =>
-                          void saveDescription(row, draftDescription)
-                        }
-                      >
-                        {t('settings.modelHub.modality.descriptionSave')}
-                      </Button>
-                    </div>
-                  }
+                <Button
+                  size='mini'
+                  type='secondary'
+                  icon={<Edit theme='outline' size='12' strokeWidth={3} />}
+                  aria-label={t('settings.modelHub.modality.editModelConfiguration')}
+                  onClick={() => editModel(row)}
+                  data-edit-scenario-model={row.model}
                 >
-                  <Button
-                    size='mini'
-                    icon={<Edit theme='outline' size='12' strokeWidth={3} />}
-                  />
-                </Popover>
+                  {t('settings.modelHub.modality.editModelConfiguration')}
+                </Button>
               </>
             }
           />
@@ -418,6 +431,25 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   return (
     <div className='flex min-h-0 flex-col'>
       {messageContext}
+      {editingModel && editingProvider && editingDefinition && (
+        <ModelAdvancedEditor
+          key={`${editingModel.provider.id}:${editingModel.definition.model}:${editingModel.task}`}
+          providerId={editingModel.provider.id}
+          providerName={providerLabel(editingProvider)}
+          preset={editingProvider.platform}
+          providerBaseUrl={editingProvider.base_url}
+          providerAuthScheme={editingProvider.auth_scheme}
+          model={editingModel.definition.model}
+          displayName={editingDefinition.display_name}
+          description={editingDefinition.description ?? null}
+          capabilities={editingDefinition.capabilities}
+          task={editingModel.task}
+          openRequest={editingModel.request}
+          hideTrigger
+          onClose={() => setEditingModel(undefined)}
+          onSave={saveModelConfiguration}
+        />
+      )}
       <ModelHubPageHeader title={t(titleKey)} description={t(subtitleKey)} />
 
       {showDefaultModel && (
@@ -469,7 +501,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
           type='text'
           size='small'
           icon={<LinkCloud theme='outline' size='14' />}
-          onClick={() => navigate('/models?section=models')}
+          onClick={() => navigate(modelProviderManagementRoute(MODALITY_SPECS[modality].task))}
         >
           {t('settings.modelHub.modality.manageModels')}
         </Button>

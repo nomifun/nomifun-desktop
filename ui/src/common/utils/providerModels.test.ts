@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
 import {
   capabilityOf,
+  capabilitySupportsTrait,
   modelHealthOf,
   modelNamesOf,
   modelSupportsTask,
@@ -71,11 +72,17 @@ describe('nested provider models', () => {
     expect(modelSupportsTask(image, 'rerank')).toBe(false);
   });
 
-  test('requires every requested trait on the selected task capability', () => {
-    const model = row('multimodal');
+  test('native input eligibility depends on adapter representation without catalog checkboxes', () => {
+    const model = row('brand-new-unknown-model');
+    model.capabilities[0]!.traits = [];
     expect(modelSupportsTask(model, 'chat', ['vision_input'])).toBe(true);
+    expect(modelSupportsTask(model, 'chat', ['audio_input'])).toBe(true);
     expect(modelSupportsTask(model, 'chat', ['vision_input', 'web_search'])).toBe(false);
+    expect(modelSupportsTask(model, 'chat', ['video_input'])).toBe(false);
     expect(modelSupportsTask(model, 'chat', [], ['function_calling'])).toBe(true);
+
+    model.capabilities[0]!.protocol = 'openai.responses';
+    expect(modelSupportsTask(model, 'chat', ['vision_input', 'web_search'])).toBe(true);
 
     const limited = row('limited');
     limited.capabilities[0]!.health = {
@@ -83,6 +90,29 @@ describe('nested provider models', () => {
       unsupported_technical_capabilities: ['function_calling'],
     };
     expect(modelSupportsTask(limited, 'chat', [], ['function_calling'])).toBe(false);
+  });
+
+  test('saved traits cannot grant representation missing from an adapter or another task', () => {
+    const model = row('mislabelled', {
+      capabilities: [{ ...row('source').capabilities[0]!, protocol: 'unknown.chat' }],
+    });
+    expect(modelSupportsTask(model, 'chat', ['vision_input'])).toBe(false);
+    expect(capabilitySupportsTrait(undefined, 'vision_input')).toBe(false);
+    expect(capabilitySupportsTrait({ ...model.capabilities[0]!, task: 'image_generation' }, 'vision_input')).toBe(false);
+  });
+
+  test('all registered image Chat adapters accept untagged image candidates', () => {
+    for (const protocol of [
+      'openai.chat_text', 'openai.responses', 'anthropic.messages',
+      'gemini.generate_text', 'bedrock.anthropic_messages', 'vertex.anthropic_messages',
+    ]) {
+      const capability = { ...row('untagged').capabilities[0]!, protocol, traits: [] };
+      expect(capabilitySupportsTrait(capability, 'vision_input')).toBe(true);
+      expect(capabilitySupportsTrait(capability, 'video_input')).toBe(false);
+      expect(capabilitySupportsTrait(capability, 'audio_input')).toBe(
+        ['openai.chat_text', 'openai.responses', 'gemini.generate_text'].includes(protocol)
+      );
+    }
   });
 
   test('strips health and timestamps from full save input', () => {

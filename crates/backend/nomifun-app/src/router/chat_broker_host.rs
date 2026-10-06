@@ -97,7 +97,16 @@ fn convert_chat_route_candidate(
         ChatRouteProtocol::Bedrock => ChatProtocol::Bedrock,
         ChatRouteProtocol::Vertex => ChatProtocol::Vertex,
     };
-    let features = candidate.features.iter().map(convert_route_feature).collect();
+    let mut features = candidate.features.iter().map(convert_route_feature).collect::<BTreeSet<_>>();
+    // Older immutable route records may omit media traits because they were
+    // authored through manual checkboxes. The selected serializer owns input
+    // representation; transport support does not expand Agent tool authority.
+    features.retain(|feature| !matches!(feature, ChatModelFeature::ImageInput | ChatModelFeature::AudioInput));
+    features.extend(
+        nomifun_chat_model_broker::protocol_features(protocol)
+            .into_iter()
+            .filter(|feature| matches!(feature, ChatModelFeature::ImageInput | ChatModelFeature::AudioInput)),
+    );
     let activation_features = candidate
         .activation_features
         .iter()
@@ -2361,6 +2370,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(routes.primary.model_route_id.as_ref(), "opaque-route");
+    }
+
+    #[test]
+    fn existing_route_media_support_uses_the_exact_protocol_without_widening_tools() {
+        let saved = candidate();
+        let resolved = convert_chat_route_candidate(&saved).unwrap();
+        assert!(resolved.features.contains(&ChatModelFeature::ImageInput));
+        assert!(resolved.features.contains(&ChatModelFeature::AudioInput));
+        assert!(!resolved.features.contains(&ChatModelFeature::ToolCalls));
+        assert!(!resolved.features.contains(&ChatModelFeature::Streaming));
+        assert!(!saved.features.contains(&ChatRouteFeature::ImageInput));
+
+        let mut anthropic = saved;
+        anthropic.protocol = ChatRouteProtocol::Anthropic;
+        anthropic.features.insert(ChatRouteFeature::AudioInput);
+        let resolved = convert_chat_route_candidate(&anthropic).unwrap();
+        assert!(resolved.features.contains(&ChatModelFeature::ImageInput));
+        assert!(!resolved.features.contains(&ChatModelFeature::AudioInput));
     }
 
     #[test]

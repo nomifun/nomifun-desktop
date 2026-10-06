@@ -1246,17 +1246,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_task_mismatch_is_unsupported_task_without_network() {
+    async fn chat_only_model_rejects_every_media_task_before_network_or_automatic_selection() {
         let server = MockServer::start().await;
-        // No mock mounted: any request reaching the server would 404 — but the
-        // gate must reject before the wire.
         let (svc, pool) = setup().await;
         let pid = seed_provider(&pool, &server.uri()).await;
         seed_model(&pool, &pid, "gpt-4o", r#"["chat"]"#, "{}", true).await;
 
-        let err = svc.invoke(&mref(&pid, "gpt-4o"), image_request("a fox")).await.unwrap_err();
-        assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
-        assert!(server.received_requests().await.unwrap().is_empty(), "gate must fire before the wire");
+        // A model ID, even one saved with a working Chat protocol, cannot
+        // supply any other task. Missing task configuration must remain an
+        // explicit local error rather than reusing Chat or choosing a default.
+        for task in [
+            ModelTask::ImageGeneration,
+            ModelTask::ImageEdit,
+            ModelTask::VideoGeneration,
+            ModelTask::MusicGeneration,
+            ModelTask::SpeechSynthesis,
+            ModelTask::SpeechRecognition,
+            ModelTask::Embedding,
+            ModelTask::Rerank,
+        ] {
+            let request = probe_request(task, &json!({})).expect("one-shot task request");
+            let err = svc.invoke(&mref(&pid, "gpt-4o"), request).await.unwrap_err();
+            assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask, "{task:?}: {err}");
+            assert!(
+                err.message.contains("no configured capability")
+                    && err.message.contains(&format!("{task:?}")),
+                "missing-task error must identify the requested task: {err}"
+            );
+            assert!(
+                svc.available_task_models(task).await.unwrap().is_empty(),
+                "Chat cannot become an automatic candidate for {task:?}"
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty(), "all task gates must fire before the wire");
+    }
+
+    #[tokio::test]
+    async fn shared_model_id_routes_asr_and_tts_through_their_exact_task_protocols() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "recognized audio"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(body_partial_json(json!({"model": "shared-model", "input": "hi"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/mpeg")
+                    .set_body_bytes(b"synthesized audio".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(
+            &pool,
+            &pid,
+            "shared-model",
+            r#"["chat","speech_recognition","speech_synthesis"]"#,
+            "{}",
+            true,
+        ).await;
+        let selected = mref(&pid, "shared-model");
+        let asr = svc.invoke(
+            &selected,
+            probe_request(ModelTask::SpeechRecognition, &json!({})).unwrap(),
+        ).await.unwrap();
+        assert!(matches!(asr, TaskOutcome::Done(TaskResult::Transcript { text, .. }) if text == "recognized audio"));
+        let tts = svc.invoke(
+            &selected,
+            probe_request(ModelTask::SpeechSynthesis, &json!({})).unwrap(),
+        ).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = tts else { panic!("expected synthesized audio") };
+        assert!(matches!(&assets[0].data, ProducedData::Bytes(bytes) if bytes == b"synthesized audio"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2, "only the exact ASR and TTS interfaces may receive requests");
+        assert!(requests.iter().all(|request| request.url.path() != "/v1/chat/completions"));
     }
 
     // -- probe ---------------------------------------------------------------

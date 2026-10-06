@@ -11,13 +11,15 @@ const addSource = readFileSync(new URL('./AddPlatformModal.tsx', import.meta.url
 const editorSource = readFileSync(new URL('./ModelDefinitionEditor.tsx', import.meta.url), 'utf8');
 
 describe('AddPlatformModal unified model input flow', () => {
-  test('puts the supported-task picker before one filtered catalog and free-text input', () => {
-    expect(editorSource.includes("t('settings.modelSupportedTasks'")).toBe(true);
+  test('starts with model ID entry and an unfiltered provider catalog', () => {
+    expect(editorSource.includes("t('settings.modelSupportedTasks'")).toBe(false);
     expect(editorSource.includes('<AutoComplete')).toBe(true);
     expect(editorSource.includes('catalogSuggestions')).toBe(true);
-    expect(editorSource.includes('modelCatalogUnavailable')).toBe(true);
-    expect(editorSource.includes('catalogSuggestionsForTask')).toBe(true);
-    expect(editorSource.includes('applyCatalogSuggestionForTask')).toBe(true);
+    expect(editorSource.includes('data-model-catalog-status')).toBe(true);
+    expect(editorSource.includes("t('settings.modelCatalogUnavailable'")).toBe(false);
+    expect(editorSource.includes('catalogSuggestionsForTask')).toBe(false);
+    expect(editorSource.includes('applyCatalogSuggestion(')).toBe(true);
+    expect(editorSource.includes('data={catalogSuggestions.map')).toBe(true);
     expect(editorSource.includes('data-unified-model-input')).toBe(true);
     expect(editorSource.includes('data-model-catalog-picker')).toBe(false);
     const unifiedInputSource = editorSource.slice(
@@ -28,46 +30,32 @@ describe('AddPlatformModal unified model input flow', () => {
     expect(unifiedInputSource.includes('onSelect=')).toBe(true);
     expect(unifiedInputSource.includes('onChange=')).toBe(true);
     expect(unifiedInputSource.includes('onBlur=')).toBe(false);
-    expect(editorSource.includes('const added = chosen.filter')).toBe(true);
     expect(editorSource.includes('removeCapabilityTask(current.capabilities, task)')).toBe(true);
     expect(editorSource.includes('onChange((current) =>')).toBe(true);
-    expect(editorSource.indexOf('data-model-task-picker')).toBeLessThan(
-      editorSource.indexOf('data-unified-model-input')
+    expect(editorSource.indexOf('data-unified-model-input')).toBeLessThan(
+      editorSource.indexOf('data-model-call-route-picker')
     );
-    const taskPickerSource = editorSource.slice(
-      editorSource.indexOf('data-model-task-section'),
-      editorSource.indexOf('{value.capabilities.map')
-    );
-    // The task control is a multi-select so the declared tasks are visible in
-    // the field itself. Removal must stay protected: a tag's "×" deletes the
-    // whole capability, so a configured one has to be confirmed first.
-    expect(taskPickerSource.includes("mode='multiple'")).toBe(true);
-    expect(taskPickerSource.includes('value={selectedTasks}')).toBe(true);
-    expect(editorSource.includes('capabilityHasConfiguration')).toBe(true);
-    expect(editorSource.includes('removeConfiguredModelTaskConfirm')).toBe(true);
+    expect(editorSource.includes('data-model-task-picker')).toBe(false);
+    expect(editorSource.includes('data-model-traits-picker')).toBe(false);
+    expect(editorSource.includes('removeModelTaskConfirm')).toBe(true);
     expect(editorSource.includes('modelTask.registered')).toBe(false);
     expect(editorSource.includes('data-remove-model-task={capability.task}')).toBe(true);
   });
 
-  test('declares each task exactly once, with no separate primary-task control', () => {
-    // A "primary task" has no field on the draft, no column on
-    // provider_model_capabilities, and the backend re-sorts capabilities by task
-    // on read — so a second picker for it could only ever restate what the
-    // supported-task list already holds, and its destructive reset silently ate
-    // configured tasks.
+  test('keeps generic purpose unconfirmed while preserving specialized and deep-link intent', () => {
     expect(editorSource.includes('primaryTask')).toBe(false);
     expect(editorSource.includes('data-primary-model-task-picker')).toBe(false);
     expect(editorSource.includes('data-primary-model-task-section')).toBe(false);
     expect(editorSource.includes('changePrimaryModelTask')).toBe(false);
     expect(editorSource.includes("t('settings.modelType'")).toBe(false);
-    // The one task control must not be gated on the model id: it comes first,
-    // so gating it there would deadlock the form.
-    const taskPicker = editorSource.slice(
-      editorSource.indexOf('data-model-task-section'),
-      editorSource.indexOf('data-model-task-picker')
-    );
-    expect(taskPicker.includes('!value.model.trim()')).toBe(false);
-    expect(taskPicker.includes('disabled=')).toBe(false);
+    expect(addSource.includes('createModelDefinitionDraft(deepLinkData?.task ?? initialTask)')).toBe(true);
+    expect(addSource.includes('initialTask?: ModelTask')).toBe(true);
+    expect(addSource.includes("emptyCapabilityDraft('chat')")).toBe(false);
+    expect(addSource.includes("deepLinkData?.task ?? 'chat'")).toBe(false);
+    expect(addSource.includes('tasksSource: model.tasksSource')).toBe(true);
+    expect(editorSource.includes('data-add-call-route')).toBe(true);
+    expect(editorSource.includes('data-model-call-route-picker')).toBe(true);
+    expect(editorSource.includes('capabilities: addCapabilityTask(current.capabilities, task)')).toBe(true);
   });
 
   test('gets operational defaults only from the backend preset manifest', () => {

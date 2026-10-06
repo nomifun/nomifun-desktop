@@ -396,13 +396,16 @@ Every capability NomiFun has is exposed through a single, typed capability regis
 
 NomiFun separates provider credentials from model records and capabilities. Extend the
 catalog with native providers, compatible protocols, custom base URLs, or local and
-self-hosted endpoints, then assign models to chat, realtime, ASR, TTS, vision,
-image generation/editing, video generation, embedding, and reranking. Routing is
+self-hosted endpoints. Enter a model id directly, then configure independent
+routes when realtime, ASR, TTS, image generation/editing, video generation,
+embedding, or reranking needs a separate interface. Chat input and technical
+features require no capability checkboxes. Routing is
 task-aware, supports per-model context and output limits, and can fail over without
 pretending that every provider uses the same URL, protocol, or auth.
 
-The important boundary is explicit capability, not a fixed vendor list: a model is
-usable for a task only when its configured provider and protocol declare that task.
+Model suggestions do not restrict manual entry. Independent tasks use their
+saved provider and protocol routes; Chat features depend on protocol support and
+actual provider responses rather than omitted capability tags.
 Creative Studio carries the exact `{ provider, model, task }` identity into every
 media operation, so a same-named model from another provider is never substituted
 silently.

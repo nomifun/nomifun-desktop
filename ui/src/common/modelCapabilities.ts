@@ -21,7 +21,7 @@ export const MODEL_TASK_ORDER = [
   'rerank',
 ] as const satisfies readonly ModelTask[];
 
-/** User-authored Chat input/search refinements; technical traits are runtime-owned. */
+/** Advisory catalog metadata order. These traits never authorize Chat inputs. */
 export const MODEL_TRAIT_ORDER = [
   'vision_input',
   'video_input',

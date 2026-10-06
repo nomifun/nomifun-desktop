@@ -15,6 +15,7 @@ nomifun-file.workspace = true
 nomifun-realtime.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-model-invoke.workspace = true
+nomifun-chat-model-broker.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
