@@ -149,7 +149,7 @@
     },
     "creativeStudio": {
       "default": {
-        "name": "多模",
+        "name": "创作",
         "description": "面向专业多模态任务，组合媒体、画布、办公、工作区、项目记忆与 Web 调研能力。"
       }
     }
@@ -165,7 +165,7 @@
     "companionMemory": { "name": "伙伴记忆", "description": "读取或写入所选伙伴的记忆。" },
     "computer": { "name": "电脑控制", "description": "高权限扩展；缺少系统授权时仅电脑操作暂不可用，不影响 Agent 的其他能力。" },
     "creationMedia": { "name": "媒体创作", "description": "通过已配置的生成服务创作文本、图片、视频、音频和音乐。" },
-    "creativeWorkshop": { "name": "创意工坊", "description": "处理画布、素材和可复用的创作模板。" },
+    "creativeWorkshop": { "name": "$t(agentSettings.template.creativeStudio.default.name)", "description": "处理画布、素材和可复用的创作模板。" },
     "customerService": { "name": "客户服务", "description": "读取和更新服务备注，或将工作转交给人工。" },
     "knowledge": { "name": "知识库", "description": "搜索、读取和更新 Agent 使用时选择的知识库。" },
     "office": { "name": "办公文档", "description": "预览和编辑文档、表格与演示文稿。" },

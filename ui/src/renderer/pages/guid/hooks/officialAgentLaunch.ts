@@ -22,14 +22,14 @@ export function officialAgentLaunchError(error: unknown, t: TFunction): string {
 /** Prepare an internal session configuration without adding a personal Agent. */
 export async function prepareOfficialAgent(
   template: OfficialPresetTemplate,
-  displayName: string,
   model?: Pick<TProviderWithModel, 'id' | 'use_model'>,
   createFromTemplate = agentPlatform.createFromTemplate.invoke,
 ): Promise<ExecutableAgentPreset> {
+  // Internal configurations store identity; localized names belong to UI copy.
   const editor = await createFromTemplate({
     template_id: template.template_key,
     request: {
-      display_name: displayName,
+      display_name: template.template_key,
       model_route_refs: {},
       chat_route_records: {},
       reuse_existing: true,

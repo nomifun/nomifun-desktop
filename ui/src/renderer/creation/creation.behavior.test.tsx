@@ -11,7 +11,7 @@ import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
 import { useGuidCreation } from './useGuidCreation';
 import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
-import { emptyCreationDraft } from './useCreationDraft';
+import { emptyCreationDraft, useCreationDraft } from './useCreationDraft';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from './submission';
 import { validateCreationTasks } from './client';
 import { createQueuedCommandItem, normalizeQueueState } from '@/renderer/pages/conversation/platforms/useConversationCommandQueue';
@@ -51,6 +51,25 @@ function mount(generationProvider = provider, sessionCollaboration?: Parameters<
 }
 
 describe('conversation creation admission and draft behavior', () => {
+  test('loading a current media draft removes persisted Agent names and identity mirrors', () => {
+    const draft = emptyCreationDraft();
+    draft.mode = 'image';
+    draft.models.image = model;
+    draft.pendingPrompt = 'keep my prompt';
+    draft.pendingFiles = ['reference.png'];
+    draft.parameters.image = { count: 2 };
+    sessionStorage.setItem(creationDraftStorageKey('guid'), JSON.stringify({
+      ...draft, agentLabel: ['创意', '工坊'].join(''), presetId,
+      selectedAgent: { kind: 'template', templateKey: 'creative-studio.default' },
+    }));
+    const hook = renderHook(() => useCreationDraft('guid'));
+    expect(hook.result.current.draft).toEqual(draft);
+    expect(JSON.parse(sessionStorage.getItem(creationDraftStorageKey('guid'))!)).toEqual(draft);
+    act(() => hook.result.current.update(current => ({ ...current, pendingPrompt: 'edited' })));
+    const stored = JSON.parse(sessionStorage.getItem(creationDraftStorageKey('guid'))!);
+    expect(stored.pendingPrompt).toBe('edited');
+    for (const field of ['agentLabel', 'presetId', 'selectedAgent']) expect(stored).not.toHaveProperty(field);
+  });
   test('an unscoped retired draft cannot seed a new generation composer', async () => {
     sessionStorage.setItem('nomifun:creative-studio:standalone-workbench-draft:image', JSON.stringify({
       version: 1, workbenchKind: 'image', layout: 'side', prompt: 'retired prompt',
@@ -105,7 +124,7 @@ describe('conversation creation admission and draft behavior', () => {
       else throw new Error(`Unexpected request ${path}`);
       return new Response(JSON.stringify({ success: true, data }), { headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
-    await prepareOfficialAgent(template, '创意工坊', { id: providerId, use_model: 'previous-chat-model' });
+    await prepareOfficialAgent(template, { id: providerId, use_model: 'previous-chat-model' });
     const collaboration = {
       execution_model_pool: { mode: 'range' as const, models: [{ provider_id: providerId, model: 'chat-lead' }, { provider_id: providerId, model: 'reviewer' }] },
       execution_template_id: null, delegation_policy: 'prefer_parallel' as const, decision_policy: 'ask_user' as const,
@@ -125,7 +144,10 @@ describe('conversation creation admission and draft behavior', () => {
     ] });
     const presetCalls = calls.filter(call => call.url.endsWith('/from-template/creative-studio.default'));
     expect(presetCalls).toHaveLength(2);
-    for (const call of presetCalls) expect(call.body).not.toHaveProperty('model');
+    for (const call of presetCalls) {
+      expect(call.body).not.toHaveProperty('model');
+      expect(call.body.display_name).toBe('creative-studio.default');
+    }
     expect(calls.find(call => call.url.endsWith('/creation-tasks'))?.body).toMatchObject({ preset_id: presetId, provider_id: providerId, model: 'image-exact', capability, params: { prompt: '一只橘猫' } });
     const collaborationIndex = calls.findIndex(call => call.body.execution_model_pool);
     expect(collaborationIndex).toBe(-1);

@@ -110,16 +110,16 @@ export function getBaseUrl(): string {
 
 路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、设定（`/presets`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements/*`、`/autowork` redirect）、定时任务（`/scheduled`、`/scheduled/:job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、知识库（`/knowledge`、`/knowledge/:id`）、Plugin 产品（`/plugins` 产品库、`/plugins/new` 创建或导入、`/plugins/create/:draftId` 从草稿创建、`/plugins/run/:id` Workshop 与运行 Surface）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
 
-创意工坊位于普通应用布局内，复用默认标题栏的回退、前进、侧栏开关与系统窗口控制；
-进入产品后，左侧主侧栏会像“设置”一样切换为创意工坊内部导航，并把“返回工作台”
-固定在底部。应用会话内还会保存最后一个经过 exact-match 验证的创意工坊完整地址；
+创作位于普通应用布局内，复用默认标题栏的回退、前进、侧栏开关与系统窗口控制；
+进入产品后，左侧主侧栏会像“设置”一样切换为创作内部导航，并把“返回工作台”
+固定在底部。应用会话内还会保存最后一个经过 exact-match 验证的创作完整地址；
 再次从主侧栏进入时恢复该地址，非法、未知或越界记录回退 `/workshop/canvases`。
 产品侧栏不再提供独立首页项，通过需求发起创作的能力由 Canvas 内的创作助手提供。
 其子路由如下：
 
 | 路由 | 用户界面 |
 | --- | --- |
-| `/workshop` | 创意工坊兼容入口，重定向到 Canvas 库。 |
+| `/workshop` | 创作兼容入口，重定向到 Canvas 库。 |
 | `/workshop/canvases` | canonical Canvas 库。 |
 | `/workshop/canvas/:canvasId` | Canvas 无限画布。 |
 | `/workshop/image`、`/workshop/video` | 独立 Image/Video Workbench；零 Canvas 时也可用。 |
@@ -128,7 +128,7 @@ export function getBaseUrl(): string {
 路由常量与 exact-match 规则在
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)。
 `/workshop/projects` 是 deprecated 兼容重定向，目标为 `/workshop/canvases`，不是
-产品页面。创意工坊没有 Project 领域：规范 HTTP 资源是
+产品页面。创作没有 Project 领域：规范 HTTP 资源是
 `/api/creative-studio/canvases`，旧 `/api/creative-studio/projects` 仅作为 deprecated
 alias 保留。Image/Video Workbench 没有 Canvas 选择器或父级加载门槛；任务 owner、
 历史与退役只使用 `workbenchKind`，旧 standalone `project_id` 只是 inert provenance。

@@ -8,10 +8,24 @@ export function emptyCreationDraft(): CreationDraft {
 
 export const creationDraftStorageKey = (scope: string) => agentBrowserStorageGenerationKey(`conversation-creation-draft:${scope}`);
 const storageKey = creationDraftStorageKey;
+/** Retain editable media inputs only. Agent identity comes from the host projection. */
+function normalizeCreationDraft(value: CreationDraft): CreationDraft {
+  const { mode, lastMode, models, parameters, references, pendingPrompt, pendingFiles } = value;
+  return { mode, lastMode, models, parameters, references,
+    ...(pendingPrompt !== undefined ? { pendingPrompt } : {}),
+    ...(pendingFiles !== undefined ? { pendingFiles } : {}),
+  };
+}
 function read(scope: string): CreationDraft {
   try {
     const value = JSON.parse(sessionStorage.getItem(storageKey(scope)) || 'null');
-    if (value && ['image', 'video', 'music'].includes(value.lastMode) && (value.mode === null || ['image', 'video', 'music'].includes(value.mode)) && value.models && value.parameters && Array.isArray(value.references)) return value;
+    if (value && ['image', 'video', 'music'].includes(value.lastMode) && (value.mode === null || ['image', 'video', 'music'].includes(value.mode)) && value.models && value.parameters && Array.isArray(value.references)) {
+      const draft = normalizeCreationDraft(value);
+      // Rewrite the same-generation draft so removed labels/identity mirrors
+      // cannot survive in browser storage after the composer loads.
+      try { sessionStorage.setItem(storageKey(scope), JSON.stringify(draft)); } catch { /* Keep editable media inputs when storage is full. */ }
+      return draft;
+    }
   } catch { /* An invalid old draft never blocks the composer. */ }
   return emptyCreationDraft();
 }
@@ -25,7 +39,7 @@ export function useCreationDraft(scope: string) {
     setEntry(current.current);
   }
   const update = useCallback((change: (value: CreationDraft) => CreationDraft) => {
-    const value = change(current.current.scope === scope ? current.current.value : read(scope));
+    const value = normalizeCreationDraft(change(current.current.scope === scope ? current.current.value : read(scope)));
     current.current = { scope, value };
     try { sessionStorage.setItem(storageKey(scope), JSON.stringify(value)); } catch { /* Memory remains authoritative if browser storage is full. */ }
     setEntry(current.current);

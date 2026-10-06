@@ -4,7 +4,8 @@
  *
  * Canvas and asset resources keep their domain/storage contracts. The former
  * product shell and independent generation pages must not return. The only
- * legacy browser values retained are one-way draft/resume import formats.
+ * media drafts contain editable inputs only; Agent identity and names are
+ * resolved from the host projection and canonical locale copy.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -27,6 +28,8 @@ const LEGACY_TRACKED_PATHS = [
 ];
 
 const RUNTIME_MARKERS = [
+  { label: 'retired creation product name', pattern: /\u521b\u610f\u5de5\u574a|(['"])(?:\u591a\u6a21|Multimodal|Creative Studio|Creative Workshop)\1/g },
+  { label: 'retired creation Agent identity mirror', pattern: /creation\.draft\.(?:agentLabel|selectedAgent|presetId)\b/g },
   { label: 'retired independent generation import', pattern: /workbenches\/(?:image|video|audio|runtime|history|drafts|product)(?:\/|['"])/g },
   { label: 'retired product shell', pattern: /\b(?:CreativeStudioFocusShell|CreativeStudioSider|SiderCreativeStudioEntry|ImageWorkbenchProductRoute|VideoWorkbenchProductRoute)\b/g },
   { label: 'retired independent history API', pattern: /\b(?:listStandalone|retireStandalone|creativeTaskHistoryClient)\b/g },
@@ -49,6 +52,7 @@ const RUNTIME_MARKERS = [
 ];
 
 const DIST_MARKERS = [
+  { label: 'retired creation product name', pattern: /\u521b\u610f\u5de5\u574a|(['"])(?:\u591a\u6a21|Multimodal|Creative Studio|Creative Workshop)\1/g },
   { label: 'retired sidebar component', pattern: /SiderWorkshopEntry/g },
   {
     label: 'retired translation namespace',
@@ -111,7 +115,7 @@ const retiredTracked = files.filter((path) =>
   LEGACY_TRACKED_PATHS.some((pattern) => pattern.test(path))
 );
 const runtimeViolations = files
-  .filter(isRuntimeSource)
+  .filter((path) => isRuntimeSource(path) || /^ui\/src\/renderer\/services\/i18n\/locales\/[^/]+\/[^/]+\.json$/.test(path))
   .flatMap((path) => scanSource(path, readFileSync(join(ROOT, path), 'utf8'), RUNTIME_MARKERS));
 for (const path of files.filter((path) => /^crates\/backend\/[^/]+\/src\/.+\.rs$/.test(path))) {
   runtimeViolations.push(...scanSource(path, readFileSync(join(ROOT, path), 'utf8'), BACKEND_MARKERS));
