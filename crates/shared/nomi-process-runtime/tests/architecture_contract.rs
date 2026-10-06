@@ -720,7 +720,7 @@ fn windows_conpty_global_state_tests_share_one_serial_group() {
     );
     assert_eq!(
         combined.matches("#[serial(windows_process_runtime)]").count(),
-        22,
+        23,
         "every current Windows process/ConPTY global-state test must remain in the one shared group"
     );
     assert!(
