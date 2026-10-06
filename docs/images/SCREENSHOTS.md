@@ -4,7 +4,7 @@ This manifest records the repository-local screenshots used by the Desktop
 README and technical guides. The current set was captured on **August 25, 2026**
 from the 0.7.2 codebase with an isolated data root.
 
-The Creative Studio set covers Canvas Library, Image Workbench, Video Workbench,
+The Creation set covers Canvas Library, Image Workbench, Video Workbench,
 Prompt Center, My Assets, Template Studio, Template Editor, and a visible native
 desktop companion. These are current running-app captures, not legacy mockups.
 Do not restore retired screenshots or introduce temporary aliases into the
@@ -26,9 +26,9 @@ numbered gallery.
 | `readme/en/workspace.png` / `readme/zh/workspace.png` | Current Desktop workspace and session hub |
 | `readme/en/models.png` / `readme/zh/models.png` | Model Management and provider model configuration |
 | `readme/en/companions.png` / `readme/zh/companions.png` | Current workspace with the live desktop companion visible |
-| `readme/en/skills.png` / `readme/zh/skills.png` | Skills Hub with Creative Studio skills |
+| `readme/en/skills.png` / `readme/zh/skills.png` | Skills Hub with Creation skills |
 
-## Creative Studio gallery
+## Creation gallery
 
 English captures live under `creative-studio/en-US/`; Chinese captures live
 under `creative-studio/zh-CN/`. Both locale sets use the same route order:
@@ -45,7 +45,7 @@ under `creative-studio/zh-CN/`. Both locale sets use the same route order:
 | `11-companion-settings.png` | Companion workspace with figure, persona, model, memory, Skills, and desktop visibility control |
 | `12-companion-workspace.png` | Companion surface kept visible beside the creative workspace |
 
-The Creative Studio captures use a 1440×900 viewport. The companion images were
+The Creation captures use a 1440×900 viewport. The companion images were
 captured from the running companion-enabled product surface and the native
 transparent companion window. The numbered
 `11-companion-settings.png` and `12-companion-workspace.png` captures are the
@@ -81,6 +81,6 @@ gallery asset.
 
 The existing `autowork-*`, `channels-*`, `cron-*`, `gs-*`, `mcp-*`, `terminal-*`,
 and `webui-*` files remain only where a technical guide still references them.
-They are not part of the Creative Studio gallery. When a Portal walkthrough
+They are not part of the Creation gallery. When a Portal walkthrough
 supersedes one, remove the old file and update its references instead of
 keeping duplicate aliases.

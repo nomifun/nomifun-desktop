@@ -2062,7 +2062,7 @@ impl AppServices {
             }),
         ));
 
-        // 创意工坊 (Creative Workshop) + 生成引擎 (creation): the workshop service
+        // 创作 (Creation) + 生成引擎 (creation): the workshop service
         // owns canvas/asset index rows + on-disk docs/binaries; the creation
         // service owns the media generation task queue. Both are plain repo-backed
         // services (no agent-factory dependency), constructed here alongside the

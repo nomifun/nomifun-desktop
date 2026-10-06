@@ -1,6 +1,6 @@
 {
-  "title": "Creative Studio",
-  "siderTitle": "Studio",
+  "title": "$t(agentSettings.template.creativeStudio.default.name)",
+  "siderTitle": "$t(agentSettings.template.creativeStudio.default.name)",
   "workbenchSider": {
     "collapse": "Collapse generation settings",
     "expand": "Expand generation settings",
@@ -13,7 +13,7 @@
     "backToWorkbench": "Back to workbench"
   },
   "navigation": {
-    "label": "Creative Studio",
+    "label": "$t(agentSettings.template.creativeStudio.default.name)",
     "canvases": "My canvases",
     "image": "Image studio",
     "video": "Video studio",
@@ -75,7 +75,7 @@
     "selectConversationModel": "Choose a conversation model",
     "selectModel": "Choose model",
     "send": "Send to Agent",
-    "skillSelectionRequired": "Select 1–3 Creative Studio skills.",
+    "skillSelectionRequired": "Select 1–3 Creation skills.",
     "skills": {
       "canvas": {
         "description": "Understand the current selection and propose safe text and structural changes.",
@@ -483,7 +483,7 @@
       "fitContain": "Fit entire image",
       "fitCover": "Fill and crop",
       "fitMode": "Fit mode",
-      "label": "Creative Studio infinite canvas",
+      "label": "$t(agentSettings.template.creativeStudio.default.name) infinite canvas",
       "loadFailed": "Could not load the canvas",
       "loading": "Loading canvas…",
       "loopPlayback": "Loop playback",
@@ -1675,7 +1675,7 @@
       "generic": "The template operation failed. Try again."
     },
     "agent": {
-      "agentName": "Creative Studio Agent",
+      "agentName": "$t(agentSettings.template.creativeStudio.default.name)",
       "appliedHint": "After applying the draft, review and save it manually in the editor.",
       "apply": "Apply to editor",
       "cancel": "Cancel",

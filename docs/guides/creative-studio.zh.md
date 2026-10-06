@@ -1,6 +1,6 @@
-# 创意工坊（Creative Studio）
+# 创作（Creation）
 
-创意工坊是 NomiFun Desktop 中专注、本地优先的创作产品，包含三个彼此独立的
+创作是 NomiFun Desktop 中专注、本地优先的创作产品，包含三个彼此独立的
 创作面：
 
 - **Canvas**：持久化无限画布，包含媒体节点、可审计的生成操作、可复用素材和
@@ -8,7 +8,7 @@
 - **Image Workbench**：独立的图片生成工作台。
 - **Video Workbench**：独立的视频生成工作台。
 
-创意工坊没有 Project 产品对象。Canvas 就是 Canvas。Image Workbench 和
+创作没有 Project 产品对象。Canvas 就是 Canvas。Image Workbench 和
 Video Workbench 不要求、不推断、不选择、也不创建 Canvas；它们直接使用
 NomiFun 现有的 Provider 与模型目录，不维护第二套模型配置系统。
 
@@ -16,11 +16,11 @@ NomiFun 现有的 Provider 与模型目录，不维护第二套模型配置系�
 
 ## 打开产品
 
-从应用侧边栏打开**创意工坊**。页面复用 NomiFun 默认标题栏里的侧栏、历史、系统
-窗口等控制；左侧主侧栏会像进入“设置”时一样切换为创意工坊内部导航，并且可以折叠
-以释放工作空间。入口会恢复当前应用会话中最后一个有效的创意工坊地址，包括完整查询
+从应用侧边栏打开**创作**。页面复用 NomiFun 默认标题栏里的侧栏、历史、系统
+窗口等控制；左侧主侧栏会像进入“设置”时一样切换为创作内部导航，并且可以折叠
+以释放工作空间。入口会恢复当前应用会话中最后一个有效的创作地址，包括完整查询
 参数和页内锚点。保存的地址如果非法、未知、外部或超长，会 fail-closed 回退到
-`/workshop/canvases`。创意工坊不再提供独立首页项；通过需求发起创作的能力由已打开
+`/workshop/canvases`。创作不再提供独立首页项；通过需求发起创作的能力由已打开
 Canvas 内的**创作助手**提供。待 Canvas 的保存结果处理完毕后，点击侧栏
 底部的**返回工作台**会回到 `/guid`。
 
@@ -81,7 +81,7 @@ Canvas 在受支持的桌面外壳与桌面浏览器 WebUI 视口（880x600 及�
 
 画布编辑使用短延迟 debounce 的 compare-and-swap（CAS）保存，每次写入都带上最后
 一版权威 revision。发生冲突后自动保存会停止，不会强写，也不会覆盖新版本后静默
-重试。请通过界面载入权威远端版本，再重新应用想保留的改动。离开创意工坊页面前会
+重试。请通过界面载入权威远端版本，再重新应用想保留的改动。离开创作页面前会
 flush 待处理的 Canvas 写入；结果不安全时会阻止离开。
 
 Canvas Agent 产生的是提案，不是后台改图。支持的提案 artifact 会 fail-closed 解析，
@@ -98,7 +98,7 @@ Canvas Agent 产生的是提案，不是后台改图。支持的提案 artifact 
 - Canvas Agent 操作和归档操作也挂在同一个 Canvas 资源下。
 
 旧 `/api/creative-studio/projects` 路由仅作为 deprecated 兼容 alias 保留。旧
-`project/projectId` 名称只表示历史 wire 兼容，不代表当前创意工坊仍有 Project
+`project/projectId` 名称只表示历史 wire 兼容，不代表当前创作仍有 Project
 领域对象。
 
 进程内 Gateway 暴露 Canvas-first capability：
@@ -113,11 +113,11 @@ instance-owner capability，只对策展的 `desktop` 与 `admin` Gateway profil
 
 ## 精确模型与任务路由
 
-一次模型选择是 exact `{ providerId, model }`。创意工坊按所需任务查询 NomiFun
+一次模型选择是 exact `{ providerId, model }`。创作按所需任务查询 NomiFun
 托管模型目录，并排除已禁用的 Provider、已禁用模型，以及只声明了相邻任务的模型。
 系统不会通过模型名称猜能力，也不会静默替换成另一个任务。
 
-| 操作 | 要求的 NomiFun task | 创意工坊 capability |
+| 操作 | 要求的 NomiFun task | 创作 capability |
 | --- | --- | --- |
 | Canvas 创作助手 | `chat` | Canvas-scoped Assistant turn；严格图提案仍需人工批准。 |
 | 模板 AI 草稿/规划 | `chat` | 一次不带工具的有界 completion。 |
@@ -172,7 +172,7 @@ hydrate 完成前不会允许生成。模型目录准备好后，只有同一个
 
 - 从固定 allow-list 上游提示词仓库同步的、带来源与许可证信息的 offline-first 目录；
 - 包含会话指令、且当前启用的 NomiFun 设定；
-- 已经保存在创意工坊素材库中的用户自有文字素材。
+- 已经保存在创作素材库中的用户自有文字素材。
 
 提示词库支持文字搜索、精确分类筛选、标签交集筛选、详情查看和复制。目录或设定中的
 提示词可以显式保存为「我的素材」中的文字素材；目录来源会继续保留仓库与许可证
@@ -249,7 +249,7 @@ revision、时间戳、可见性、标签、媒体生成模型或素材。公开
   克隆、音频到音频、speed/instructions、AAC 与 PCM 没有在本合同中开放。
 - Provider 协议存在差异。只有 exact 类型化协议 profile 支持时才显示对应控制项；
   未知协议使用更小的安全子集。
-- 默认标题栏和创意工坊侧栏会跟随应用语言，但首发 Canvas 与编辑器的大部分正文仍以
+- 默认标题栏和创作侧栏会跟随应用语言，但首发 Canvas 与编辑器的大部分正文仍以
   简体中文为主。
 - 配置了模型不等于远端 Provider 可达，也不等于已经执行付费请求。生成前请留意
   Provider 的计费和数据政策。
@@ -257,7 +257,7 @@ revision、时间戳、可见性、标签、媒体生成模型或素材。公开
 
 ## 如何理解验证结论
 
-创意工坊按层报告验证结果，避免把一个层级的成功误当成另一个层级：
+创作按层报告验证结果，避免把一个层级的成功误当成另一个层级：
 
 1. **合同检查**：TypeScript/Rust 测试、schema 检查、typecheck、主题/图标/dead-CSS
    与编译，用于证明代码层合同。

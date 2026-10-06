@@ -3,7 +3,7 @@
 NomiFun's **Models** surface is an extensible control plane, not a fixed vendor
 list. It separates provider credentials, model records, task capabilities, and
 reliability policy so the same catalog can be reused by conversations,
-companions, scheduled work, presets, and Creative Studio.
+companions, scheduled work, presets, and Creation.
 
 > Simplified Chinese: [model-routing.zh.md](model-routing.zh.md)
 
@@ -84,9 +84,9 @@ The managed model catalog can represent these task families:
 | Vision | Image-aware chat and analysis |
 | Speech recognition (ASR) | Voice input and companion/device speech |
 | Speech synthesis (TTS) | Companions, devices, and Canvas audio nodes |
-| Image generation / editing | Creative Studio Canvas and Image Workbench |
-| Video generation | Creative Studio Canvas and Video Workbench |
-| Music generation | Conversation creation and Creative Studio |
+| Image generation / editing | Creation Canvas and Image Workbench |
+| Video generation | Creation Canvas and Video Workbench |
+| Music generation | Conversation creation and Creation |
 | Embedding / reranking | Retrieval and knowledge workflows |
 
 These tasks identify distinct invocation protocols and endpoints. The runtime
@@ -160,7 +160,7 @@ routes. Chat input and technical features do not create image/video/music/TTS/AS
 generation routes: automatic creation selects only models with the exact task
 route configured.
 
-Creative Studio persists the exact `{ providerId, model, task, capability }`
+Creation persists the exact `{ providerId, model, task, capability }`
 identity with each admitted media operation. Retrying the same idempotent task
 cannot change those facts.
 
@@ -211,5 +211,5 @@ their provider calls happen inside their own runtime.
   `crates/backend/nomifun-app/src/router/model_failover.rs`
 - IDMM policy:
   `crates/backend/nomifun-idmm/src/policy.rs`
-- Creative Studio model catalog:
+- Creation model catalog:
   `ui/src/renderer/pages/creativeStudio/models/catalog.ts`

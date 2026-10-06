@@ -147,7 +147,7 @@ pub use repository::{
     MAX_KNOWLEDGE_TREE_OPERATION_PAGE_SIZE, PrepareKnowledgeTreeOperationParams,
     PreparedKnowledgeTreeOperation,
 };
-// 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
+// 创作 (Creation) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{
     ApplyCreativeAgentProposalParams, AssetSort, CreateCreativeTaskParams,
     CreativeAgentProposalCommit, CreativeTaskOwnerRef,
