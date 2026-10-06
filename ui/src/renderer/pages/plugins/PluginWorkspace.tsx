@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Alert } from '@arco-design/web-react';
 import {
   AllApplication,
   ApiApp,
@@ -182,6 +183,16 @@ interface PluginNavGroupProps {
   counts: PluginLibraryCounts;
   activeView: PluginLibraryView;
   onSelect: (view: PluginLibraryView) => void;
+}
+
+export function PluginBetaNotice() {
+  const { t } = useTranslation();
+  return <Alert
+    type='warning'
+    title={t('pluginPlatform.workspace.betaTitle')}
+    content={t('pluginPlatform.workspace.betaNotice')}
+    showIcon
+  />;
 }
 
 function PluginNavGroup({ title, items, counts, activeView, onSelect }: PluginNavGroupProps) {

@@ -15,10 +15,10 @@ test('one Plugin entry owns library, creator, and App/detail routes', () => {
   expect(router).not.toMatch(/PluginRuntime|PluginProduct|PluginMount/);
 });
 
-test('hidden plugins keep navigation and direct routes behind the shared gate', () => {
+test('plugins enable navigation and direct routes through the shared gate', () => {
   const sider = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
   const router = readFileSync(new URL('../Router.tsx', import.meta.url), 'utf8');
-  expect(PLUGIN_FEATURE_VISIBLE).toBe(false);
+  expect(PLUGIN_FEATURE_VISIBLE).toBe(true);
   expect(sider).toMatch(/\{PLUGIN_FEATURE_VISIBLE && <>\s*<SiderPluginEntry\b[^]*?<PluginPinnedEntries\b[^]*?<\/>\}/);
   for (const route of ['/plugins', '/plugins/run/:id']) {
     expect(router).toContain(`path='${route}' element={PLUGIN_FEATURE_VISIBLE ? withRouteFallback(`);
