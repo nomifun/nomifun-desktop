@@ -13,6 +13,10 @@ mod native_turn_recovery;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
 
+#[cfg(test)]
+#[path = "idmm_message_tests.rs"]
+mod idmm_message_tests;
+
 use async_trait::async_trait;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -33,6 +37,7 @@ use nomifun_ai_agent::{
     SessionControlSink,
 };
 use nomifun_agent_contracts::{
+    IdmmDecisionExplanation, IdmmDecisionNotice,
     AgentBindingValue, AgentHandoffBindingRefV1, AgentHandoffCompletionAccountV1,
     AgentHandoffCompletionCriterionV1, AgentHandoffEnvelopeV1, AgentHandoffInputCitationV1,
     AgentHandoffMode, AgentHandoffPlanStepV1, AgentHandoffPlanV1,
@@ -1920,18 +1925,27 @@ impl NomiCoreSessionOwner {
         idempotency_key: &str,
         request: SendMessageRequest,
         initial_only: bool,
+        idmm_decision: Option<IdmmDecisionExplanation>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         let _operation_fence = self
             .session_operation_lock(session_id.as_ref())
             .write_owned()
             .await;
-        let input = self
+        let mut input = self
             .canonical_turn_input_with_admission(
                 owner_id, session_id,
                 &Self::turn_operation_id(owner_id, session_id.as_ref(), idempotency_key),
                 &request,
             )
             .await?;
+        if let Some(decision) = &idmm_decision {
+            decision.validate().map_err(|error| AppError::BadRequest(error.into()))?;
+            if request.origin.as_deref() != Some("idmm") {
+                return Err(AppError::BadRequest("IDMM source must be authored by the supervisor".into()));
+            }
+            input["idmm_decision"] = serde_json::to_value(decision)
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+        }
         let principal = PrincipalRef {
             principal_kind: "user".to_owned(),
             principal_id: owner_id.to_owned(),
@@ -1980,6 +1994,14 @@ impl NomiCoreSessionOwner {
                 ));
             }
         };
+        if idmm_decision.is_some() {
+            // UI provenance is emitted from the accepted canonical input. It is
+            // never reconstructed from current settings or intervention logs.
+            if self.publish_canonical_idmm_input(owner_id, session_id, &root_message_id).await.is_err() {
+                tracing::warn!(agent_session_id=session_id.as_ref(),message_id=%root_message_id,
+                    "IDMM realtime input delivery unavailable; continuing the accepted canonical Turn");
+            }
+        }
         let projection = self
             .canonical_conversation_projection(owner_id, session_id)
             .await?
@@ -2329,14 +2351,77 @@ impl NomiCoreSessionOwner {
         idempotency_key: &str,
         request: SendMessageRequest,
     ) -> Result<IdempotentMessageDelivery, AppError> {
+        if request.origin.as_deref() == Some("idmm") {
+            return Err(AppError::BadRequest("IDMM origin is reserved for the supervisor".into()));
+        }
         self.dispatch_canonical_turn(
             owner_id,
             &AgentSessionId::from(session_id.to_owned()),
             idempotency_key,
             request,
             false,
+            None,
         )
         .await
+    }
+
+    pub(crate) async fn send_session_idmm_message_idempotent(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+        request: SendMessageRequest,
+        decision: IdmmDecisionExplanation,
+    ) -> Result<IdempotentMessageDelivery, AppError> {
+        self.dispatch_canonical_turn(owner_id, &AgentSessionId::from(session_id.to_owned()),
+            idempotency_key, request, false, Some(decision)).await
+    }
+
+    async fn publish_canonical_idmm_input(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        message_id: &str,
+    ) -> Result<(), AppError> {
+        let row: (i64, i64, String) = sqlx::query_as(
+            "SELECT session.created_at,event.seq,event.inline_json FROM agent_events event \
+             JOIN agent_sessions session ON session.agent_session_id=event.session_id \
+             WHERE event.session_id=? AND event.event_id=? AND event.kind='message/user-accepted'",
+        ).bind(session_id.as_ref()).bind(message_id).fetch_one(&self.pool).await
+            .map_err(|error| AppError::Internal(format!("read accepted IDMM source: {error}")))?;
+        let input: Value = serde_json::from_str(&row.2)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        let decision: IdmmDecisionExplanation = serde_json::from_value(input["idmm_decision"].clone())
+            .map_err(|error| AppError::Conflict(format!("accepted IDMM source is invalid: {error}")))?;
+        decision.validate().map_err(|error| AppError::Conflict(error.into()))?;
+        self.user_events.send_to_user(owner_id, WebSocketMessage::new("message.userCreated", json!({
+            "conversation_id":session_id,"msg_id":message_id,
+            "content":input["content"],"idmm_decision":decision,
+            "position":"right","status":"finish","hidden":input["hidden"],
+            "origin":"idmm","created_at":row.0.saturating_add(row.1),
+        })));
+        Ok(())
+    }
+
+    pub(crate) async fn append_session_idmm_notice(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+        notice: IdmmDecisionNotice,
+    ) -> Result<(), AppError> {
+        let session_id = AgentSessionId::from(session_id.to_owned());
+        let principal = PrincipalRef { principal_kind:"user".into(),principal_id:owner_id.into() };
+        let result = self.canonical.store().append_idmm_notice(&principal, &session_id, idempotency_key, notice)
+            .await.map_err(agent_session_store_error)?;
+        if let Some(result) = result.filter(|result| !result.duplicate) {
+            if let Some(record) = result.record {
+                self.user_events.send_to_user(owner_id, WebSocketMessage::new("message.annotationUpdated", json!({
+                    "conversation_id":session_id,"message_id":record.correlation_id,
+                })));
+            }
+        }
+        Ok(())
     }
 
     /// Read the durable outcome of the exact keyed public turn without
@@ -13072,6 +13157,12 @@ fn canonical_message_response_with_observation(
         .get("state")
         .and_then(Value::as_str)
         .unwrap_or("completed");
+    let idmm_decision: Option<IdmmDecisionExplanation> = document.get("idmm_decision")
+        .filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose()?;
+    if let Some(decision) = &idmm_decision {
+        decision.validate().map_err(|error| NomiCoreApiError::new(StatusCode::CONFLICT,
+            "AGENT_SESSION_MESSAGE_PROJECTION_INVALID", error))?;
+    }
     if projection.presentation_intent == "turn_summary" {
         let Some(summary_message_id) = document.get("correlation_id").and_then(Value::as_str)
         else {
@@ -13191,6 +13282,7 @@ fn canonical_message_response_with_observation(
             json!({
                 "content": document.get("content").and_then(Value::as_str).unwrap_or_default(),
                 "turn_id": document.get("turn_id"),
+                "idmm_decision": idmm_decision,
                 "display_at_ms": document.get("display_at_ms").and_then(Value::as_i64).unwrap_or_else(|| {
                     // created_at remains the stable keyset/order cursor. The
                     // displayed clock comes from the message, not Session age.
@@ -13271,6 +13363,19 @@ fn canonical_message_response_with_observation(
             },
             MessagePosition::Left,
         ),
+        "idmm_notice" => {
+            let notice: IdmmDecisionNotice = serde_json::from_value(document.get("reference").cloned()
+                .ok_or_else(|| NomiCoreApiError::new(StatusCode::CONFLICT,
+                    "AGENT_SESSION_MESSAGE_PROJECTION_INVALID", "IDMM notice lost its canonical reference"))?)?;
+            notice.validate().map_err(|error| NomiCoreApiError::new(StatusCode::CONFLICT,
+                "AGENT_SESSION_MESSAGE_PROJECTION_INVALID", error))?;
+            (MessageType::Tips, json!({
+                "content":notice.decision.rationale,
+                "type":if notice.status == nomifun_agent_contracts::IdmmDecisionNoticeStatus::Failed { "error" } else { "warning" },
+                "display_at_ms":notice.created_at,
+                "idmm_notice":notice,
+            }), MessagePosition::Center)
+        }
         "agent_transition" => {
             let reference = document
                 .get("reference")
@@ -13306,7 +13411,7 @@ fn canonical_message_response_with_observation(
     let status = match state {
         "streaming" | "started" => MessageStatus::Work,
         "failed" | "error" | "uncertain" => MessageStatus::Error,
-        "accepted" | "completed" | "recorded" => MessageStatus::Finish,
+        "accepted" | "completed" | "recorded" | "waiting_for_human" => MessageStatus::Finish,
         _ => MessageStatus::Pending,
     };
     let status = if message_type == MessageType::ToolCall && content.get("status").and_then(Value::as_str) == Some("error") {
@@ -14252,6 +14357,7 @@ async fn start_owned_session_turn(
             &idempotency_key,
             input,
             initial_only,
+            None,
         )
         .await?;
     let operation_id = NomiCoreSessionOwner::turn_operation_id(
@@ -15855,6 +15961,11 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
             "turn input must be a string or an object containing content",
         )
     })?;
+    if ["idmm_decision", "idmm_notice", "input_source"].iter().any(|key| object.contains_key(*key))
+        || object.get("origin").and_then(Value::as_str) == Some("idmm") {
+        return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST,
+            "NOMI_CORE_INVALID_REQUEST", "IDMM source metadata is owned by the supervisor"));
+    }
     let content = object
         .get("content")
         .or_else(|| object.get("text"))

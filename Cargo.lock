@@ -5864,6 +5864,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
+ "uuid",
 ]
 
 [[package]]
@@ -6107,6 +6108,7 @@ dependencies = [
 name = "nomifun-api-types"
 version = "0.7.6"
 dependencies = [
+ "nomifun-agent-contracts",
  "nomifun-common",
  "serde",
  "serde_json",
@@ -6710,6 +6712,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "nomi-redact",
+ "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",

@@ -400,38 +400,6 @@ const IdmmControl: React.FC<IdmmControlProps> = ({
           </div>
         )}
 
-        {!isDraft && state?.recent_interventions.length ? (
-          <div className={sectionClass}>
-            <span className='text-12px font-600 text-t-primary'>{t('idmm.recentActivity')}</span>
-            {state.recent_interventions.slice(0, 3).map((item) => (
-              <div key={item.intervention_id} className='rounded-8px bg-fill-2 px-9px py-7px'>
-                <div className='flex min-w-0 items-center justify-between gap-8px text-11px'>
-                  <span className='min-w-0 truncate text-t-secondary'>
-                    {t(`idmm.interventionReason.${item.reason}`, { defaultValue: item.reason })}
-                  </span>
-                  <span
-                    className={classNames(
-                      'shrink-0 font-500',
-                      item.status === 'failed'
-                        ? 'text-danger-6'
-                        : item.status === 'halted'
-                          ? 'text-warning-6'
-                          : 'text-success-6'
-                    )}
-                  >
-                    {t(`idmm.interventionStatus.${item.status}`)}
-                  </span>
-                </div>
-                {item.detail && (
-                  <div className='mt-3px line-clamp-2 break-words text-10px leading-14px text-t-tertiary'>
-                    {item.detail}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : null}
-
         {applyNote && (
           <div className='px-2px text-11px leading-15px text-t-quaternary'>{applyNote}</div>
         )}

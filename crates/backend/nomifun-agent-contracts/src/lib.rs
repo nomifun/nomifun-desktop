@@ -12,6 +12,7 @@ pub mod digest;
 pub mod event;
 pub mod engine_features;
 pub mod impact;
+pub mod idmm;
 pub mod manifest;
 pub mod plugin;
 pub mod model_route;
@@ -36,6 +37,7 @@ pub use digest::{
 pub use event::*;
 pub use engine_features::*;
 pub use impact::*;
+pub use idmm::*;
 pub use manifest::*;
 pub use plugin::*;
 pub use model_route::*;

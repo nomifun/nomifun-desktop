@@ -263,7 +263,7 @@ const getProcessedItemTurnEndedAt = (item: IRenderableItem): number | undefined 
 };
 
 const isTerminalAssistantItem = (item: IRenderableItem): boolean =>
-  item.type === 'tips' && item.content.type === 'error';
+  item.type === 'tips' && item.content.type === 'error' && !item.content.idmm_notice;
 
 const isHiddenProcessItem = (item: IRenderableItem): boolean => {
   if (item.type !== 'thinking' && item.type !== 'text') return false;
@@ -291,7 +291,7 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
     case 'text':
       return item.position === 'right' ? 'user' : 'assistant';
     case 'tips':
-      if (item.content.agent_transition) return 'other';
+      if (item.content.agent_transition || item.content.idmm_notice) return 'other';
       if (isContextCompressionTip(item)) return 'process';
       return 'assistant';
     case 'thinking':
@@ -733,7 +733,7 @@ const MessageList: React.FC<{
   /** Windowed-history paging (nomi surfaces): prepend the next older message
    *  window when the user scrolls to the top. Omitted on chats that still load
    *  their whole transcript at once. */
-  onLoadOlder?: () => void | Promise<void>;
+  onLoadOlder?: () => void | boolean | Promise<void | boolean>;
   hasMoreOlder?: boolean;
   loadingOlder?: boolean;
 }> = ({ emptySlot, onLoadOlder, hasMoreOlder, loadingOlder }) => {
@@ -754,6 +754,8 @@ const MessageList: React.FC<{
   const targetMessageId = locationState.targetMessageId;
   const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | undefined>();
   const handledTargetKeyRef = useRef<string>('');
+  const [pendingQuestionJump, setPendingQuestionJump] = useState<ChatMessageJumpDetail | null>(null);
+  const [loadingQuestionPage, setLoadingQuestionPage] = useState(false);
 
   // Pre-process message list to group tool outputs into summary cards
   const processedList = useMemo(() => {
@@ -1215,7 +1217,11 @@ const MessageList: React.FC<{
         if (detail.msgId && sourceMessageIds.includes(detail.msgId)) return true;
         return false;
       });
-      if (targetIndex < 0) return;
+      if (targetIndex < 0) {
+        if (detail.loadOlder) setPendingQuestionJump(detail);
+        return;
+      }
+      setPendingQuestionJump(null);
 
       hideScrollButton();
       requestAnimationFrame(() => {
@@ -1234,6 +1240,34 @@ const MessageList: React.FC<{
       window.removeEventListener(CHAT_MESSAGE_JUMP_EVENT, handleMessageJump);
     };
   }, [conversationContext?.conversation_id, displayList, hideScrollButton, scrollElementIntoView]);
+
+  useEffect(() => {
+    if (!pendingQuestionJump) return;
+    if (pendingQuestionJump.conversation_id !== conversationContext?.conversation_id) {
+      setPendingQuestionJump(null);
+      return;
+    }
+    const found = displayList.some((item) => {
+      const ids = getProcessedItemSourceMessageIds(item);
+      return Boolean((pendingQuestionJump.messageId && ids.includes(pendingQuestionJump.messageId))
+        || (pendingQuestionJump.msgId && ids.includes(pendingQuestionJump.msgId)));
+    });
+    if (found) {
+      window.dispatchEvent(new CustomEvent<ChatMessageJumpDetail>(CHAT_MESSAGE_JUMP_EVENT, {
+        detail: { ...pendingQuestionJump, loadOlder: false },
+      }));
+    } else if (!loadingQuestionPage && !loadingOlder && hasMoreOlder && onLoadOlder) {
+      const attemptedJump = pendingQuestionJump;
+      setLoadingQuestionPage(true);
+      void Promise.resolve(onLoadOlder()).then((advanced) => {
+        if (advanced === false) setPendingQuestionJump(current => current === attemptedJump ? null : current);
+      }).catch(() => {
+        setPendingQuestionJump(current => current === attemptedJump ? null : current);
+      }).finally(() => setLoadingQuestionPage(false));
+    } else if (!loadingOlder && !hasMoreOlder) {
+      setPendingQuestionJump(null);
+    }
+  }, [conversationContext?.conversation_id, displayList, hasMoreOlder, loadingOlder, loadingQuestionPage, onLoadOlder, pendingQuestionJump]);
 
   // Click scroll button
   const handleScrollButtonClick = () => {

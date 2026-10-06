@@ -23,6 +23,9 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use zeroize::Zeroizing;
 
+#[path = "support/live_idmm_demo.rs"]
+mod live_idmm_demo;
+
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
 mod live_general_desktop;
@@ -69,6 +72,7 @@ enum LiveCase {
     LongCoding,
     Companion,
     CreativeStudio,
+    Idmm,
 }
 
 #[derive(Clone)]
@@ -2913,6 +2917,7 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
         LiveCase::SelectedModel => run_selected_model_chain(&router, api_key.as_str(), &model).await,
         LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
         LiveCase::CreativeStudio => run_live_creative_studio_chain(&router, api_key.as_str(), &model).await,
+        LiveCase::Idmm => live_idmm_demo::run(&router, api_key.as_str(), &model).await,
     }}).catch_unwind().await.unwrap_or_else(|_| Err(SmokeFailure::new(
         "live.case", "LIVE_CASE_PANICKED", 500)));
     drop(router);
@@ -2953,6 +2958,15 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
 
     audit_result?;
     result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --idmm-smoke"]
+async fn nomi_core_idmm_reaches_live_stepfun() {
+    if let Err(error) = run_live_provider_smoke(LiveCase::Idmm).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
+        panic!("live IDMM demo did not pass");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

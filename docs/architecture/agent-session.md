@@ -57,6 +57,22 @@ UI consumes current stream and Message projections directly. It has no marker-de
 
 Cron, Companion, Requirements, AutoWork, IDMM and AgentExecution retain their own business configuration and supervision state. Session input, admission, cancellation and completion use canonical Turn receipts.
 
+IDMM explanations are typed metadata on canonical accepted input. Only the
+trusted IDMM command can supply `idmm_decision`; public input cannot claim the
+IDMM source or supply reserved annotation fields. The immutable explanation
+records the actual source, bypass model when used, short basis and exact original
+question reference. Live UI events and historical Message projections use this
+same committed fact. Neither a configured model nor an old origin field or audit
+entry can supply missing explanations.
+
+Automatic answers require a transactionally verified current question and ready
+Session. A waiting-for-human or failed decision is recorded as
+`idmm/notice-recorded`, validated against the exact question and projected as a
+conversation notice. It creates no Turn and does not enter Runtime context.
+Decision explanations also remain outside model message bodies. The UI display
+preference controls expansion only; it invokes no model and carries no confidence
+percentage.
+
 AgentExecution settlement, restart recovery and manual adoption use one Session output query for the exact Turn's terminal receipt, assistant content and settled tool effects. The query resolves only that Turn's event window in one transaction rather than scanning the whole Session history. Content cannot come from UI projections, reasoning or later turns. File outputs require successful file-operation or publication receipts and verification of workspace identity, path, byte count and digest. Directory scans, model claims and retired display markers are not delivery evidence. Later writes, patches and deletes determine the final output state in event order.
 
 A Step spec is task input rather than a second artifact contract. The sole Runtime enforces typed requirements, completion and delivery; the scheduler cannot infer another acceptance gate from reference filenames, formats or counts in prose. Recovery uses the Session owner's complete canonical OperationId and the same output and error classification as normal settlement. Terminal metadata cannot become an output summary. Missing, unknown or incomplete receipts do not authorize replay; automatic retry requires an explicit structured retry permission.
