@@ -253,6 +253,15 @@ mod tests {
                 SafeHttpErrorKind::ForbiddenTarget
             );
         }
+        let body = serde_json::to_vec(&json!({
+            "Status": 0, "TC": false, "CD": false,
+            "Question": [{"name": "search.test.", "type": 28}],
+            "Answer": [{"name": "search.test.", "type": 28, "data": "2001:2::2a", "TTL": 30}],
+        })).unwrap();
+        assert_eq!(
+            answers("search.test", 28, &body).unwrap_err().kind(),
+            SafeHttpErrorKind::ForbiddenTarget,
+        );
     }
     #[test]
     fn rejects_unrelated_records_cycles_and_wrong_questions() {
