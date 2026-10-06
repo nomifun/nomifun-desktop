@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 
-function generate(packages, previous) {
+function generate(packages, previous, args = [], expectedStatus = 0) {
   const root = mkdtempSync(join(tmpdir(), 'nomifun-linux-updater-'));
   try {
     mkdirSync(join(root, 'scripts'));
@@ -19,10 +19,11 @@ function generate(packages, previous) {
       writeFileSync(`${path}.sig`, `fixture-signature:${name}`);
     }
     const result = spawnSync(process.execPath, [join(root, 'scripts/make-latest-json.mjs'),
-      '--version', '0.7.6', '--out', out, '--notes', 'Linux fixture', '--collect'], {
+      '--version', '0.7.6', '--out', out, '--notes', 'Linux fixture', '--collect', ...args], {
       encoding: 'utf8', timeout: 10_000,
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.stderr).toBe(expectedStatus);
+    if (expectedStatus !== 0) return result;
     return JSON.parse(readFileSync(out, 'utf8'));
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -92,5 +93,24 @@ describe('Linux updater installer routing', () => {
     expect(manifest.platforms['darwin-aarch64'].url).toEndWith('/NomiFun.app.tar.gz');
     expect(manifest.platforms['darwin-x86_64']).toEqual(manifest.platforms['darwin-aarch64']);
     expect(manifest.platforms['windows-x86_64'].url).toEndWith('/NomiFun-setup.exe');
+  });
+
+  test('arm64 macOS release scans the selected target and removes an obsolete same-version Intel entry', () => {
+    const windows = { url: 'https://example.test/win.exe', signature: 'windows' };
+    const manifest = generate([
+      ['aarch64-apple-darwin', 'NomiFun.app.tar.gz'],
+      ['universal-apple-darwin', 'stale.app.tar.gz'],
+    ], { version: '0.7.6', platforms: {
+      'darwin-x86_64': { url: 'https://example.test/old-universal.app.tar.gz', signature: 'old' },
+      'windows-x86_64': windows,
+    } }, ['--target-dir', 'target/aarch64-apple-darwin', '--target-triple', 'aarch64-apple-darwin', '--macos-arm64-only']);
+    expect(manifest.platforms['darwin-aarch64'].url).toEndWith('/NomiFun.app.tar.gz');
+    expect(manifest.platforms['darwin-x86_64']).toBeUndefined();
+    expect(manifest.platforms['windows-x86_64']).toEqual(windows);
+  });
+
+  test('arm64 macOS release rejects a scanned Universal updater rather than relabelling it', () => {
+    const result = generate([['universal-apple-darwin', 'stale.app.tar.gz']], undefined, ['--macos-arm64-only'], 1);
+    expect(result.stderr).toContain('旧 Intel/Universal');
   });
 });

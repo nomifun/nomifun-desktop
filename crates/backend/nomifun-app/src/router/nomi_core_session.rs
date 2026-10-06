@@ -715,6 +715,10 @@ impl NomiCoreSessionOwner {
         &self.canonical
     }
 
+    pub(crate) fn session_operation_locks(&self) -> Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>> {
+        self.session_operation_locks.clone()
+    }
+
     fn session_operation_lock(
         &self,
         session_id: &str,
@@ -4072,6 +4076,12 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             principal_kind: "user".to_owned(),
             principal_id: owner_id.to_owned(),
         };
+        let _operation_fence = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        match self.canonical.get(&principal, &session_id).await {
+            Ok(_) => self.runtime_sessions.terminate_and_wait_result(session_id.as_ref(), Some(nomifun_common::AgentKillReason::ConfigurationChanged)).await?,
+            Err(AppError::NotFound(_)) => {},
+            Err(error) => return Err(error),
+        }
         let command = match self
             .canonical
             .fence_delete(
@@ -4088,9 +4098,6 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             }
             PreparedAgentSessionDelete::Fenced(command) => command,
         };
-        self.runtime_sessions
-            .terminate_and_wait_result(session_id.as_ref(), Some(nomifun_common::AgentKillReason::ConfigurationChanged))
-            .await?;
         let blockers = self.canonical.store().delete_blockers(&session_id).await
             .map_err(agent_session_store_error)?;
         if !blockers.is_empty() {
@@ -5044,67 +5051,6 @@ fn companion_id_from_binding(
         ));
     }
     Ok(Some(companion_id))
-}
-
-#[cfg(feature = "browser-use")]
-fn managed_browser_profile_bindings(
-    owner_id: &str,
-    binding: &AgentBindingValue,
-) -> Result<Vec<nomifun_browser_platform::runtime::BrowserProfileBinding>, AppError> {
-    let mut profiles = Vec::new();
-    for resource in binding
-        .typed_resource_bindings
-        .iter()
-        .filter(|resource| {
-            resource.resource_kind.as_ref()
-                == nomifun_browser_platform::product::BROWSER_RESOURCE_KIND
-        })
-    {
-        if resource.owner_id != owner_id {
-            return Err(AppError::Forbidden(
-                "Browser Resource belongs to another owner".to_owned(),
-            ));
-        }
-        match resource
-            .typed_parameters
-            .get("provider_kind")
-            .map(String::as_str)
-        {
-            Some("managed") => {
-                let profile = match resource
-                    .typed_parameters
-                    .get("persistence")
-                    .map(String::as_str)
-                {
-                    None | Some("persistent") => {
-                        nomifun_browser_platform::runtime::BrowserProfileBinding::persistent(
-                            resource.binding_id.as_ref(),
-                        )
-                    }
-                    Some("ephemeral") => {
-                        nomifun_browser_platform::runtime::BrowserProfileBinding::ephemeral(
-                            resource.binding_id.as_ref(),
-                        )
-                    }
-                    Some(_) => {
-                        return Err(AppError::Conflict(
-                            "managed Browser Resource has an invalid persistence policy"
-                                .to_owned(),
-                        ));
-                    }
-                }
-                .map_err(|error| AppError::Conflict(error.to_string()))?;
-                profiles.push(profile);
-            }
-            Some("attached_chrome") => {}
-            _ => {
-                return Err(AppError::Conflict(
-                    "Browser Resource has no canonical provider kind".to_owned(),
-                ));
-            }
-        }
-    }
-    Ok(profiles)
 }
 
 #[cfg(feature = "browser-use")]
@@ -6657,7 +6603,7 @@ mod session_boundary_tests {
             .0;
         for exact_cleanup in [
             ".retire_agent_session(agent_session_id)",
-            ".delete_agent_session(owner_id, agent_session_id, &bindings)",
+            ".delete_agent_session(owner_id, agent_session_id)",
             ".close_agent_session(owner_id, agent_session_id)",
             ".delete_jobs_by_agent_session(owner_id, agent_session_id)",
             ".clear_owner_for_session(",
@@ -6885,6 +6831,10 @@ pub(crate) struct NomiCoreAgentApiState {
         Option<Arc<nomifun_browser_platform::workspace::BrowserResourceService>>,
     #[cfg(feature = "browser-use")]
     attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
+    #[cfg(feature = "browser-use")]
+    browser_profile_store: nomifun_browser_platform::runtime::BrowserProfileStore,
+    #[cfg(feature = "browser-use")]
+    pub(crate) browser_user_close: Arc<dyn crate::browser_workspace_provider::BrowserUserClosePort>,
     delete_cleanup_locks:
         Arc<DashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -6909,6 +6859,10 @@ impl NomiCoreAgentApiState {
         >,
         #[cfg(feature = "browser-use")]
         attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
+        #[cfg(feature = "browser-use")]
+        browser_profile_store: nomifun_browser_platform::runtime::BrowserProfileStore,
+        #[cfg(feature = "browser-use")]
+        browser_user_close: Arc<dyn crate::browser_workspace_provider::BrowserUserClosePort>,
     ) -> Self {
         Self {
             authoritative_user_id,
@@ -6930,6 +6884,10 @@ impl NomiCoreAgentApiState {
             browser_resources,
             #[cfg(feature = "browser-use")]
             attached_chrome,
+            #[cfg(feature = "browser-use")]
+            browser_profile_store,
+            #[cfg(feature = "browser-use")]
+            browser_user_close,
             delete_cleanup_locks: Arc::new(DashMap::new()),
         }
     }
@@ -7076,29 +7034,20 @@ impl NomiCoreAgentApiState {
 
         #[cfg(feature = "browser-use")]
         {
-            let bindings = managed_browser_profile_bindings(
-                owner_id,
-                &deleting_session.agent_binding,
-            )?;
             if let Some(resources) = &self.browser_resources {
-                resources
-                    .delete_agent_session(owner_id, agent_session_id, &bindings)
-                    .await
-                    .map_err(|error| {
-                        NomiCoreApiError::new(
-                            StatusCode::CONFLICT,
-                            "AGENT_SESSION_BROWSER_CLEANUP_FAILED",
-                            format!(
-                                "Browser Resource cleanup failed before AgentSession deletion: {error}"
-                            ),
-                        )
-                    })?;
-            } else if !bindings.is_empty() {
-                return Err(NomiCoreApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "AGENT_SESSION_BROWSER_CLEANUP_UNAVAILABLE",
-                    "Managed Browser profile cleanup owner is unavailable",
-                ));
+                resources.delete_agent_session(owner_id, agent_session_id).await
+                    .map_err(|error| NomiCoreApiError::new(StatusCode::CONFLICT,
+                        "AGENT_SESSION_BROWSER_CLEANUP_FAILED",
+                        format!("Browser cleanup failed before AgentSession deletion: {error}")))?;
+            } else {
+                // With no native host installed this boot there cannot be a
+                // live user entity. Exact on-disk cleanup still works without CEF.
+                let store = self.browser_profile_store.clone();
+                let key = nomifun_browser_platform::workspace::managed_workspace_key(owner_id, agent_session_id)
+                    .map_err(|error| AppError::Conflict(error.to_string()))?;
+                tokio::task::spawn_blocking(move || store.delete_persistent_profile(&key)).await
+                    .map_err(|error| AppError::Conflict(error.to_string()))?
+                    .map_err(|error| AppError::Conflict(error.to_string()))?;
             }
         }
         #[cfg(not(feature = "browser-use"))]

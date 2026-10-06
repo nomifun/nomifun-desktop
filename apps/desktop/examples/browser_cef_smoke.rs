@@ -31,11 +31,36 @@ fn main() {
     let soak_only = std::env::var_os("NOMIFUN_CEF_SOAK_ONLY").is_some();
     let window_reopen_only = std::env::var_os("NOMIFUN_CEF_WINDOW_REOPEN_ONLY").is_some();
     let context_shutdown_only = std::env::var_os("NOMIFUN_CEF_CONTEXT_SHUTDOWN_ONLY").is_some();
+    let sqlite_compatibility_only = std::env::var_os("NOMIFUN_CEF_SQLITE_COMPATIBILITY_ONLY").is_some();
+    let cold_navigation_only = std::env::var_os("NOMIFUN_CEF_COLD_NAVIGATION_ONLY").is_some();
+    let old_host_allocations = sqlite_compatibility_only.then(|| (0..2000)
+        .map(|index| Arc::new(std::sync::Mutex::new(format!("host allocation before preload {index}"))))
+        .collect::<Vec<_>>());
+    let bundle = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let framework = bundle.join("Contents/Frameworks/Chromium Embedded Framework.framework");
+    // SAFETY: no fixture HTTP, Tauri or Tokio worker exists at this point.
+    if let Err(error) = unsafe { Engine::preload_framework(&framework) } {
+        let _ = std::fs::write(&report, serde_json::to_vec_pretty(&serde_json::json!({"passed":false,"preload_error":error})).unwrap());
+        std::process::exit(2);
+    }
+    drop(old_host_allocations);
     std::fs::write(report.with_extension("pid"), std::process::id().to_string()).expect("fixture PID receipt");
+    if sqlite_compatibility_only {
+        // This branch never builds Tauri or calls Engine::initialize. The
+        // temporary database and all workers are created only after preload.
+        let result = verify_sqlite_compatibility();
+        let (value, passed) = match result {
+            Ok(value) => (value, true),
+            Err(error) => (serde_json::json!({"passed":false,"error":error}), false),
+        };
+        let written = std::fs::write(&report, serde_json::to_vec_pretty(&value).unwrap()).is_ok();
+        std::process::exit(if passed && written { 0 } else { 1 });
+    }
     let root = tempfile::Builder::new().prefix("nomi-cef-smoke-").tempdir().expect("disposable CEF profile");
     let data = root.path().to_path_buf();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
+    let fixture_started = std::time::Instant::now();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break; };
@@ -45,6 +70,12 @@ fn main() {
                 let Ok(count) = stream.read(&mut request) else { return; };
                 let request = String::from_utf8_lossy(&request[..count]);
                 let path = request.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/");
+                #[cfg(debug_assertions)]
+                eprintln!("CEF_SMOKE_HTTP received=true fixture_elapsed_ms={} route={}", fixture_started.elapsed().as_millis(), match path {
+                    "/" => "root", "/download-file" => "download", "/download-slow-file" => "download_slow",
+                    "/upload-frames" => "upload_frames", "/popup-source" => "popup_source", "/popup-child" => "popup_child",
+                    _ => "other_fixture_route",
+                });
                 if path == "/download-file" {
                     let body = "Native CEF download 中文\n";
                     let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=cef-download.txt\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
@@ -92,9 +123,8 @@ fn main() {
             });
         }
     });
-    let bundle = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
     let helper = bundle.join("Contents/Frameworks/NomiCEFSmoke Helper.app/Contents/MacOS/NomiCEFSmoke Helper");
-    let paths = Paths { framework: bundle.join("Contents/Frameworks/Chromium Embedded Framework.framework"), helper, main_bundle: bundle, data_root: data.clone() };
+    let paths = Paths { framework, helper, main_bundle: bundle, data_root: data.clone() };
     let engine_slot = Arc::new(std::sync::OnceLock::<Arc<Engine>>::new());
     let setup_engine = engine_slot.clone();
     let failure_report = report.clone();
@@ -131,6 +161,9 @@ fn main() {
         tauri::async_runtime::spawn(async move {
             let mut retained_shutdown_context = None;
             let result = async {
+                if cold_navigation_only {
+                    return verify_cold_host_navigation(&engine, &handle, &data, &format!("http://{address}/browser_workspace.html")).await;
+                }
                 if context_shutdown_only {
                     retained_shutdown_context = Some(engine.create_context(Some(data.join("shutdown-context"))).await?);
                     eprintln!("CEF_SMOKE_PHASE shutdown_context_created_without_page");
@@ -264,6 +297,139 @@ fn main() {
     let code = app.run_return(|_, _| {});
     drop(root);
     std::process::exit(code);
+}
+
+#[cfg(target_os = "macos")]
+async fn verify_cold_host_navigation(
+    engine: &std::sync::Arc<nomifun_browser_macos::engine::Engine>,
+    app: &tauri::AppHandle,
+    data: &std::path::Path,
+    url: &str,
+) -> Result<serde_json::Value, String> {
+    use nomifun_browser_platform::{runtime::*, run_guard::{BrowserInputState, BrowserRunCoordinator}};
+    let host = macos::host::DesktopBrowserHost::new(app.clone(), engine.clone());
+    let ephemeral = match std::env::var("NOMIFUN_CEF_COLD_NAVIGATION_PROFILE").as_deref() {
+        Ok("ephemeral") => true,
+        Err(_) | Ok("persistent") => false,
+        _ => return Err("cold fixture profile must be persistent or ephemeral".into()),
+    };
+    let runtime = host.create(CreateBrowserRuntime {
+        key: BrowserResourceKey { principal_id: "fixture-user".into(), agent_session_id: "cold-host".into(), resource_binding_id: "managed-browser".into() },
+        runtime_generation: 1, profile: if ephemeral { BrowserProfile::Ephemeral } else { BrowserProfile::Persistent(data.join("cold-host-profile")) }, user_input_enabled: true,
+    }).await.map_err(|error| error.to_string())?;
+    runtime.surface().ok_or("cold fixture native surface is missing")?
+        .set_surface(BrowserSurfaceBounds { x:20., y:60., width:1060., height:620. }, true, Default::default())
+        .await.map_err(|error| error.to_string())?;
+    let created = std::time::Instant::now();
+    let result = async {
+        // This is the first page in a fresh native process and uses the real
+        // product host, including registered ownership and bootstrap barrier.
+        runtime.execute(BrowserTabCommand::Create { url: url.into() }, Default::default())
+            .await.map_err(|error| error.to_string())?;
+        let create_elapsed_ms = created.elapsed().as_millis();
+        let mut changes = runtime.changes().ok_or("cold fixture native metadata is missing")?;
+        let target = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let snapshot = runtime.snapshot().await.map_err(|error| error.to_string())?;
+                if let Some(tab) = snapshot.tabs.iter().find(|tab| tab.url == url && tab.lifecycle == BrowserTabLifecycle::Ready) {
+                    return Ok::<_, String>(tab.target.clone());
+                }
+                changes.changed().await.map_err(|_| "cold fixture metadata owner was lost")?;
+            }
+        }).await.map_err(|_| "cold navigation did not produce the actual ready document")??;
+        let coordinator = BrowserRunCoordinator::new(runtime.clone());
+        let run = coordinator.begin().await.map_err(|error| error.to_string())?;
+        run.require_explicit_finish();
+        let observation = { let runtime = runtime.clone(); coordinator.agent_operation(&run, move |cancel| async move {
+            Ok(runtime.automation().expect("real native host automation").observe(None, cancel).await)
+        }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())? };
+        coordinator.settle(&run).await.map_err(|error| error.to_string())?;
+        let locked = coordinator.snapshot().await.input_state == BrowserInputState::AgentRunning;
+        coordinator.finish(&run).await.map_err(|error| error.to_string())?;
+        let checks = serde_json::json!({
+            "cold_first_navigation_ready":true,
+            "navigation_uses_same_owned_page":observation.target == target,
+            "protocol_survives_first_navigation":!observation.elements.is_empty(),
+            "user_input_locked_until_finish":locked,
+            "user_input_recovered":coordinator.snapshot().await.input_state == BrowserInputState::UserReady,
+        });
+        Ok::<_, String>(serde_json::json!({"passed":checks.as_object().unwrap().values().all(|value|value==true),"checks":checks,"create_elapsed_ms":create_elapsed_ms,"profile":if ephemeral { "ephemeral" } else { "persistent" }}))
+    }.await;
+    let closed = runtime.close().await.map_err(|error| error.to_string());
+    match (result, closed) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (_, Err(error)) => Err(error),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_sqlite_compatibility() -> Result<serde_json::Value, String> {
+    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+    use sqlx::{Row, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
+    use nomifun_browser_macos::engine::Engine;
+    const WORKERS: usize = 8;
+    const PER_WORKER: usize = 5000;
+    if Engine::initialized_in_process() { return Err("allocator fixture unexpectedly initialized CEF".into()); }
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(WORKERS)
+        .enable_all().build().map_err(|error| error.to_string())?;
+    let completed = Arc::new(AtomicUsize::new(0));
+    let count = completed.clone();
+    runtime.block_on(async move {
+        let options: SqliteConnectOptions = "sqlite::memory:".parse().map_err(|error: sqlx::Error| error.to_string())?;
+        let pool = SqlitePoolOptions::new().max_connections(WORKERS as u32).min_connections(WORKERS as u32)
+            .connect_with(options).await.map_err(|error| error.to_string())?;
+        sqlx::query("CREATE TABLE agent_sessions(native_contract_id TEXT,native_cursor_json TEXT,native_checkpoint_json TEXT)")
+            .execute(&pool).await.map_err(|error| error.to_string())?;
+        let mut tasks = tokio::task::JoinSet::new();
+        for worker in 0..WORKERS {
+            let pool = pool.clone();
+            let count = count.clone();
+            tasks.spawn(async move {
+                // Retain one connection for each task so eight SQLite native
+                // workers exercise their own lookaside pools concurrently.
+                let mut connection = pool.acquire().await.map_err(|error| error.to_string())?;
+                for iteration in 0..PER_WORKER {
+                    let rows = sqlx::query("SELECT name FROM pragma_table_info(?)").bind("agent_sessions")
+                        .fetch_all(&mut *connection).await.map_err(|error| error.to_string())?;
+                    let columns = rows.iter().map(|row| row.try_get::<String, _>(0))
+                        .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+                    if columns != ["native_contract_id", "native_cursor_json", "native_checkpoint_json"] {
+                        return Err("SQLite schema projection was corrupted after preload".to_owned());
+                    }
+                    let memory = Arc::new(Mutex::new(format!("worker={worker} iteration={iteration} native_cursor_json")));
+                    let (send, receive) = std::sync::mpsc::channel();
+                    send.send(memory.clone()).map_err(|error| error.to_string())?;
+                    let memory = receive.recv().map_err(|error| error.to_string())?;
+                    if !memory.lock().map_err(|error| error.to_string())?.contains("native_cursor_json") {
+                        return Err("host allocation content was corrupted".to_owned());
+                    }
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok::<_, String>(())
+            });
+        }
+        let mut failure = None;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result.map_err(|error| error.to_string()).and_then(|result| result) {
+                failure = Some(error);
+            }
+        }
+        pool.close().await;
+        failure.map_or(Ok(()), Err)
+    })?;
+    drop(runtime);
+    if completed.load(Ordering::Relaxed) != WORKERS * PER_WORKER || Engine::initialized_in_process() {
+        return Err("CEF/SQLite compatibility fixture did not complete its exact scope".into());
+    }
+    Ok(serde_json::json!({
+        "passed":true,"shutdown_complete":true,
+        "scope":"early-library-preload-sqlite-compatibility",
+        "sqlite_workers":WORKERS,"schema_queries":completed.load(Ordering::Relaxed),
+        "cef_initialized":false,"helper_processes_started":0,
+        "checks":{"preload_before_workers":true,"legacy_host_allocations_freed":true,
+            "sqlite_schema_and_host_allocation_churn":true,"cef_engine_not_initialized":true}
+    }))
 }
 
 #[cfg(target_os = "macos")]

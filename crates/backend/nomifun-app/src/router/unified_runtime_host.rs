@@ -481,6 +481,13 @@ impl ConversationRuntimeHost {
     }
 
     async fn confirm_unstarted_cancellation(&self, message: &SendMessageData) -> Result<bool, AppError> {
+        let previous_terminal = self.last_terminal_root.lock()
+            .map_err(|_| error("terminal root state poisoned"))?.clone();
+        if let Some(previous) = previous_terminal {
+            // An unstarted successor must not replace the only trusted proof
+            // identifying a prior terminal whose native release still needs retry.
+            self.resources.finish_browser_turn(&previous).await?;
+        }
         // Keep publication of ActiveTurn excluded until the read-only proof
         // and its local acknowledgement are complete. This opens no resource
         // and claims no lease; a running or previously claimed Turn cannot
@@ -548,6 +555,14 @@ impl ConversationRuntimeHost {
         cancellation: CancellationToken,
     ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
         let root = self.root(message);
+        let previous_terminal = self.last_terminal_root.lock()
+            .map_err(|_| error("terminal root state poisoned"))?.clone();
+        if let Some(previous) = previous_terminal {
+            // A terminal may be durable while native input release still
+            // needs a retry. Finish that exact owner before claiming a new root.
+            self.resources.finish_browser_turn(&previous).await
+                .map_err(|error| self.preparation_error(root, "previous_browser_release", error))?;
+        }
         tracing::info!(
             agent_session_id = self.options.conversation_id.as_str(),
             root_message_id = root,
@@ -596,6 +611,10 @@ impl ConversationRuntimeHost {
         *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = None;
         *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = None;
         drop(active);
+        // Retain and lock the managed user browser before any later awaited
+        // preflight can fail. Early failure/cancellation uses the same cleanup.
+        self.resources.open_turn(&admitted, journal.clone()).await
+            .map_err(|error| self.preparation_error(root, "resource_open", error))?;
         // Publish the exact journal before the next awaited budget/read so
         // storage errors and cancellation cannot discard a committed claim.
         journal.refresh_budget().await
@@ -606,10 +625,6 @@ impl ConversationRuntimeHost {
         journal.validate_receipt(&admitted)
             .map_err(|error| self.preparation_error(root, "claim_revalidate", error))?;
         if cancellation.is_cancelled() { return Ok(admitted); }
-        // EngineKernelSession retains its own partial-open state before any
-        // owner can fail, so leaving ActiveTurn installed is intentional.
-        self.resources.open_turn(&admitted, journal)
-            .map_err(|error| self.preparation_error(root, "resource_open", error))?;
         self.restore_recovery_steering().await
             .map_err(|error| self.preparation_error(root, "recovery_restore", error))?;
         Ok(admitted)
@@ -633,11 +648,12 @@ impl ConversationRuntimeHost {
         if terminal {
             self.model_configuration.clear(&turn.operation)
                 .map_err(|_| error("terminal model configuration belongs to another Turn"))?;
-            *self
-                .last_terminal_root
-                .lock()
-                .map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
+            *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
             *active = None;
+            drop(active);
+            // The terminal append above is the canonical release boundary.
+            // A failed native release retains Browser owner state for retry.
+            self.resources.finish_browser_turn(root).await?;
         }
         Ok(())
     }
@@ -1044,6 +1060,22 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                     nomifun_idmm::IdmmProgressPhase::Terminal);
                 return Ok(());
             }
+
+            if self.terminal_already_recorded(self.root(message))? {
+                if !self.session_host.confirm_published_terminal(
+                    &self.options, &self.binding, &self.snapshot_ref, message, event,
+                ).await? {
+                    return Err(error("published terminal witness differs from the canonical Turn"));
+                }
+                // Native final release can fail after the terminal transaction
+                // committed. Retry that release, never append or reinterpret the
+                // already-recorded outcome during SDK teardown.
+                self.resources.finish_browser_turn(self.root(message)).await?;
+                self.supervision.note_progress(&self.options.conversation_id, None,
+                    nomifun_idmm::IdmmProgressPhase::Terminal);
+                return Ok(());
+            }
+
             return Err(error("terminal has no admitted Turn or exact unstarted cancellation witness"));
         }
         let operation = self
@@ -1203,7 +1235,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 else { Err(error("unstarted cancellation no longer matches its durable proof")) };
         }
         if self.terminal_already_recorded(root)? {
-            return Ok(());
+            return self.resources.finish_browser_turn(root).await;
         }
         if self.active.lock().await.is_none() {
             if self.confirm_unstarted_cancellation(message).await? { return Ok(()); }
@@ -1267,7 +1299,13 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         Ok(())
     }
     async fn cleanup_session(&self) -> Result<(), AppError> {
-        self.resources.cleanup_session().await
+        self.resources.cleanup_session().await?;
+        let terminal_root = self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))?.clone();
+        if let Some(root) = terminal_root { self.resources.finish_browser_turn(&root).await?; }
+        self.session_host.retire_kernel_session_after_teardown(
+            &self.options.conversation_id, &self.resources,
+        )?;
+        Ok(())
     }
 }
 

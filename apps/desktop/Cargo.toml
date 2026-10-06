@@ -104,6 +104,7 @@ windows = { version = "0.61", features = [
 gtk = { version = "0.18", features = ["v3_24"] }
 
 [dev-dependencies]
+sqlx.workspace = true
 zeroize.workspace = true
 tracing-subscriber.workspace = true
 axum.workspace = true

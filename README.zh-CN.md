@@ -317,7 +317,7 @@ Agent；主 Agent 始终是整次执行的控制点。
 自研、**进程内 Rust** 实现 —— 不依赖 Playwright、不依赖 Node、不依赖第三方自动化守护进程。能力更强、速度更快、token 更省，提供细粒度控制，且完全开源供你增强。
 
 - **Computer use** —— 无障碍树 + Set-of-Marks 叠层 + OCR，引导模型操作真实 UI 元素而非猜像素。macOS（AXUIElement + Vision OCR）与 Windows（UI Automation）已完整，Linux（AT-SPI2）为部分支持。
-- **会话里的真实浏览器** —— Windows 当前已把原生 WebView2 直接嵌入会话工作区；macOS 后端遵循同一契约继续实现，Linux 暂缓。用户与 Agent 看到并操作同一个真实页面，保留真实标签页、导航、表单、历史、站点存储、登录状态、WebSocket 与 HMR；不是 iframe、视频流或连续截图。
+- **会话里的真实浏览器** —— 桌面应用在 Windows 嵌入原生 WebView2，在 Apple Silicon macOS 嵌入原生 CEF，Linux 暂缓。用户与 Agent 看到并操作同一个真实页面，保留真实标签页、导航、表单、历史、站点存储、登录状态、WebSocket 与 HMR；不是 iframe、视频流或连续截图。
 - **一条简单的输入规则** —— Agent 工作期间，浏览器输入只属于 Agent，用户可以直接观察真实交互；本轮结束后，用户即可手动操作页面。系统不存在暂停后“接管”的流程。
 - **无需额外测试产品的前端闭环** —— 启用相应能力后，Agent 可以观察渲染元素，并用真实鼠标、键盘、拖拽、上传、下载和网站对话框交互测试自己开发的应用。Browser 不提供控制台、问题列表、测试步骤面板或专门测试模式。
 - **会话持有状态** —— 每个持久会话拥有独立的浏览器 Profile 与标签页。Browser 从会话内打开，不再有全局管理页或 Browser 设置中心；站点数据与下载只放在简洁的会话浏览器菜单中管理。
@@ -556,6 +556,36 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 
 优先使用脚本入口而非裸 `cargo`/`vite` —— 它们附带了构建目录清理与一致性检查。第一次接触代码库？请读 [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)、[`CONTRIBUTING.md`](CONTRIBUTING.md) 与 [`docs/contributing/development.zh.md`](docs/contributing/development.zh.md)。
 
+### macOS 构建与发行
+
+内置浏览器使用固定的 Apple Silicon arm64 CEF 运行库，当前明确拒绝 Intel 与 Universal 包。
+`build`、`build:mac`、`build:signed` 和 `build:updater` 在 macOS 上使用同一套完整装配流程：
+先装入 CEF Framework、五类 Helper、资源和许可证，再签名最终 App，由这份 App 生成 DMG 和 updater `.app.tar.gz`。
+更新包还需要独立的 Tauri updater 签名密钥。
+
+| 目标 | 命令 |
+| --- | --- |
+| 本地 arm64 测试安装包 | `bun run build` 或 `bun run build:mac` |
+| Developer ID 签名与已配置的公证 | `bun run build:signed` 或 `bun run build:mac --signed` |
+| 完整 updater 包与 `.sig` | `bun run build:updater` |
+| Developer ID 安装包与 updater 包 | `bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json` |
+| 可直接运行、包含内置浏览器的开发 App | `bun run build:fast` |
+
+`bun run dev` 从完整开发 `.app` 启动，并在 Rust 热重载前等待原生浏览器完成退出清理；
+`build:fast` 也会生成完整开发 `.app` 并输出路径。裸 Cargo 二进制没有配套浏览器 App Bundle。
+开发时可显式设置 `NOMIFUN_MACOS_DEV_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"`，
+再运行 `bun run dev` 或 `bun run build:fast`。主 App、CEF Framework、全部 Helper 和增量重建
+都使用这个已安装的身份，缓存按签名身份隔离。脚本不会自动选择或创建证书；未配置时保留 ad-hoc
+签名，并在启动时提示一次“重建后可能需 macOS 钥匙串授权”。
+
+当前固定 CEF 使用默认 **Chromium Safe Storage** 钥匙串项目。macOS 的明确访问授权与 Agent Browser
+能力授权分别管理；固定签名身份和 Bundle ID 可让系统识别后续更新，但不能替代用户首次授权。
+SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md)。
+
+生产入口固定 release profile、arm64 target 和完整 App/DMG，不接受绕过装配的 `--debug`、`--no-bundle` 等参数。
+签名读取 gitignored 的 `apps/desktop/signing/.env.signing`，要求已安装的 `APPLE_SIGNING_IDENTITY`；
+最终 App 和 DMG 才进行已配置的公证。`release:mac` 发布 arm64 产物，并仅扫描本次 arm64 target 生成更新条目。
+
 <details>
 <summary><b>完整脚本目录</b></summary>
 
@@ -569,12 +599,12 @@ bun run test       # Rust 测试（日常可用 test:fast 跑 nextest）
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
-| `bun run build:fast` | 快速构建可直接运行的 debug 桌面二进制（不打安装包） |
+| `bun run build:fast` | 快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制 |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
-| `bun run build:mac` | 打 macOS 安装包（.dmg），汇总到 dist/desktop/ |
+| `bun run build:mac` | 装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
-| `bun run build:signed` | 打桌面包并签名+公证（仅 macOS） |
-| `bun run build:updater` | 打桌面包并产出自更新 .sig 制品 |
+| `bun run build:signed` | 装配完整 macOS CEF App，签名并执行已配置的公证 |
+| `bun run build:updater` | 构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包 |
 | `bun run make:latest` | 扫描本机更新产物，生成/合并自动更新清单 latest.json |
 | `bun run release:mac` | 一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |

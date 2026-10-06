@@ -14,6 +14,8 @@ use std::{
     },
 };
 
+use futures_util::FutureExt;
+
 use nomifun_agent_contracts::{
     AgentSessionId, CapabilityId, ExactRoleProviderRef, OperationId, PrincipalRef,
     ResolvedSnapshotRef, StrictJsonValue, TypedResourceBinding,
@@ -33,14 +35,14 @@ use nomifun_browser_platform::{
         BROWSER_MODULE_ID, BROWSER_RESOURCE_KIND, BrowserCapabilityAction,
         BrowserProviderKind, BrowserSessionAuthority,
     },
-    run_guard::BrowserRunGuard,
+    run_guard::{BrowserRunGuard, RunAdmissionError},
     runtime::{
         BrowserAction, BrowserDialogReply, BrowserElementRef, BrowserEvaluation,
         BrowserMouseButton, BrowserRuntimeSnapshot, BrowserTabCommand, BrowserTabTarget,
         WorkspaceError,
     },
     uploads::BrowserUploadScope,
-    workspace::{BrowserResource, BrowserResourceService},
+    workspace::{BrowserResource, BrowserResourceService, BrowserWorkspace, managed_workspace_key},
 };
 use nomifun_common::AppError;
 use serde::Deserialize;
@@ -89,23 +91,7 @@ impl ActiveBrowserRun {
         }
     }
 
-    async fn settle(&self) -> Result<(), BrowserHostFailure> {
-        match self {
-            Self::Managed { resource, guard } => {
-                resource.settle_run(guard).await.map_err(Into::into)
-            }
-            Self::AttachedChrome(turn) => turn.settle().await.map_err(Into::into),
-        }
-    }
 
-    async fn finish(&self) -> Result<(), BrowserHostFailure> {
-        match self {
-            Self::Managed { resource, guard } => {
-                resource.finish_run(guard).await.map_err(Into::into)
-            }
-            Self::AttachedChrome(turn) => turn.finish().await.map_err(Into::into),
-        }
-    }
 }
 
 struct BrowserTurnAdmission {
@@ -116,7 +102,6 @@ struct BrowserTurnAdmission {
     provider: ExactRoleProviderRef,
     binding: TypedResourceBinding,
     authority: BrowserSessionAuthority,
-    ephemeral: bool,
     upload_scope: Option<Arc<BrowserUploadScope>>,
     download_scope: Option<Arc<BrowserDownloadScope>>,
     bound: tokio::sync::OnceCell<BoundBrowserProviderResource>,
@@ -165,6 +150,20 @@ impl BrowserTurnAdmission {
     }
 }
 
+#[derive(Clone)]
+struct ManagedSessionRun {
+    workspace: Arc<BrowserWorkspace>,
+    guard: BrowserRunGuard,
+}
+
+struct ManagedSessionTurn {
+    // The retained worker owns input-gate initialization if preparation is cancelled.
+    ready: futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<ManagedSessionRun, String>>>,
+    cancelled: tokio_util::sync::CancellationToken,
+    workspace: Arc<Mutex<Option<Arc<BrowserWorkspace>>>>,
+    settled: AtomicBool,
+}
+
 /// Shared owner mounted both into the Browser Role handler and into the
 /// EngineKernelSession lifecycle. The latter is what proves native input is
 /// settled before the turn cleanup witness is published.
@@ -175,6 +174,7 @@ pub(crate) struct BrowserRoleOwner {
     headless_render: Option<Arc<HeadlessRenderRuntime>>,
     effect_store: nomifun_agent_session::AgentSessionStore,
     turns: Mutex<BTreeMap<TurnKey, Arc<BrowserTurnAdmission>>>,
+    managed_turns: Mutex<BTreeMap<TurnKey, Arc<ManagedSessionTurn>>>,
 }
 
 impl BrowserRoleOwner {
@@ -192,10 +192,65 @@ impl BrowserRoleOwner {
             headless_render,
             effect_store,
             turns: Mutex::new(BTreeMap::new()),
+            managed_turns: Mutex::new(BTreeMap::new()),
         })
     }
 
-    pub(crate) fn open_turn(
+    pub(crate) fn ensure_previous_turn_finished(&self, principal_id: &str, agent_session_id: &str) -> Result<(), AppError> {
+        if self.managed_turns.lock().map_err(|_| browser_lifecycle_error("managed Browser turn registry is poisoned"))?.keys()
+            .chain(self.turns.lock().map_err(|_| browser_lifecycle_error("Browser turn registry is poisoned"))?.keys())
+            .any(|key| key.principal_id == principal_id && key.agent_session_id == agent_session_id) {
+            return Err(browser_lifecycle_error("A previous Browser turn has not proven terminal release"));
+        }
+        Ok(())
+    }
+
+    async fn open_managed_turn(&self, principal: &PrincipalRef, agent_session_id: &AgentSessionId, turn_id: &OperationId) -> Result<(), AppError> {
+        // Every Agent turn locks its Session's managed user browser, including
+        // Agents without Browser tools and Agents bound to attached Chrome.
+        // Creating this domain entity does not initialize CEF or grant tools.
+        if let Some(resources) = &self.resources {
+            let key = TurnKey::new(&principal.principal_id, agent_session_id.as_ref(), turn_id.as_ref());
+            let cancelled = tokio_util::sync::CancellationToken::new();
+            let worker_cancelled = cancelled.clone();
+            let retained_workspace = Arc::new(Mutex::new(None));
+            let worker_workspace = retained_workspace.clone();
+            let resources = resources.clone();
+            let data_dir = self.data_dir.clone();
+            let owner_id = principal.principal_id.clone();
+            let session_id = agent_session_id.as_ref().to_owned();
+            let turn = {
+                let mut turns = self.managed_turns.lock().map_err(|_| browser_lifecycle_error("managed Browser turn registry is poisoned"))?;
+                if turns.keys().any(|active| active.principal_id == key.principal_id && active.agent_session_id == key.agent_session_id) {
+                    return Err(browser_lifecycle_error("A previous managed Browser turn has not proven cleanup"));
+                }
+                let worker = tokio::spawn(async move {
+                    let key = managed_workspace_key(&owner_id, &session_id).map_err(|error| error.to_string())?;
+                    let profile = nomifun_browser_platform::runtime::BrowserProfileStore::new(data_dir)
+                        .and_then(|store| store.profile_for(&key, nomifun_browser_platform::runtime::BrowserProfilePersistence::Persistent))
+                        .map_err(|error| error.to_string())?;
+                    let workspace = resources.ensure_user(&owner_id, &session_id, profile).await.map_err(|error| error.to_string())?;
+                    *worker_workspace.lock().map_err(|_| "managed Browser start state is poisoned")? = Some(workspace.clone());
+                    let guard = workspace.begin_run().await.map_err(|error| error.to_string())?;
+                    guard.require_explicit_finish();
+                    if worker_cancelled.is_cancelled() { guard.cancel(); }
+                    Ok(ManagedSessionRun { workspace, guard })
+                });
+                let turn = Arc::new(ManagedSessionTurn {
+                    ready: async move { worker.await.map_err(|error| error.to_string())? }.boxed().shared(),
+                    cancelled,
+                    workspace: retained_workspace,
+                    settled: AtomicBool::new(false),
+                });
+                turns.insert(key, turn.clone());
+                turn
+            };
+            turn.ready.clone().await.map_err(browser_lifecycle_error)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn open_turn(
         &self,
         principal: &PrincipalRef,
         agent_session_id: &AgentSessionId,
@@ -203,6 +258,7 @@ impl BrowserRoleOwner {
         workspace: &str,
         compiled: &CompiledSnapshot,
     ) -> Result<(), AppError> {
+        self.open_managed_turn(principal, agent_session_id, turn_id).await?;
         let capability_id = CapabilityId::from(BROWSER_MODULE_ID);
         let Some(capability) = compiled.resolved_capability(&capability_id) else {
             return Ok(());
@@ -257,7 +313,6 @@ impl BrowserRoleOwner {
             resource,
         )
         .map_err(browser_lifecycle_error)?;
-        let ephemeral = browser_workspace_provider::browser_resource_ephemeral(binding)?;
         let workspace = Path::new(workspace);
         let upload_scope = policy
             .allowed_actions
@@ -286,7 +341,6 @@ impl BrowserRoleOwner {
             provider,
             binding: binding.clone(),
             authority,
-            ephemeral,
             upload_scope,
             download_scope,
             bound: tokio::sync::OnceCell::new(),
@@ -319,6 +373,11 @@ impl BrowserRoleOwner {
         turn_id: &str,
     ) -> Result<(), AppError> {
         let key = TurnKey::new(principal_id, agent_session_id, turn_id);
+        if let Some(turn) = self.managed_turns.lock().map_err(|_| browser_lifecycle_error("managed Browser turn registry is poisoned"))?.get(&key) {
+            turn.cancelled.cancel();
+            if let Some(Ok(run)) = turn.ready.peek() { run.guard.cancel(); }
+        }
+
         if let Some(admission) = self
             .turns
             .lock()
@@ -344,23 +403,62 @@ impl BrowserRoleOwner {
             .map_err(|_| browser_lifecycle_error("Browser turn registry is poisoned"))?
             .get(&key)
             .cloned();
-        let Some(admission) = admission else {
-            return Ok(());
-        };
-        admission.cancel();
-        if let Some(run) = admission.run.get() {
-            run.settle().await.map_err(browser_lifecycle_error)?;
-            run.finish().await.map_err(browser_lifecycle_error)?;
+        if let Some(admission) = &admission {
+            admission.cancel();
+            if let Some(ActiveBrowserRun::AttachedChrome(run)) = admission.run.get() {
+                run.settle().await.map_err(browser_lifecycle_error)?;
+            }
         }
-        let mut turns = self
-            .turns
-            .lock()
-            .map_err(|_| browser_lifecycle_error("Browser turn registry is poisoned"))?;
-        if turns
-            .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current, &admission))
-        {
-            turns.remove(&key);
+        let managed = self.managed_turns.lock()
+            .map_err(|_| browser_lifecycle_error("managed Browser turn registry is poisoned"))?
+            .get(&key).cloned();
+        if let Some(turn) = managed {
+            turn.cancelled.cancel();
+            match turn.ready.clone().await {
+                Ok(run) => {
+                    run.guard.cancel();
+                    run.workspace.settle_run(&run.guard).await.map_err(browser_lifecycle_error)?;
+                }
+                Err(_) => {
+                    let workspace = turn.workspace.lock()
+                        .map_err(|_| browser_lifecycle_error("managed Browser start state is poisoned"))?.clone();
+                    if let Some(workspace) = workspace {
+                        workspace.settle_failed_start().await.map_err(browser_lifecycle_error)?;
+                    }
+                    // With no workspace the joined worker never entered a native
+                    // input gate. Original preparation failure is still recorded.
+                }
+            }
+            turn.settled.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// Called only after the trusted journal owner commits this exact Turn's
+    /// terminal. Failed downstream cleanup or terminal writes retain input lock.
+    pub(crate) async fn finish_turn(&self, principal_id: &str, agent_session_id: &str, turn_id: &str) -> Result<(), AppError> {
+        let key = TurnKey::new(principal_id, agent_session_id, turn_id);
+        let admission = self.turns.lock().map_err(|_| browser_lifecycle_error("Browser turn registry is poisoned"))?.get(&key).cloned();
+        if let Some(admission) = &admission {
+            if let Some(ActiveBrowserRun::AttachedChrome(run)) = admission.run.get() {
+                run.finish().await.map_err(browser_lifecycle_error)?;
+            }
+        }
+        let managed = self.managed_turns.lock().map_err(|_| browser_lifecycle_error("managed Browser turn registry is poisoned"))?.get(&key).cloned();
+        if let Some(turn) = managed {
+            if !turn.settled.load(Ordering::Acquire) { return Err(browser_lifecycle_error("managed Browser input has not proven settlement")); }
+            match turn.ready.clone().await {
+                Ok(run) => run.workspace.finish_run(&run.guard).await.map_err(browser_lifecycle_error)?,
+                Err(_) => {
+                    let workspace = turn.workspace.lock().map_err(|_| browser_lifecycle_error("managed Browser start state is poisoned"))?.clone();
+                    if let Some(workspace) = workspace { workspace.recover_failed_start().await.map_err(browser_lifecycle_error)?; }
+                }
+            }
+            self.managed_turns.lock().map_err(|_| browser_lifecycle_error("managed Browser turn registry is poisoned"))?.remove(&key);
+        }
+        if let Some(admission) = admission {
+            let mut turns = self.turns.lock().map_err(|_| browser_lifecycle_error("Browser turn registry is poisoned"))?;
+            if turns.get(&key).is_some_and(|current| Arc::ptr_eq(current, &admission)) { turns.remove(&key); }
         }
         Ok(())
     }
@@ -397,7 +495,6 @@ impl BrowserRoleOwner {
                     self.attached_chrome.clone(),
                     &self.data_dir,
                     admission.authority.clone(),
-                    admission.ephemeral,
                 )
                 .await
                 .map_err(|error| BrowserHostFailure::Unavailable(error.to_string()))
@@ -415,9 +512,12 @@ impl BrowserRoleOwner {
             .get_or_try_init(|| async {
                 let run = match self.bound(admission).await? {
                     BoundBrowserProviderResource::Managed(resource) => {
-                        let guard = resource.begin_run().await?;
-                        guard.require_explicit_finish();
-                        ActiveBrowserRun::Managed { resource, guard }
+                        let turn = self.managed_turns.lock()
+                            .map_err(|_| BrowserHostFailure::Unavailable("managed Browser turn registry is poisoned".into()))?
+                            .get(&admission.key).cloned().ok_or(BrowserHostFailure::NoActiveTurn)?;
+                        let run = turn.ready.clone().await.map_err(BrowserHostFailure::Unavailable)?;
+                        if !Arc::ptr_eq(resource.workspace(), &run.workspace) { return Err(BrowserHostFailure::ResourceChanged); }
+                        ActiveBrowserRun::Managed { resource, guard: run.guard }
                     }
                     BoundBrowserProviderResource::AttachedChrome(resource) => {
                         ActiveBrowserRun::AttachedChrome(resource.begin_run().await?)
@@ -843,6 +943,40 @@ impl From<BrowserHostFailure> for Wave2HostPortError {
 
 fn browser_lifecycle_error(error: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Browser Resource lifecycle: {error}"))
+}
+
+#[async_trait::async_trait]
+impl crate::browser_workspace_provider::BrowserUserClosePort for BrowserRoleOwner {
+    async fn close_user_workspace(&self, principal_id: &str, agent_session_id: &str, runtime_generation: u64) -> Result<(), WorkspaceError> {
+        let session_id = AgentSessionId::from(agent_session_id.to_owned());
+        let session = self.effect_store.get_live_session(&session_id).await.map_err(|_| WorkspaceError::ActionDenied)?;
+        if session.owner_ref.principal_kind != "user" || session.owner_ref.principal_id != principal_id { return Err(WorkspaceError::ActionDenied); }
+        let head = self.effect_store.head(&session_id).await.map_err(|_| WorkspaceError::ActionDenied)?;
+        if head.status == "running" || head.active_turn_id.is_some() { return Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)); }
+        let resources = self.resources.as_ref().ok_or(WorkspaceError::NativeUnavailable)?;
+        let Some(current) = resources.get_for_agent_session(principal_id, agent_session_id).await? else { return Ok(()); };
+        if current.runtime_generation() != runtime_generation { return Err(WorkspaceError::StaleTarget); }
+        if current.has_active_run().await {
+            let turns = self.managed_turns.lock().map_err(|_| WorkspaceError::Admission(RunAdmissionError::WorkerFailed))?
+                .iter().filter(|(key, _)| key.principal_id == principal_id && key.agent_session_id == agent_session_id)
+                .map(|(key, turn)| (key.clone(), turn.clone())).collect::<Vec<_>>();
+            let [(key, turn)] = turns.as_slice() else { return Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)); };
+            if !turn.settled.load(Ordering::Acquire) { return Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked)); }
+            let run = turn.ready.clone().await.map_err(|_| WorkspaceError::Admission(RunAdmissionError::InputGateFailed))?;
+            if !Arc::ptr_eq(&current, &run.workspace) { return Err(WorkspaceError::StaleTarget); }
+            let receipt = self.effect_store.read_turn_receipt(&session_id, &OperationId::from(key.turn_id.clone()))
+                .await.map_err(|_| WorkspaceError::ActionDenied)?;
+            let terminal = receipt.terminal_event.ok_or(WorkspaceError::ActionDenied)?;
+            if receipt.status == nomifun_agent_session::TurnReceiptStatus::Running
+                || terminal.agent_session_id != session_id || terminal.correlation_id.as_ref() != key.turn_id
+                || !matches!(terminal.kind.0.as_str(), "turn/completed" | "turn/failed" | "turn/cancelled") {
+                return Err(WorkspaceError::ActionDenied);
+            }
+            resources.close_after_terminal(current.key().clone(), runtime_generation).await
+        } else {
+            resources.close_idle(current.key().clone(), runtime_generation).await
+        }
+    }
 }
 
 fn browser_action(
@@ -1397,7 +1531,6 @@ mod tests {
             connection_config_ref: None,
             typed_parameters: BTreeMap::from([
                 ("provider_kind".to_owned(), "managed".to_owned()),
-                ("persistence".to_owned(), "ephemeral".to_owned()),
             ]),
         };
         let descriptor = browser_workspace_provider::provider_descriptor(&provider, &binding)
@@ -1428,7 +1561,6 @@ mod tests {
             provider,
             binding,
             authority,
-            ephemeral: true,
             upload_scope: None,
             download_scope: None,
             bound: tokio::sync::OnceCell::new(),
@@ -1548,4 +1680,122 @@ mod tests {
         render.shutdown().await.unwrap();
         database.close().await;
     }
+}
+
+#[cfg(test)]
+mod managed_user_browser_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use nomifun_browser_platform::{
+        run_guard::{NativeInputGate, RunAdmissionError},
+        runtime::{BrowserNativeSurfacePort, BrowserRuntime, BrowserRuntimeFactory, CreateBrowserRuntime},
+    };
+
+    struct GateRuntime { fail_lock: Arc<AtomicBool>, fail_unlock: Arc<AtomicBool>, locked: Arc<AtomicBool> }
+    #[async_trait::async_trait]
+    impl NativeInputGate for GateRuntime {
+        async fn lock_user_input(&self) -> Result<(), RunAdmissionError> {
+            self.locked.store(true, Ordering::SeqCst);
+            if self.fail_lock.swap(false, Ordering::SeqCst) { return Err(RunAdmissionError::InputGateFailed); }
+            Ok(())
+        }
+        async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> { Ok(()) }
+        async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
+            if self.fail_unlock.swap(false, Ordering::SeqCst) { return Err(RunAdmissionError::InputGateFailed); }
+            self.locked.store(false, Ordering::SeqCst); Ok(())
+        }
+    }
+    #[async_trait::async_trait]
+    impl BrowserRuntime for GateRuntime {
+        fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort> { None }
+        async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+            Ok(BrowserRuntimeSnapshot { runtime_generation: 1, revision: 1, active_tab_id: None, tabs: vec![], downloads: vec![] })
+        }
+        async fn execute(&self, _: BrowserTabCommand, _: tokio_util::sync::CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> { self.snapshot().await }
+        async fn close(&self) -> Result<(), WorkspaceError> { Ok(()) }
+    }
+    struct GateFactory(Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>);
+    #[async_trait::async_trait]
+    impl BrowserRuntimeFactory for GateFactory {
+        async fn create(&self, request: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
+            self.1.store(!request.user_input_enabled, Ordering::SeqCst);
+            Ok(Arc::new(GateRuntime { fail_lock: self.0.clone(), locked: self.1.clone(), fail_unlock: self.2.clone() }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_managed_start_is_recovered_before_the_next_turn_without_browser_tools() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let fail_lock = Arc::new(AtomicBool::new(true));
+        let physical_locked = Arc::new(AtomicBool::new(false));
+        let resources = Arc::new(BrowserResourceService::new(Arc::new(GateFactory(fail_lock, physical_locked.clone(), Arc::new(AtomicBool::new(false))))));
+        let key = managed_workspace_key("alice", "user-session").unwrap();
+        let profile = nomifun_browser_platform::runtime::BrowserProfileStore::new(root.path()).unwrap()
+            .profile_for(&key, nomifun_browser_platform::runtime::BrowserProfilePersistence::Persistent).unwrap();
+        let user = resources.ensure_user("alice", "user-session", profile).await.unwrap();
+        user.user_command(BrowserTabCommand::Create { url: "https://example.test/".into() }).await.unwrap();
+        let owner = BrowserRoleOwner::new(Some(resources), None, root.path().to_path_buf(), None, store);
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: "alice".into() };
+        let session: AgentSessionId = "user-session".into();
+        assert!(owner.open_managed_turn(&principal, &session, &"failed-turn".into()).await.is_err());
+        assert!(user.snapshot().await.unwrap().run.input_gate_failed);
+        assert!(owner.turns.lock().unwrap().is_empty(), "no Browser Tool authority was created");
+        owner.settle_turn("alice", "user-session", "failed-turn").await.unwrap();
+        assert!(user.snapshot().await.unwrap().run.input_gate_failed, "downstream cleanup or terminal may still fail; retain the physical gate");
+        assert!(physical_locked.load(Ordering::SeqCst), "a later cleanup or terminal failure cannot restore physical input");
+        assert!(owner.ensure_previous_turn_finished("alice", "user-session").is_err());
+        owner.finish_turn("alice", "user-session", "failed-turn").await.unwrap();
+        assert!(!user.snapshot().await.unwrap().run.input_gate_failed);
+        assert!(!physical_locked.load(Ordering::SeqCst));
+        assert!(owner.managed_turns.lock().unwrap().is_empty());
+        owner.open_managed_turn(&principal, &session, &"next-turn".into()).await.unwrap();
+        assert_eq!(user.snapshot().await.unwrap().run.input_state, nomifun_browser_platform::run_guard::BrowserInputState::AgentRunning);
+        assert!(matches!(user.user_command(BrowserTabCommand::Create { url: "https://example.test/".into() }).await,
+            Err(WorkspaceError::Admission(RunAdmissionError::UserInputLocked))));
+        owner.settle_turn("alice", "user-session", "next-turn").await.unwrap();
+        assert_eq!(user.snapshot().await.unwrap().run.input_state, nomifun_browser_platform::run_guard::BrowserInputState::AgentRunning,
+            "Browser drain is not the canonical terminal and cannot release user input");
+        assert!(physical_locked.load(Ordering::SeqCst));
+        owner.finish_turn("alice", "user-session", "next-turn").await.unwrap();
+        assert_eq!(user.snapshot().await.unwrap().run.input_state, nomifun_browser_platform::run_guard::BrowserInputState::UserReady);
+        user.user_command(BrowserTabCommand::Create { url: "https://example.test/".into() }).await.unwrap();
+        db.close().await;
+    }
+    #[tokio::test]
+    async fn durable_terminal_release_failure_retains_the_same_owner_for_retry_before_a_successor() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(db.pool().clone()).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let physical_locked = Arc::new(AtomicBool::new(false));
+        let factory = Arc::new(GateFactory(Arc::new(AtomicBool::new(false)), physical_locked.clone(), Arc::new(AtomicBool::new(true))));
+        let resources = Arc::new(BrowserResourceService::new(factory));
+        let key = managed_workspace_key("alice", "terminal-retry").unwrap();
+        let profile = nomifun_browser_platform::runtime::BrowserProfileStore::new(root.path()).unwrap()
+            .profile_for(&key, nomifun_browser_platform::runtime::BrowserProfilePersistence::Persistent).unwrap();
+        let user = resources.ensure_user("alice", "terminal-retry", profile).await.unwrap();
+        user.user_command(BrowserTabCommand::Create { url: "https://example.test/".into() }).await.unwrap();
+        let owner = BrowserRoleOwner::new(Some(resources), None, root.path().to_path_buf(), None, store);
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: "alice".into() };
+        owner.open_managed_turn(&principal, &"terminal-retry".into(), &"old-turn".into()).await.unwrap();
+        owner.settle_turn("alice", "terminal-retry", "old-turn").await.unwrap();
+        assert!(physical_locked.load(Ordering::SeqCst), "settlement alone must preserve native input exclusion");
+        // The trusted terminal callback now attempts final native release.
+        assert!(owner.finish_turn("alice", "terminal-retry", "old-turn").await.is_err());
+        assert!(physical_locked.load(Ordering::SeqCst));
+        assert_eq!(owner.managed_turns.lock().unwrap().len(), 1);
+        assert!(owner.ensure_previous_turn_finished("alice", "terminal-retry").is_err());
+        // Retrying that exact durable terminal succeeds before successor admission.
+        owner.finish_turn("alice", "terminal-retry", "old-turn").await.unwrap();
+        assert!(!physical_locked.load(Ordering::SeqCst));
+        owner.ensure_previous_turn_finished("alice", "terminal-retry").unwrap();
+        owner.open_managed_turn(&principal, &"terminal-retry".into(), &"successor".into()).await.unwrap();
+        assert!(physical_locked.load(Ordering::SeqCst));
+        owner.settle_turn("alice", "terminal-retry", "successor").await.unwrap();
+        owner.finish_turn("alice", "terminal-retry", "successor").await.unwrap();
+        assert!(!physical_locked.load(Ordering::SeqCst));
+        db.close().await;
+    }
+
 }

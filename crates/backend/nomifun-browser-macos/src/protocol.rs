@@ -146,6 +146,10 @@ enum Delivery {
 struct Pending {
     session: Option<String>,
     sender: oneshot::Sender<Result<Value, String>>,
+    #[cfg(debug_assertions)]
+    method: String,
+    #[cfg(debug_assertions)]
+    started: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -246,8 +250,16 @@ impl Protocol {
             if self.closed.load(Ordering::Acquire) || state.pending.len() >= MAX_PENDING {
                 return Err("CEF page is closed or has too many pending commands".into());
             }
-            state.pending.insert(id, Pending { session: session.map(str::to_owned), sender: tx });
+            state.pending.insert(id, Pending {
+                session: session.map(str::to_owned), sender: tx,
+                #[cfg(debug_assertions)]
+                method: method.to_owned(),
+                #[cfg(debug_assertions)]
+                started: std::time::Instant::now(),
+            });
         }
+        #[cfg(debug_assertions)]
+        self.trace(id, "queued");
         if let Err(error) = (self.send)(Command { id, bytes, guard }) {
             self.state.lock().unwrap().pending.remove(&id);
             return Err(error);
@@ -256,6 +268,8 @@ impl Protocol {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("CEF page closed before the command settled".into()),
             Err(_) => {
+                #[cfg(debug_assertions)]
+                self.trace(id, "timed_out");
                 // Settlement is unknown. Invalidate the entire channel so the
                 // runtime cannot issue more actions or claim cleanup succeeded.
                 self.close();
@@ -297,6 +311,12 @@ impl Protocol {
         let Ok(value) = serde_json::from_slice::<Value>(bytes) else { self.close(); return; };
         let mut state = self.state.lock().unwrap();
         if let Some(id) = value.get("id").and_then(Value::as_i64).and_then(|id| i32::try_from(id).ok()) {
+            #[cfg(debug_assertions)]
+            if protocol_trace_enabled() {
+                if let Some(pending) = state.pending.get(&id) {
+                    eprintln!("CEF_PROTOCOL id={id} method={} phase=reply elapsed_ms={} success={}", pending.method, pending.started.elapsed().as_millis(), value.get("error").is_none());
+                }
+            }
             if let Some(pending) = state.pending.remove(&id) {
                 if value.get("sessionId").and_then(Value::as_str) != pending.session.as_deref() {
                     let _ = pending.sender.send(Err("CEF protocol reply belongs to another frame session".into()));
@@ -309,6 +329,10 @@ impl Protocol {
                 let _ = pending.sender.send(result);
             }
         } else if let Some(method) = value.get("method").and_then(Value::as_str) {
+            #[cfg(debug_assertions)]
+            if protocol_trace_enabled() && matches!(method, "Page.frameNavigated" | "Page.frameStartedLoading" | "Page.frameStoppedLoading" | "Page.domContentEventFired" | "Page.loadEventFired" | "Target.attachedToTarget") {
+                eprintln!("CEF_PROTOCOL method={method} phase=event");
+            }
             let event = Event { method: method.into(), session: value.get("sessionId").and_then(Value::as_str).map(str::to_owned), params: value.get("params").cloned().unwrap_or(Value::Null) };
             let deliveries: Vec<_> = state.subscribers.iter().filter(|(_, subscriber)| subscriber.methods.iter().any(|candidate| candidate == method))
                 .map(|(id, subscriber)| (*id, subscriber.delivery.clone(), subscriber.failed.clone())).collect();
@@ -322,6 +346,14 @@ impl Protocol {
 
     pub fn is_closed(&self) -> bool { self.closed.load(Ordering::Acquire) }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn trace(&self, id: i32, phase: &str) {
+        if !protocol_trace_enabled() { return; }
+        if let Some(pending) = self.state.lock().unwrap().pending.get(&id) {
+            eprintln!("CEF_PROTOCOL id={id} method={} phase={phase} elapsed_ms={}", pending.method, pending.started.elapsed().as_millis());
+        }
+    }
+
     pub fn reject(&self, id: i32) {
         if let Some(pending) = self.state.lock().unwrap().pending.remove(&id) {
             let _ = pending.sender.send(Err("CEF command authority changed before native dispatch".into()));
@@ -334,4 +366,10 @@ impl Protocol {
         for (_, subscriber) in std::mem::take(&mut state.subscribers) { subscriber.failed.store(true, Ordering::Release); }
         for (_, pending) in std::mem::take(&mut state.pending) { let _ = pending.sender.send(Err("CEF page protocol is closed".into())); }
     }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn protocol_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("NOMIFUN_CEF_PROTOCOL_TRACE").is_some())
 }

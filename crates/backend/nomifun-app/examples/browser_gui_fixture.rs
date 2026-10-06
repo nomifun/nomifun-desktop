@@ -2,7 +2,9 @@
 //! Deterministic modes read no user dataset or real provider credential.
 //! Opt-in --live-frontend / --live-commands / --live-general-commands /
 //! --live-default-general-commands accept the live key only via stdin.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
+//! --user-browser-only prepares a normal chat Session with no Browser Module
+//! or Browser Resource binding, for testing the independent user sidebar.
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--user-browser-only|--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -2822,6 +2824,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let mode = std::env::args().nth(2);
+    let user_browser_only = mode.as_deref() == Some("--user-browser-only");
     let native_pause = mode.as_deref() == Some("--native-pause");
     let native_actions = mode.as_deref() == Some("--native-actions") || native_pause;
     let computer_denied = mode.as_deref() == Some("--computer-denied");
@@ -2841,6 +2844,7 @@ async fn main() -> anyhow::Result<()> {
     let computer_launch_missing = mode.as_deref() == Some("--computer-launch-missing");
     anyhow::ensure!(
         mode.is_none()
+            || user_browser_only
             || live_mode
             || native_actions
             || computer_denied
@@ -2965,7 +2969,11 @@ async fn main() -> anyhow::Result<()> {
         stop: CancellationToken::new(),
     });
     let routes = Router::new()
-        .route("/", get(|State(f):State<Arc<Fixture>>| async move { ([("cache-control","no-store")],Html(if f.live.is_some() {FRONTEND_PAGE} else {PAGE})) }))
+        .route("/", get(|State(f):State<Arc<Fixture>>| async move {
+            eprintln!("BROWSER_GUI_FIXTURE_HTTP_GET timestamp_ms={}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+            ([("cache-control","no-store")],Html(if f.live.is_some() {FRONTEND_PAGE} else {PAGE}))
+        }))
         .route("/app.js", get(|State(f):State<Arc<Fixture>>| async move {
             if let Some(live)=&f.live {
                 let source_path=live.source.lock().unwrap().clone();
@@ -3133,7 +3141,9 @@ async fn main() -> anyhow::Result<()> {
             return Ok::<_,anyhow::Error>(Value::String(session["agent_session_id"].as_str()
                 .ok_or_else(||anyhow::anyhow!("Official command Session missing"))?.to_owned()));
         }
-        let display_name = if computer_denied {
+        let display_name = if user_browser_only {
+            "内置浏览器独立用户入口验收"
+        } else if computer_denied {
             "Computer 权限拒绝验收"
         } else if computer_granted {
             "Computer 权限已授权验收"
@@ -3173,7 +3183,9 @@ async fn main() -> anyhow::Result<()> {
             draft["document"]["persona"] = json!("You are a precise local Browser repair acceptance agent.");
             draft["document"]["instructions"] = json!("Use only the selected real Browser and Workspace Actions. For browser/act click, send exactly {\"action\":\"click\",\"element\":ELEMENT}, where ELEMENT is the complete {reference, role, name, focused} object copied unchanged from the latest browser/observe result. Do not add top-level reference, role, name, focused, or target fields, and do not stringify nested objects. Use the selected Workspace read and patch Actions for source changes inside the bound workspace; do not try to edit source through the page.");
         }
-        draft["document"]["enabled_capabilities"] = if computer_denied || computer_granted {
+        draft["document"]["enabled_capabilities"] = if user_browser_only {
+            json!([])
+        } else if computer_denied || computer_granted {
             json!([{
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/observe","computer/a11y.observe"]
@@ -3224,9 +3236,11 @@ async fn main() -> anyhow::Result<()> {
         };
         let revision_path=format!("/api/agent-presets/{preset}/revisions");
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
-        let expected_capabilities=if live_mode {2}else{1};
+        let expected_capabilities=if user_browser_only {0}else if live_mode {2}else{1};
         anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==expected_capabilities),"Browser fixture revision missing selected Module");
-        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus || computer_concurrent_user || computer_pointer_input || computer_click_variants || computer_drag_cancel || computer_input_crash || computer_unicode_input || computer_large_a11y || computer_soak || computer_launch_missing {
+        let resources = if user_browser_only {
+            json!([])
+        } else if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus || computer_concurrent_user || computer_pointer_input || computer_click_variants || computer_drag_cancel || computer_input_crash || computer_unicode_input || computer_large_a11y || computer_soak || computer_launch_missing {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
         } else if live_mode {
             json!([

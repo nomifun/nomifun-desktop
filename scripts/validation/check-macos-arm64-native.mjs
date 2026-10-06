@@ -46,18 +46,10 @@ import {
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
-export const EXPECTED_CEF = Object.freeze({
-  cef: '152.0.6',
-  chromium: '152.0.7977.83',
-  architecture: 'arm64',
-});
-export const CEF_HELPER_NAMES = Object.freeze([
-  'NomiFun Helper',
-  'NomiFun Helper (GPU)',
-  'NomiFun Helper (Renderer)',
-  'NomiFun Helper (Plugin)',
-  'NomiFun Helper (Alerts)',
-]);
+export const EXPECTED_CEF = Object.freeze(JSON.parse(readFileSync(
+  new URL('../../apps/desktop/browser-runtime.json', import.meta.url), 'utf8',
+)));
+export const CEF_HELPER_NAMES = Object.freeze([...EXPECTED_CEF.helpers]);
 export const CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/generated/first-party-agent-modules.envelope.json';
 
@@ -405,13 +397,8 @@ export function inspectCefBundle(
     }
   }
   const metadataValid = metadataShape.status === 'pass'
-    && metadata?.cef === EXPECTED_CEF.cef
-    && metadata?.chromium === EXPECTED_CEF.chromium
-    && metadata?.architecture === EXPECTED_CEF.architecture
-    && typeof metadata?.archive === 'string'
-    && metadata.archive.includes('macosarm64')
-    && typeof metadata?.archive_sha1 === 'string'
-    && /^[0-9a-f]{40}$/i.test(metadata.archive_sha1);
+    && ['cef', 'chromium', 'crate', 'architecture', 'archive', 'archive_sha1']
+      .every(field => metadata?.[field] === EXPECTED_CEF[field]);
 
   const frameworkShape = inspectPath(frameworkBinary, { requireExecutable: true });
   const frameworkArchitecture = frameworkShape.status === 'pass'

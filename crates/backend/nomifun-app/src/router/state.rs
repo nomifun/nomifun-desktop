@@ -666,7 +666,7 @@ async fn build_nomi_core_agent_api_state(
             context_admission: Arc::clone(&platform_builtin_context_admission),
             knowledge: Arc::clone(&services.knowledge_service),
             #[cfg(feature = "browser-use")]
-            browser: browser_owner,
+            browser: browser_owner.clone(),
             hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts::new(
                 services.database.pool().clone(),
             ),
@@ -729,6 +729,11 @@ async fn build_nomi_core_agent_api_state(
             services.browser_resources.clone(),
             #[cfg(feature = "browser-use")]
             services.attached_chrome.clone(),
+            #[cfg(feature = "browser-use")]
+            nomifun_browser_platform::runtime::BrowserProfileStore::new(services.data_dir.clone())
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            #[cfg(feature = "browser-use")]
+            browser_owner,
         ),
         wave4_owners,
         mcp_catalog_publisher,

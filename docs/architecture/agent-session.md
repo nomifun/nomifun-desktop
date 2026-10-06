@@ -28,6 +28,29 @@ Current-generation history, immutable Snapshots, model changes and explicit Agen
 
 Session reasoning uses one native `reasoning_effort` field defined by the shared contract. No lossy mirrors or fallback columns are maintained.
 
+SDK retries of a published terminal acknowledge the existing receipt only when its original root, delivery,
+Snapshot/route and canonical Runtime terminal match, then continue native final release without another terminal or
+an altered outcome. Generation-zero unstarted cancellation uses its independent exact witness. Native `turn/paused`
+retains the active Operation and checkpoint resume authority, so it is not a final-terminal witness for user rebuild
+or duplicate final-terminal acknowledgement. Complete Runtime
+teardown retires the exact resource-context instance from the host Weak cache; retained old handles cannot revive
+closed contexts, and late old cleanup cannot release or evict successors.
+
+## Built-in browser and Agent Browser authority
+
+The Browser domain owns the user side browser for the same authenticated owner and canonical Session. User navigation
+requires no Agent Browser Module or resource binding. Opening and retrying never mutate canonical Agent authority.
+Authorized managed Agent wrappers borrow the user's real page while enforcing the frozen Snapshot, exact Provider,
+typed resource and BrowserRunGuard. Attached Chrome remains a separate connected resource.
+
+Every Agent Turn locks its Session's managed browser during retained Runtime preparation, including chat without
+Browser tools. Settlement drains native operations while retaining the hardware input gate. Only the exact durable
+Turn terminal permits final release; later cleanup or terminal-write failures leave input locked. User commands and first native
+creation fail closed while canonical running precedes a proven gate. User profiles use owner/Session identity under
+`browser-v4/agent-sessions/<hash>/`, independent of grant definitions. Session deletion includes this browser and its
+profile even when no Agent Browser binding exists; there is no second active Agent authority ledger.
+See the [browser architecture](browser-platform.md).
+
 ## Consumers and deletion
 
 UI consumes current stream and Message projections directly. It has no marker-dependent local terminal-processing state machine or prose-based reclassification of old errors. Channel binds through its current owner; orphan rows without an authority binding produce a conflict instead of being automatically rebound.

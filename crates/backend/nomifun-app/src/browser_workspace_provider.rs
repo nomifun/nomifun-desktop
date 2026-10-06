@@ -22,6 +22,14 @@ use std::sync::Arc;
 #[path = "browser_workspace_provider/attached_provider.rs"]
 pub mod attached_provider;
 
+/// Trusted user lifecycle owner. HTTP callers still prove canonical ownership
+/// and hold the existing Session operation fence before entering this port.
+#[async_trait::async_trait]
+pub trait BrowserUserClosePort: Send + Sync {
+    async fn close_user_workspace(&self, principal_id: &str, agent_session_id: &str, runtime_generation: u64)
+        -> Result<(), nomifun_browser_platform::runtime::WorkspaceError>;
+}
+
 struct CanonicalAttachedBrowserSessionVerifier {
     sessions: nomifun_conversation::CanonicalAgentSessionOwner,
 }
@@ -226,38 +234,17 @@ mod binding_tests {
         assert!(browser_resource_binding(binding, descriptor).is_err());
     }
 
-    #[test]
-    fn browser_profile_lifetime_is_frozen_by_the_resource_binding() {
-        let mut binding = TypedResourceBinding {
-            binding_id: ResourceBindingId::from("browser-binding"),
-            resource_kind: ResourceKind::from(BROWSER_RESOURCE_KIND),
-            resource_id: ResourceId::from("browser-resource"),
-            owner_id: "alice".into(),
-            operations: BTreeSet::from(["observe".into()]),
-            connection_config_ref: None,
-            typed_parameters: BTreeMap::new(),
-        };
-        assert!(!browser_resource_ephemeral(&binding).unwrap());
-        binding
-            .typed_parameters
-            .insert("persistence".into(), "ephemeral".into());
-        assert!(browser_resource_ephemeral(&binding).unwrap());
-        binding
-            .typed_parameters
-            .insert("persistence".into(), "temporary-ish".into());
-        assert!(browser_resource_ephemeral(&binding).is_err());
-    }
+
 }
 
 /// Materialize the exact provider selected by an already-authorized canonical
-/// AgentSession. Both the Agent runtime resolver and Browser REST route use this
-/// function, so neither surface can silently fall back to the managed provider.
+/// AgentSession. The user side browser has separate ownership authorization;
+/// this Agent resolver never silently falls back to another Provider.
 pub(crate) async fn bind_authorized_resource(
     resources: Option<Arc<BrowserResourceService>>,
     attached_chrome: Option<Arc<attached_provider::AttachedChromeProviderService>>,
     data_dir: &std::path::Path,
     authority: BrowserSessionAuthority,
-    ephemeral: bool,
 ) -> Result<BoundBrowserProviderResource, nomifun_common::AppError> {
     match authority.resource().provider().kind() {
         BrowserProviderKind::Managed => {
@@ -270,11 +257,7 @@ pub(crate) async fn bind_authorized_resource(
                 .and_then(|store| {
                     store.profile_for(
                         &authority.key(),
-                        if ephemeral {
-                            BrowserProfilePersistence::Ephemeral
-                        } else {
-                            BrowserProfilePersistence::Persistent
-                        },
+                        BrowserProfilePersistence::Persistent,
                     )
                 })
                 .map_err(|error| {
@@ -376,20 +359,4 @@ pub(crate) fn browser_resource_binding(
         binding.operations,
     )
     .map_err(|error| nomifun_common::AppError::UnprocessableEntity(error.to_string()))
-}
-
-pub(crate) fn browser_resource_ephemeral(
-    binding: &nomifun_agent_contracts::TypedResourceBinding,
-) -> Result<bool, nomifun_common::AppError> {
-    match binding
-        .typed_parameters
-        .get("persistence")
-        .map(String::as_str)
-    {
-        None | Some("persistent") => Ok(false),
-        Some("ephemeral") => Ok(true),
-        Some(_) => Err(nomifun_common::AppError::UnprocessableEntity(
-            "Browser Resource has an invalid persistence policy.".into(),
-        )),
-    }
 }

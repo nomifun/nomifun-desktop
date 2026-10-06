@@ -1,0 +1,21 @@
+{
+  "cef": "152.0.6",
+  "chromium": "152.0.7977.83",
+  "crate": "152.3.0",
+  "architecture": "arm64",
+  "archive": "cef_binary_152.0.6+g708dc14+chromium-152.0.7977.83_macosarm64_minimal.tar.bz2",
+  "archive_sha1": "426836139b0ea7b7278aa0915cfae90eb460551f",
+  "resources": [
+    "icudtl.dat",
+    "resources.pak",
+    "chrome_100_percent.pak",
+    "chrome_200_percent.pak"
+  ],
+  "helpers": [
+    "NomiFun Helper",
+    "NomiFun Helper (GPU)",
+    "NomiFun Helper (Renderer)",
+    "NomiFun Helper (Plugin)",
+    "NomiFun Helper (Alerts)"
+  ]
+}

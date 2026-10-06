@@ -417,6 +417,11 @@ impl EngineKernelSession {
             && self.compiled.snapshot_ref() == &session.snapshot().snapshot_ref
             && self.workspace == session.workspace()
     }
+    pub(super) fn teardown_proven(&self) -> Result<bool, AppError> {
+        let state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
+        Ok(state.kernel_release_started
+            && matches!(state.release.as_ref().and_then(|done| done.peek()), Some(Ok(()))))
+    }
     pub fn compiled(&self) -> &Arc<CompiledSnapshot> {
         &self.compiled
     }
@@ -1082,7 +1087,7 @@ impl EngineKernelSession {
         Ok(tools)
     }
 
-    pub fn open_turn(
+    pub async fn open_turn(
         &self,
         receipt: &EngineTurnReceipt,
         journal: EngineTurnJournal,
@@ -1097,9 +1102,13 @@ impl EngineKernelSession {
             return Err(failure("turn differs from the compiled Session authority"));
         }
         journal.validate_receipt(receipt)?;
+        #[cfg(feature = "browser-use")]
+        self.browser.ensure_previous_turn_finished(&self.principal.principal_id, self.session_id.as_ref())?;
+
         if let Some(root) = &self.git_root {
             self.wave2.ensure_workspace_git_ready(root)?;
         }
+        {
         let mut state = self
             .state
             .lock()
@@ -1130,6 +1139,7 @@ impl EngineKernelSession {
             cleanup: None,
             resource_operations: Default::default(),
         });
+        }
         *self
             .creation_turn_root
             .lock()
@@ -1142,7 +1152,7 @@ impl EngineKernelSession {
             &OperationId::from(receipt.operation_id()),
             &self.workspace,
             &self.compiled,
-        )?;
+        ).await?;
         if self.process_selected {
             self.wave2.open_runtime_turn(
                 &self.principal.principal_id,
@@ -1152,6 +1162,29 @@ impl EngineKernelSession {
                 journal,
             )?;
         }
+        Ok(())
+    }
+
+    /// The journal owner calls this after its exact root's durable terminal.
+    pub async fn finish_browser_turn(&self, root_message_id: &str) -> Result<(), AppError> {
+        #[cfg(feature = "browser-use")]
+        {
+            let operation = {
+                let state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
+                let Some(turn) = &state.turn else { return Ok(()); };
+                if turn.root != root_message_id {
+                    // A successor cancelled before preparation owns no Browser
+                    // run. An old cached resource root may remain, but only an
+                    // already-finished Browser owner permits this no-op.
+                    self.browser.ensure_previous_turn_finished(&self.principal.principal_id, self.session_id.as_ref())?;
+                    return Ok(());
+                }
+                turn.operation.clone()
+            };
+            self.browser.finish_turn(&self.principal.principal_id, self.session_id.as_ref(), &operation).await?;
+        }
+        #[cfg(not(feature = "browser-use"))]
+        let _ = root_message_id;
         Ok(())
     }
 

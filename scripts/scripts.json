@@ -84,7 +84,7 @@
     },
     "build:fast": {
       "group": "build",
-      "desc": "快速构建可直接运行的 debug 桌面二进制（不打安装包）"
+      "desc": "快速构建 debug；macOS 输出完整 CEF .app，其余平台输出二进制"
     },
     "build:win": {
       "group": "build",
@@ -92,7 +92,7 @@
     },
     "build:mac": {
       "group": "build",
-      "desc": "打 macOS 安装包（.dmg），汇总到 dist/desktop/"
+      "desc": "装配完整 arm64 CEF App，打 macOS DMG 并汇总到 dist/desktop/"
     },
     "build:linux": {
       "group": "build",
@@ -100,11 +100,11 @@
     },
     "build:signed": {
       "group": "build",
-      "desc": "打桌面包并签名+公证（仅 macOS）"
+      "desc": "装配完整 macOS CEF App，签名并执行已配置的公证"
     },
     "build:updater": {
       "group": "build",
-      "desc": "打桌面包并产出自更新 .sig 制品"
+      "desc": "构建自更新包与 .sig；macOS 从最终 CEF App 生成更新包"
     },
     "make:latest": {
       "group": "build",

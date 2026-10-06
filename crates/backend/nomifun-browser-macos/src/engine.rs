@@ -22,7 +22,9 @@ pub struct Paths {
 }
 
 static INITIALIZED: OnceLock<()> = OnceLock::new();
+static PRELOADED_FRAMEWORK: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 const BOOTSTRAP_URL: &str = "data:text/html,";
+const NATIVE_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Only the desktop host can construct this process-wide owner. All CEF object
 /// mutations happen on the application's existing main thread.
@@ -42,12 +44,49 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Must be called on the main thread after the application implements
-    /// CefAppProtocol, and before the host creates its first native context.
+    /// The native compatibility fixture proves its preload never starts CEF.
+    pub fn initialized_in_process() -> bool { INITIALIZED.get().is_some() }
+
+    /// Load and pin CEF before the host starts Tauri, Tokio or other workers.
+    /// This does not initialize CEF, create profiles, start helpers or access
+    /// Keychain. The loaded library remains resident until process exit.
+    ///
+    /// # Safety
+    /// Call during single-threaded process startup. CEF's macOS library
+    /// constructor replaces the default malloc zone by temporarily unregistering
+    /// the system zone. Concurrent allocation/free can corrupt the host heap or
+    /// hit Chromium's "no zone found" check, even before cef_initialize.
+    pub unsafe fn preload_framework(framework: &std::path::Path) -> Result<(), String> {
+        if objc2::MainThreadMarker::new().is_none() {
+            return Err("CEF framework preload requires the startup main thread".into());
+        }
+        let framework = framework.canonicalize().map_err(|_| "CEF framework is missing")?;
+        let loaded = PRELOADED_FRAMEWORK.get_or_init(|| {
+            let library = std::ffi::CString::new(framework.join("Chromium Embedded Framework").as_os_str().as_encoded_bytes())
+                .map_err(|_| "CEF framework path is invalid".to_owned())?;
+            if unsafe { load_library(Some(&*library.as_ptr().cast())) } != 1 {
+                return Err("CEF framework could not be loaded during startup".into());
+            }
+            Ok(framework.clone())
+        });
+        match loaded {
+            Ok(path) if path == &framework => Ok(()),
+            Ok(_) => Err("CEF framework differs from the preloaded application library".into()),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    /// Requires startup `preload_framework`. Call on the main thread after the
+    /// application implements CefAppProtocol, before its first native context.
     pub fn initialize(paths: Paths) -> Result<Arc<Self>, String> {
         if objc2::MainThreadMarker::new().is_none() { return Err("CEF initialization requires the main thread".into()); }
         if INITIALIZED.set(()).is_err() { return Err("CEF cannot be initialized twice in one process".into()); }
         let framework = paths.framework.canonicalize().map_err(|_| "CEF framework is missing")?;
+        match PRELOADED_FRAMEWORK.get() {
+            Some(Ok(loaded)) if loaded == &framework => {}
+            Some(Err(error)) => return Err(error.clone()),
+            _ => return Err("CEF framework must be preloaded before starting host workers".into()),
+        }
         let helper = paths.helper.canonicalize().map_err(|_| "CEF helper is missing")?;
         let main_bundle = paths.main_bundle.canonicalize().map_err(|_| "CEF main bundle is missing")?;
         std::fs::create_dir_all(&paths.data_root).map_err(|_| "CEF data root cannot be created")?;
@@ -56,9 +95,6 @@ impl Engine {
             .ok_or("CEF main identity is absent")?;
         let guardian=crate::guardian_client::GuardOwner::start(&helper,main,packaged_helper_paths(&helper)?)?;
         let mut initialization_guard=GuardianInitializationGuard {owner:guardian.clone(),armed:true};
-        let library = std::ffi::CString::new(framework.join("Chromium Embedded Framework").as_os_str().as_encoded_bytes())
-            .map_err(|_| "CEF framework path is invalid")?;
-        if unsafe { load_library(Some(&*library.as_ptr().cast())) } != 1 { return Err("CEF framework could not be loaded".into()); }
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
         let (ready, _) = watch::channel(false);
         let engine = Arc::new(Self { ready, stopped: Default::default(), closing: AtomicBool::new(false), pump_generation: AtomicU64::new(0), pump_due: Mutex::new(None), pump_active: AtomicBool::new(false), pump_reentered: AtomicBool::new(false), pages: Mutex::new(BTreeMap::new()), contexts: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()), root,guardian });
@@ -204,7 +240,7 @@ impl Engine {
     pub async fn wait_ready(&self) -> Result<(), String> {
         if self.closing.load(Ordering::Acquire) { return Err("CEF is closing".into()); }
         let mut ready = self.ready.subscribe();
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::time::timeout(NATIVE_INITIALIZATION_TIMEOUT, async {
             while !*ready.borrow_and_update() {
                 if self.stopped.blocks_work() || self.closing.load(Ordering::Acquire) { return Err("CEF initialization stopped".into()); }
                 ready.changed().await.map_err(|_| "CEF readiness channel closed")?;
@@ -285,6 +321,8 @@ impl Engine {
                         let browser = page.browser.lock().unwrap().clone();
                         if let Some(browser) = browser {
                             if let Some(host) = browser.host() {
+                                #[cfg(debug_assertions)]
+                                page.protocol.trace(message.id, "native_dispatch");
                                 if host.send_dev_tools_message(Some(&message.bytes)) == 1 { return; }
                             }
                         }
@@ -522,6 +560,19 @@ pub struct Page {
 impl Page {
     pub fn id(&self) -> uuid::Uuid { self.id }
     pub fn closed(&self) -> watch::Receiver<bool> { self.closed.subscribe() }
+    /// Browser creation does not prove its initial RenderFrameHost/document is
+    /// ready. The runtime registers this Page before awaiting this native-only
+    /// barrier, then initializes protocol policies and navigates the same view.
+    pub async fn wait_bootstrap_ready(&self, cancel: &tokio_util::sync::CancellationToken, closing: &tokio_util::sync::CancellationToken) -> Result<(), String> {
+        let started = Instant::now();
+        let result = wait_bootstrap_ready(self.metadata.subscribe(), self.closed.subscribe(), cancel, closing).await;
+        #[cfg(debug_assertions)]
+        if crate::protocol::protocol_trace_enabled() {
+            eprintln!("CEF_BOOTSTRAP readiness={} elapsed_ms={}", if result.is_ok() { "ready" } else { "failed" }, started.elapsed().as_millis());
+        }
+        let _ = started;
+        result
+    }
     pub fn listen_popups(&self) -> Result<mpsc::Receiver<PopupCandidate>, String> {
         let mut sender = self.popup_sender.lock().unwrap();
         if sender.is_some() {
@@ -698,6 +749,114 @@ impl Page {
             let _ = tx.send(result);
         }))?;
         rx.await.map_err(|_| "CEF input gate acknowledgement was lost")?
+    }
+}
+
+async fn wait_bootstrap_ready(
+    snapshots: watch::Receiver<PageSnapshot>,
+    closed: watch::Receiver<bool>,
+    cancel: &tokio_util::sync::CancellationToken,
+    closing: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    wait_bootstrap_ready_until(snapshots, closed, cancel, closing, NATIVE_INITIALIZATION_TIMEOUT).await
+}
+
+async fn wait_bootstrap_ready_until(
+    mut snapshots: watch::Receiver<PageSnapshot>,
+    mut closed: watch::Receiver<bool>,
+    cancel: &tokio_util::sync::CancellationToken,
+    closing: &tokio_util::sync::CancellationToken,
+    timeout: Duration,
+) -> Result<(), String> {
+    use nomifun_browser_platform::runtime::BrowserTabLifecycle;
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    loop {
+        if cancel.is_cancelled() || closing.is_cancelled() { return Err("CEF bootstrap readiness was cancelled".into()); }
+        if *closed.borrow_and_update() { return Err("CEF page closed before bootstrap readiness".into()); }
+        let snapshot = snapshots.borrow_and_update().clone();
+        if matches!(snapshot.lifecycle, BrowserTabLifecycle::Failed | BrowserTabLifecycle::Crashed) {
+            return Err("CEF bootstrap document failed before readiness".into());
+        }
+        if snapshot.url == BOOTSTRAP_URL && snapshot.document_generation > 0 && snapshot.lifecycle == BrowserTabLifecycle::Ready {
+            return Ok(());
+        }
+        tokio::select! { biased;
+            _ = cancel.cancelled() => return Err("CEF bootstrap readiness was cancelled".into()),
+            _ = closing.cancelled() => return Err("CEF bootstrap readiness was cancelled".into()),
+            _ = &mut deadline => return Err("CEF bootstrap initialization timed out".into()),
+            result = closed.changed() => { result.map_err(|_| "CEF bootstrap close witness was lost")?; },
+            result = snapshots.changed() => { result.map_err(|_| "CEF bootstrap document witness was lost")?; },
+        }
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_readiness_tests {
+    use super::*;
+    use nomifun_browser_platform::runtime::BrowserTabLifecycle;
+    use tokio_util::sync::CancellationToken;
+
+    fn ready() -> PageSnapshot {
+        PageSnapshot { url: BOOTSTRAP_URL.into(), document_generation: 1, lifecycle: BrowserTabLifecycle::Ready, ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn creation_and_protocol_attachment_do_not_replace_a_committed_ready_document() {
+        let (snapshots, receiver) = watch::channel(PageSnapshot::default());
+        let (_closed, close_receiver) = watch::channel(false);
+        let waiting = tokio::spawn(async move { wait_bootstrap_ready(receiver, close_receiver, &CancellationToken::new(), &CancellationToken::new()).await });
+        let mut not_committed = ready(); not_committed.document_generation = 0;
+        snapshots.send_replace(not_committed);
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        let mut loading = ready(); loading.lifecycle = BrowserTabLifecycle::Loading;
+        snapshots.send_replace(loading);
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        let mut wrong_document = ready(); wrong_document.url = "https://untrusted.example/".into();
+        snapshots.send_replace(wrong_document);
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "another document cannot satisfy the owned bootstrap barrier");
+        snapshots.send_replace(ready());
+        waiting.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_crash_and_cancellation_retire_an_unready_owned_page() {
+        for reason in ["close", "crash", "cancel", "shutdown"] {
+            let (snapshots, receiver) = watch::channel(PageSnapshot::default());
+            let (closed, close_receiver) = watch::channel(false);
+            let cancel = CancellationToken::new(); let shutdown = CancellationToken::new();
+            let waiter_cancel = cancel.clone(); let waiter_shutdown = shutdown.clone();
+            let waiting = tokio::spawn(async move { wait_bootstrap_ready(receiver, close_receiver, &waiter_cancel, &waiter_shutdown).await });
+            match reason {
+                "close" => { closed.send_replace(true); },
+                "crash" => { let mut failed = ready(); failed.lifecycle = BrowserTabLifecycle::Crashed; snapshots.send_replace(failed); },
+                "cancel" => cancel.cancel(),
+                _ => shutdown.cancel(),
+            }
+            assert!(waiting.await.unwrap().is_err(), "{reason} cannot become readiness");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_closed_pages_cannot_win_with_a_cached_ready_snapshot() {
+        let (_snapshots, receiver) = watch::channel(ready());
+        let (_closed, close_receiver) = watch::channel(false);
+        let cancel = CancellationToken::new(); cancel.cancel();
+        assert!(wait_bootstrap_ready(receiver, close_receiver, &cancel, &CancellationToken::new()).await.is_err());
+        let (_snapshots, receiver) = watch::channel(ready());
+        let (_closed, close_receiver) = watch::channel(true);
+        assert!(wait_bootstrap_ready(receiver, close_receiver, &CancellationToken::new(), &CancellationToken::new()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_unready_document_has_a_bounded_initialization_deadline() {
+        let (_snapshots, receiver) = watch::channel(PageSnapshot::default());
+        let (_closed, close_receiver) = watch::channel(false);
+        let error = wait_bootstrap_ready_until(receiver, close_receiver, &CancellationToken::new(), &CancellationToken::new(), Duration::from_millis(1)).await.unwrap_err();
+        assert_eq!(error, "CEF bootstrap initialization timed out");
     }
 }
 

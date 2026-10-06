@@ -57,9 +57,11 @@ pub enum WorkspaceError {
     DownloadLimit,
     #[error("The browser download cannot be published safely into the authorized workspace.")]
     DownloadDenied,
+    #[error("The native browser could not initialize; restart the application.")]
+    NativeInitializationFailed,
     #[error("The native browser command failed.")]
     NativeCommandFailed,
-    #[error("The Browser profile cleanup request is not an exact frozen binding set.")]
+    #[error("The Browser profile identity or persistence policy is invalid.")]
     ProfileCleanupInvalid,
     #[error("Persistent Browser profile cleanup is not configured on this host.")]
     ProfileCleanupUnavailable,
@@ -91,6 +93,7 @@ impl WorkspaceError {
             Self::UploadLimit => "BROWSER_UPLOAD_LIMIT",
             Self::DownloadLimit => "BROWSER_DOWNLOAD_LIMIT",
             Self::DownloadDenied => "BROWSER_DOWNLOAD_DENIED",
+            Self::NativeInitializationFailed => "BROWSER_NATIVE_INITIALIZATION_FAILED",
             Self::NativeCommandFailed => "BROWSER_NATIVE_COMMAND_FAILED",
             Self::ProfileCleanupInvalid => "BROWSER_PROFILE_CLEANUP_INVALID",
             Self::ProfileCleanupUnavailable => "BROWSER_PROFILE_CLEANUP_UNAVAILABLE",
@@ -107,8 +110,9 @@ impl WorkspaceError {
     }
 }
 
-/// Canonical identity of one Browser Resource. It is supplied by the
-/// authenticated AgentSession owner, never by model or page input.
+/// Host-owned scope of a browser handle, never supplied by model or page input.
+/// Agent wrappers carry their canonical authorization definition ID; managed
+/// physical runtimes use the stable domain ID and profiles hash owner/Session only.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BrowserResourceKey {
     pub principal_id: String,
@@ -137,46 +141,6 @@ pub enum BrowserProfilePersistence {
     Ephemeral,
 }
 
-/// Frozen managed-Browser binding identity supplied by the authenticated
-/// AgentSession owner during deletion. It contains no caller-selected path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrowserProfileBinding {
-    resource_binding_id: String,
-    persistence: BrowserProfilePersistence,
-}
-
-impl BrowserProfileBinding {
-    pub fn new(
-        resource_binding_id: impl Into<String>,
-        persistence: BrowserProfilePersistence,
-    ) -> Result<Self, WorkspaceError> {
-        let resource_binding_id = resource_binding_id.into();
-        if !is_bounded_profile_identity(&resource_binding_id) {
-            return Err(WorkspaceError::ProfileCleanupInvalid);
-        }
-        Ok(Self {
-            resource_binding_id,
-            persistence,
-        })
-    }
-
-    pub fn persistent(resource_binding_id: impl Into<String>) -> Result<Self, WorkspaceError> {
-        Self::new(resource_binding_id, BrowserProfilePersistence::Persistent)
-    }
-
-    pub fn ephemeral(resource_binding_id: impl Into<String>) -> Result<Self, WorkspaceError> {
-        Self::new(resource_binding_id, BrowserProfilePersistence::Ephemeral)
-    }
-
-    pub fn resource_binding_id(&self) -> &str {
-        &self.resource_binding_id
-    }
-
-    pub const fn persistence(&self) -> BrowserProfilePersistence {
-        self.persistence
-    }
-}
-
 pub(crate) fn is_bounded_profile_identity(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 512
@@ -192,9 +156,10 @@ pub enum BrowserProfile {
 }
 
 impl BrowserProfile {
-    /// Identity comes from the authenticated host, never a page or tool argument.
-    /// A project path is not a browser identity: AgentSessions never share data.
-    /// No old profile is read or migrated, and temporary work stays ephemeral.
+    /// Physical identity comes from the authenticated owner and canonical Session.
+    /// Agent authorization definitions and project paths never select profiles.
+    /// This current-generation namespace does not read or migrate old profiles.
+    /// Ephemeral is reserved for standalone host/conformance callers.
     pub fn for_agent_session(
         data_dir: &std::path::Path,
         key: &BrowserResourceKey,
@@ -205,17 +170,13 @@ impl BrowserProfile {
             return Self::Ephemeral;
         }
         let mut digest = Sha256::new();
-        digest.update(b"nomifun.browser.agent-session-profile.v1\0");
-        for value in [
-            &key.principal_id,
-            &key.agent_session_id,
-            &key.resource_binding_id,
-        ] {
+        digest.update(b"nomifun.browser.session-managed-profile.v2\0");
+        for value in [&key.principal_id, &key.agent_session_id] {
             digest.update((value.len() as u64).to_be_bytes());
             digest.update(value.as_bytes());
         }
         Self::Persistent(
-            data_dir.join("browser-v3").join("agent-sessions")
+            data_dir.join("browser-v4").join("agent-sessions")
                 .join(format!("{:x}", digest.finalize())),
         )
     }
@@ -255,7 +216,7 @@ impl BrowserProfileStore {
         ))
     }
 
-    pub(crate) fn delete_persistent_profile(
+    pub fn delete_persistent_profile(
         &self,
         key: &BrowserResourceKey,
     ) -> Result<(), WorkspaceError> {
@@ -270,7 +231,7 @@ impl BrowserProfileStore {
 }
 
 fn delete_exact_profile_tree(data_dir: &Path, profile: &Path) -> io::Result<()> {
-    let expected_root = data_dir.join("browser-v3").join("agent-sessions");
+    let expected_root = data_dir.join("browser-v4").join("agent-sessions");
     if profile.parent() != Some(expected_root.as_path()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -280,7 +241,7 @@ fn delete_exact_profile_tree(data_dir: &Path, profile: &Path) -> io::Result<()> 
     let profile_name = profile.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "Browser profile has no identity")
     })?;
-    let Some(browser_root) = plain_child(data_dir, OsStr::new("browser-v3"))? else {
+    let Some(browser_root) = plain_child(data_dir, OsStr::new("browser-v4"))? else {
         return Ok(());
     };
     let Some(session_root) =
@@ -379,11 +340,11 @@ mod profile_tests {
     }
 
     #[test]
-    fn agent_session_profile_is_stable_and_isolates_principals_sessions_and_bindings() {
+    fn session_profile_is_stable_across_agent_bindings_and_isolates_owners_and_sessions() {
         assert_eq!(profile("alice", "one", "binding"), profile("alice", "one", "binding"));
         assert_ne!(profile("alice", "one", "binding"), profile("alice", "two", "binding"));
         assert_ne!(profile("alice", "one", "binding"), profile("bob", "one", "binding"));
-        assert_ne!(profile("alice", "one", "binding-a"), profile("alice", "one", "binding-b"));
+        assert_eq!(profile("alice", "one", "binding-a"), profile("alice", "one", "binding-b"));
         assert_ne!(profile("ab", "c", "d"), profile("a", "bc", "d"));
     }
 
@@ -392,7 +353,7 @@ mod profile_tests {
         let BrowserProfile::Persistent(path) = profile("../用户", "C:\\outside/../../secret", "binding") else {
             panic!("persistent AgentSession");
         };
-        assert_eq!(path.parent().unwrap(), std::path::Path::new("owned-data/browser-v3/agent-sessions"));
+        assert_eq!(path.parent().unwrap(), std::path::Path::new("owned-data/browser-v4/agent-sessions"));
         let hash = path.file_name().unwrap().to_str().unwrap();
         assert_eq!(hash.len(), 64);
         assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));

@@ -279,6 +279,26 @@ impl EngineSessionHost {
         Ok(context)
     }
 
+    /// A closed context can remain strongly referenced by old runtime handles.
+    /// Retire only that exact cache instance after proven teardown, so a
+    /// replacement never revives it and a late old close cannot evict a successor.
+    pub(super) fn retire_kernel_session_after_teardown(
+        &self,
+        session_id: &str,
+        context: &Arc<super::engine_kernel_session::EngineKernelSession>,
+    ) -> Result<(), AppError> {
+        if !context.teardown_proven()? {
+            return Err(AppError::Conflict("Engine resource teardown is not proven".into()));
+        }
+        let mut sessions = self.kernel_sessions.lock()
+            .map_err(|_| AppError::Conflict("Engine resource handles poisoned".into()))?;
+        if sessions.get(session_id).and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, context)) {
+            sessions.remove(session_id);
+        }
+        Ok(())
+    }
+
     pub async fn read_model_facts(
         &self,
         session: &AdmittedEngineSession,
@@ -879,6 +899,104 @@ impl EngineSessionHost {
             if admission.get("resolved_snapshot_ref") != Some(&snapshot_value) || admission.get("route_identity") != Some(&route_value) {
                 return Err(conflict("accepted root Snapshot or route differs from the frozen engine scope"));
             }
+        }
+        Ok(true)
+    }
+
+    /// Read-only acknowledgement of the exact terminal this host already
+    /// published. It never changes the recorded outcome or creates authority.
+    /// The caller must also retain its own successful-publication witness.
+    pub(super) async fn confirm_published_terminal(
+        &self,
+        options: &AgentRuntimeBuildOptions,
+        binding: &RuntimeBuildBinding,
+        expected_snapshot: &ResolvedSnapshotRef,
+        message: &SendMessageData,
+        expected_event: &nomifun_agent_runtime::AgentEngineEvent,
+    ) -> Result<bool, AppError> {
+        let conflict = |reason: &str| AppError::Conflict(format!("Engine terminal receipt: {reason}"));
+        let session = self.resolve(options, binding).await?;
+        if &session.snapshot.snapshot_ref != expected_snapshot {
+            return Err(conflict("Snapshot differs from the open engine Session"));
+        }
+        let root = message.source_message_id.as_deref().unwrap_or(&message.msg_id);
+        let operations: Vec<String> = sqlx::query_scalar(
+            "SELECT operation_id FROM agent_turns WHERE session_id=? AND source_message_id=? LIMIT 2",
+        ).bind(&options.conversation_id).bind(root).fetch_all(&self.pool).await
+            .map_err(|error| conflict(&error.to_string()))?;
+        let [operation] = operations.as_slice() else {
+            return Err(conflict("accepted root has no unique canonical Turn"));
+        };
+        let session_id = options.conversation_id.clone().into();
+        let operation_id = operation.clone().into();
+        let store = self.canonical_store()?;
+        let receipt = store.read_turn_receipt(&session_id, &operation_id).await
+            .map_err(|error| conflict(&error.to_string()))?;
+        let expected_kind = match expected_event {
+            nomifun_agent_runtime::AgentEngineEvent::TurnCompleted { .. } => "turn/completed",
+            nomifun_agent_runtime::AgentEngineEvent::TurnCancelled { .. } => "turn/cancelled",
+            nomifun_agent_runtime::AgentEngineEvent::TurnPaused { .. } => "turn/paused",
+            nomifun_agent_runtime::AgentEngineEvent::TurnFailed { .. } => "turn/failed",
+            _ => return Err(conflict("terminal acknowledgement requires a terminal Runtime event")),
+        };
+        if receipt.status == nomifun_agent_session::TurnReceiptStatus::Running { return Ok(false); }
+        let started = receipt.started_event.ok_or_else(|| conflict("published Turn has no started event"))?;
+        let terminal = receipt.terminal_event.ok_or_else(|| conflict("published Turn has no terminal event"))?;
+        if started.agent_session_id != session_id || started.kind.0 != "turn/started"
+            || started.correlation_id.as_ref() != operation || started.causation_event_id.as_ref().map(|id|id.as_ref()) != Some(root)
+            || terminal.agent_session_id != session_id || terminal.kind.0 != expected_kind
+            || terminal.correlation_id.as_ref() != operation || terminal.seq <= started.seq {
+            return Err(conflict("terminal does not belong to the exact accepted Turn"));
+        }
+        let facts = store.chat_causality_facts(&session_id, &operation_id).await
+            .map_err(|error| conflict(&error.to_string()))?;
+        if facts.execution_generation == 0 || facts.session.owner_ref != session.principal || facts.session.agent_binding.resolved_snapshot_ref != *expected_snapshot {
+            return Err(conflict("published Runtime Turn lacks a claim or its Session scope changed"));
+        }
+        let source = facts.events.iter().find(|event| event.event_id.as_ref() == root)
+            .ok_or_else(|| conflict("accepted source message is missing"))?;
+        let source_payload = facts.event_payloads.get(root).ok_or_else(|| conflict("accepted source payload is missing"))?;
+        let started_payload = facts.event_payloads.get(started.event_id.as_ref())
+            .ok_or_else(|| conflict("accepted Turn payload is missing"))?;
+        if source.agent_session_id != session_id || source.kind.0 != "message/user-accepted"
+            || source.correlation_id.as_ref() != root
+            || source_payload.get("content").and_then(serde_json::Value::as_str) != Some(message.content.as_str())
+            || started_payload.get("source_message_id").and_then(serde_json::Value::as_str) != Some(root) {
+            return Err(conflict("message differs from its durable accepted root"));
+        }
+        let delivery = super::runtime_attachments::delivery(source_payload);
+        let origin = match delivery.get("origin") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(origin)) => Some(origin.as_str()),
+            Some(_) => return Err(conflict("accepted origin is not a string")),
+        };
+        if super::runtime_attachments::references(source_payload)? != message.files
+            || super::runtime_attachments::selected_skills(source_payload)? != message.inject_skills
+            || origin != message.origin.as_deref() {
+            return Err(conflict("delivery metadata differs from its durable accepted root"));
+        }
+        let route = session.snapshot.content.chat_route_identity.as_ref()
+            .ok_or_else(|| conflict("accepted Session has no exact route"))?;
+        let snapshot_value = serde_json::to_value(expected_snapshot).map_err(|error| conflict(&error.to_string()))?;
+        let route_value = serde_json::to_value(route).map_err(|error| conflict(&error.to_string()))?;
+        for payload in [source_payload, started_payload] {
+            let admission = payload.get("admission").ok_or_else(|| conflict("accepted root has no frozen admission scope"))?;
+            if admission.get("resolved_snapshot_ref") != Some(&snapshot_value) || admission.get("route_identity") != Some(&route_value) {
+                return Err(conflict("accepted root Snapshot or route differs from the frozen engine scope"));
+            }
+        }
+        let expected_event = serde_json::to_value(expected_event).map_err(|error| conflict(&error.to_string()))?;
+        let matching = facts.events.iter().filter(|event| event.agent_session_id == session_id
+            && event.kind.0 == "runtime/progress-recorded"
+            && event.correlation_id.as_ref() == operation
+            && event.seq > started.seq && event.seq < terminal.seq
+            && facts.event_payloads.get(event.event_id.as_ref())
+                .and_then(|payload| payload.get("event")) == Some(&expected_event)).count();
+        if matching != 1 { return Err(conflict("terminal retry differs from its published Runtime event")); }
+        let causation = terminal.causation_event_id.as_ref().ok_or_else(|| conflict("terminal has no causation event"))?;
+        if !facts.events.iter().any(|event| &event.event_id == causation
+            && event.agent_session_id == session_id && event.seq >= started.seq && event.seq < terminal.seq) {
+            return Err(conflict("terminal causation differs from its exact Turn facts"));
         }
         Ok(true)
     }

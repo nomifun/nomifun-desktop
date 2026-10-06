@@ -32,7 +32,10 @@ impl BrowserRuntimeFactory for DesktopBrowserHost {
     async fn create(&self, request: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
         let engine = match &self.engine {
             HostEngine::Initialized(engine) => engine.clone(),
-            HostEngine::Deferred(engine) => engine.get(&self.app).await.map_err(native_error)?,
+            HostEngine::Deferred(engine) => engine.get(&self.app).await.map_err(|error| {
+                tracing::error!(%error, "macOS built-in browser initialization failed; restart is required");
+                WorkspaceError::NativeInitializationFailed
+            })?,
         };
         let context = engine.create_context(match &request.profile { BrowserProfile::Ephemeral => None, BrowserProfile::Persistent(path) => Some(path.clone()) }).await.map_err(native_error)?;
         let app = self.app.clone();
@@ -380,6 +383,12 @@ impl DesktopBrowserRuntime {
             // a dialog. A failed native tab remains available for explicit close.
             state.tabs.insert(id.clone(), tab.clone()); state.active = Some(id);
             self.apply_surface(&state).await?; self.request_presentation(&mut state);
+        }
+        if let Err(error) = page.wait_bootstrap_ready(cancel, &self.closing).await {
+            self.retire_native_tab(&tab).await?;
+            if self.closing.is_cancelled() { return Err(WorkspaceError::WorkspaceClosed); }
+            if cancel.is_cancelled() { return Err(RunAdmissionError::Cancelled.into()); }
+            return Err(native_error(error));
         }
         if let Err(error) = self.initialize_native_tab(&tab).await {
             self.retire_native_tab(&tab).await?;

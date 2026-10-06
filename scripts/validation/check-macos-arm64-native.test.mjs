@@ -16,6 +16,7 @@ import {
 
 import {
   CEF_HELPER_NAMES,
+  EXPECTED_CEF,
   EXPECTED_TARGET,
   TARGET_ID,
   assertSelfTest,
@@ -149,11 +150,7 @@ describe('macOS arm64 host validation helper', () => {
       mkdirSync(cefResources, { recursive: true });
       writeFileSync(join(cefResources, 'CREDITS.html'), 'credits');
       writeFileSync(join(cefResources, 'runtime.json'), JSON.stringify({
-        cef: '152.0.6',
-        chromium: '152.0.7977.83',
-        architecture: 'arm64',
-        archive: 'cef_binary_fixture_macosarm64_minimal.tar.bz2',
-        archive_sha1: 'a'.repeat(40),
+        ...EXPECTED_CEF,
       }));
       writeFileSync(packagePath, 'package fixture');
       const lock = createReleaseLock({

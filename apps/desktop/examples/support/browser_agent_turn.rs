@@ -393,7 +393,7 @@ async fn api(
 async fn wait_user_ready(
     router: &nomifun_app::DesktopServer,
     id: &str,
-    workspace: &nomifun_browser_platform::workspace::BrowserResource,
+    workspace: &nomifun_browser_platform::workspace::BrowserWorkspace,
     view: &tauri::Webview,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
