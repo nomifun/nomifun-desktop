@@ -708,7 +708,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       ) {
         setPanelError(
           t('creativeStudio.agent.skillSelectionRequired', {
-            defaultValue: '请明确选择 1–3 个 Creative Studio 创作技能。',
+            defaultValue: '请明确选择 1–3 个创作技能。',
           })
         );
         return;

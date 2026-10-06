@@ -10,6 +10,17 @@ import { extname } from 'node:path';
 
 import enCreativeStudio from './locales/en-US/creativeStudio.json';
 import zhCreativeStudio from './locales/zh-CN/creativeStudio.json';
+import enAgentSettings from './locales/en-US/agentSettings.json';
+import zhAgentSettings from './locales/zh-CN/agentSettings.json';
+import { createInstance } from 'i18next';
+
+const names = createInstance();
+await names.init({
+  resources: {
+    'en-US': { translation: { creativeStudio: enCreativeStudio, agentSettings: enAgentSettings } },
+    'zh-CN': { translation: { creativeStudio: zhCreativeStudio, agentSettings: zhAgentSettings } },
+  },
+});
 
 type LocaleTree = { readonly [key: string]: string | LocaleTree };
 
@@ -77,13 +88,23 @@ describe('Creative Studio locale contract', () => {
   });
 
   test('ships real navigation and workbench-return copy without the retired home pitch', () => {
-    expect(zhCreativeStudio.title).toBe('创意工坊');
+    expect(names.t('creativeStudio.title', { lng: 'zh-CN' })).toBe('创作');
     expect(zhCreativeStudio.focus.backToWorkbench).toBe('返回工作台');
-    expect(enCreativeStudio.title).toBe('Creative Studio');
+    expect(names.t('creativeStudio.title', { lng: 'en-US' })).toBe('Creation');
     expect(enCreativeStudio.focus.backToWorkbench).toBe('Back to workbench');
     const localeKeys = new Set(flattenKeys(enCreativeStudio));
     expect(CORE_KEYS.filter((key) => !localeKeys.has(key))).toEqual([]);
     expect(flattenKeys(zhCreativeStudio).some((key) => key.startsWith('home.'))).toBe(false);
+  });
+
+  test('resolves every public creation name from the official Agent name', () => {
+    for (const lng of ['zh-CN', 'en-US']) {
+      const name = names.t('agentSettings.template.creativeStudio.default.name', { lng });
+      for (const key of ['title', 'siderTitle', 'navigation.label', 'templates.agent.agentName']) {
+        expect(names.t(`creativeStudio.${key}`, { lng })).toBe(name);
+      }
+      expect(names.t('agentSettings.modules.creativeWorkshop.name', { lng })).toBe(name);
+    }
   });
 
   test('keeps retired automation terminology out of user-facing Creative Studio copy', () => {

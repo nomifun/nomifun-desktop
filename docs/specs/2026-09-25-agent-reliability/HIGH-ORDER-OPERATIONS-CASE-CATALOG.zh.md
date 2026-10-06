@@ -134,7 +134,7 @@ P0/P1 失败时不得用后面的真实模型“碰巧成功”覆盖。
 | Browser | `browser/observe`、`browser/navigate`、`browser/act`、`browser/render_content`、`browser/download`、`browser/upload`、`browser/evaluate` |
 | Computer | `computer/observe`、`computer/a11y.observe`、`computer/input`、`computer/launch` |
 | Creation | `creation.media/text`、`creation.media/image`、`creation.media/image_edit`、`creation.media/video`、`creation.media/audio`、`creation.media/music` |
-| Creative Workshop | `creative.workshop/canvas.read`、`creative.workshop/canvas.edit`、`creative.workshop/asset.read`、`creative.workshop/asset.write`、`creative.workshop/template.run` |
+| Creation | `creative.workshop/canvas.read`、`creative.workshop/canvas.edit`、`creative.workshop/asset.read`、`creative.workshop/asset.write`、`creative.workshop/template.run` |
 | Office | `office/preview`、`office/document.edit`、`office/sheet.edit`、`office/slides.edit` |
 | Channel | `channel.messaging/reply`、`channel.messaging/send` |
 | Companion | `companion/learn`、`companion/evolve` |

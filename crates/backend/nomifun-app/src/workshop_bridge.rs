@@ -1,4 +1,4 @@
-//! Bridge wiring the 生成引擎 (`nomifun-creation`) to the 创意工坊 asset store
+//! Bridge wiring the 生成引擎 (`nomifun-creation`) to the 创作 asset store
 //! (`nomifun-workshop`'s data dir + `nomifun-db` index), without either domain
 //! crate depending on the other.
 //!

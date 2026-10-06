@@ -401,7 +401,15 @@ impl AgentControlPlane {
             .templates
             .seed(template_key)
             .ok_or_else(|| not_found("OfficialPresetTemplate"))?;
-        let display_name = nonempty_name(request.display_name)?;
+        let requested_name = nonempty_name(request.display_name)?;
+        // Session-only official configurations persist the stable template
+        // identity. Product names are localized by the renderer, never copied
+        // from a caller or an older launch into the internal reuse cache.
+        let display_name = if request.reuse_existing {
+            template_key.as_str().to_owned()
+        } else {
+            requested_name
+        };
         let required_chat_features = required_chat_features(
             seed.enabled_capabilities
                 .iter()
@@ -956,28 +964,53 @@ impl AgentControlPlane {
         editor_response(stored, revision, document, None)
     }
 
-    /// Recover old internal official bindings without guessing a personal
-    /// Agent's identity from its capability set or display name alone.
+    /// Verify internal official configurations against their complete current
+    /// seed. Known creation labels admit presentation repair only; neither a
+    /// matching name nor a hidden personal model variant proves official identity.
+    /// Presentation repair changes only owned metadata;
+    /// immutable Revisions, Snapshots and Session bindings stay byte-for-byte exact.
     pub async fn internal_official_template(
         &self, owner: &UserId, id: &str,
     ) -> Result<Option<OfficialPresetKey>, ControlPlaneError> {
-        let stored = self.owned_preset(owner, id).await?;
-        if !stored.session_only { return Ok(None); }
-        let Some(key) = parse_official_key(&stored.preset.display_name) else { return Ok(None); };
+        let mut stored = self.owned_preset(owner, id).await?;
+        if !stored.session_only || stored.preset.source != AgentPresetSource::User {
+            return Ok(None);
+        }
+        let key = parse_official_key(&stored.preset.display_name).or_else(|| {
+            // One-way repair of current-generation launch-cache metadata.
+            // These labels never become an identity source or an import path:
+            // the complete owned seed must still match below.
+            let old_creation_labels = [
+                "\u{591a}\u{6a21}", "\u{521b}\u{610f}\u{5de5}\u{574a}",
+                "Multimodal", "Creative Studio", "Creation", "创作",
+            ];
+            old_creation_labels.contains(&stored.preset.display_name.as_str())
+                .then_some(OfficialPresetKey::CreativeStudioDefault)
+        });
+        let Some(key) = key else { return Ok(None); };
         let Some(seed) = self.templates.seed(key) else { return Ok(None); };
         let Some(revision) = self.current_revision(&stored).await? else { return Ok(None); };
         let payload = &revision.payload;
+        if !payload.persona.is_empty() || !payload.instructions.is_empty()
+            || !payload.starter_prompts.is_empty() || !payload.system_role_provider_overrides.is_empty()
+            || !payload.context_order.is_empty() || !payload.middleware_order.is_empty()
+        {
+            return Ok(None);
+        }
         let catalog = self.catalog.snapshot()?;
-        let expected_capabilities = seed
-            .enabled_capabilities
-            .iter()
+        let expected_capabilities = seed.enabled_capabilities.iter()
             .map(|reference| template_selection(reference, &catalog))
             .collect::<Result<Vec<_>, _>>()?;
-        let exact = payload.persona.is_empty() && payload.instructions.is_empty()
-            && payload.starter_prompts.is_empty() && payload.system_role_provider_overrides.is_empty()
-            && payload.skill_bindings == seed.skill_bindings
-            && payload.enabled_capabilities == expected_capabilities;
-        Ok(exact.then_some(key))
+        if payload.skill_bindings != seed.skill_bindings
+            || payload.enabled_capabilities != expected_capabilities
+        {
+            return Ok(None);
+        }
+        if stored.preset.display_name != key.as_str() {
+            stored.preset.display_name = key.as_str().to_owned();
+            self.store.update_preset_metadata(&stored).await?;
+        }
+        Ok(Some(key))
     }
 
     /// Read-only admission check for product selectors. This uses the same
@@ -1663,7 +1696,8 @@ impl AgentControlPlane {
             expected_current_revision: Some(wire_cast(&revision.reference)?),
             draft: AgentPresetDraftDto {
                 preset_id: preset.preset.preset_id.as_ref().to_owned(),
-                display_name: preset.preset.display_name.clone(),
+                display_name: template_key.map(|key| key.as_str().to_owned())
+                    .unwrap_or_else(|| preset.preset.display_name.clone()),
                 description: preset.preset.description.clone(),
                 source_template_key: template_key.map(|key| wire_cast(&key)).transpose()?,
                 current_revision: Some(wire_cast(&revision.reference)?),
@@ -2176,10 +2210,11 @@ mod tests {
         AgentModuleId, PluginSourceKind, PluginSourceMetadata,
         RuntimeProfileKind, RuntimeTarget, StableSourceIdentity,
         StrictJsonValue, ToolPresentationKind, VersionString, capability_surface_declarations,
+        SkillDefinition, LogicalArtifactRef,
         digest_payload,
     };
     use nomifun_agent_kernel::{
-        CompilerEnvironment, MaterializedCapability, MaterializedRegistry,
+        CompilerEnvironment, MaterializedCapability, MaterializedRegistry, MaterializedSkill,
     };
     use serde_json::json;
 
@@ -2760,6 +2795,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn internal_creation_names_use_template_identity_and_repair_metadata_only() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CreativeStudioDefault, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let mut request = official_launch_request(true);
+        request.display_name = "Caller supplied name".into();
+        let created = control.create_from_template(&owner, "creative-studio.default", request.clone()).await.unwrap();
+        assert_eq!(created.preset.display_name, "creative-studio.default");
+        let id = AgentPresetId::from(created.preset.preset_id.clone());
+        let reference: PresetRevisionRef = wire_cast(created.preset.current_stable_revision.as_ref().unwrap()).unwrap();
+        let original_revision = serde_json::to_value(store.get_revision(&reference).await.unwrap().unwrap()).unwrap();
+        let original_snapshot = serde_json::to_value(store.get_snapshot(&reference).await.unwrap().unwrap()).unwrap();
+
+        // Same-generation cache metadata may carry an earlier localized label.
+        // The exact complete seed is required in addition to a known old label.
+        for old_name in ["\u{591a}\u{6a21}", "\u{521b}\u{610f}\u{5de5}\u{574a}", "Multimodal", "Creative Studio", "创作", "Creation"] {
+            let mut cached = store.get_preset(&id).await.unwrap().unwrap();
+            cached.preset.display_name = old_name.into();
+            store.update_preset_metadata(&cached).await.unwrap();
+            assert_eq!(control.internal_official_template(&owner, id.as_ref()).await.unwrap(),
+                Some(OfficialPresetKey::CreativeStudioDefault));
+            assert_eq!(store.get_preset(&id).await.unwrap().unwrap().preset.display_name,
+                "creative-studio.default");
+        }
+        let mut cached = store.get_preset(&id).await.unwrap().unwrap();
+        cached.preset.display_name = "Old launch label".into();
+        store.update_preset_metadata(&cached).await.unwrap();
+        let reused = control.create_from_template(&owner, "creative-studio.default", request).await.unwrap();
+        assert_eq!(reused.preset.preset_id, created.preset.preset_id);
+        assert_eq!(reused.preset.display_name, "creative-studio.default");
+        assert_eq!(reused.preset.current_stable_revision, created.preset.current_stable_revision);
+        assert_eq!(serde_json::to_value(store.get_revision(&reference).await.unwrap().unwrap()).unwrap(), original_revision);
+        assert_eq!(serde_json::to_value(store.get_snapshot(&reference).await.unwrap().unwrap()).unwrap(), original_snapshot);
+    }
+
+    #[tokio::test]
+    async fn personal_creation_preset_keeps_its_owned_name_and_is_not_an_official_configuration() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CreativeStudioDefault, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let mut request = official_launch_request(false);
+        request.display_name = "My personal creator".into();
+        let personal = control.create_from_template(&owner, "creative-studio.default", request).await.unwrap();
+        assert_eq!(control.internal_official_template(&owner, &personal.preset.preset_id).await.unwrap(), None);
+        assert_eq!(control.editor(&owner, &personal.preset.preset_id, None).await.unwrap().preset.display_name,
+            "My personal creator");
+        // Personal model variants are also session-only caches. Complete seed
+        // equality must not discard their custom identity.
+        let id = AgentPresetId::from(personal.preset.preset_id.clone());
+        let mut variant = store.get_preset(&id).await.unwrap().unwrap();
+        variant.session_only = true;
+        store.update_preset_metadata(&variant).await.unwrap();
+        assert_eq!(control.internal_official_template(&owner, id.as_ref()).await.unwrap(), None);
+        assert_eq!(store.get_preset(&id).await.unwrap().unwrap().preset.display_name,
+            "My personal creator");
+    }
+
+    #[tokio::test]
     async fn additional_module_is_not_recognized_as_current_official_seed() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
@@ -2812,6 +2905,37 @@ mod tests {
             registry.capabilities.insert(selected.capability.id.clone(), capability.clone());
             catalog.capabilities.push(capability);
             catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+        }
+        // Keep the fixture complete when an official seed binds bundled Skills.
+        for reference in &templates.seed(key).unwrap().skill_bindings {
+            let parent = registry.capabilities.values().next().unwrap();
+            let definition = SkillDefinition {
+                id: reference.id.clone(), version: reference.version.clone(),
+                package: parent.manifest.package.clone(),
+                display: LocalizedMetadata {
+                    name: reference.id.as_ref().to_owned(), description: "Official Skill fixture".into(),
+                    localized_names: BTreeMap::new(), localized_descriptions: BTreeMap::new(),
+                },
+                body_ref: LogicalArtifactRef {
+                    artifact_id: format!("{}.body", reference.id.as_ref()).into(),
+                    normalized_relative_path: format!("skills/{}/SKILL.md", reference.id.as_ref()),
+                    digest: DigestHex::from("b".repeat(64)),
+                },
+                resources: Vec::new(), requires_capabilities: Vec::new(),
+                supported_surfaces: BTreeSet::from(["desktop".to_owned()]),
+            };
+            let contract_digest = digest_payload(&definition).unwrap();
+            let contribution_id = ContributionId::from(format!("skill:{}", reference.id.as_ref()));
+            let skill = MaterializedSkill {
+                definition, contribution_id: contribution_id.clone(), contract_digest: contract_digest.clone(),
+                contribution_lock: ContributionLock {
+                    contribution_id, contract_digest, ..parent.contribution_lock.clone()
+                },
+                target_artifact_digest: parent.target_artifact_digest.clone(),
+                mount_id: parent.mount_id.clone(), source: parent.source.clone(),
+            };
+            registry.skills.insert(reference.id.clone(), skill.clone());
+            catalog.skills.push(skill);
         }
         let compiler = test_compiler().with_materialized_registry(Arc::new(registry), CompilerEnvironment {
             resolver_version: VersionString::from("1.0.0"), required_runtime_protocol_version: VersionString::from("1.0.0"),

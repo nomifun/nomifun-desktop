@@ -75,7 +75,7 @@ The source of truth is
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
-| `/workshop` | Creative Studio compatibility entry; redirects to the Canvas library. |
+| `/workshop` | Creation compatibility entry; redirects to the Canvas library. |
 | `/workshop/canvases` | Canonical Canvas library. |
 | `/workshop/canvas/:canvasId` | Canvas infinite editor. |
 | `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
@@ -91,17 +91,17 @@ Legacy settings paths such as `/settings/model`, `/settings/agent`,
 `/settings/webui` and `/settings/webhook` are
 redirects. Do not document them as primary navigation.
 
-Creative Studio reuses the normal app titlebar and swaps the primary rail to a
+Creation reuses the normal app titlebar and swaps the primary rail to a
 Settings-style product navigation surface, with **Back to Workbench** pinned at
 the bottom. During an app session, the main rail entry resumes the last complete
-Creative Studio location that passes the product's exact route matcher; invalid
+Creation location that passes the product's exact route matcher; invalid
 or unknown stored locations fall back to `/workshop/canvases`. The product rail
 has no separate home item because prompt-led creation lives in the Canvas
 Assistant. Its route constants and exact-match rules live in
 [`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts).
 
 `/workshop/projects` is a deprecated compatibility redirect to
-`/workshop/canvases`, not a product surface. Creative Studio has Canvases only:
+`/workshop/canvases`, not a product surface. Creation has Canvases only:
 the canonical HTTP resource is `/api/creative-studio/canvases`, while
 `/api/creative-studio/projects` is a deprecated alias. Image and Video
 Workbenches have no Canvas selector or parent-load gate. Their task owner,

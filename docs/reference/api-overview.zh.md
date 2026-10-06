@@ -95,8 +95,8 @@ NomiFun 启动时进入三种鉴权策略之一：
 | Agent Execution | `/api/agent-executions/*` | 已鉴权 | [`nomifun-agent-execution/src/routes.rs`](../../crates/backend/nomifun-agent-execution/src/routes.rs) |
 | 终端 | `/api/terminals/*` | 已鉴权 | [`nomifun-terminal/src/routes.rs`](../../crates/backend/nomifun-terminal/src/routes.rs) |
 | 知识库 | `/api/knowledge/*` | 已鉴权 | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
-| 创意工坊管理与生成 | `/api/creative-studio/*` 管理分组：项目、素材、提示词、模板/运行/草稿、任务、Agent session 与集合 | 仅实例 owner | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)、[`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs)、[`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs) |
-| 创意工坊媒体交付 | `GET /api/creative-studio/files/{asset_id}` | 公开的只读 capability URL；不提供列表或写操作 | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
+| 创作管理与生成 | `/api/creative-studio/*` 管理分组：项目、素材、提示词、模板/运行/草稿、任务、Agent session 与集合 | 仅实例 owner | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)、[`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs)、[`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs) |
+| 创作媒体交付 | `GET /api/creative-studio/files/{asset_id}` | 公开的只读 capability URL；不提供列表或写操作 | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
 | Unified Plugin Core | `/api/plugins`、`/api/plugins/{plugin_id}/*` 与 `/api/plugin-drafts/*`：Library、Chat/Draft、目录/ZIP/Backup 共用导入、配置、生命周期、Package/Backup 导出和 Preview | 仅实例 owner；写操作还要求本地产品信任 | [`router/plugin.rs`](../../crates/backend/nomifun-app/src/router/plugin.rs) |
 | Plugin Surface 资源与 Bridge | descriptor-fenced 资源与 Bridge 路由，包含精确 session generation 与 Artifact digest | 实例 owner 且持有匹配的 live Surface descriptor | 同上 |
 | 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |

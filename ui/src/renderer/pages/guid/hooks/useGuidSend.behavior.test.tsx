@@ -529,7 +529,7 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls[0]).toEqual({
       method: 'POST', url: '/api/agent-presets/from-template/chat.minimal',
       body: {
-        display_name: 'agentSettings.template.chat.minimal.name',
+        display_name: 'chat.minimal',
         reuse_existing: true,
         model_route_refs: {},
         chat_route_records: {},
@@ -549,8 +549,8 @@ describe('useGuidSend HTTP behavior', () => {
     expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
     const nextTurn = renderHook(() => useCreationDraft(PRESET_CONVERSATION_ID));
-    expect(nextTurn.result.current.draft.selectedAgent).toEqual({ kind: 'template', templateKey: 'chat.minimal' });
-    expect(nextTurn.result.current.draft.presetId).toBe(PRESET_ID);
+    expect(nextTurn.result.current.draft).not.toHaveProperty('selectedAgent');
+    expect(nextTurn.result.current.draft).not.toHaveProperty('presetId');
     expect(nextTurn.result.current.draft.mode).toBeNull();
   });
 

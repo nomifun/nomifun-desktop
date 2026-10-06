@@ -1,6 +1,5 @@
 import type { ConversationId, MessageId, ProviderId } from '@/common/types/ids';
 import type { AgentPresetId } from '@/common/types/agentPlatform';
-import type { GuidAgentSelectionPreference } from '@/common/config/configKeys';
 
 export type CreationMode = 'image' | 'video' | 'music';
 export type CreationCapability = 't2i' | 'i2i' | 'inpaint' | 't2v' | 'i2v' | 'music' | 'tts';
@@ -16,9 +15,6 @@ export interface CreationDraft {
   references: CreationReference[];
   pendingPrompt?: string;
   pendingFiles?: string[];
-  selectedAgent?: GuidAgentSelectionPreference;
-  presetId?: AgentPresetId;
-  agentLabel?: string;
 }
 export interface SubmitCreationRequest {
   provider_id: ProviderId;
