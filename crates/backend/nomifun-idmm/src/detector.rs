@@ -33,6 +33,12 @@ pub struct DecisionPrompt {
     pub options: Vec<DecisionOption>,
 }
 
+pub(crate) struct RuleAnswer {
+    pub content: String,
+    pub reason_code: &'static str,
+    pub rationale: &'static str,
+}
+
 fn option_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
@@ -168,7 +174,7 @@ pub(crate) fn safe_option(option: &DecisionOption) -> bool {
 pub(crate) fn rule_answer(
     prompt: &DecisionPrompt,
     prefer_recommended: bool,
-) -> Option<String> {
+) -> Option<RuleAnswer> {
     if prompt.class != DecisionClass::Options {
         return None;
     }
@@ -176,9 +182,17 @@ pub(crate) fn rule_answer(
     if prefer_recommended
         && let Some(option) = safe.clone().find(|option| option.recommended)
     {
-        return Some(option.reply());
+        return Some(RuleAnswer {
+            content: option.reply(),
+            reason_code: "rule_selected_recommended_option",
+            rationale: "候选项包含明确推荐的安全选项，按规则采用该项继续。",
+        });
     }
-    safe.into_iter().next().map(DecisionOption::reply)
+    safe.into_iter().next().map(|option| RuleAnswer {
+        content: option.reply(),
+        reason_code: "rule_selected_first_safe_option",
+        rationale: "按规则选择第一个通过安全筛查的选项，继续当前任务。",
+    })
 }
 
 /// Detect only an explicit hand-off to the user. Ordinary prose containing a
@@ -293,7 +307,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prompt.class, DecisionClass::Options);
-        assert_eq!(rule_answer(&prompt, true).as_deref(), Some("2"));
+        let answer = rule_answer(&prompt, true).unwrap();
+        assert_eq!(answer.content, "2");
+        assert_eq!(answer.reason_code, "rule_selected_recommended_option");
+        assert!(answer.rationale.contains("推荐"));
+    }
+
+    #[test]
+    fn first_safe_option_keeps_its_actual_rule_reason() {
+        let prompt = detect_decision("请选择下一步：\n1. 继续分析\n2. 创建草稿（推荐）").unwrap();
+        let answer = rule_answer(&prompt, false).unwrap();
+        assert_eq!(answer.content, "1");
+        assert_eq!(answer.reason_code, "rule_selected_first_safe_option");
     }
 
     #[test]

@@ -178,6 +178,10 @@
       "group": "test",
       "desc": "Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan."
     },
+    "demo:idmm": {
+      "group": "test",
+      "desc": "用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告"
+    },
     "test:agent-reliability-report": {
       "group": "test",
       "desc": "验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查"

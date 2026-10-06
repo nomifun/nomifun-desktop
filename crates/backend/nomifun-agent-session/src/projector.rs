@@ -1,5 +1,6 @@
 use nomifun_agent_contracts::{
-    AgentSessionId, SessionEventPayloadRef, SessionEventRecord, digest_bytes, digest_payload,
+    AgentSessionId, IdmmDecisionExplanation, IdmmDecisionNotice, SessionEventPayloadRef,
+    SessionEventRecord, digest_bytes, digest_payload,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -31,6 +32,8 @@ struct ProjectionDocument {
     reference: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal_effect: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idmm_decision: Option<IdmmDecisionExplanation>,
 }
 
 pub(crate) fn initial_head(session_id: &AgentSessionId) -> SessionHeadProjection {
@@ -136,6 +139,7 @@ pub(crate) fn reduce_agent_messages(
             tool_summary: None,
             reference: None,
             terminal_effect: None,
+            idmm_decision: None,
         },
     };
 
@@ -165,6 +169,9 @@ pub(crate) fn payload_value(event: &SessionEventRecord, stored_body: Option<Valu
 }
 
 fn projection_identity(event: &SessionEventRecord) -> (String, String) {
+    if event.kind.0 == "idmm/notice-recorded" {
+        return (format!("idmm:{}", event.correlation_id.0), "idmm_notice".to_owned());
+    }
     if event.kind.0 == "session/agent-binding-changed" {
         return (
             format!("agent-transition:{}", event.correlation_id.0),
@@ -231,6 +238,30 @@ fn apply_projection_semantics(
             if let Some(content) = payload.get("content").and_then(Value::as_str) {
                 document.content = Some(content.to_owned());
             }
+            if let Some(value) = payload.get("idmm_decision") {
+                let decision: IdmmDecisionExplanation = serde_json::from_value(value.clone()).map_err(|error| {
+                    SessionStoreError::InvalidEvent(format!("invalid IDMM input explanation: {error}"))
+                })?;
+                decision.validate().map_err(|error| SessionStoreError::InvalidEvent(error.into()))?;
+                document.idmm_decision = Some(decision);
+            }
+        }
+        "idmm/notice-recorded" => {
+            let notice: IdmmDecisionNotice = serde_json::from_value(payload.clone()).map_err(|error| {
+                SessionStoreError::InvalidEvent(format!("invalid IDMM notice: {error}"))
+            })?;
+            notice.validate().map_err(|error| SessionStoreError::InvalidEvent(error.into()))?;
+            if event.correlation_id.as_ref() != event.event_id.as_ref()
+                || event.event_id.as_ref() != notice.decision.intervention_id
+            {
+                return Err(SessionStoreError::InvalidEvent("IDMM notice identity differs from its intervention".into()));
+            }
+            document.state = Some("recorded".into());
+            document.display_at_ms = Some(notice.created_at);
+            document.reference = Some(serde_json::to_value(notice)?);
+            // This reference is a strict notice contract; generic diagnostic
+            // references must not add fields to its typed payload.
+            return Ok(());
         }
         "message/content-part" => {
             if document.display_at_ms.is_none() {

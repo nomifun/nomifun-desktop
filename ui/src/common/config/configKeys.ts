@@ -63,6 +63,8 @@ export type ConfigKeyMap = {
   'chat.thinking.visible': boolean | undefined;
   'chat.thinking.contentLength': ThinkingContentDisplayLength | undefined;
   'chat.thinking.summaryLength': ThinkingSummaryDisplayLength | undefined;
+  /** Default expansion only; canonical explanations remain in history. */
+  'chat.idmm.showDecisionBasis': boolean | undefined;
   // Desktop control (computer-use): gates the nomi engine's Computer tool
   // (observe/click/type/launch). Read by the backend agent factory per session.
   'channels.telegram.agent':

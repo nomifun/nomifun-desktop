@@ -28,6 +28,7 @@ param(
   [switch]$BrowserGui,
   [switch]$ModelSmoke,
   [switch]$BeforeToolSmoke,
+  [switch]$IdmmSmoke,
   [switch]$CodingSmoke,
   [switch]$GameSmoke,
   [switch]$LongCodingSmoke,
@@ -40,7 +41,7 @@ $ErrorActionPreference = 'Stop'
 if ($Setup -and $Delete) {
   throw 'Setup and Delete cannot be used together.'
 }
-if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke, $CodingSmoke, $GameSmoke, $LongCodingSmoke).Where({ [bool]$_ }).Count -gt 1) {
+if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke, $IdmmSmoke, $CodingSmoke, $GameSmoke, $LongCodingSmoke).Where({ [bool]$_ }).Count -gt 1) {
   throw 'Smoke modes are mutually exclusive.'
 }
 if ($BrowserGui -and ([string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
@@ -220,6 +221,8 @@ try {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
   } elseif ($BeforeToolSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke
+  } elseif ($IdmmSmoke) {
+    & bun run demo:idmm
   } elseif ($CodingSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
   } elseif ($GameSmoke) {

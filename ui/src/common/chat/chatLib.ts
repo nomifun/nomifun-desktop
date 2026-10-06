@@ -8,6 +8,7 @@ import type {
   PersistedToolArtifact,
 } from '@/common/types/platform/toolCallTypes';
 import type { OfficialPresetKey } from '@/common/types/agentPlatform';
+import { normalizeIdmmDecisionExplanation, normalizeIdmmDecisionNotice, type IdmmDecisionExplanation, type IdmmDecisionNotice } from '@/common/types/idmm';
 import type { IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import {
   parseConversationId,
@@ -132,6 +133,7 @@ export type IMessageText = IMessage<
     content: string;
     /** Actual message time; created_at remains the durable pagination cursor. */
     display_at_ms?: number;
+    idmm_decision?: IdmmDecisionExplanation;
     /** Canonical typed output-limit continuation, never inferred from text. */
     continuation_of_message_id?: MessageId;
     interaction?: {
@@ -207,6 +209,7 @@ export type IMessageTips = IMessage<
     type: 'error' | 'success' | 'warning';
     error?: AgentStreamErrorInfo;
     recovery?: TruncatedTurnRecovery;
+    idmm_notice?: IdmmDecisionNotice;
     agent_transition?: {
       transition_id: string;
       previous_agent_label: string;
@@ -334,6 +337,7 @@ type ResponseTextData = {
   replace?: boolean;
   cronMeta?: CronMessageMeta;
   knowledge_writeback?: unknown;
+  idmm_decision?: unknown;
   teammate_message?: unknown;
   sender_name?: unknown;
   sender_backend?: unknown;
@@ -572,15 +576,19 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
       preferred.content.knowledge_writeback
     );
     const interaction = preferred.content.interaction ?? fallback.content.interaction;
+    // Durable history is passed as primary and owns the decision explanation,
+    // even while a longer live text fragment wins the body.
+    const decision = primary.content.idmm_decision ?? secondary.content.idmm_decision;
     const observations = (preferred.content.observations?.length ?? 0) >= (fallback.content.observations?.length ?? 0)
       ? preferred.content.observations : fallback.content.observations;
-    if (!knowledgeWriteback && !interaction && !observations) return preferred;
+    if (!knowledgeWriteback && !interaction && !observations && !decision) return preferred;
     return {
       ...preferred,
       content: {
         ...preferred.content,
         ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
         ...(interaction ? { interaction } : {}),
+        ...(decision ? { idmm_decision: decision } : {}),
         ...(observations ? { observations } : {}),
       },
     };
@@ -917,6 +925,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const errorData = message.data;
       const structuredError = normalizeAgentStreamError(errorData);
       const recovery = isObject(errorData) ? normalizeTruncatedTurnRecovery(errorData.recovery) : undefined;
+      const notice = isObject(errorData) ? normalizeIdmmDecisionNotice(errorData.idmm_notice) : undefined;
       const errorText =
         (isObject(errorData) ? optionalDisplayText(errorData.message) : undefined) ?? toDisplayText(errorData);
       return {
@@ -932,6 +941,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           type: 'error',
           ...(structuredError ? { error: structuredError } : {}),
           ...(recovery ? { recovery } : {}),
+          ...(notice ? { idmm_notice: notice } : {}),
         },
       };
     }
@@ -944,6 +954,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           ? (normalizeAgentStreamError(data.error) ?? normalizeAgentStreamError({ ...data, message: content }))
           : undefined;
       const recovery = normalizeTruncatedTurnRecovery(data.recovery);
+      const notice = normalizeIdmmDecisionNotice(data.idmm_notice);
       return {
         id: uuid(),
         type: 'tips',
@@ -957,6 +968,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           type: tipType,
           ...(structuredError ? { error: structuredError } : {}),
           ...(recovery ? { recovery } : {}),
+          ...(notice ? { idmm_notice: notice } : {}),
         },
       };
     }
@@ -967,6 +979,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const isRichData = isResponseTextData(data);
       const shouldReplace = message.replace === true || (isRichData && data.replace === true);
       const persistedWriteback = isRichData ? normalizeKnowledgeWritebackState(data.knowledge_writeback) : undefined;
+      const decision = isRichData ? normalizeIdmmDecisionExplanation(data.idmm_decision) : undefined;
       return {
         id: uuid(),
         type: 'text',
@@ -981,6 +994,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
               cronMeta: normalizeCronMessageMeta(data.cronMeta),
               ...(shouldReplace ? { replace: true } : {}),
               ...(persistedWriteback ? { knowledge_writeback: persistedWriteback } : {}),
+              ...(decision ? { idmm_decision: decision } : {}),
               ...normalizeTextContinuation(data),
               ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),
             }
@@ -1084,6 +1098,7 @@ export const transformUserCreatedEvent = (
   conversationId: ConversationId
 ): IMessageText | undefined => {
   if (event.hidden || event.conversation_id !== conversationId || !event.msg_id) return undefined;
+  const decision = normalizeIdmmDecisionExplanation(event.idmm_decision);
   return {
     id: uuid(),
     type: 'text',
@@ -1095,6 +1110,7 @@ export const transformUserCreatedEvent = (
     content: {
       content: event.content,
       ...(event.interaction ? { interaction: event.interaction } : {}),
+      ...(decision ? { idmm_decision: decision } : {}),
     },
   };
 };
