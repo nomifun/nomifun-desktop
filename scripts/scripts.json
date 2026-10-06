@@ -36,11 +36,11 @@
     },
     "check:creative-studio-retirement": {
       "group": "check",
-      "desc": "扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流"
+      "desc": "扫描 tracked 源码，阻止旧创作页面、路由、API、翻译与 Gateway 标记回流"
     },
     "check:creative-studio-retirement:dist": {
       "group": "check",
-      "desc": "在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物"
+      "desc": "在 UI production build 后扫描 ui/dist，阻止旧创作标记进入发布产物"
     },
     "check:process-runtime-boundary": {
       "group": "check",

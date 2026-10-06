@@ -30,7 +30,7 @@ Kernel 新增测试覆盖释放失败、未绑定/错误身份句柄、作用域
 
 ## 删除与合并
 
-- 删除未接入产品入口的旧 Creative Studio Projects 页面、列表模型、兼容服务和归档包装，
+- 删除未接入产品入口的旧 Creation Projects 页面、列表模型、兼容服务和归档包装，
   以及只验证这些废弃包装的测试。现行 Canvas 功能及历史 URL 重定向不变。
 - 删除未使用的 EmojiPicker、MarqueePillLabel、旧 TTS 请求封装、Google URL 辅助函数、
   旧 Agent 参数构建器及检测类型、旧通用响应订阅和运行时生命周期钩子。

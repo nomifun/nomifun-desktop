@@ -38,11 +38,11 @@ describe('Agent Settings locale contract', () => {
     expect(zh.template.chat.minimal.name).toBe('最简');
     expect(zh.template.assistant.general.name).toBe('通用');
     expect(zh.template.coding.codex.name).toBe('编程');
-    expect(zh.template.creativeStudio.default.name).toBe('多模');
+    expect(zh.template.creativeStudio.default.name).toBe('创作');
     expect(en.template.chat.minimal.name).toBe('Minimal');
     expect(en.template.assistant.general.name).toBe('General');
     expect(en.template.coding.codex.name).toBe('Coding');
-    expect(en.template.creativeStudio.default.name).toBe('Multimodal');
+    expect(en.template.creativeStudio.default.name).toBe('Creation');
   });
 
   test('gives every explicit official Agent capability a visible localized introduction', () => {

@@ -149,7 +149,7 @@
     },
     "creativeStudio": {
       "default": {
-        "name": "Multimodal",
+        "name": "Creation",
         "description": "For professional multimodal work across media, canvas, Office, workspace, project memory, and web research."
       }
     }
@@ -165,7 +165,7 @@
     "companionMemory": { "name": "Companion memory", "description": "Recall or write memory for the selected companion." },
     "computer": { "name": "Computer", "description": "High-privilege extension. Missing OS grants disable only Computer actions, not the Agent's other capabilities." },
     "creationMedia": { "name": "Media creation", "description": "Create text, images, video, audio and music through configured generation services." },
-    "creativeWorkshop": { "name": "Creative workshop", "description": "Work with canvases, assets and reusable creative templates." },
+    "creativeWorkshop": { "name": "$t(agentSettings.template.creativeStudio.default.name)", "description": "Work with canvases, assets and reusable creative templates." },
     "customerService": { "name": "Customer service", "description": "Read and update service notes or hand work to a person." },
     "knowledge": { "name": "Knowledge", "description": "Search, read and update a knowledge base selected when the Agent is used." },
     "office": { "name": "Office", "description": "Preview and edit documents, spreadsheets and presentations." },

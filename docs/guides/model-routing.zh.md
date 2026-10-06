@@ -2,7 +2,7 @@
 
 NomiFun 的**模型**页面是一套可扩展控制面，不是固定厂商清单。它把 provider
 凭据、模型记录、任务能力与可靠性策略分开管理，让同一份目录可以被会话、伙伴、
-计划任务、设定和创意工坊复用。
+计划任务、设定和创作复用。
 
 > English: [model-routing.md](model-routing.md)
 
@@ -67,9 +67,9 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 | Vision | 带图片的聊天与分析 |
 | 语音识别（ASR） | 语音输入、伙伴和设备语音 |
 | 语音合成（TTS） | 伙伴、设备与 Canvas 音频节点 |
-| 图片生成 / 编辑 | 创意工坊 Canvas 与 Image Workbench |
-| 视频生成 | 创意工坊 Canvas 与 Video Workbench |
-| 音乐生成 | 会话创作与 Creative Studio |
+| 图片生成 / 编辑 | 创作 Canvas 与 Image Workbench |
+| 视频生成 | 创作 Canvas 与 Video Workbench |
+| 音乐生成 | 会话创作与 Creation |
 | Embedding / Rerank | 检索与知识工作流 |
 
 这些任务表示独立调用协议与 endpoint。运行时不会只凭模型名猜测图片或视频生成
@@ -124,7 +124,7 @@ Chat 不需要用户勾选识图、视频理解、音频输入、工具调用、
 收窄后续路由。Chat 的输入与技术能力不会自动创建生图、视频、音乐、TTS 或 ASR
 接口；自动创作只会选择已配置对应任务接口的模型。
 
-创意工坊会把精确的 `{ providerId, model, task, capability }` 身份随每次已接纳
+创作会把精确的 `{ providerId, model, task, capability }` 身份随每次已接纳
 的媒体操作持久化。复用同一个幂等任务重试时，不能更换这些事实。
 
 ## 模型故障转移队列
@@ -171,5 +171,5 @@ AutoWork 位于更上一层：它负责让带标签的需求队列继续认领�
   `crates/backend/nomifun-app/src/router/model_failover.rs`
 - IDMM 策略：
   `crates/backend/nomifun-idmm/src/policy.rs`
-- 创意工坊模型目录：
+- 创作模型目录：
   `ui/src/renderer/pages/creativeStudio/models/catalog.ts`

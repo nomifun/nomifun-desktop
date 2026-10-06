@@ -45,7 +45,7 @@ docs/
 ```
 
 Current top-level user surfaces include conversations, terminals, extensible
-model management, Creative Studio, presets, MCP, open capabilities,
+model management, Creation, presets, MCP, open capabilities,
 requirements/AutoWork, scheduled tasks, companions, knowledge, and
 feature-gated computer/browser automation. The frontend source of truth is
 `ui/src/renderer/components/layout/Router.tsx`.

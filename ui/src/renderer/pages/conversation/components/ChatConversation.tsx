@@ -192,12 +192,10 @@ const NomiConversationPanel: React.FC<{
   const frozenAgentSelection = useMemo<GuidAgentSelection>(() =>
     officialTemplateKey
       ? { kind: 'template', templateKey: officialTemplateKey }
-      : creation.draft.presetId === conversation.preset_id && creation.draft.selectedAgent
-      ? creation.draft.selectedAgent
       : conversation.preset_id
       ? { kind: 'preset', presetId: conversation.preset_id }
       : { kind: 'template', templateKey: 'chat.minimal' },
-    [conversation.preset_id, creation.draft.presetId, creation.draft.selectedAgent, officialTemplateKey],
+    [conversation.preset_id, officialTemplateKey],
   );
   const { t } = useTranslation();
   const [modelSwitching, setModelSwitching] = useState(false);
@@ -385,9 +383,7 @@ const NomiConversationPanel: React.FC<{
     if (!frozenPresetId) throw new Error(t('conversation.chat.frozenAgentUnavailable'));
     return frozenPresetId;
   }, [frozenPresetId, t]);
-  const frozenCreativeAgent = frozenAgentSelection.kind === 'template'
-    && frozenAgentSelection.templateKey === 'creative-studio.default'
-    && creation.draft.presetId === frozenPresetId;
+  const frozenCreativeAgent = officialTemplateKey === 'creative-studio.default';
   const selectCreationMode = (mode: CreationMode) => {
     if (frozenCreativeAgent) {
       creation.setMode(mode);
@@ -404,8 +400,7 @@ const NomiConversationPanel: React.FC<{
   const exitCreation = () => creation.setMode(null);
   const currentAgentLabel = officialTemplateKey
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[officialTemplateKey]}.name`)
-    : (creation.draft.presetId === conversation.preset_id ? creation.draft.agentLabel : undefined)
-      ?? presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent';
+    : presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent';
   const agentSelectorNode = (
     <GuidAgentSelector
       presets={executableAgentPresets}

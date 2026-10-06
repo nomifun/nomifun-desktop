@@ -1,4 +1,6 @@
 {
+  "agentUnavailable": "$t(agentSettings.template.creativeStudio.default.name) Agent 尚未加载，请重试",
+  "resourcesUnavailable": "$t(agentSettings.template.creativeStudio.default.name)所需资源尚未就绪，请刷新后重试",
   "mode": { "chat": "日常对话", "image": "图像创作", "video": "视频创作", "music": "音乐创作" },
   "scene": {
     "trigger": "使用场景：{{scene}}，展开全部场景",
