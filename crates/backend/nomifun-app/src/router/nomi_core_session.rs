@@ -1564,67 +1564,18 @@ impl NomiCoreSessionOwner {
                 message_id: source_message_id,
             });
         }
-        let terminal_payload = receipt
-            .terminal_event
-            .as_ref()
-            .and_then(|event| match &event.payload {
-                nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) => {
-                    Some(&payload.0)
-                }
-                _ => None,
-            });
-        let projections = self
-            .canonical
-            .store()
-            .messages_after(session_id, 0)
-            .await
-            .map_err(agent_session_store_error)?;
-        let result_text = projections
-            .iter()
-            .filter(|message| {
-                message.presentation_intent == "message"
-                    && message.first_seq > started.seq
-                    && message
-                        .projection
-                        .get("correlation_id")
-                        .and_then(Value::as_str)
-                        != Some(source_message_id.as_str())
-            })
-            .max_by_key(|message| message.last_seq)
-            .and_then(|message| message.projection.get("content"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let (result_ok, result_error, result_error_code, retryable) = match receipt.status {
-            nomifun_agent_session::TurnReceiptStatus::Completed => {
-                (Some(true), None, None, Some(false))
-            }
-            nomifun_agent_session::TurnReceiptStatus::Failed => (
-                Some(false),
-                terminal_payload
-                    .and_then(|payload| payload.get("message"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                Some("turn_failed".to_owned()),
-                Some(true),
-            ),
-            nomifun_agent_session::TurnReceiptStatus::Cancelled => (
-                Some(false),
-                Some("Turn cancelled".to_owned()),
-                Some("cancelled".to_owned()),
-                Some(false),
-            ),
-            nomifun_agent_session::TurnReceiptStatus::NotFound
-            | nomifun_agent_session::TurnReceiptStatus::Running => unreachable!(),
-        };
+        let facts = self.canonical.store().turn_output_facts(session_id, operation_id)
+            .await.map_err(agent_session_store_error)?;
+        let delivery = nomifun_agent_execution::canonical_turn_delivery(&facts, &receipt, replayed)?;
         Ok(PublicTurnDeliveryState::Completed(IdempotentMessageDelivery {
-            message_id: source_message_id,
-            replayed,
-            completed: true,
-            result_ok,
-            result_text,
-            result_error,
-            result_error_code,
-            result_error_retryable: retryable,
+            message_id: delivery.message_id,
+            replayed: delivery.replayed,
+            completed: delivery.completed,
+            result_ok: delivery.result_ok,
+            result_text: delivery.result_text,
+            result_error: delivery.result_error,
+            result_error_code: delivery.result_error_code,
+            result_error_retryable: delivery.result_error_retryable,
         }))
     }
 
@@ -2160,6 +2111,8 @@ impl NomiCoreSessionOwner {
                 "AgentExecution lease generation is no longer authoritative".to_owned(),
             ));
         }
+        // Step revision and Attempt identity fence the invocation. Outbox
+        // enqueue/ack may advance only the Attempt's metadata CAS revision.
         let exact: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) \
              FROM agent_execution_steps step \
@@ -2172,7 +2125,7 @@ impl NomiCoreSessionOwner {
              WHERE step.execution_id = ? AND step.step_id = ? \
                AND step.version = ? AND step.status = 'running' \
                AND step.superseded_in_revision IS NULL \
-               AND attempt.attempt_id = ? AND attempt.version = ? \
+               AND attempt.attempt_id = ? AND attempt.version >= ? \
                AND attempt.status = 'running' \
                AND link.conversation_id = ? \
                AND link.relation IN ('attempt', 'automation') AND link.active = 1 \
@@ -2202,11 +2155,9 @@ impl NomiCoreSessionOwner {
         Ok(())
     }
 
-    /// Materialize the retiring Conversation-shaped consumer projection from
-    /// a Store-only canonical AgentSession. `None` means there is no canonical
-    /// row and permits an explicit legacy fallback; every other canonical
-    /// state (foreign owner, deleting/tombstoned row, invalid saved artifacts)
-    /// fails closed.
+    /// Materialize the Conversation consumer projection from the canonical
+    /// AgentSession. `None` means there is no canonical row; foreign ownership,
+    /// deletion and invalid saved artifacts fail closed.
     pub(crate) async fn canonical_conversation_projection(
         &self,
         owner_id: &str,
@@ -2457,27 +2408,6 @@ impl NomiCoreSessionOwner {
         idempotency_key: &str,
         reason: nomifun_common::AgentKillReason,
     ) -> Result<AgentMutationReceipt, AppError> {
-        let head = self
-            .canonical
-            .store()
-            .head(session_id)
-            .await
-            .map_err(agent_session_store_error)?;
-        let active_turn_id = head
-            .active_turn_id
-            .ok_or_else(|| AppError::Conflict("AgentSession has no active turn".into()))?;
-        let generation = self
-            .canonical
-            .store()
-            .read_turn_receipt(
-                session_id,
-                &OperationId::from(active_turn_id),
-            )
-            .await
-            .map_err(agent_session_store_error)?
-            .started_event
-            .map(|event| event.seq)
-            .unwrap_or(head.last_seq);
         let receipt = self.canonical
             .cancel(
                 &PrincipalRef {
@@ -2488,15 +2418,115 @@ impl NomiCoreSessionOwner {
                 idempotency_key,
             )
             .await?;
-        if let Some(runtime) = self.runtime_sessions.get_runtime(session_id.as_ref()) {
-            runtime.cancel().await?;
-        }
+        self.cancel_receipted_runtime_turn(session_id, &receipt, reason).await?;
+        Ok(receipt)
+    }
+
+    async fn cancel_exact_turn(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+        target_operation_id: &OperationId,
+        reason: nomifun_common::AgentKillReason,
+    ) -> Result<AgentMutationReceipt, AppError> {
+        let receipt = self.canonical.cancel_exact_turn(
+            &PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() },
+            session_id, idempotency_key, target_operation_id,
+        ).await?;
+        self.cancel_receipted_runtime_turn(session_id, &receipt, reason).await?;
+        Ok(receipt)
+    }
+
+    async fn cancel_receipted_runtime_turn(
+        &self,
+        session_id: &AgentSessionId,
+        receipt: &AgentMutationReceipt,
+        reason: nomifun_common::AgentKillReason,
+    ) -> Result<(), AppError> {
+        // The mutation receipt fixes the cancelled Turn, including replays.
+        // Native resume can advance that Turn's generation beyond its original
+        // start sequence; resolve the exact generation from canonical storage.
+        let generation = self.canonical.store().native_execution_generation(
+            session_id, &receipt.target_operation_id,
+        ).await.map_err(agent_session_store_error)?;
         self.runtime_sessions.cancel_runtime_turn(
             session_id.as_ref(),
             generation,
             Some(reason),
         )?;
-        Ok(receipt)
+        Ok(())
+    }
+
+    async fn queue_receipted_steering(
+        &self,
+        session_id: &AgentSessionId,
+        receipt: &AgentMutationReceipt,
+    ) -> Result<(), AppError> {
+        let turn = self.canonical.store().read_turn_receipt(session_id, &receipt.target_operation_id)
+            .await.map_err(agent_session_store_error)?;
+        if matches!(turn.status, nomifun_agent_session::TurnReceiptStatus::Completed
+            | nomifun_agent_session::TurnReceiptStatus::Failed | nomifun_agent_session::TurnReceiptStatus::Cancelled)
+            && turn.terminal_event.is_some() {
+            // A durable steering command for a closed target has expired. Its
+            // original canonical fact is the acknowledgement, never a new input
+            // for whichever Turn happens to be active now.
+            return Ok(());
+        }
+        if turn.status != nomifun_agent_session::TurnReceiptStatus::Running || turn.terminal_event.is_some() {
+            return Err(AppError::Conflict("steering target has no active canonical Turn receipt".into()));
+        }
+        let started = turn.started_event.ok_or_else(|| AppError::Conflict("steering target has no start fact".into()))?;
+        let root = match &started.payload {
+            nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) => payload.0.get("source_message_id")
+                .and_then(Value::as_str).map(str::to_owned),
+            _ => None,
+        }.ok_or_else(|| AppError::Conflict("steering target has no source message".into()))?;
+        let facts = self.canonical.store().turn_output_facts(session_id, &receipt.target_operation_id)
+            .await.map_err(agent_session_store_error)?;
+        if facts.head.active_turn_id.as_deref() != Some(receipt.target_operation_id.as_ref()) {
+            if facts.events.iter().any(|event| event.correlation_id.as_ref() == receipt.target_operation_id.as_ref()
+                && matches!(event.kind.0.as_str(), "turn/completed" | "turn/failed" | "turn/cancelled")) {
+                return Ok(());
+            }
+            return Err(AppError::Conflict("steering target no longer owns the canonical active Turn".into()));
+        }
+        let steering = facts.events.iter().find(|event| event.event_id == receipt.event_id
+            && event.kind.0 == "turn/steer-accepted" && event.correlation_id.as_ref() == receipt.target_operation_id.as_ref())
+            .ok_or_else(|| AppError::Conflict("steering delivery has no exact canonical admission".into()))?;
+        let payload = facts.event_payloads.get(steering.event_id.as_ref())
+            .ok_or_else(|| AppError::Conflict("steering admission has no canonical payload".into()))?;
+        if payload.get("target_operation_id").and_then(Value::as_str) != Some(receipt.target_operation_id.as_ref()) {
+            return Err(AppError::Conflict("steering admission target differs from its receipt".into()));
+        }
+        // Recover original delivery data on every attempt, including a replay
+        // after canonical commit but before the native queue acknowledgement.
+        let input = payload.get("input").ok_or_else(|| AppError::Conflict("steering admission has no input".into()))?;
+        let text = input.get("content").and_then(Value::as_str)
+            .ok_or_else(|| AppError::Conflict("steering input has no text".into()))?.to_owned();
+        let files = super::runtime_attachments::references(input)?;
+        let inject_skills = super::runtime_attachments::selected_skills(input)?;
+        let generation = self.canonical.store().native_execution_generation(session_id, &receipt.target_operation_id)
+            .await.map_err(agent_session_store_error)?;
+        if self.runtime_sessions.active_turn_generation(session_id.as_ref())
+            .is_some_and(|current| current != generation) {
+            return Err(AppError::Conflict("steering target differs from the exact Runtime generation".into()));
+        }
+        let runtime = self.runtime_sessions.get_runtime(session_id.as_ref())
+            .ok_or_else(|| AppError::Conflict("steering requires the target Runtime".into()))?;
+        let queued = runtime.steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
+            receipt_operation_id: receipt.event_id.as_ref().to_owned(), wire_turn_id: root, turn_generation: generation,
+            text, files, inject_skills,
+        }).await?;
+        if queued { return Ok(()); }
+        let current = self.canonical.store().read_turn_receipt(session_id, &receipt.target_operation_id)
+            .await.map_err(agent_session_store_error)?;
+        if current.terminal_event.is_some() && matches!(current.status,
+            nomifun_agent_session::TurnReceiptStatus::Completed | nomifun_agent_session::TurnReceiptStatus::Failed
+                | nomifun_agent_session::TurnReceiptStatus::Cancelled) {
+            return Ok(());
+        }
+        Err(AppError::Conflict("the target Runtime closed steering before delivery".into()))
     }
 
 }
@@ -4319,19 +4349,65 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         })
     }
 
-    async fn list_messages(
+    async fn read_turn_output(
         &self,
         owner_id: &str,
         conversation_id: &str,
-        query: ListMessagesQuery,
-    ) -> Result<MessageListResponse, AppError> {
-        <Self as nomifun_channel::ChannelSessionPort>::list_messages(
-            self,
-            owner_id,
-            conversation_id,
-            query,
-        )
-        .await
+        operation_id: Option<&str>,
+    ) -> Result<Option<nomifun_agent_execution::AgentExecutionTurnOutput>, AppError> {
+        let session_id = AgentSessionId::from(conversation_id.to_owned());
+        // Authorize before querying either operation identity or content.
+        self.canonical.get(&PrincipalRef {
+            principal_kind: "user".into(), principal_id: owner_id.into(),
+        }, &session_id).await?;
+        let operation_id = if let Some(operation) = operation_id {
+            Self::turn_operation_id(owner_id, conversation_id, operation)
+        } else {
+            // Explicit adoption chooses the latest admitted Turn. A running
+            // latest Turn cannot make an older closed Turn adoptable.
+            let latest: Option<String> = sqlx::query_scalar(
+                "SELECT operation_id FROM agent_turns WHERE session_id = ? ORDER BY rowid DESC LIMIT 1",
+            ).bind(conversation_id).fetch_optional(&self.pool).await
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+            let Some(latest) = latest else { return Ok(None); };
+            OperationId::from(latest)
+        };
+        let receipt = self.canonical.store().read_turn_receipt(&session_id, &operation_id)
+            .await.map_err(agent_session_store_error)?;
+        if receipt.status == nomifun_agent_session::TurnReceiptStatus::NotFound { return Ok(None); }
+        let facts = self.canonical.store().turn_output_facts(&session_id, &operation_id)
+            .await.map_err(agent_session_store_error)?;
+        let mut delivery = nomifun_agent_execution::canonical_turn_delivery(&facts, &receipt, true)?;
+        if !delivery.completed {
+            delivery.paused_reason = self.canonical.store().native_pause_state(&session_id, &operation_id)
+                .await.map_err(agent_session_store_error)?.map(|pause| pause.reason);
+        }
+        let (output_files, integrity_ok) = if delivery.completed {
+            let workspace = frozen_workspace_root(
+                &self.managed_workspace_root, owner_id, &session_id, &facts.session.agent_binding,
+            )?;
+            // Hashing may read substantial output bytes; keep it off the
+            // Runtime's async owner thread. Facts and paths remain read-only.
+            let output_facts = facts;
+            let output_receipt = receipt.clone();
+            match tokio::task::spawn_blocking(move || {
+                nomifun_agent_execution::canonical_turn_output_files(
+                    &output_facts, &output_receipt, workspace.as_deref().map(std::path::Path::new),
+                )
+            }).await.map_err(|error| AppError::Internal(format!("verify canonical Turn output: {error}")))? {
+                Ok(files) => (files, true),
+                Err(error) => {
+                    tracing::warn!(%error, %conversation_id, operation_id = %operation_id.as_ref(),
+                        "canonical Turn output verification failed; automatic replay is disabled");
+                    (Vec::new(), false)
+                }
+            }
+        } else { (Vec::new(), true) };
+        Ok(Some(nomifun_agent_execution::AgentExecutionTurnOutput {
+            canonical_operation_id: operation_id.as_ref().to_owned(),
+            terminal_event_id: receipt.terminal_event.as_ref().map(|event| event.event_id.as_ref().to_owned()),
+            delivery, output_files, integrity_ok,
+        }))
     }
 
     async fn get(
@@ -4368,6 +4444,19 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         self.cancel_session(owner_id, conversation_id).await
     }
 
+    async fn cancel_turn_for_execution(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        cancellation_operation_id: &str,
+        target_operation_id: &str,
+    ) -> Result<(), AppError> {
+        self.cancel_exact_turn(
+            owner_id, &AgentSessionId::from(conversation_id.to_owned()), cancellation_operation_id,
+            &OperationId::from(target_operation_id.to_owned()), nomifun_common::AgentKillReason::UserCancelled,
+        ).await.map(|_| ())
+    }
+
     async fn steer_turn(
         &self,
         owner_id: &str,
@@ -4388,46 +4477,24 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 canonical_turn_input(&request),
             )
             .await?;
-        if !receipt.duplicate {
-            let turn = self
-                .canonical
-                .store()
-                .read_turn_receipt(&session_id, &receipt.target_operation_id)
-                .await
-                .map_err(agent_session_store_error)?;
-            let started = turn.started_event.ok_or_else(|| AppError::Conflict(
-                "AgentExecution steer has no active Turn start".to_owned(),
-            ))?;
-            let root = match &started.payload {
-                nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) => payload
-                    .0
-                    .get("source_message_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                _ => None,
-            }
-            .ok_or_else(|| AppError::Conflict(
-                "AgentExecution steer has no source message".to_owned(),
-            ))?;
-            let runtime = self.runtime_sessions.get_runtime(conversation_id).ok_or_else(|| {
-                AppError::Conflict("AgentExecution Runtime is not active".to_owned())
-            })?;
-            let queued = runtime
-                .steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
-                    receipt_operation_id: receipt.event_id.as_ref().to_owned(),
-                    wire_turn_id: root,
-                    turn_generation: self.canonical.store().native_execution_generation(&session_id, &receipt.target_operation_id).await.map_err(agent_session_store_error)?,
-                    text: request.content,
-                    files: request.files,
-                    inject_skills: request.inject_skills,
-                })
-                .await?;
-            if !queued {
-                return Err(AppError::Conflict(
-                    "AgentExecution Runtime closed steering before delivery".to_owned(),
-                ));
-            }
-        }
+        self.queue_receipted_steering(&session_id, &receipt).await?;
+        Ok(receipt.event_id.as_ref().to_owned())
+    }
+
+    async fn steer_turn_for_execution(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        target_operation_id: &str,
+        request: SendMessageRequest,
+    ) -> Result<String, AppError> {
+        let session_id = AgentSessionId::from(conversation_id.to_owned());
+        let receipt = self.canonical.steer_exact_turn(
+            &PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() },
+            &session_id, operation_id, &OperationId::from(target_operation_id.to_owned()), canonical_turn_input(&request),
+        ).await?;
+        self.queue_receipted_steering(&session_id, &receipt).await?;
         Ok(receipt.event_id.as_ref().to_owned())
     }
 
@@ -5621,6 +5688,79 @@ mod session_boundary_tests {
     const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
 
+    #[tokio::test]
+    async fn execution_admission_keeps_invocation_authority_across_metadata_revisions() {
+        use tower::ServiceExt;
+        const TRUST: &str = "execution-authority-regression";
+        async fn post(router: &axum::Router, path: &str, body: serde_json::Value) -> serde_json::Value {
+            let response = router.clone().oneshot(axum::http::Request::builder().method("POST").uri(path)
+                .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(
+                response.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+            assert!(status.is_success(), "{path}: {status}: {body}");
+            body["data"].clone()
+        }
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::AppConfig {
+            data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+            auth_policy: nomifun_auth::AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
+        let services = crate::services::AppServices::from_config(database, &config).await.unwrap();
+        let (states, _components) = super::super::state::try_build_module_states(&services).await.unwrap();
+        let owner = states.nomi_core_agent_api.session_owner.clone();
+        let router = super::super::create_router_with_states(&services, states);
+        let provider = post(&router, "/api/providers", json!({
+            "platform":"custom","name":"authority fixture","base_url":"http://127.0.0.1:9/v1",
+            "auth_scheme":"bearer","credentials":{"api_keys":["test-only"]},"enabled":true,
+            "initial_model":{"model":"authority-fixture","enabled":true,"capabilities":[{
+                "task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default"
+            }]}
+        })).await;
+        let model = json!({"provider_id":provider["provider_id"],"model":"authority-fixture"});
+        let preset = post(&router, "/api/agent-presets/from-template/chat.minimal",
+            json!({"reuse_existing":false,"display_name":"authority fixture","model":model})).await;
+        let input = json!({"preset_id":preset["preset"]["preset_id"],"model":model});
+        let child = post(&router, "/api/agent-sessions", input).await;
+        let session = child["agent_session_id"].as_str().unwrap();
+        let pool = services.database.pool();
+        // Seed only Execution's business rows; the Session and its frozen
+        // binding above come from the real owner. No model task is started.
+        let execution_id = uuid::Uuid::now_v7().to_string();
+        let step = uuid::Uuid::now_v7().to_string();
+        let attempt = uuid::Uuid::now_v7().to_string();
+        let now = super::now_ms();
+        nomifun_db::sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,lease_owner,lease_expires_at,created_at,updated_at) VALUES(?,?,'authority fixture','running','automatic','fixed','automatic','automatic','{}','authority-fixture',?,?,?)")
+            .bind(&execution_id).bind(services.authoritative_user_id.as_ref()).bind(now + 60_000)
+            .bind(now).bind(now).execute(pool).await.unwrap();
+        nomifun_db::sqlx::query("INSERT INTO agent_execution_steps(step_id,execution_id,title,spec,kind,status,version,introduced_in_revision,created_at,updated_at) VALUES(?,?,'fixture','Answer in chat','agent','running',3,1,?,?)")
+            .bind(&step).bind(&execution_id).bind(now).bind(now).execute(pool).await.unwrap();
+        nomifun_db::sqlx::query("INSERT INTO agent_execution_attempts(attempt_id,execution_id,step_id,attempt_no,status,trigger_reason,effective_config,version,created_at,updated_at) VALUES(?,?,?,0,'running','initial','{}',5,?,?)")
+            .bind(&attempt).bind(&execution_id).bind(&step).bind(now).bind(now).execute(pool).await.unwrap();
+        nomifun_db::sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,step_id,attempt_id,active,created_at,updated_at) VALUES(?,?,'attempt',?,?,1,?,?)")
+            .bind(session).bind(&execution_id).bind(&step).bind(&attempt).bind(now).bind(now).execute(pool).await.unwrap();
+        let mut authority = nomifun_db::AgentExecutionTurnAuthority {
+            execution_id, step_id: step.clone(), attempt_id: attempt,
+            expected_step_version:3, expected_attempt_version:2, lease_owner:"authority-fixture".into(),
+        };
+        let user = services.authoritative_user_id.as_ref();
+        owner.validate_agent_execution_turn_authority(user, session, &authority).await.unwrap();
+        authority.expected_attempt_version = 6;
+        assert!(owner.validate_agent_execution_turn_authority(user, session, &authority).await.is_err(),
+            "metadata revision cannot move backwards relative to captured authority");
+        authority.expected_attempt_version = 2;
+        nomifun_db::sqlx::query("UPDATE agent_execution_steps SET version=4 WHERE step_id=?")
+            .bind(&step).execute(pool).await.unwrap();
+        assert!(owner.validate_agent_execution_turn_authority(user, session, &authority).await.is_err(),
+            "a prior invocation cannot acquire a successor Step generation");
+        services.shutdown_nomi_core_host().await.unwrap();
+        services.database.close().await;
+    }
+
     #[test]
     fn kernel_configuration_refusals_keep_typed_local_attribution() {
         for refusal in [
@@ -6343,7 +6483,7 @@ mod session_boundary_tests {
                 .await
                 .unwrap(),
         );
-        assert_eq!(workspace.parent(), Some(managed_root.as_path()));
+        assert_eq!(workspace.parent(), Some(std::fs::canonicalize(&managed_root).unwrap().as_path()));
         assert!(workspace.is_dir());
         assert!(
             nomifun_file::list_workspace_level(&workspace, ".", None)
@@ -14106,65 +14246,7 @@ async fn steer_nomi_core_agent_session_turn(
             input,
         )
         .await?;
-    if !receipt.duplicate {
-        let turn_receipt = state
-            .session_owner
-            .canonical()
-            .store()
-            .read_turn_receipt(&session_id, &receipt.target_operation_id)
-            .await
-            .map_err(agent_session_store_error)?;
-        let started = turn_receipt.started_event.ok_or_else(|| {
-            NomiCoreApiError::new(
-                StatusCode::CONFLICT,
-                "AGENT_SESSION_TURN_RECEIPT_INVALID",
-                "active canonical Turn has no start fact",
-            )
-        })?;
-        let root = match &started.payload {
-            nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) => payload
-                .0
-                .get("source_message_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            NomiCoreApiError::new(
-                StatusCode::CONFLICT,
-                "AGENT_SESSION_TURN_RECEIPT_INVALID",
-                "active canonical Turn has no source message",
-            )
-        })?;
-        let runtime = state
-            .session_owner
-            .runtime_sessions
-            .get_runtime(session_id.as_ref())
-            .ok_or_else(|| {
-                NomiCoreApiError::new(
-                    StatusCode::CONFLICT,
-                    "AGENT_SESSION_RUNTIME_NOT_ACTIVE",
-                    "steering requires the active Session Runtime",
-                )
-            })?;
-        let queued = runtime
-            .steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
-                receipt_operation_id: receipt.event_id.as_ref().to_owned(),
-                wire_turn_id: root,
-                turn_generation: state.session_owner.canonical.store().native_execution_generation(&session_id, &receipt.target_operation_id).await.map_err(agent_session_store_error)?,
-                text: turn.content,
-                files: turn.files,
-                inject_skills: turn.inject_skills,
-            })
-            .await?;
-        if !queued {
-            return Err(NomiCoreApiError::new(
-                StatusCode::CONFLICT,
-                "AGENT_SESSION_STEER_NOT_QUEUED",
-                "the active Runtime closed steering before this input was queued",
-            ));
-        }
-    }
+    state.session_owner.queue_receipted_steering(&session_id, &receipt).await?;
     Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
         target_operation_id: receipt.target_operation_id.as_ref().to_owned(),

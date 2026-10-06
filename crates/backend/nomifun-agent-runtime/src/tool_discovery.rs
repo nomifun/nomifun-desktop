@@ -1,4 +1,4 @@
-//! Turn-local ToolSearch control over the host-frozen ToolPlan.
+//! Turn-local ToolSearch over the complete host-frozen ToolPlan.
 //!
 //! The policy chooses names from metadata captured by the Runtime. It cannot
 //! add tools, schemas, capabilities, or authority. Successful names only make
@@ -42,7 +42,7 @@ pub trait AgentToolDiscoveryPort: Send + Sync + std::fmt::Debug {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.to_owned(),
-        description: "Search the frozen deferred tool catalog and reveal up to five already-authorized schemas per query for later model steps. Multiple ToolSearch calls may share a batch; do not mix searches with execution or other control calls. This cannot install, select, or grant capabilities.".to_owned(),
+        description: "Search the complete frozen authorized tool catalog by tool name, exact Action ID or keyword. Matches identify tools whose schemas are already visible and reveal deferred schemas for later model steps. An already-visible tool is available now; do not treat absence from the deferred catalog as lost permission. Up to five matches per query. Multiple searches may share a batch; do not mix them with execution or other controls. This cannot install, select, or grant capabilities.".to_owned(),
         input_schema: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({
             "type": "object",
             "additionalProperties": false,
@@ -71,7 +71,9 @@ pub(crate) fn definitions(
 }
 
 pub(crate) fn catalog(plan: &AgentToolPlan, activated: &BTreeSet<String>) -> Option<String> {
-    let aliases = candidates(plan, activated).into_iter()
+    let aliases = candidates(plan).into_iter()
+        .filter(|candidate| plan.binding(&candidate.name).is_some_and(|binding| binding.definition.deferred)
+            && !activated.contains(&candidate.name))
         .flat_map(|candidate| candidate.aliases)
         .collect::<BTreeSet<_>>();
     (!aliases.is_empty()).then(|| format!(
@@ -80,13 +82,9 @@ pub(crate) fn catalog(plan: &AgentToolPlan, activated: &BTreeSet<String>) -> Opt
     ))
 }
 
-fn candidates(
-    plan: &AgentToolPlan,
-    activated: &BTreeSet<String>,
-) -> Vec<AgentToolDiscoveryCandidate> {
+fn candidates(plan: &AgentToolPlan) -> Vec<AgentToolDiscoveryCandidate> {
     plan.model_definitions()
         .into_iter()
-        .filter(|definition| definition.deferred && !activated.contains(&definition.name))
         .filter_map(|definition| {
             let binding = plan.binding(&definition.name)?;
             let mut aliases = vec![
@@ -135,7 +133,10 @@ pub(crate) async fn execute(
             true,
         ));
     }
-    let candidates = candidates(plan, activated);
+    // Already-visible tools remain searchable. Returning "No deferred tools"
+    // for an exact workspace tool name made models infer that they had no file
+    // capability, although its schema was present in the same request.
+    let candidates = candidates(plan);
     let selected = match port
         .select(
             causality,
@@ -189,16 +190,20 @@ pub(crate) async fn execute(
                 true,
             ));
         }
-        additions.push(name);
+        let already_available = plan.binding(&name).is_some_and(|binding| !binding.definition.deferred)
+            || activated.contains(&name);
+        if !already_available { additions.push(name); }
         projected.push(serde_json::json!({
             "name": candidate.name,
             "description": candidate.description,
-            "activated": true,
+            "activated": !already_available,
+            "already_available": already_available,
+            "schema_visibility": if already_available { "already_visible" } else { "visible_on_next_model_step" },
         }));
     }
     activated.extend(additions);
     let output = if projected.is_empty() {
-        format!("No deferred tools matching \"{query}\" found.")
+        format!("No authorized tool matching \"{query}\" found in the frozen Session catalog. Use an exact advertised tool name or Action ID. Already-visible tools remain callable without ToolSearch; this result does not remove their availability.")
     } else {
         serde_json::to_string_pretty(&projected)
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?
@@ -301,10 +306,10 @@ mod tests {
             assert_eq!(limit, MAX_MATCHES);
             assert_eq!(
                 candidates.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
-                ["deferred_alpha", "deferred_beta"]
+                ["always_visible", "deferred_alpha", "deferred_beta"]
             );
             assert_eq!(
-                candidates[0].aliases,
+                candidates[1].aliases,
                 ["fixture.deferred_alpha", "fixture/deferred_alpha"]
             );
             Ok(self.selected.clone())
@@ -379,6 +384,36 @@ mod tests {
             .unwrap();
             assert!(result.is_error);
             assert!(activated.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn already_visible_and_activated_tools_remain_searchable_without_false_unavailability() {
+        #[derive(Debug)]
+        struct ExactPort;
+        #[async_trait]
+        impl AgentToolDiscoveryPort for ExactPort {
+            async fn select(&self, _: &ChatCausality, _: u64, query: &str,
+                candidates: &[AgentToolDiscoveryCandidate], _: usize, _: CancellationToken,
+            ) -> Result<Vec<String>, AgentEngineError> {
+                assert!(candidates.iter().any(|candidate| candidate.name == query));
+                Ok(vec![query.to_owned()])
+            }
+        }
+        let plan = plan();
+        let mut activated = BTreeSet::from(["deferred_alpha".to_owned()]);
+        for name in ["always_visible", "deferred_alpha"] {
+            let before = activated.clone();
+            let result = execute(&call(name), &plan, &mut activated, &ExactPort,
+                &causality(), 7, CancellationToken::new()).await.unwrap();
+            let output: serde_json::Value = serde_json::from_str(&result.output_text()).unwrap();
+            assert!(!result.is_error);
+            assert_eq!(output[0]["name"], name);
+            assert_eq!(output[0]["already_available"], true);
+            assert_eq!(output[0]["activated"], false);
+            assert_eq!(output[0]["schema_visibility"], "already_visible");
+            assert_eq!(activated, before);
+            assert!(definitions(&plan, &activated).iter().any(|definition| definition.name == name));
         }
     }
 }

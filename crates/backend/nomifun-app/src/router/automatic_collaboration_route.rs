@@ -143,7 +143,8 @@ fn has_execution_verb(normalized: &str, compacted: &str) -> bool {
 }
 
 fn classify(input: &str) -> Option<ExplicitCollaborationIntent> {
-    let normalized = input.trim().to_lowercase();
+    let request = super::automatic_turn_intent::request_text(input)?;
+    let normalized = request.trim().to_lowercase();
     let compacted = compact(&normalized);
     if compacted.is_empty()
         || is_directly_negated(&compacted)
@@ -350,6 +351,13 @@ mod tests {
             assert_eq!(routed.tool_plan.len(), 2, "{input}");
             assert_eq!(routed.tool_choice, ChatToolChoice::Auto);
         }
+        let background = serde_json::json!({
+            "task_brief":"Use subagents to build the whole product",
+            "step_spec":"Implement the HTML game",
+        }).to_string();
+        let routed = route(&background, DelegationPolicy::Automatic, plan());
+        assert!(!routed.forced);
+        assert_eq!(routed.tool_plan.len(), 2);
     }
 
     #[test]

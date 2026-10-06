@@ -83,6 +83,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-api-types/src/agent_platform.rs"),
                     include_str!("../../../nomifun-api-types/src/execution_constraints.rs"),
                     include_str!("../../../nomifun-agent-execution/src/attempt_runner.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/canonical_output.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context_lifecycle.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/output_limit.rs"),
@@ -270,6 +271,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_computer_media.rs"),
                     include_str!("engine_creation_tools.rs"),
                     include_str!("automatic_creation_route.rs"),
+                    include_str!("automatic_turn_intent.rs"),
                     include_str!("workspace_file_read.rs"),
                     include_str!("engine_history.rs")
                 )
@@ -921,11 +923,10 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             turn_plan,
         );
         let mut turn_plan = collaboration.tool_plan;
-        let mut tool_choice = collaboration.tool_choice;
+        let tool_choice = collaboration.tool_choice;
         instructions.extend(collaboration.instructions);
-        // An explicit collaboration request owns this turn. Otherwise retain
-        // the existing high-confidence media route as another narrowing of
-        // the already-admitted immutable ToolPlan.
+        // Media intent is a presentation hint. Keep the full authorized
+        // surface: text classification must not erase workspace or other tools.
         if !collaboration.forced {
             let automatic_creation_route =
                 super::automatic_creation_route::classify(&message.content).filter(|route| {
@@ -937,12 +938,11 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                         .is_some()
                 });
             if let Some(route) = automatic_creation_route.as_ref() {
-                turn_plan = turn_plan.for_action(
-                    super::engine_creation_tools::CREATION_CAPABILITY_ID,
-                    route.action_id(),
-                );
-                instructions.push(route.instruction().to_owned());
-                tool_choice = ChatToolChoice::Auto;
+                let tool_name = turn_plan.model_name_for_action(
+                    super::engine_creation_tools::CREATION_CAPABILITY_ID, route.action_id(),
+                ).expect("route was filtered against the frozen tool plan").to_owned();
+                turn_plan = route.expose(&turn_plan)?;
+                instructions.push(route.instruction(&tool_name));
             }
         }
         let request = ChatModelRequest {

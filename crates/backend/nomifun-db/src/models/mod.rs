@@ -1,5 +1,6 @@
 mod agent_metadata;
 mod agent_execution;
+mod agent_execution_effect;
 mod agent_execution_template;
 mod attachment;
 mod channel;
@@ -30,6 +31,7 @@ mod remote_binding;
 
 pub use agent_metadata::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
 pub use agent_execution::*;
+pub use agent_execution_effect::*;
 pub use agent_execution_template::*;
 pub use attachment::AttachmentRow;
 pub use channel::{

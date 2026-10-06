@@ -3731,3 +3731,47 @@ async fn restart_quarantines_unfinished_resource_cleanup_before_retry() {
     assert!(blockers.resource_cleanup_pending.is_empty());
     assert_eq!(blockers.resource_cleanup_uncertainties.len(), 1);
 }
+
+#[tokio::test]
+async fn turn_output_facts_resolve_payloads_only_inside_the_exact_terminal_boundary() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, started) = create_turn(&store, "bounded-output", "turn-output-one").await;
+    let value = json!({"content":"exact output","turn_id":"root-one"});
+    let bytes = canonical_json_bytes(&value).unwrap();
+    let payload = SessionPayloadRecord {
+        payload_id: ArtifactId::from("bounded-output-payload"),
+        agent_session_id: session.agent_session_id.clone(), media_type: "application/json".into(),
+        byte_len: bytes.len() as u64, digest: digest_bytes(&bytes),
+        body: SessionPayloadBody::Json(StrictJsonValue(value.clone())),
+    };
+    let mut part = append(&session.agent_session_id, "bounded-output-part", "runtime-supervisor", "bounded-output-part",
+        "message/content-part", "assistant-one", Some(started.clone()), value.clone());
+    part.semantic_event.payload = SessionEventPayloadRef::Stored(payload.payload_id.clone());
+    store.append_event_with_payload(&part, Some(&payload)).await.unwrap();
+    let completion = append(&session.agent_session_id, "bounded-output-complete", "runtime-supervisor", "bounded-output-complete",
+        "message/completed", "assistant-one", Some(part.event_id.clone()),
+        json!({"part_count":1,"content_digest":digest_bytes(b"exact output")}));
+    store.append_event(&completion).await.unwrap();
+    let terminal = append(&session.agent_session_id, "bounded-output-terminal", "runtime-supervisor", "bounded-output-terminal",
+        "turn/completed", "turn-output-one", Some(completion.event_id), json!({}));
+    store.append_event(&terminal).await.unwrap();
+    let second = append(&session.agent_session_id, "bounded-output-second", "session-api", "bounded-output-second",
+        "turn/started", "turn-output-two", Some(terminal.event_id.clone()), json!({"source_message_id":"root-two"}));
+    store.append_event(&second).await.unwrap();
+    let later = append(&session.agent_session_id, "bounded-output-later", "runtime-supervisor", "bounded-output-later",
+        "message/content-part", "assistant-two", Some(second.event_id.clone()), json!({"content":"later output","turn_id":"root-two"}));
+    store.append_event(&later).await.unwrap();
+    let exact = store.turn_output_facts(&session.agent_session_id, &OperationId::from("turn-output-one")).await.unwrap();
+    assert_eq!(exact.events.first().unwrap().event_id, started);
+    assert_eq!(exact.events.last().unwrap().event_id, terminal.event_id);
+    assert_eq!(exact.event_payloads[part.event_id.as_ref()], value);
+    assert_eq!(exact.events.len(), 4);
+    assert!(!exact.event_payloads.contains_key(later.event_id.as_ref()));
+    assert!(exact.fork_context.is_none());
+    let running = store.turn_output_facts(&session.agent_session_id, &OperationId::from("turn-output-two")).await.unwrap();
+    assert_eq!(running.events.first().unwrap().event_id, second.event_id);
+    assert_eq!(running.events.last().unwrap().event_id, later.event_id);
+    assert_eq!(running.events.len(), 2);
+    assert!(matches!(store.turn_output_facts(&session.agent_session_id, &OperationId::from("missing-turn")).await,
+        Err(SessionStoreError::NotFound(_))));
+}

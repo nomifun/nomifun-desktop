@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 nomifun-common.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-agent-session.workspace = true
+nomifun-agent-runtime.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 nomifun-auth.workspace = true

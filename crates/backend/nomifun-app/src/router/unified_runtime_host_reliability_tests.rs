@@ -34,6 +34,7 @@ struct Fixture {
     runtime: nomifun_ai_agent::AgentRuntimeHandle,
     services: crate::services::AppServices,
     host: Arc<ConversationRuntimeHost>,
+    owner: Arc<super::super::nomi_core_session::NomiCoreSessionOwner>,
     message: SendMessageData,
     database_path: PathBuf,
 }
@@ -100,7 +101,7 @@ impl Fixture {
             workspace_binding_lease: Some(nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(
                 std::path::Path::new(&workspace), id.to_owned()).unwrap()),
         };
-        let runtime = services.official_runtime.factory()(options).await.unwrap();
+        let runtime = services.agent_runtime_sessions.get_or_create_runtime(id, options).await.unwrap();
         let host = HOSTS.get().unwrap().lock().unwrap().remove(id).unwrap().upgrade().unwrap();
         // Accept the durable root without starting a model task. This is the
         // cancellation-before-first-driver-poll boundary, not a UI scenario.
@@ -118,10 +119,17 @@ impl Fixture {
         let message = SendMessageData { content:"cancel before model dispatch".into(), msg_id:"cleanup-wire".into(),
             source_message_id:Some(root.as_ref().into()), files, inject_skills, origin };
         println!("CLEANUP_FIXTURE scenario={scenario} session={id} operation=cleanup-retry-turn database={}", database_path.display());
-        Self { _directory:directory, _router:router, runtime, services, host, message, database_path }
+        Self { _directory:directory, _router:router, runtime, services, host, owner, message, database_path }
     }
 
     fn pool(&self) -> &nomifun_db::SqlitePool { self.services.database.pool() }
+
+    fn registry_options(&self) -> AgentRuntimeBuildOptions {
+        let mut options = self.host.options.clone();
+        options.workspace_binding_lease = Some(nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(
+            std::path::Path::new(&options.workspace), options.conversation_id.clone()).unwrap());
+        options
+    }
 
     async fn state(&self) -> String {
         sqlx::query_scalar("SELECT state FROM agent_turns WHERE session_id=?")
@@ -179,6 +187,93 @@ async fn admitted_workspace_context_reaches_the_formal_turn_without_a_probe() {
 #[tokio::test]
 async fn cancellation_receipt_identity_rejects_altered_empty_delivery() {
     cancellation_identity_scenario(false).await;
+}
+
+#[tokio::test]
+async fn cancellation_replay_and_delayed_stop_preserve_the_real_successor_runtime() {
+    use nomifun_agent_execution::AgentExecutionSessionPort;
+    let fixture = Fixture::new("cancel-target-isolation").await;
+    let session = AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let cancel_path = format!("/api/agent-sessions/{}/turns/cancel", session.as_ref());
+    let first = api(&fixture._router, &cancel_path, json!({"idempotency_key":"stable-stop-effect"})).await;
+    assert_eq!(first["target_operation_id"], "cleanup-retry-turn");
+    let store = fixture.owner.canonical().store();
+    let (_, admitted) = store.start_turn(&session, "session_api".into(), "successor-admission".into(),
+        "successor-operation".into(), StrictJsonValue(json!({"content":"a later user turn", "admission":{
+            "route_identity":fixture.host.route,"resolved_snapshot_ref":fixture.host.snapshot_ref,
+        }}))).await.unwrap();
+    let successor_generation = store.native_execution_generation(&session, &"successor-operation".into()).await.unwrap();
+    assert_eq!(successor_generation, admitted.record.as_ref().unwrap().seq);
+    let runtimes = &fixture.services.agent_runtime_sessions;
+    runtimes.get_or_create_runtime_for_turn(session.as_ref(), successor_generation,
+        CancellationToken::new(), fixture.registry_options()).await.unwrap();
+    assert_eq!(runtimes.active_turn_generation(session.as_ref()), Some(successor_generation));
+    assert!(runtimes.get_runtime(session.as_ref()).is_some());
+
+    let replay = api(&fixture._router, &cancel_path, json!({"idempotency_key":"stable-stop-effect"})).await;
+    assert_eq!(replay["target_operation_id"], "cleanup-retry-turn");
+    assert_eq!(replay["message_id"], first["message_id"]);
+    assert_eq!(replay["duplicate"], true);
+    fixture.owner.cancel_turn_for_execution(fixture.services.authoritative_user_id.as_ref(), session.as_ref(),
+        "delayed-durable-stop", "cleanup-retry-turn").await.unwrap();
+    let late_steer = fixture.owner.steer_turn_for_execution(fixture.services.authoritative_user_id.as_ref(), session.as_ref(),
+        "first-late-durable-steer", "cleanup-retry-turn", nomifun_api_types::SendMessageRequest {
+            content:"This belongs only to the cancelled original task".into(),files:vec![],inject_skills:vec![],
+            hidden:false,origin:Some("agent_execution".into()),channel_platform:None,plugin_delivery:None,
+        }).await.unwrap();
+    assert_eq!(late_steer, first["message_id"].as_str().unwrap());
+    assert_eq!(store.head(&session).await.unwrap().active_turn_id.as_deref(), Some("successor-operation"));
+    assert_eq!(runtimes.active_turn_generation(session.as_ref()), Some(successor_generation));
+    assert!(runtimes.get_runtime(session.as_ref()).is_some(), "late/replayed stop must not quarantine a successor runtime");
+    assert_eq!(store.read_turn_receipt(&session, &"successor-operation".into()).await.unwrap().status,
+        nomifun_agent_session::TurnReceiptStatus::Running);
+    let cancellations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/cancelled'")
+        .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(cancellations, 1, "late stop reuses the original terminal without manufacturing another cancellation");
+    let steering: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
+        .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(steering, 0, "first late delivery cannot add steering to the successor");
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
+    use nomifun_agent_execution::AgentExecutionSessionPort;
+    let fixture = Fixture::new("steer-delivery-gap").await;
+    let session = AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let target = OperationId::from("cleanup-retry-turn");
+    let generation = fixture.owner.canonical().store().native_execution_generation(&session, &target).await.unwrap();
+    let runtime = fixture.services.agent_runtime_sessions.get_or_create_runtime_for_turn(session.as_ref(), generation,
+        CancellationToken::new(), fixture.registry_options()).await.unwrap();
+    let host = fixture.host.clone();
+    let mut message = fixture.message.clone();
+    message.msg_id = message.source_message_id.clone().unwrap();
+    host.admit_preparation(&message, CancellationToken::new()).await.unwrap();
+    host.record_event(&message, &AgentEngineEvent::TurnStarted {
+        binding:host.engine_binding.clone(),turn_operation_id:target.clone(),
+    }).await.unwrap();
+    let request = || nomifun_api_types::SendMessageRequest {
+        content:"Original committed steering\n中文纠正必须保留".into(),files:vec![],inject_skills:vec![],hidden:false,
+        origin:Some("agent_execution".into()),channel_platform:None,plugin_delivery:None,
+    };
+    // The real canonical admission commits, then its sender disappears before
+    // calling the native queue. A retry sees duplicate=true but must deliver.
+    let receipt = fixture.owner.canonical().steer_exact_turn(&PrincipalRef {
+        principal_kind:"user".into(),principal_id:fixture.services.authoritative_user_id.to_string(),
+    }, &session, "stable-steering-effect", &target, super::super::nomi_core_session::canonical_turn_input(&request())).await.unwrap();
+    assert!(!receipt.duplicate);
+    assert!(host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids().is_empty());
+    for _ in 0..2 {
+        let delivered = fixture.owner.steer_turn_for_execution(fixture.services.authoritative_user_id.as_ref(), session.as_ref(),
+            "stable-steering-effect", target.as_ref(), request()).await.unwrap();
+        assert_eq!(delivered, receipt.event_id.as_ref());
+        assert_eq!(host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids(), vec![delivered]);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
+        .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(count, 1);
+    runtime.kill_and_wait(None).await.unwrap();
+    fixture.finish().await;
 }
 
 #[tokio::test]

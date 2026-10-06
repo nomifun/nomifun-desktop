@@ -59,13 +59,15 @@ impl ConversationEffects for ProductionConversationEffects {
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
+        target_operation_id: &str,
         text: &str,
     ) -> Result<(), AppError> {
         self.session
-            .steer_turn(
+            .steer_turn_for_execution(
                 owner_id,
                 conversation_id,
                 operation_id,
+                target_operation_id,
                 SendMessageRequest {
                     plugin_delivery: None,
                     content: text.to_owned(),
@@ -83,10 +85,11 @@ impl ConversationEffects for ProductionConversationEffects {
         &self,
         owner_id: &str,
         conversation_id: &str,
-        _operation_id: &str,
+        operation_id: &str,
+        target_operation_id: &str,
     ) -> Result<(), AppError> {
         self.session
-            .cancel_for_execution(owner_id, conversation_id)
+            .cancel_turn_for_execution(owner_id, conversation_id, operation_id, target_operation_id)
             .await
     }
     async fn report_lead(

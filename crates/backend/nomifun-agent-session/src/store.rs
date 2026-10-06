@@ -72,6 +72,13 @@ pub use native_pause::{NativePauseState, NativeResumeRequest, NativeOwnerEvidenc
 mod native_effect_reconciliation;
 pub use native_effect_reconciliation::{NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates};
 
+#[derive(Clone, Copy)]
+enum CausalityFactScope {
+    SessionHistory,
+    NativeRecovery,
+    TurnOutput,
+}
+
 fn wall_clock_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -821,6 +828,32 @@ impl AgentSessionStore {
         idempotency_key: IdempotencyKey,
         producer_id: EventProducerId,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
+        self.cancel_selected_turn(session_id, None, idempotency_key, producer_id).await
+    }
+
+    /// Cancel only the specified canonical Turn. A delayed command for a
+    /// closed Turn returns that Turn's existing terminal fact and cannot select
+    /// a successor. Selection, terminal inspection and mutation share one tx.
+    pub async fn cancel_exact_turn(
+        &self,
+        session_id: &AgentSessionId,
+        target_operation_id: &OperationId,
+        idempotency_key: IdempotencyKey,
+        producer_id: EventProducerId,
+    ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
+        if target_operation_id.as_ref().trim().is_empty() {
+            return Err(SessionStoreError::InvalidEvent("exact cancellation requires a target Turn".into()));
+        }
+        self.cancel_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id).await
+    }
+
+    async fn cancel_selected_turn(
+        &self,
+        session_id: &AgentSessionId,
+        requested_target: Option<&OperationId>,
+        idempotency_key: IdempotencyKey,
+        producer_id: EventProducerId,
+    ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
 
@@ -857,6 +890,14 @@ impl AgentSessionStore {
                 }
             };
             let ack = event_ack(&record);
+            if target.as_ref().trim().is_empty() || record.correlation_id.as_ref() != target.as_ref() {
+                return Err(SessionStoreError::InvalidEvent("cancellation replay has inconsistent target provenance".into()));
+            }
+            if requested_target.is_some_and(|requested| requested != &target) {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "cancellation replay differs from its original target Turn".into(),
+                ));
+            }
             tx.commit().await?;
             return Ok((
                 target,
@@ -870,17 +911,11 @@ impl AgentSessionStore {
             ));
         }
 
-        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        let target_operation_id = head
-            .active_turn_id
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .map(OperationId::from)
-            .ok_or_else(|| {
-                SessionStoreError::Conflict(
-                    "Remote cancellation requires an active turn".to_owned(),
-                )
-            })?;
+        let (target_operation_id, closed) = mutation_target_tx(&mut tx, session_id, requested_target).await?;
+        if let Some(closed) = closed {
+            tx.commit().await?;
+            return Ok((target_operation_id, closed));
+        }
         let turn_event = sqlx::query_as::<_, StoredEventRow>(
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                     kind, kind_version, \
@@ -933,6 +968,31 @@ impl AgentSessionStore {
         producer_id: EventProducerId,
         input: StrictJsonValue,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
+        self.steer_selected_turn(session_id, None, idempotency_key, producer_id, input).await
+    }
+
+    pub async fn steer_exact_turn(
+        &self,
+        session_id: &AgentSessionId,
+        target_operation_id: &OperationId,
+        idempotency_key: IdempotencyKey,
+        producer_id: EventProducerId,
+        input: StrictJsonValue,
+    ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
+        if target_operation_id.as_ref().trim().is_empty() {
+            return Err(SessionStoreError::InvalidEvent("exact steering requires a target Turn".into()));
+        }
+        self.steer_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, input).await
+    }
+
+    async fn steer_selected_turn(
+        &self,
+        session_id: &AgentSessionId,
+        requested_target: Option<&OperationId>,
+        idempotency_key: IdempotencyKey,
+        producer_id: EventProducerId,
+        input: StrictJsonValue,
+    ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         if let Some(existing) = event_by_producer_key_tx(
@@ -962,9 +1022,9 @@ impl AgentSessionStore {
                 }
                 SessionEventPayloadRef::Empty | SessionEventPayloadRef::Stored(_) => false,
             };
-            if !replay_matches {
+            if !replay_matches || requested_target.is_some_and(|requested| requested != &target) {
                 return Err(SessionStoreError::IdempotencyConflict(
-                    "steering idempotency key was replayed with different input".to_owned(),
+                    "steering idempotency key was replayed with different input or target".to_owned(),
                 ));
             }
             let ack = event_ack(&record);
@@ -980,17 +1040,11 @@ impl AgentSessionStore {
                 },
             ));
         }
-        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        let target_operation_id = head
-            .active_turn_id
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .map(OperationId::from)
-            .ok_or_else(|| {
-                SessionStoreError::Conflict(
-                    "steering requires an active canonical Agent Turn".to_owned(),
-                )
-            })?;
+        let (target_operation_id, closed) = mutation_target_tx(&mut tx, session_id, requested_target).await?;
+        if let Some(closed) = closed {
+            tx.commit().await?;
+            return Ok((target_operation_id, closed));
+        }
         let turn_event = sqlx::query_as::<_, StoredEventRow>(
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
                     kind, kind_version, \
@@ -2232,22 +2286,33 @@ impl AgentSessionStore {
         session_id: &AgentSessionId,
         turn_operation_id: &nomifun_agent_contracts::OperationId,
     ) -> Result<ChatCausalityFacts, SessionStoreError> {
-        self.read_chat_causality_facts(session_id, turn_operation_id, false).await
+        self.read_chat_causality_facts(session_id, turn_operation_id, CausalityFactScope::SessionHistory).await
     }
 
     /// Recovery needs the current Turn and its original input, not every
     /// completed task in this Session. Keep long-lived Sessions off the hot
     /// path's memory/CPU budget without inventing another transcript store.
     pub async fn native_recovery_facts(&self, session_id: &AgentSessionId, operation: &OperationId) -> Result<ChatCausalityFacts, SessionStoreError> {
-        self.read_chat_causality_facts(session_id, operation, true).await
+        self.read_chat_causality_facts(session_id, operation, CausalityFactScope::NativeRecovery).await
     }
 
-    async fn read_chat_causality_facts(&self, session_id: &AgentSessionId, turn_operation_id: &OperationId, current_only: bool)
+    /// A read-only snapshot bounded by one exact Turn's committed start and
+    /// first terminal event (or current head while still running). Output
+    /// consumers do not need unrelated history, fork input, or later Turns.
+    /// Payload resolution and all identity metadata share this transaction.
+    pub async fn turn_output_facts(
+        &self, session_id: &AgentSessionId, operation: &OperationId,
+    ) -> Result<ChatCausalityFacts, SessionStoreError> {
+        self.read_chat_causality_facts(session_id, operation, CausalityFactScope::TurnOutput).await
+    }
+
+    async fn read_chat_causality_facts(&self, session_id: &AgentSessionId, turn_operation_id: &OperationId, scope: CausalityFactScope)
         -> Result<ChatCausalityFacts, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         let session = require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        let rows = if current_only {
+        let rows = match scope {
+            CausalityFactScope::NativeRecovery => {
             if !matches!(head.status.as_str(), "running" | "paused") || head.active_turn_id.as_deref() != Some(turn_operation_id.as_ref()) { return Err(SessionStoreError::ExecutionFenced); }
             let rows = sqlx::query_as::<_, StoredEventRow>(
                 "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key, \
@@ -2257,7 +2322,24 @@ impl AgentSessionStore {
                 .bind(turn_operation_id.as_ref()).bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
             if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("native recovery fact budget exceeded".into())); }
             rows
-        } else { event_rows_for_session_tx(&mut tx, session_id.as_ref()).await? };
+            }
+            CausalityFactScope::TurnOutput => {
+            let rows = sqlx::query_as::<_, StoredEventRow>(
+                "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key, \
+                 e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id FROM agent_events e \
+                 JOIN agent_turns t ON t.session_id=e.session_id AND t.operation_id=? \
+                 JOIN agent_events s ON s.event_id=t.started_event_id \
+                 LEFT JOIN agent_events z ON z.event_id=t.terminal_event_id \
+                 WHERE e.session_id=? AND e.seq>=s.seq AND e.seq<=COALESCE(z.seq,?) \
+                 ORDER BY e.seq LIMIT 1000001")
+                .bind(turn_operation_id.as_ref()).bind(session_id.as_ref())
+                .bind(as_i64(head.last_seq, "head sequence")?).fetch_all(&mut *tx).await?;
+            if rows.is_empty() { return Err(SessionStoreError::NotFound(turn_operation_id.as_ref().into())); }
+            if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("Turn output fact budget exceeded".into())); }
+            rows
+            }
+            CausalityFactScope::SessionHistory => event_rows_for_session_tx(&mut tx, session_id.as_ref()).await?,
+        };
 
         let mut events = Vec::with_capacity(rows.len());
         let mut event_payloads = BTreeMap::new();
@@ -2282,7 +2364,7 @@ impl AgentSessionStore {
             event_payloads.insert(event.event_id.as_ref().to_owned(), payload);
             events.push(event);
         }
-        let fork_context = fork_context_tx(&mut tx, &session).await?;
+        let fork_context = if matches!(scope, CausalityFactScope::TurnOutput) { None } else { fork_context_tx(&mut tx, &session).await? };
         tx.commit().await?;
 
         Ok(ChatCausalityFacts {
@@ -6296,6 +6378,49 @@ async fn event_by_event_id_tx(
     .bind(event_id)
     .fetch_optional(&mut **tx)
     .await?)
+}
+
+/// Shared exact-target fence for durable cancel and steer commands. Returning
+/// an existing terminal is an absorbing no-op, never a fresh mutation fact.
+async fn mutation_target_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &AgentSessionId,
+    requested_target: Option<&OperationId>,
+) -> Result<(OperationId, Option<SessionEventAppendResult>), SessionStoreError> {
+    let head = head_by_id_tx(tx, session_id.as_ref()).await?;
+    let Some(target) = requested_target else {
+        let target = head.active_turn_id.filter(|value| !value.trim().is_empty()).map(OperationId::from)
+            .ok_or_else(|| SessionStoreError::Conflict("mutation requires an active canonical Agent Turn".into()))?;
+        return Ok((target, None));
+    };
+    let turn = sqlx::query_as::<_, StoredTurnRow>(
+        "SELECT turn_id, operation_id, state, started_event_id, terminal_event_id \
+         FROM agent_turns WHERE session_id = ? AND operation_id = ?",
+    ).bind(session_id.as_ref()).bind(target.as_ref()).fetch_optional(&mut **tx).await?
+        .ok_or_else(|| SessionStoreError::Conflict("exact mutation target Turn does not exist".into()))?;
+    if turn.turn_id != target.as_ref() || turn.operation_id != target.as_ref() {
+        return Err(SessionStoreError::InvalidSession("mutation target identity is inconsistent".into()));
+    }
+    if matches!(turn.state.as_str(), "completed" | "failed" | "cancelled" | "interrupted") {
+        let terminal = turn.terminal_event_id.as_deref()
+            .ok_or_else(|| SessionStoreError::InvalidSession("closed mutation target has no terminal event".into()))?;
+        let record = event_by_event_id_tx(tx, terminal).await?.map(event_from_row).transpose()?
+            .ok_or_else(|| SessionStoreError::InvalidSession("mutation target terminal event is missing".into()))?;
+        if record.agent_session_id != *session_id || record.correlation_id.as_ref() != target.as_ref()
+            || !matches!(record.kind.0.as_str(), "turn/completed" | "turn/failed" | "turn/cancelled") {
+            return Err(SessionStoreError::InvalidSession("mutation target terminal provenance differs".into()));
+        }
+        let ack = event_ack(&record);
+        return Ok((target.clone(), Some(SessionEventAppendResult {
+            record: Some(record), ack: Some(ack.clone()), cursor: ack.cursor,
+            persisted: true, duplicate: true,
+        })));
+    }
+    if !matches!(turn.state.as_str(), "accepted" | "running")
+        || head.active_turn_id.as_deref() != Some(target.as_ref()) {
+        return Err(SessionStoreError::Conflict("exact mutation target is not the active Turn".into()));
+    }
+    Ok((target.clone(), None))
 }
 
 async fn event_by_producer_key_tx(

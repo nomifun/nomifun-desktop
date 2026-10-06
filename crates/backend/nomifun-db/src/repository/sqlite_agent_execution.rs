@@ -14,6 +14,7 @@ use crate::models::{
     AgentExecutionEventRow, AgentExecutionParticipantRow, AgentExecutionRow,
     AgentExecutionStepDependencyRow, AgentExecutionStepDetailRow, AgentExecutionStepRow,
     ConversationExecutionLinkRow,
+    AttemptConversationEffects, RecoveryReviewBlock,
 };
 use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
 use crate::repository::agent_execution::{
@@ -28,6 +29,7 @@ use crate::repository::agent_execution::{
     NewAgentExecutionEvent, NewAgentExecutionParticipant, NewAgentExecutionStep,
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
     PendingConversationCleanup, RetryAgentExecutionStep, SettleAgentExecutionAttemptParams,
+    RecoveredAgentExecutionAttemptOutput,
     UpdateAgentExecutionParams,
 };
 
@@ -286,17 +288,18 @@ fn review_block_runtime_state(
     operation_id: &str,
     receipt_state: &str,
     reason: &str,
-) -> String {
-    serde_json::json!({
-        "pending_conversation_effects": [],
-        "review_blocked": {
-            "kind": "interrupted_initial_turn",
-            "operation_id": operation_id,
-            "receipt_state": receipt_state,
-            "reason": reason,
-        }
-    })
-    .to_string()
+    previous_runtime_state: Option<&str>,
+) -> Result<String, DbError> {
+    let mut state = AttemptConversationEffects::decode(previous_runtime_state)
+        .map_err(|error| DbError::Init(error.to_string()))?;
+    // A manual-review barrier never discards a committed steering intent or
+    // decision input. Their exact identities/text remain available to owner
+    // review even when they cannot safely be delivered automatically.
+    state.review_blocked = Some(RecoveryReviewBlock {
+        kind: "interrupted_turn".to_owned(), operation_id: operation_id.to_owned(),
+        receipt_state: receipt_state.to_owned(), reason: reason.to_owned(),
+    });
+    state.encode().map_err(|error| DbError::Init(error.to_string()))
 }
 
 async fn reconcile_running_attempt_receipt_tx(
@@ -307,6 +310,7 @@ async fn reconcile_running_attempt_receipt_tx(
     expected_step_version: i64,
     attempt_id: &str,
     expected_attempt_version: i64,
+    recovered_output: Option<&RecoveredAgentExecutionAttemptOutput>,
     now: i64,
 ) -> Result<RunningAttemptReceiptReconciliation, DbError> {
     let active_sessions: Vec<String> = sqlx::query_scalar(
@@ -326,33 +330,67 @@ async fn reconcile_running_attempt_receipt_tx(
     .bind(user_id)
     .fetch_all(&mut **tx)
     .await?;
-    let operation_id = format!("{attempt_id}:initial-turn");
+    let previous_runtime_state: Option<String> = sqlx::query_scalar(
+        "SELECT runtime_state FROM agent_execution_attempts WHERE execution_id=? AND attempt_id=?"
+    ).bind(execution_id).bind(attempt_id).fetch_one(&mut **tx).await?;
+    let effects = AttemptConversationEffects::decode(previous_runtime_state.as_deref())
+        .map_err(|error| DbError::Init(error.to_string()))?;
+    let operation_key = effects.current_turn_operation_key(attempt_id)
+        .map_err(|error| DbError::Init(error.to_string()))?;
     let receipt = match active_sessions.as_slice() {
-        [session_id] => sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<i64>)>(
-            "SELECT state, result_json, error_json, finished_at \
-             FROM agent_turns WHERE session_id = ? AND operation_id = ?",
-        )
-        .bind(session_id)
-        .bind(&operation_id)
-        .fetch_optional(&mut **tx)
-        .await?,
+        [session_id] => {
+            let operation_id = format!("turn:user:{user_id}:{session_id}:{operation_key}");
+            sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+                "SELECT state, terminal_event_id, finished_at \
+                 FROM agent_turns WHERE session_id = ? AND operation_id = ?",
+            )
+            .bind(session_id)
+            .bind(operation_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        }
         _ => None,
     };
 
-    if let Some((state, result, error, finished_at)) = receipt.as_ref()
-        && matches!(state.as_str(), "completed" | "failed" | "cancelled" | "interrupted")
+    if let Some((state, terminal_event_id, finished_at)) = receipt.as_ref()
+        && let Some(output) = recovered_output
+        && matches!(state.as_str(), "completed" | "failed" | "cancelled")
     {
-        let succeeded = state == "completed";
+        let expected_operation = format!(
+            "turn:user:{user_id}:{}:{operation_key}", output.conversation_id
+        );
+        if output.attempt_id != attempt_id
+            || active_sessions.as_slice() != [output.conversation_id.clone()]
+            || output.canonical_operation_id != expected_operation
+            || terminal_event_id.as_deref() != Some(output.terminal_event_id.as_str())
+            || output.tokens.is_some_and(|tokens| tokens < 0)
+            || output.output_files.iter().any(|path| path.trim().is_empty())
+        {
+            return Err(conflict("canonical Agent Execution recovery output"));
+        }
+        // Session control metadata is not a public answer. Only typed output
+        // returned by the canonical owner may settle the business result.
+        let has_output = output.text.as_ref().is_some_and(|text| !text.trim().is_empty())
+            || !output.output_files.is_empty();
+        let succeeded = state == "completed" && output.ok && has_output;
+        let error = (!succeeded).then(|| output.error.as_deref().unwrap_or(
+            "Canonical Agent Turn ended without a successful public delivery"
+        ));
+        let delivered_files = if succeeded { output.output_files.as_slice() } else { &[] };
+        let output_files = serde_json::to_string(delivered_files)
+            .map_err(|error| DbError::Init(format!("encode recovered canonical output files: {error}")))?;
         let attempt = sqlx::query(
             "UPDATE agent_execution_attempts SET status = ?, question = NULL, error = ?, \
-                output_summary = ?, runtime_state = NULL, retry_after = NULL, \
+                output_summary = ?, output_files = ?, tokens = ?, runtime_state = NULL, retry_after = NULL, \
                 finished_at = ?, version = version + 1, updated_at = ? \
              WHERE execution_id = ? AND step_id = ? AND attempt_id = ? AND version = ? \
                AND status = 'running'",
         )
         .bind(if succeeded { "completed" } else { "failed" })
-        .bind(if succeeded { None } else { error.as_deref().or(Some(state.as_str())) })
-        .bind(result.as_deref())
+        .bind(error)
+        .bind(succeeded.then_some(output.text.as_deref()).flatten())
+        .bind(output_files)
+        .bind(output.tokens)
         .bind(finished_at.unwrap_or(now))
         .bind(now)
         .bind(execution_id)
@@ -395,6 +433,10 @@ async fn reconcile_running_attempt_receipt_tx(
     }
 
     let (receipt_state, reason) = match receipt.as_ref().map(|receipt| receipt.0.as_str()) {
+        Some("completed" | "failed" | "cancelled") => (
+            "terminal_output_unavailable",
+            "The canonical Turn is terminal, but its exact typed public delivery has not been validated. Automatic retry is blocked; control metadata is not task output.",
+        ),
         Some("accepted" | "running") => (
             "running",
             "The canonical Agent Turn was durably admitted before interruption, but its terminal outcome is unknown. Automatic retry is blocked to prevent duplicate model or tool effects.",
@@ -423,7 +465,10 @@ async fn reconcile_running_attempt_receipt_tx(
     .bind(attempt_id)
     .execute(&mut **tx)
     .await?;
-    let runtime_state = review_block_runtime_state(&operation_id, receipt_state, reason);
+    let operation_id = active_sessions.first().map(|session_id| {
+        format!("turn:user:{user_id}:{session_id}:{operation_key}")
+    }).unwrap_or(operation_key);
+    let runtime_state = review_block_runtime_state(&operation_id, receipt_state, reason, previous_runtime_state.as_deref())?;
     let attempt = sqlx::query(
         "UPDATE agent_execution_attempts SET status = 'waiting_input', question = ?, error = ?, \
             runtime_state = ?, retry_after = NULL, finished_at = NULL, \
@@ -1718,6 +1763,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         user_id: &str,
         execution_id: &str,
         expected_version: i64,
+        recovered_outputs: &[RecoveredAgentExecutionAttemptOutput],
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionRow, DbError> {
         let now = now_ms();
@@ -1768,6 +1814,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 step_version,
                 &attempt_id,
                 attempt_version,
+                recovered_outputs.iter().find(|output| output.attempt_id == attempt_id),
                 now,
             )
             .await?;
@@ -3909,6 +3956,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         attempt_id: &str,
         expected_attempt_version: i64,
         lease: &AgentExecutionLeaseToken,
+        recovered_output: Option<&RecoveredAgentExecutionAttemptOutput>,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionAttemptRecoveryResult, DbError> {
         let now = now_ms();
@@ -3991,6 +4039,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 expected_step_version,
                 attempt_id,
                 expected_attempt_version,
+                recovered_output,
                 now,
             )
             .await?
@@ -4066,6 +4115,33 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let now = now_ms();
         let mut tx = self.pool.begin().await?;
         fence_scheduler_write_tx(&mut tx, execution_id, lease, now).await?;
+        if let Some(source) = &params.expected_active_session_turn {
+            if params.attempt_status != ExecutionAttemptStatus::WaitingInput
+                || params.step_status != ExecutionStepStatus::WaitingInput
+                || source.conversation_id.trim().is_empty()
+                || source.canonical_operation_id.trim().is_empty() {
+                return Err(conflict("Native Agent decision source Turn"));
+            }
+            // The exact calling Turn must still own the active Session and
+            // Attempt in this same write transaction. A delayed old tool call
+            // cannot move a successor Turn into WaitingInput.
+            let valid: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM conversation_execution_links link \
+                 JOIN agent_sessions session ON session.agent_session_id=link.conversation_id \
+                 JOIN agent_session_heads head ON head.session_id=session.agent_session_id \
+                 JOIN agent_turns turn ON turn.session_id=session.agent_session_id AND turn.operation_id=? \
+                 JOIN agent_executions execution ON execution.execution_id=link.execution_id \
+                 WHERE link.conversation_id=? AND link.execution_id=? AND link.step_id=? AND link.attempt_id=? \
+                   AND link.active=1 AND link.relation IN ('attempt','automation') \
+                   AND session.state='live' AND execution.user_id=? AND execution.deleted_at IS NULL \
+                   AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+                   AND json_extract(session.owner_ref_json,'$.principal_id')=? \
+                   AND head.active_turn_id=turn.operation_id AND head.status IN ('running','paused') \
+                   AND turn.state IN ('accepted','running') AND turn.terminal_event_id IS NULL",
+            ).bind(&source.canonical_operation_id).bind(&source.conversation_id).bind(execution_id)
+                .bind(step_id).bind(attempt_id).bind(user_id).bind(user_id).fetch_one(&mut *tx).await?;
+            if valid != 1 { return Err(conflict("Native Agent decision source Turn")); }
+        }
         let terminal = params.attempt_status.is_terminal();
         let waiting_for_input = params.attempt_status == ExecutionAttemptStatus::WaitingInput;
         let question_present = params.question.is_some() || !waiting_for_input;

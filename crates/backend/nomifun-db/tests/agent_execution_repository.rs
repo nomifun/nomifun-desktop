@@ -4,6 +4,8 @@ use nomifun_common::{
 };
 use nomifun_db::{
     AgentExecutionAttemptSessionKind, CreateAgentExecutionAttemptParams,
+    AgentExecutionAttemptRecoveryDisposition, AgentExecutionLeaseToken,
+    RecoveredAgentExecutionAttemptOutput,
     CreateAgentExecutionParams, IAgentExecutionRepository,
     NewAgentExecutionEvent, NewAgentExecutionParticipant, NewAgentExecutionStep,
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
@@ -659,4 +661,249 @@ async fn agent_execution_business_ids_are_uuidv7_and_dependencies_use_them() {
             "updated_at",
         ]
     );
+}
+
+async fn recovery_fixture(
+    db: &nomifun_db::Database,
+    repository: &SqliteAgentExecutionRepository,
+) -> (String, nomifun_db::AgentExecutionStepDetailRow, RecoveredAgentExecutionAttemptOutput) {
+    let created = create_execution(repository).await;
+    let participant_id = repository.get_execution_detail(OWNER_ID, &created.execution_id)
+        .await.unwrap().unwrap().participants[0].participant_id.clone();
+    let planned = repository.reconcile_plan(
+        OWNER_ID, &created.execution_id, created.version,
+        &ReconcileAgentExecutionPlanParams {
+            goal: None, adaptation_policy: None, decision_policy: None, delegation_policy: None,
+            keep_step_ids: Vec::new(), new_participants: Vec::new(), retire_participant_ids: Vec::new(),
+            new_steps: vec![step(nomifun_common::generate_id(), Some(participant_id.clone()), "recovery")],
+            new_dependencies: Vec::new(), execution_status: AgentExecutionStatus::Running,
+        }, &event(AgentExecutionEventKind::PlanChanged),
+    ).await.unwrap();
+    let queued = repository.create_attempt(
+        OWNER_ID, &created.execution_id, &planned.steps[0].step_id, planned.steps[0].version,
+        None, &CreateAgentExecutionAttemptParams {
+            participant_id: Some(participant_id), start_immediately: false,
+            trigger_reason: "initial".to_owned(), effective_config: "{}".to_owned(),
+            retry_after: None, runtime_state: None,
+        }, &event(AgentExecutionEventKind::AttemptChanged),
+    ).await.unwrap();
+    let attempt = queued.current_attempt.as_ref().unwrap().attempt.clone();
+    let conversation_id = nomifun_common::generate_id();
+    insert_canonical_session(db, &conversation_id, OWNER_ID, "live").await;
+    let running = repository.start_attempt(
+        OWNER_ID, &created.execution_id, &queued.step.step_id, queued.step.version,
+        &attempt.attempt_id, attempt.version, &conversation_id,
+        AgentExecutionAttemptSessionKind::ChildAttempt, None, &event(AgentExecutionEventKind::AttemptChanged),
+    ).await.unwrap();
+    let operation_id = format!("turn:user:{OWNER_ID}:{conversation_id}:{}:initial-turn", attempt.attempt_id);
+    let terminal_event_id = nomifun_common::generate_id();
+    nomifun_db::sqlx::query(
+        "INSERT INTO agent_events (session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) \
+         VALUES (?,1,?,'recovery-fixture',?,'turn/completed',1,?,?)"
+    ).bind(&conversation_id).bind(&terminal_event_id).bind(&terminal_event_id).bind(&operation_id)
+        .bind(r#"{"model_steps":3,"finish_reason":"stop","finished_at_ms":10}"#)
+        .execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,result_json,terminal_event_id,accepted_at,started_at,finished_at) \
+         VALUES (?,?,?,?,'completed',?,?,1,1,1)"
+    ).bind(&conversation_id).bind(&operation_id).bind(&operation_id).bind(&operation_id)
+        .bind(r#"{"model_steps":3,"finish_reason":"stop","finished_at_ms":10}"#)
+        .bind(&terminal_event_id).execute(db.pool()).await.unwrap();
+    (created.execution_id, running, RecoveredAgentExecutionAttemptOutput {
+        attempt_id: attempt.attempt_id, conversation_id, canonical_operation_id: operation_id,
+        terminal_event_id, ok: true, text: Some("已完成游戏实现".to_owned()),
+        output_files: vec!["/workspace/index.html".to_owned()], error: None, tokens: Some(12),
+    })
+}
+
+#[tokio::test]
+async fn recovery_adopts_exact_typed_output_and_never_session_control_metadata() {
+    let db = database().await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let (execution_id, running, output) = recovery_fixture(&db, &repository).await;
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    let lease = AgentExecutionLeaseToken::new("recovery-owner".to_owned());
+    repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms() + 30_000)
+        .await.unwrap().unwrap();
+    let recovered = repository.reconcile_recovered_attempt(
+        OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+        &output.attempt_id, running.current_attempt.as_ref().unwrap().attempt.version,
+        &lease, Some(&output), &event(AgentExecutionEventKind::AttemptChanged),
+    ).await.unwrap();
+    assert_eq!(recovered.disposition, AgentExecutionAttemptRecoveryDisposition::CompletedReceiptAdopted);
+    let attempt = recovered.detail.current_attempt.unwrap().attempt;
+    assert_eq!(attempt.status, "completed");
+    assert_eq!(attempt.output_summary.as_deref(), Some("已完成游戏实现"));
+    assert_eq!(serde_json::from_str::<Vec<String>>(&attempt.output_files).unwrap(), output.output_files);
+    assert_eq!(attempt.tokens, Some(12));
+    assert!(!attempt.output_summary.unwrap().contains("model_steps"));
+}
+
+#[tokio::test]
+async fn recovery_rejects_mismatched_terminal_identity_and_empty_public_delivery() {
+    let db = database().await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let (execution_id, running, mut output) = recovery_fixture(&db, &repository).await;
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    let lease = AgentExecutionLeaseToken::new("recovery-owner".to_owned());
+    repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms() + 30_000)
+        .await.unwrap().unwrap();
+    let actual_terminal = output.terminal_event_id.clone();
+    output.terminal_event_id = nomifun_common::generate_id();
+    assert!(repository.reconcile_recovered_attempt(
+        OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+        &output.attempt_id, running.current_attempt.as_ref().unwrap().attempt.version,
+        &lease, Some(&output), &event(AgentExecutionEventKind::AttemptChanged),
+    ).await.is_err());
+    output.terminal_event_id = actual_terminal;
+    output.text = Some(" \n".to_owned());
+    output.output_files.clear();
+    let recovered = repository.reconcile_recovered_attempt(
+        OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+        &output.attempt_id, running.current_attempt.as_ref().unwrap().attempt.version,
+        &lease, Some(&output), &event(AgentExecutionEventKind::AttemptChanged),
+    ).await.unwrap();
+    assert_eq!(recovered.detail.step.status, "failed");
+    assert_eq!(recovered.detail.current_attempt.unwrap().attempt.status, "failed");
+}
+
+#[tokio::test]
+async fn recovery_pause_requires_typed_output_before_adopting_completed_turn() {
+    let db = database().await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let (execution_id, running, output) = recovery_fixture(&db, &repository).await;
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    repository.pause_execution(OWNER_ID, &execution_id, execution.version, &[output], &event(AgentExecutionEventKind::StatusChanged))
+        .await.unwrap();
+    let paused = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id)
+        .await.unwrap().unwrap();
+    assert_eq!(paused.step.status, "completed");
+    assert_eq!(paused.current_attempt.unwrap().attempt.output_summary.as_deref(), Some("已完成游戏实现"));
+
+    let (execution_id, running, _) = recovery_fixture(&db, &repository).await;
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    let attempt = &running.current_attempt.as_ref().unwrap().attempt;
+    repository.enqueue_attempt_conversation_effect(
+        OWNER_ID, &execution_id, execution.version, &running.step.step_id, running.step.version,
+        &attempt.attempt_id, attempt.version,
+        &nomifun_db::AttemptConversationEffectParams { runtime_state: Some(serde_json::json!({
+            "pending_conversation_effects": [{"kind":"steer","operation_id":"pending-correction","target_operation_id":"target-turn","content":"preserve this correction"}]
+        }).to_string()) }, &event(AgentExecutionEventKind::StepChanged),
+    ).await.unwrap();
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    repository.pause_execution(OWNER_ID, &execution_id, execution.version, &[], &event(AgentExecutionEventKind::StatusChanged))
+        .await.unwrap();
+    let paused = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id)
+        .await.unwrap().unwrap();
+    assert_eq!(paused.step.status, "waiting_input");
+    let attempt = paused.current_attempt.unwrap().attempt;
+    assert!(attempt.output_summary.is_none());
+    let state = attempt.runtime_state.unwrap();
+    assert!(state.contains("terminal_output_unavailable"));
+    assert!(state.contains("preserve this correction"), "manual review must retain accepted but undelivered input");
+}
+
+#[tokio::test]
+async fn recovery_pause_uses_the_current_decision_turn_instead_of_the_closed_initial_turn() {
+    let db = database().await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let (execution_id, running, initial_output) = recovery_fixture(&db, &repository).await;
+    let attempt = &running.current_attempt.as_ref().unwrap().attempt;
+    let waiting = repository.settle_attempt(
+        OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+        &attempt.attempt_id, attempt.version, None,
+        &nomifun_db::SettleAgentExecutionAttemptParams {
+            expected_active_session_turn: None,
+            attempt_status: nomifun_common::ExecutionAttemptStatus::WaitingInput,
+            step_status: ExecutionStepStatus::WaitingInput,
+            execution_status: Some(AgentExecutionStatus::WaitingInput),
+            question: Some(Some("continue?".to_owned())), error: None,
+            output_summary: None, output_files: None, tokens: None, retry_after: None,
+            runtime_state: Some(None), started_at: None, finished_at: None, loop_repeat_reset: None,
+        }, &event(AgentExecutionEventKind::DecisionRequested),
+    ).await.unwrap();
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    let mut effects = nomifun_db::AttemptConversationEffects::default();
+    effects.push_decision("decision-current".into(), "continue".into()).unwrap();
+    repository.resume_waiting_attempt(
+        OWNER_ID, &execution_id, execution.version, &waiting.step.step_id, waiting.step.version,
+        &attempt.attempt_id, waiting.current_attempt.as_ref().unwrap().attempt.version,
+        &nomifun_db::AttemptConversationEffectParams { runtime_state: Some(effects.encode().unwrap()) },
+        &event(AgentExecutionEventKind::DecisionAnswered),
+    ).await.unwrap();
+    let operation_id = format!("turn:user:{OWNER_ID}:{}:decision-current", initial_output.conversation_id);
+    let terminal_event_id = nomifun_common::generate_id();
+    nomifun_db::sqlx::query(
+        "INSERT INTO agent_events (session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) \
+         VALUES (?,2,?,'recovery-fixture',?,'turn/completed',1,?,'{}')"
+    ).bind(&initial_output.conversation_id).bind(&terminal_event_id).bind(&terminal_event_id).bind(&operation_id)
+        .execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,result_json,terminal_event_id,accepted_at,started_at,finished_at) \
+         VALUES (?,?,?,?,'completed','{}',?,2,2,2)"
+    ).bind(&initial_output.conversation_id).bind(&operation_id).bind(&operation_id).bind(&operation_id)
+        .bind(&terminal_event_id).execute(db.pool()).await.unwrap();
+    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+    assert!(repository.pause_execution(
+        OWNER_ID, &execution_id, execution.version, &[initial_output.clone()], &event(AgentExecutionEventKind::StatusChanged),
+    ).await.is_err(), "a completed older Turn is not the resumed invocation's output");
+    let current_output = RecoveredAgentExecutionAttemptOutput {
+        canonical_operation_id: operation_id, terminal_event_id,
+        text: Some("current continuation output".to_owned()),
+        ..initial_output
+    };
+    repository.pause_execution(
+        OWNER_ID, &execution_id, execution.version, &[current_output], &event(AgentExecutionEventKind::StatusChanged),
+    ).await.unwrap();
+    let paused = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id).await.unwrap().unwrap();
+    assert_eq!(paused.step.status, "completed");
+    assert_eq!(paused.current_attempt.unwrap().attempt.output_summary.as_deref(), Some("current continuation output"));
+}
+
+#[tokio::test]
+async fn native_decision_request_is_atomically_bound_to_the_calling_turn() {
+    let db = database().await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let (execution_id, running, original) = recovery_fixture(&db, &repository).await;
+    let attempt = &running.current_attempt.as_ref().unwrap().attempt;
+    let successor = format!("turn:user:{OWNER_ID}:{}:decision-next", original.conversation_id);
+    nomifun_db::sqlx::query(
+        "INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,accepted_at,started_at) \
+         VALUES (?,?,?,?,'running',2,2)",
+    ).bind(&original.conversation_id).bind(&successor).bind(&successor).bind(&successor)
+        .execute(db.pool()).await.unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO agent_session_heads (session_id,status,active_turn_id,active_set_generation,last_seq,unread_count) \
+         VALUES (?,'running',?,1,2,0)",
+    ).bind(&original.conversation_id).bind(&successor).execute(db.pool()).await.unwrap();
+    let mut params = nomifun_db::SettleAgentExecutionAttemptParams {
+        expected_active_session_turn: Some(nomifun_db::AgentExecutionActiveTurnGuard {
+            conversation_id: original.conversation_id.clone(),
+            canonical_operation_id: original.canonical_operation_id.clone(),
+        }),
+        attempt_status: nomifun_common::ExecutionAttemptStatus::WaitingInput,
+        step_status: ExecutionStepStatus::WaitingInput,
+        execution_status: Some(AgentExecutionStatus::WaitingInput), question: Some(Some("old question".into())),
+        error: None, output_summary: None, output_files: None, tokens: None, retry_after: None,
+        runtime_state: None, started_at: None, finished_at: None, loop_repeat_reset: None,
+    };
+    let request = event(AgentExecutionEventKind::DecisionRequested);
+    assert!(matches!(repository.settle_attempt(
+        OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+        &attempt.attempt_id, attempt.version, None, &params, &request,
+    ).await, Err(nomifun_db::DbError::Conflict(_))));
+    let unchanged = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id).await.unwrap().unwrap();
+    assert_eq!(unchanged.step.version, running.step.version);
+    assert_eq!(unchanged.step.status, "running");
+    assert_eq!(unchanged.current_attempt.as_ref().unwrap().attempt.version, attempt.version);
+    params.expected_active_session_turn.as_mut().unwrap().canonical_operation_id = successor.clone();
+    let requested = repository.settle_attempt(
+        OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+        &attempt.attempt_id, attempt.version, None, &params, &request,
+    ).await.unwrap();
+    assert_eq!(requested.step.status, "waiting_input");
+    assert!(requested.step.version > running.step.version);
+    let active: String = nomifun_db::sqlx::query_scalar("SELECT active_turn_id FROM agent_session_heads WHERE session_id=?")
+        .bind(&original.conversation_id).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(active, successor, "domain WaitingInput does not cancel or replace a different canonical Turn");
 }

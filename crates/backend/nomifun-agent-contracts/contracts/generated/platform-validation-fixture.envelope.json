@@ -4,7 +4,7 @@
     "manifest_version": "1.0.0",
     "confirmed_decision_contract_digest": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
     "canonical_schema_manifest_digest": "6578934cb607586566c5fc719ed5a8955e13a8264b5cca73b1cd13ab3a81d154",
-    "cargo_lock_digest": "f38745408eaeb8176a5a64b111dede2b81381a9c6b445d7fa0818081ee99aec9",
+    "cargo_lock_digest": "739c4f93825165d768de734443362ca10028be6682861c853cf2713a236cf2d5",
     "official_preset_seed_manifest_digest": "efc0b11b67187f53c6091080554607d897762ef364fef1336368827a08008b1d",
     "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
     "coding_codex_native_contract_digest": "19411e27d38cfd07f6c4375f9258dc0ba677e951ad4e76da36ea78bae9ff7faa",
@@ -151,5 +151,5 @@
       }
     }
   },
-  "payload_digest": "07c8424a65f1cfbbf98a38b40e79e1efa230c0022fd4ad72e74729c63e8a08d1"
+  "payload_digest": "ca7f92422e9079338b796461d5b17793449c50e58fc00972b5992e0fb2f4329d"
 }

@@ -41,7 +41,7 @@ use nomifun_db::{
     IAgentExecutionTemplateRepository, IProviderRepository, NewAgentExecutionEvent,
     NewAgentExecutionParticipant, NewAgentExecutionTemplateParticipant,
     NewAgentExecutionStep, NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
-    RetryAgentExecutionStep, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
+    RetryAgentExecutionStep, AgentExecutionActiveTurnGuard, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
     UpdateAgentExecutionTemplateParams,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -55,7 +55,6 @@ use crate::automation::{
     AgentExecutionAutomationPort, AutomationExecutionReceipt, AutomationExecutionRequest,
     AutomationExecutionSource,
 };
-use crate::artifact_contract::validate_required_artifacts;
 use crate::conversation_effect::AttemptConversationEffects;
 use crate::domain_mapper;
 use crate::event_publisher::{
@@ -73,6 +72,7 @@ use crate::participant_router::rank_participants;
 use crate::scheduler::{
     ConversationEffects, DEFAULT_ATTEMPT_TIMEOUT, DEFAULT_MAX_PARALLEL, ExecutionScheduler,
     ExecutionSchedulerDeps, terminal_transition_payload,
+    agent_outcome_can_complete,
 };
 
 const PLAN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -1348,12 +1348,21 @@ impl AgentExecutionEngine {
                 AgentExecutionStatus::WaitingInput,
             ],
         )?;
+        let mut recovered_outputs = Vec::new();
+        for attempt in current.attempts.iter().filter(|attempt| {
+            attempt.status == ExecutionAttemptStatus::Running
+        }) {
+            if let Some(output) = self.scheduler.recover_attempt_output(owner_id, attempt).await? {
+                recovered_outputs.push(output);
+            }
+        }
         let row = self
             .repository
             .pause_execution(
                 owner_id,
                 execution_id,
                 command.expected_version,
+                &recovered_outputs,
                 &actor_event(
                     actor,
                     AgentExecutionEventKind::StatusChanged,
@@ -2201,21 +2210,16 @@ impl AgentExecutionEngine {
             .max_by_key(|attempt| attempt.attempt_no)
             .and_then(|attempt| attempt.conversation_id.clone())
             .ok_or_else(|| AppError::BadRequest("step has no Agent conversation to adopt".to_owned()))?;
-        let output = self
+        let outcome = self
             .scheduler
-            .read_attempt_output(owner_id, &conversation_id)
-            .await
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| AppError::BadRequest("Agent conversation has no final output".to_owned()))?;
-        let output_files = self
-            .scheduler
-            .read_attempt_output_files(owner_id, &conversation_id)
-            .await;
-        validate_required_artifacts(&step.spec, &output_files).map_err(|error| {
-            AppError::BadRequest(format!(
-                "Agent conversation output cannot be adopted: {error}"
-            ))
-        })?;
+            .read_adoptable_attempt_output(owner_id, &conversation_id)
+            .await?
+            .filter(agent_outcome_can_complete)
+            .ok_or_else(|| AppError::BadRequest("Agent conversation has no successful canonical public delivery to adopt".to_owned()))?;
+        let output = outcome.text.filter(|text| !text.trim().is_empty()).unwrap_or_else(|| {
+            format!("Verified output files:\n{}", outcome.output_files.join("\n"))
+        });
+        let output_files = outcome.output_files;
         let output_files = serde_json::to_string(&output_files)
             .map_err(|error| AppError::Internal(format!("encode verified adopted output files: {error}")))?;
         self.repository
@@ -2228,7 +2232,7 @@ impl AgentExecutionEngine {
                 &AdoptAgentExecutionStepOutputParams {
                     output_summary: output,
                     output_files,
-                    tokens: None,
+                    tokens: outcome.tokens,
                     runtime_state: None,
                 },
                 &actor_event(
@@ -2287,7 +2291,13 @@ impl AgentExecutionEngine {
             })?
             .unwrap_or_default();
         let operation_id = generate_id();
-        effects.push_steer(operation_id.clone(), text.clone())?;
+        let operation_key = effects.current_turn_operation_key(&attempt.attempt_id)?;
+        let target_operation_id = self.session.read_turn_output(owner_id, attempt.conversation_id.as_deref()
+            .ok_or_else(|| AppError::Conflict("running attempt has no Session".to_owned()))?, Some(&operation_key))
+            .await?
+            .map(|output| output.canonical_operation_id)
+            .ok_or_else(|| AppError::Conflict("the Attempt has no exact canonical Turn to steer".to_owned()))?;
+        effects.push_steer(operation_id.clone(), target_operation_id.clone(), text.clone())?;
         let persisted = self
             .repository
             .enqueue_attempt_conversation_effect(
@@ -2326,6 +2336,7 @@ impl AgentExecutionEngine {
                 owner_id,
                 &persisted.conversation_id,
                 &operation_id,
+                &target_operation_id,
                 &text,
             )
             .await;
@@ -2371,6 +2382,7 @@ impl AgentExecutionEngine {
         owner_id: &str,
         actor: &AgentExecutionActor,
         conversation_id: &str,
+        source_turn_operation_id: &nomifun_agent_contracts::OperationId,
         question: String,
     ) -> Result<AgentExecutionDetail, AppError> {
         let question = non_empty("question", question)?;
@@ -2434,8 +2446,12 @@ impl AgentExecutionEngine {
             )
         })?;
         let operation_id = generate_id();
+        let target_operation_id = source_turn_operation_id.as_ref().to_owned();
+        if target_operation_id.trim().is_empty() {
+            return Err(AppError::Conflict("Native Agent decision requires its exact source Turn".into()));
+        }
         let mut effects = AttemptConversationEffects::default();
-        effects.push_stop_turn(operation_id.clone())?;
+        effects.push_stop_turn(operation_id.clone(), target_operation_id.clone())?;
         let persisted = self.repository
             .settle_attempt(
                 owner_id,
@@ -2446,6 +2462,10 @@ impl AgentExecutionEngine {
                 attempt.version,
                 Some(&lease),
                 &SettleAgentExecutionAttemptParams {
+                    expected_active_session_turn: Some(AgentExecutionActiveTurnGuard {
+                        conversation_id: conversation_id.to_owned(),
+                        canonical_operation_id: target_operation_id.clone(),
+                    }),
                     attempt_status: ExecutionAttemptStatus::WaitingInput,
                     step_status: ExecutionStepStatus::WaitingInput,
                     execution_status: Some(AgentExecutionStatus::WaitingInput),
@@ -2478,7 +2498,7 @@ impl AgentExecutionEngine {
         // retried under the same identity before any DecisionInput continuation.
         let delivery = self
             .scheduler
-            .stop_attempt_turn(owner_id, conversation_id, &operation_id)
+            .stop_attempt_turn(owner_id, conversation_id, &operation_id, &target_operation_id)
             .await;
         if delivery.is_ok() {
             if let Some(persisted_attempt) = persisted.current_attempt.as_ref()

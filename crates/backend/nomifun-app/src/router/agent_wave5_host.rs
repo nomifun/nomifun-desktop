@@ -170,6 +170,7 @@ impl NomiCoreWave5Host {
                                 &context.principal.principal_id,
                                 &actor,
                                 conversation_id,
+                                &context.turn_id,
                                 input.question,
                             )
                             .await
