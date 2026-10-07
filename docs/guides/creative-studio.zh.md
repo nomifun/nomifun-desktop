@@ -1,62 +1,61 @@
 # 创作（Creation）
 
-创作是 NomiFun Desktop 中专注、本地优先的创作产品，包含三个彼此独立的
-创作面：
+创作是 NomiFun Desktop 中专注、本地优先的创作产品，核心为：
 
 - **Canvas**：持久化无限画布，包含媒体节点、可审计的生成操作、可复用素材和
-  私有模板。
-- **Image Workbench**：独立的图片生成工作台。
-- **Video Workbench**：独立的视频生成工作台。
+  私有模板；
+- **素材库资源**：素材、提示词库与私有模板，均可从主侧边栏直接进入。
 
-创作没有 Project 产品对象。Canvas 就是 Canvas。Image Workbench 和
-Video Workbench 不要求、不推断、不选择、也不创建 Canvas；它们直接使用
-NomiFun 现有的 Provider 与模型目录，不维护第二套模型配置系统。
+创作没有 Project 产品对象。Canvas 就是 Canvas。生成使用 NomiFun 现有的
+Provider 与模型目录，不维护第二套模型配置系统。原独立 Image/Video Workbench
+页面已退役；生成任务通过 Canvas 节点与模板步骤完成。
 
 > English: [creative-studio.md](creative-studio.md)
 
 ## 打开产品
 
-从应用侧边栏打开**创作**。页面复用 NomiFun 默认标题栏里的侧栏、历史、系统
-窗口等控制；左侧主侧栏会像进入“设置”时一样切换为创作内部导航，并且可以折叠
-以释放工作空间。入口会恢复当前应用会话中最后一个有效的创作地址，包括完整查询
-参数和页内锚点。保存的地址如果非法、未知、外部或超长，会 fail-closed 回退到
-`/workshop/canvases`。创作不再提供独立首页项；通过需求发起创作的能力由已打开
-Canvas 内的**创作助手**提供。待 Canvas 的保存结果处理完毕后，点击侧栏
-底部的**返回工作台**会回到 `/guid`。
+主侧边栏直接暴露创作资源入口：**我的画布**（`/nomi/canvases`）、
+**素材库**（`/asset-library/materials`）、**提示词库**
+（`/asset-library/prompts`）和**模板工作台**（`/asset-library/templates`），
+位于“数据空间”分组。我的画布入口会恢复当前应用会话中最后一个有效的创作
+地址，包括完整查询参数和页内锚点；保存的地址如果非法、未知、外部或超长，会
+fail-closed 回退到 `/nomi/canvases`。通过需求发起创作的能力由已打开 Canvas
+内的**创作助手**提供。
 
 规范路由面如下：
 
 | 路由 | 用途 |
 | --- | --- |
-| `/workshop` | 兼容入口，重定向到 `/workshop/canvases`。 |
-| `/workshop/canvases` | 创建、重命名、打开、导入、导出和删除 Canvas。 |
-| `/workshop/canvas/:canvasId` | 编辑一个 Canvas 的 canonical 无限文档。 |
-| `/workshop/image` | 使用独立 Image Workbench；零 Canvas 时也完整可用。 |
-| `/workshop/video` | 使用独立 Video Workbench；零 Canvas 时也完整可用。 |
-| `/workshop/prompts`、`/workshop/assets`、`/workshop/templates` | 管理提示词、可复用素材和模板工作台中的私有模板。 |
+| `/nomi/canvases` | 创建、重命名、打开、导入、导出和删除 Canvas。 |
+| `/nomi/canvases/:canvasId` | 编辑一个 Canvas 的 canonical 无限文档。 |
+| `/asset-library/materials` | 在“我的素材”中管理可复用素材。 |
+| `/asset-library/prompts` | 在提示词库中管理提示词。 |
+| `/asset-library/templates` | 在模板工作台中管理私有模板。 |
 
-`/workshop/projects` 是 deprecated 兼容路由，会重定向到
-`/workshop/canvases`，不是产品页面，也不是 Canvas 的第二个名称。
-`/workshop/audio` 已退役；音频创作仍可通过 Canvas 音频节点完成。
+已退役的 `/workshop/*` 路径不再作为路由挂载。保存的 `/workshop`、
+`/workshop/canvases`、`/workshop/projects` 或 `/workshop/canvas/:canvasId`
+恢复地址由
+[`resourceRoutes.ts`](../../ui/src/renderer/pages/creativeStudio/app/resourceRoutes.ts)
+中的 `migratedCreativeRoute()` 单向改写为对应的 `/nomi/canvases` 目标。
+独立 Image/Video Workbench 页面已退役；生成任务通过 Canvas 节点与模板完成。
 
 ## 领域边界
 
-任务 owner union 保持有意的最小形状：
+任务 owner union 保持有意的最小形状 —— 创建任务的 wire 契约只接受两种
+owner，service 层另支持会话轮 owner：
 
 | Owner | 身份 | 使用场景 |
 | --- | --- | --- |
 | `CanvasNode` | `{ canvasId, nodeId }` | 从 Canvas 节点发起的任务。 |
-| `StandaloneWorkbench` | `{ workbenchKind }` | Image、Video 或其他独立工作台任务。 |
-| `TemplateStep` | 保持现有 template/run/step 身份 | 模板执行。 |
+| `TemplateStep` | `{ templateId, templateRunId, templateStepId }` | 模板执行。 |
+| `ConversationTurn` | `{ conversationId, messageId }` | 绑定到会话轮次的创作任务。 |
 
-只有从 Canvas 节点发起的任务才拥有 Canvas owner。独立任务不会获得隐藏、临时、
-默认或自动选择的 Canvas。旧 standalone 行可以保留 legacy `project_id` 作为 inert
-provenance，但它不参与 owner equality、历史分页、退役、素材 origin 匹配或 Canvas
-删除。新 standalone 任务不写入 legacy 项目绑定，新 standalone 素材 origin 只携带
-`workbench_kind`。
+只有从 Canvas 节点发起的任务才拥有 Canvas owner。已退役的
+`standalone_workbench` owner kind 会被 wire 契约拒绝；旧行可以保留 legacy
+`project_id` 作为 inert provenance，但它不参与 owner equality、历史分页、
+退役、素材 origin 匹配或 Canvas 删除。
 
-删除 Canvas 只受该 Canvas 的 live `CanvasNode` 任务限制。live standalone 任务不阻止
-任何 Canvas 删除。
+删除 Canvas 只受该 Canvas 的 live `CanvasNode` 任务限制。
 
 ## 画布模型
 
@@ -131,44 +130,23 @@ instance-owner capability，只对策展的 `desktop` 与 `admin` Gateway profil
 放在一起。复用同一个幂等身份重试时，不能悄悄替换这些事实。删除 Provider 或单个
 模型也会经过协调门禁，不能静默留下活跃任务或其他硬绑定孤儿。
 
-## 独立 Image/Video Workbench
+## 已退役的独立工作台
 
-Image 和 Video 是独立工作台。它们的路由没有 Canvas query、选择器、父级加载门槛或
-scope bar；即使 Canvas 列表为空，也必须完整可用。它们不会创建或选择隐藏 Canvas。
+独立 Image/Video Workbench 页面已退役，不再挂载路由。创建任务的 wire 契约
+只接受 `canvas_node` 与 `template_step` owner；`standalone_workbench` owner
+会被拒绝。旧 standalone 行仍可作为 provenance 读取，但不能精确重试。图片、
+视频与音频生成现在通过 Canvas 节点 Composer 与模板步骤完成。
 
-独立任务历史只按 `workbench_kind` 分桶：
-
-- `GET /api/creative-studio/tasks?workbench_kind=image|video`
-- `POST /api/creative-studio/tasks/retire`，body 为
-  `{ workbench_kind, task_ids }`
-
-历史分页、活跃任务恢复、重试、退役和素材 origin 匹配都会忽略旧 standalone 的
-`project_id` provenance。历史模型按任务 identity 合并旧 provenance 分桶，并保持严格
-keyset 分页。无法证明有序输入的旧行仍可见，但不能执行精确重试。
-
-### 工作台 session 草稿连续性
-
-Image 和 Video 按 `workbenchKind` 在 `sessionStorage` 中各保存一份版本化草稿。
-storage key 不包含 `projectId` 或 `canvasId`。草稿只保存：
-
-- prompt；
-- exact `{ providerId, model }` 身份；
-- 受控生成参数；
-- 有序 reference asset IDs；
-- 工作台布局。
-
-busy 状态、错误、打开的 modal、当前选择、任务状态和完整素材对象都会明确排除。
-损坏、超长、未知版本、跨工作台或 storage 不可用时，值会 fail-closed 丢弃，不阻止
-页面加载。
-
-进入路由时，reference ID 会通过 canonical asset `get` API 逐个 hydrate。缺失、不可读、
-类型不匹配、重复、超量或错误类型的引用会被移除，不会恢复成过期浏览器对象。初始
-hydrate 完成前不会允许生成。模型目录准备好后，只有同一个 exact Provider/model
-仍支持所需 task 时才恢复；不会用另一个 Provider 的同名模型替换。
+Canvas 节点 Composer 的草稿随 canonical Canvas 文档持久化，包含 prompt、
+exact `{ providerId, model }` 身份、受控生成参数和有序 reference asset IDs。
+hydrate 时缺失、不可读、类型不匹配、重复、超量或错误类型的引用会被移除，
+不会恢复成过期浏览器对象；初始 hydrate 完成前不允许生成。已保存模型只有在
+同一个 exact Provider/model 仍支持所需 task 时才恢复，不会用另一个 Provider
+的同名模型替换。
 
 ## 提示词库与可复用输入
 
-`/workshop/prompts` 是独立的提示词管理页面，汇总三类来源：
+`/asset-library/prompts` 是独立的提示词管理页面，汇总三类来源：
 
 - 从固定 allow-list 上游提示词仓库同步的、带来源与许可证信息的 offline-first 目录；
 - 包含会话指令、且当前启用的 NomiFun 设定；
@@ -182,7 +160,7 @@ hydrate 完成前不会允许生成。模型目录准备好后，只有同一个
 仍可作为提示词来源。成功同步一次后，有效缓存可以在离线时继续使用。
 
 独立提示词页面有意不持有隐藏 Canvas 插入目标。复制或保存提示词不会创建 Canvas，
-也不会自动开始生成；需要进入某条具体创作链路时，再从 Canvas 或工作台选择对应的
+也不会自动开始生成；需要进入某条具体创作链路时，再从 Canvas 中选择对应的
 文字素材。
 
 ## 素材、持久化与恢复
@@ -223,7 +201,7 @@ Conversation 消息与活跃 pending turn 位于归档之外，导入不会克�
 
 ## 最小模板 AI
 
-`/workshop/templates` 的 **AI 创建**首发范围刻意保持简单：
+`/asset-library/templates` 的 **AI 创建**首发范围刻意保持简单：
 
 1. 输入简单需求并选择一个 exact、已启用的 `chat` 模型。
 2. NomiFun 执行一次不带工具的 completion：墙钟上限 120 秒、输出上限 4,096 token、
@@ -275,7 +253,7 @@ revision、时间戳、可见性、标签、媒体生成模型或素材。公开
 
 ## 实现索引
 
-- 产品路由：[`app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)
+- 产品路由：[`app/resourceRoutes.ts`](../../ui/src/renderer/pages/creativeStudio/app/resourceRoutes.ts)
 - Canvas 文档：[`creative_studio.rs`](../../crates/backend/nomifun-workshop/src/creative_studio.rs)
 - Canvas、素材与模板路由：[`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)
 - 生成任务路由：[`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs)

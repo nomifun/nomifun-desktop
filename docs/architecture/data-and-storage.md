@@ -87,7 +87,9 @@ from [`crates/backend/nomifun-db/src/lib.rs`](../../crates/backend/nomifun-db/sr
 Persisted identity follows the layered v3 contract in
 [`id-system.md`](id-system.md):
 
-- every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`;
+- every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, except the
+  frozen Agent Store and Unified Plugin exception groups (TEXT/composite
+  keys);
 - stable cross-dataset entities add a named, bare canonical UUIDv7 field;
 - internal-only relation, singleton, cache, and event rows use the table `id`
   only inside the active dataset; product-addressable entities use named
@@ -112,7 +114,8 @@ conversation artifacts, and IDMM interventions.
 - `init_database` — opens or initializes the v3 baseline database.
 - `init_database_memory` — in-memory variant used by tests.
 
-The crate exposes ~20 repository **trait + Sqlite-impl** pairs. A non-exhaustive
+The crate exposes the repository **trait + Sqlite-impl** pairs. A
+non-exhaustive
 list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 
 | Trait | Sqlite implementation | Stores |
@@ -127,7 +130,7 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements; owner links follow the same application-managed logical-reference policy as every other repository |
 | `ICronRepository` | `SqliteCronRepository` | Scheduled tasks and their timezone-normalized expressions |
 | `ITerminalRepository` | `SqliteTerminalRepository` | Terminal session metadata |
-| `IPresetRepository` / `IPresetStateRepository` | `SqlitePresetRepository` / `SqlitePresetRepository` | Relational presets and per-user selection state |
+| `ISshHostRepository` | `SqliteSshHostRepository` | Encrypted owner-scoped SSH host book |
 | `IChannelRepository` | `SqliteChannelRepository` | External chat-channel plugin configs (Telegram / Lark / DingTalk / WeChat) |
 | `IClientPreferenceRepository` | `SqliteClientPreferenceRepository` | Per-client preferences |
 | `ITagSettingRepository` | `SqliteTagSettingRepository` | Tag-based grouping (used by AutoWork) |
@@ -157,10 +160,12 @@ or downgrade path.
 
 The baseline contract is checked at runtime:
 
-- every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`;
+- every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, except the
+  Agent Store and Unified Plugin tables frozen with TEXT/composite keys;
 - stable business-ID columns contain bare canonical UUIDv7 strings;
-- the schema has no physical `FOREIGN KEY`, `REFERENCES`, trigger, database
-  cascade, or `*_row_id`;
+- outside those two exception groups the schema has no physical `FOREIGN KEY`,
+  `REFERENCES`, database cascade, or `*_row_id`; the only triggers are the
+  baseline's registered guard triggers;
 - every logical reference has its required index and registry entry.
 
 ### Scheduled-task ownership
@@ -198,13 +203,16 @@ renewable leases are process memory only and are never persisted.
 
 ### Logical-reference policy
 
-No product table has a physical foreign key. Stable-parent links such as
+Outside the Agent Store and Unified Plugin exception groups, no product table
+has a physical foreign key. Stable-parent links such as
 `messages.conversation_id` and `cron_job_runs.cron_job_id` store the parent's
 bare UUIDv7 business ID. The repository layer validates the target and applies the
 registered `RESTRICT`, application `CASCADE`, `SET_NULL`, or `KEEP_HISTORY`
 delete policy in a transaction. Application `CASCADE` is service/repository
-behavior, not a SQLite cascade or trigger. Orphan audits cover the database
-and managed side stores.
+behavior, not a SQLite cascade or trigger. The exception tables carry the
+baseline's frozen physical `FOREIGN KEY` / `ON DELETE` behavior, and the only
+triggers are the baseline's registered guard triggers. Orphan audits cover the
+database and managed side stores.
 
 `requirements.owner_conversation_id` is deliberately a logical link with a
 `SET_NULL` lifecycle: Conversation deletion clears the binding in the

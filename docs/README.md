@@ -2,9 +2,10 @@
 
 This folder contains the current technical, operator, and contributor
 documentation for **NomiFun**. Normative current behavior lives under
-`architecture/` and `contributing/`. The `continuity/` area is retained for
-historical decisions, continuity context, and release audits; it does not
-override the current architecture or contributor standards.
+`architecture/` and `contributing/`. The `specs/` area keeps dated design
+contracts whose decisions are still load-bearing — a few are referenced
+directly from source — while dated status, progress, and review snapshots are
+not retained; use Git history.
 
 > New to the project? Start with
 > [Getting Started -> Introduction](getting-started/introduction.md).
@@ -18,7 +19,7 @@ override the current architecture or contributor standards.
 | Install or run locally | [getting-started/installation.md](getting-started/installation.md) |
 | Try the app quickly | [getting-started/quick-start.md](getting-started/quick-start.md) |
 | Connect providers, local models, and configure failover | [guides/model-routing.md](guides/model-routing.md) |
-| Create with the infinite canvas, workbenches, assets, and templates | [guides/creative-studio.md](guides/creative-studio.md) |
+| Create with the infinite canvas, assets, prompts, and templates | [guides/creative-studio.md](guides/creative-studio.md) |
 | Connect a XiaoZhi ESP32 robot | [guides/xiaozhi-robot.md](guides/xiaozhi-robot.md) |
 | Understand the current architecture | [architecture/overview.md](architecture/overview.md) |
 | Build or package the project | [contributing/building-and-packaging.md](contributing/building-and-packaging.md) |
@@ -39,15 +40,16 @@ docs/
 ├── architecture/         current system architecture and implementation map
 ├── reference/            configuration, API overview, troubleshooting, FAQ
 ├── contributing/         development, project structure, data/ID standards, build/package notes
-├── continuity/           historical decisions, continuity notes, and release audits
+├── specs/                dated design contracts with still-load-bearing decisions
 ├── skills/               exported skill docs for external agents
 └── images/               screenshot manifest and referenced images
 ```
 
 Current top-level user surfaces include conversations, terminals, extensible
-model management, Creation, presets, MCP, open capabilities,
-requirements/AutoWork, scheduled tasks, companions, knowledge, and
-feature-gated computer/browser automation. The frontend source of truth is
+model management, Creation (Canvas + asset library), the Agent workbench,
+skills, MCP, open capabilities, requirements/AutoWork, scheduled tasks,
+companions, knowledge, SSH hosts, and feature-gated plugin capabilities. The
+frontend source of truth is
 `ui/src/renderer/components/layout/Router.tsx`.
 
 ## Documentation scope

@@ -83,7 +83,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""   # empty for the default key
 # Windows (NSIS .exe + .sig):
 bun run build:win --config apps/desktop/tauri.updater.conf.json
 
-# macOS (Universal .app.tar.gz + .sig — one artifact serves both darwin chips):
+# macOS (arm64 .app.tar.gz + .sig):
 bun run build:mac --config apps/desktop/tauri.updater.conf.json
 
 # Linux (AppImage + .sig for updater; deb/rpm remain manual installers):
@@ -176,8 +176,8 @@ stale `latest.json` whose version does not match the release version.
 6. Create/update the matching GitHub Release and upload **all** manual
    installers, updater packages, updater `.sig` files, and `latest.json`. For
    macOS this means both:
-   - `dist/desktop/NomiFun_<version>_universal.dmg` for manual install.
-   - `target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz`
+   - `dist/desktop/NomiFun_<version>_aarch64.dmg` for manual install.
+   - `target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz`
      plus `NomiFun.app.tar.gz.sig` for auto-update.
    For Windows, the updater `.exe` is also the normal manual installer; upload
    any `.msi` only if the build generated one.

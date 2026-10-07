@@ -44,7 +44,7 @@ Frame 与生命周期，但仅属宿主内部实现，不构成 DevTools 产品�
 会话内嵌浏览器使用 WebView2/操作系统原生网络栈，不安装应用转发代理、IP/端口白名单或网络设置。
 这保留系统代理、证书、localhost、LAN、WebSocket 和 HMR。最小边界是顶层导航仅限无内嵌凭据的
 HTTP(S)，并且 Browser child 无 Tauri capability、local trust、backend credential 或任意文件权限。
-后台 `nomi_local_websearch` / render 仍是不同消费者，保留严格公网 DNS/IP pinning，不与可见浏览器混用。
+后台 `web.research` / render 仍是不同消费者，保留严格公网 DNS/IP pinning，不与可见浏览器混用。
 
 浏览器菜单的“重新打开浏览器”需要明确确认：关闭所有网页并丢弃未保存网页内容，但不清空会话消息或项目文件。
 后端持有同一 Session 的 operation fence，在 canonical 空闲边界校验浏览器代际。
@@ -219,16 +219,16 @@ NomiCore 的 Knowledge 已通过 typed port 接入 Kernel 非 Agent operation �
 只有安装版本验证成功才装配该 Provider，缺少运行时时仍明确 unavailable，不回退普通 HTTP。
 本机公网渲染测试因系统 DNS 把 example.com 映射到保留的 Fake-IP 而被阻断，没有放行该网段；本地检索公网回归通过。
 
-`nomi_local_websearch` 是 Agent 工作台“网页”分类中的独立可选能力。它不映射为 `web.search` / `web_search`，不要求模型原生搜索能力，也不隐含 Browser 自动化权限。
+`web.research` 是 Agent 工作台“网页”分类中的独立可选能力模块。它不映射为 `web.search` / `web_search`，不要求模型原生搜索能力，也不隐含 Browser 自动化权限。
 
 其 Headless owner 使用匿名临时 context、限定 origin 的请求转发与 exact process/profile 清理，不读取会话标签或登录态。Runtime/adapter 身份冻结在能力元数据中，会话构建和请求执行时再次校验。
 
 Windows 默认桌面启动已接入 Chrome 120+ 的安装版本发现和文件指纹装配，找不到合格安装时保持不可用。
 发现过程只读取已知安装目录的 PE 版本信息和文件，不运行 Chrome、不发送搜索请求、不读取旧浏览器偏好。
 运行版本在真正检索时、创建检索页面之前再次核对；版本变化会拒绝旧绑定。真实公网检索与目录接口已验证。
-`local_websearch_agent` 集成测试通过正式 DesktopServer、工作台配置 API 与普通 Chat 模型协议完成会话检索：模型
-没有原生搜索 trait，仍取得精确的 `nomi_local_websearch` 工具及真实公开来源/引用标识。该测试使用确定性模型端点，
-未供应内嵌 Workspace 或系统浏览器连接；完整 GUI、真实模型自主检索和引用渲染验收仍待完成。
+本地检索集成测试通过正式 DesktopServer、工作台配置 API 与普通 Chat 模型协议完成会话检索：模型
+没有原生搜索 trait，仍取得精确的 `web.research` 工具及真实公开来源/引用标识。该测试使用确定性模型端点，
+未供应内嵌 Workspace 或 Attached Chrome 连接；完整 GUI、真实模型自主检索和引用渲染验收仍待完成。
 
 本地搜索结果在现有聊天工具记录中显示查询、来源标题/域名/摘要及明确的错误状态，不是独立搜索页面。
 来源文字按纯文本处理；只有用户点击有效 HTTP(S) 来源时才调用既有系统浏览器打开入口。检索执行本身不打开

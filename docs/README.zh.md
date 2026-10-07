@@ -1,8 +1,9 @@
 # NomiFun 文档
 
 本目录保存 **NomiFun** 当前的技术文档、运维文档与贡献者文档。当前规范性内容
-位于 `architecture/` 与 `contributing/`。`continuity/` 保留历史决策、交接
-背景和发布审计，不得覆盖当前架构或贡献者规范。
+位于 `architecture/` 与 `contributing/`。`specs/` 保留仍然承重的带日期设计
+契约——少数直接被源码引用；带日期的状态、进度与评审快照不保留，追溯请使用
+Git 历史。
 
 > 初次接触项目请从
 > [入门 -> 项目介绍](getting-started/introduction.zh.md) 开始。
@@ -16,7 +17,7 @@
 | 安装或本地运行 | [getting-started/installation.zh.md](getting-started/installation.zh.md) |
 | 快速试用 | [getting-started/quick-start.zh.md](getting-started/quick-start.zh.md) |
 | 接入 provider、本地模型并配置故障转移 | [guides/model-routing.zh.md](guides/model-routing.zh.md) |
-| 使用无限画布、工作台、素材与模板创作 | [guides/creative-studio.zh.md](guides/creative-studio.zh.md) |
+| 使用无限画布、素材、提示词与模板创作 | [guides/creative-studio.zh.md](guides/creative-studio.zh.md) |
 | 连接小智 ESP32 机器人 | [guides/xiaozhi-robot.zh.md](guides/xiaozhi-robot.zh.md) |
 | 理解 Agent 会话 日志和内容 | [Agent Session 当前架构](architecture/agent-session.zh.md) |
 | 理解当前架构 | [architecture/overview.zh.md](architecture/overview.zh.md) |
@@ -37,14 +38,14 @@ docs/
 ├── architecture/         当前系统架构与实现地图
 ├── reference/            配置、API 概览、排障、FAQ
 ├── contributing/         开发、项目结构、数据/ID 规范、构建与打包
-├── continuity/           历史决策、交接说明与发布审计
+├── specs/                仍然承重的带日期设计契约
 ├── skills/               面向外部 agent 的 skill 文档
 └── images/               截图清单与图片资源
 ```
 
-当前顶层用户界面包括会话、终端、可扩展模型管理、创作、设定、MCP、
-开放能力、需求/AutoWork、定时任务、伙伴、知识库，以及 feature-gated 的
-computer/browser 自动化能力。前端路由真相来源是
+当前顶层用户界面包括会话、终端、可扩展模型管理、创作（Canvas + 素材库）、
+Agent 工作台、技能、MCP、开放能力、需求/AutoWork、定时任务、伙伴、知识库、
+SSH 主机，以及 feature-gated 的插件能力。前端路由真相来源是
 `ui/src/renderer/components/layout/Router.tsx`。
 
 ## 文档范围

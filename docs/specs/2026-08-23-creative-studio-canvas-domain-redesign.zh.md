@@ -1,7 +1,7 @@
 # 创作：画布领域与独立工作台重构
 
 - 日期：2026-08-23
-- 状态：画布领域设计仍有效；Director 部分已于 2026-09-11 退休
+- 状态：历史设计稿。Director 部分已于 2026-09-11 退休；独立生图/视频工作台其后亦已退役，canonical 路由由 `/workshop/*` 改为 `/nomi/canvases` 与 `/asset-library/*`。以下路由表保留当时的决策记录，现行路由以 `ui/src/renderer/components/layout/Router.tsx` 为准。
 - 本地 checkpoint：`main`（按用户要求不推送远程）
 
 ## 1. 用户确认的产品原则

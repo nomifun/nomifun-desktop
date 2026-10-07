@@ -115,8 +115,14 @@ to the UI in plaintext, never placed in the conversation or the model request,
 and host-key verification is enforced (accept-new on first use, blocked on
 change).
 
+You can also import hosts from `~/.ssh/config` on the SSH hosts settings page:
+the backend scans the local config (`GET /api/ssh-hosts/import-candidates`),
+lets you pick aliases, and imports only host/port/key paths
+(`POST /api/ssh-hosts/import`) — credentials are never read from arbitrary
+request paths.
+
 ## Not in this version
 
-Importing hosts from `~/.ssh/config`, a live remote-output terminal panel,
-ProxyJump/bastion hops, and MFA/keyboard-interactive auth are planned for later
-phases. Remote targets are assumed to be POSIX Linux hosts.
+A live remote-output terminal panel, ProxyJump/bastion hops, and
+MFA/keyboard-interactive auth are planned for later phases. Remote targets are
+assumed to be POSIX Linux hosts.

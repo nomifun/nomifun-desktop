@@ -13,7 +13,7 @@ Current pages:
 | --- | --- |
 | MCP servers | `/mcp` |
 | Skills | `/skills` |
-| Presets | `/presets` |
+| Agent workbench | `/agent` |
 | Public/remote capability exposure | `/open-capabilities` |
 
 Legacy settings URLs redirect to these pages.
@@ -163,6 +163,6 @@ Custom and bundled Skills use the same Session capture and native context reader
 
 ## Related
 
-- [Presets](./presets.md)
+- [Agent Workbench](./presets.md)
 - [Remote Capability API](./remote-capability-api.md)
 - [Terminal](./terminal.md)

@@ -29,6 +29,9 @@ They are not interchangeable.
    id INTEGER PRIMARY KEY AUTOINCREMENT
    ```
 
+   The canonical Agent Store tables and the Unified Plugin tables are the two
+   frozen exception groups; they use TEXT/composite keys exactly as declared
+   in the baseline schema.
 2. An entity that needs a stable product locator across databases, devices,
    files, APIs, events, or managed stores has a separately named, bare UUIDv7
    business field such as `user_id`, `conversation_id`, `message_id`,
@@ -38,8 +41,9 @@ They are not interchangeable.
    receive a UUID merely for uniformity, and that `id` never becomes a product
    wire locator.
 4. Relationships are logical references maintained by repositories and
-   services. The product schema contains no physical foreign keys,
-   `REFERENCES` clauses, triggers, or database cascades.
+   services. Outside the two frozen exception groups, the product schema
+   contains no physical foreign keys, `REFERENCES` clauses, or database
+   cascades; only the baseline's registered guard/validator triggers exist.
 5. v3 is a new dataset lineage. Historical datasets are reset as a whole; rows
    and old identifier formats are not migrated into v3.
 
@@ -52,8 +56,9 @@ and dependent tables, must declare:
 id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
-SQLite internal tables, migration metadata, and temporary tables are not
-product tables.
+The canonical Agent Store tables and the Unified Plugin tables use the
+TEXT/composite keys frozen in the baseline instead. SQLite internal tables,
+migration metadata, and temporary tables are not product tables.
 
 The technical `id`:
 
@@ -159,7 +164,12 @@ boundary.
 
 ## Logical references
 
-v3 removes physical foreign keys from all product schemas. Product DDL must
+v3 removes physical foreign keys from product schemas outside the two frozen
+exception groups (canonical Agent Store tables and Unified Plugin tables,
+which keep the physical `FOREIGN KEY`/`ON DELETE` declarations written in the
+baseline). The baseline also ships registered guard/validator triggers in a
+few domains; no new domain may add triggers or physical constraints without an
+explicit schema-contract update. All other product DDL must
 not contain:
 
 ```text
@@ -214,9 +224,11 @@ CREATE INDEX idx_cron_job_runs_cron_job_id
     ON cron_job_runs(cron_job_id);
 ```
 
-`agent_messages.agent_session_id` logically targets
-`agent_sessions.agent_session_id`; `cron_job_runs.cron_job_id` logically targets
-`cron_jobs.cron_job_id`. Neither relationship is declared to SQLite.
+`messages.conversation_id` logically targets
+`conversations.conversation_id`; `cron_job_runs.cron_job_id` logically targets
+`cron_jobs.cron_job_id`. Neither relationship is declared to SQLite. (Inside
+the Agent Store exception group, `agent_messages.session_id` is a real
+`FOREIGN KEY` — that physical graph is deliberate and frozen.)
 
 Do not store both `conversation_id` and `conversation_row_id`, or any equivalent
 business-ID/row-ID pair, for the same relationship.

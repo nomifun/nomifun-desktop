@@ -40,7 +40,8 @@ NomiFun 把状态保存在三个地方：一个 SQLite 数据库（一切结构�
 
 持久化身份遵循 [id-system.md](id-system.zh.md) 中的 v3 分层契约：
 
-- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`；
+- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 与
+  Unified Plugin 两组冻结例外使用 TEXT/复合主键；
 - 需要跨数据集的稳定实体增加具名、裸标准 UUIDv7 字段；
 - 仅内部关系、单例、缓存和事件行在当前数据集内部使用表 `id`；
   需要产品定位的实体使用具名 UUIDv7 业务字段；
@@ -63,7 +64,7 @@ IDMM Intervention。
 - `init_database` —— 打开或初始化 v3 baseline 数据库。
 - `init_database_memory` —— 测试用的内存版本。
 
-该 crate 暴露约 20 对仓储 **trait + Sqlite 实现**。下面是非穷尽列表（完整列表见 `lib.rs` 中的 `pub use repository::{...}` 块）：
+该 crate 暴露仓储 **trait + Sqlite 实现** 对。下面是非穷尽列表（完整列表见 `lib.rs` 中的 `pub use repository::{...}` 块）：
 
 | Trait | Sqlite 实现 | 存储 |
 | --- | --- | --- |
@@ -77,7 +78,7 @@ IDMM Intervention。
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements；所有 owner 关联都遵循 Repository/Service 管理的逻辑关联策略 |
 | `ICronRepository` | `SqliteCronRepository` | 定时任务及其按时区归一化的表达式 |
 | `ITerminalRepository` | `SqliteTerminalRepository` | 终端会话元数据 |
-| `IPresetRepository` / `IPresetStateRepository` | `SqlitePresetRepository` / `SqlitePresetRepository` | 关系化设定与每用户选择状态 |
+| `ISshHostRepository` | `SqliteSshHostRepository` | 加密的 owner 作用域 SSH 主机簿 |
 | `IChannelRepository` | `SqliteChannelRepository` | 外部聊天渠道插件配置（Telegram / Lark / DingTalk / WeChat） |
 | `IClientPreferenceRepository` | `SqliteClientPreferenceRepository` | 按客户端的偏好 |
 | `ITagSettingRepository` | `SqliteTagSettingRepository` | 基于标签的分组（被 AutoWork 使用） |
@@ -97,10 +98,11 @@ IDMM Intervention。
 
 运行时 baseline 校验至少确认：
 
-- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`；
+- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 与
+  Unified Plugin 表按基线冻结使用 TEXT/复合主键；
 - 稳定业务 ID 是裸标准 UUIDv7；
-- schema 没有物理 `FOREIGN KEY`、`REFERENCES`、trigger、数据库 cascade 或
-  `*_row_id`；
+- 两组例外之外的 schema 没有物理 `FOREIGN KEY`、`REFERENCES`、数据库
+  cascade 或 `*_row_id`；唯一的 trigger 是基线已注册的 guard trigger；
 - 每个逻辑关联都有必需索引和 registry 登记。
 
 ### 定时任务所有权
@@ -116,7 +118,7 @@ HTTP、Gateway、服务和 Repository 的公开读写都必须携带 `user_id`�
 
 `installation_identity.owner_user_id` 所引用的 canonical 用户是安装所有者。
 只有该 owner 可以启动主机 runtime，
-并使用文件、终端、Skill、Preset、知识库挂载、Office 预览和平台 Gateway 等能力。
+并使用文件、终端、Skill、AgentPreset、知识库挂载、Office 预览和平台 Gateway 等能力。
 其他已认证主体只保留普通 Nomi Conversation 和定时任务中的模型调用；用户身份、
 role 文本或开放 JSON 都不能扩大权限。
 
@@ -125,12 +127,15 @@ v3 baseline 直接创建上述权限模型，不保留或规范化旧 schema gen
 
 ### 逻辑关联策略
 
-任何产品表都没有物理外键。稳定父实体关联（例如
+默认策略是逻辑关联：Agent Store 与 Unified Plugin 两组例外之外的产品表
+都没有物理外键。稳定父实体关联（例如
 `messages.conversation_id`、`cron_job_runs.cron_job_id`）保存父实体的裸 UUIDv7
 业务 ID。Repository 层在事务
 中校验目标，并执行登记的 `RESTRICT`、应用层 `CASCADE`、`SET_NULL` 或
 `KEEP_HISTORY` 删除策略。应用层 `CASCADE` 是 Service/Repository 行为，不是
-SQLite cascade 或 trigger。数据库和受管 side-store 都执行 orphan audit。
+SQLite cascade 或 trigger。例外表使用基线中冻结的物理 `FOREIGN KEY` 与
+`ON DELETE` 行为；唯一允许的 trigger 是基线已注册的 guard trigger。
+数据库和受管 side-store 都执行 orphan audit。
 
 `requirements.owner_conversation_id` 是采用 `SET_NULL` 删除策略的逻辑关联；
 删除会话时由应用事务清空绑定，因此持久化 AutoWork runner 仍可继续运行，

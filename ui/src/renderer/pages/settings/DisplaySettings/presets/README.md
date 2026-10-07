@@ -1,6 +1,8 @@
 # 预设 CSS 主题契约 / Preset CSS Theme Contract
 
-每个预设主题是一段完整的 CSS，由 `Layout.tsx` 注入为 `<head>` 末尾的 `<style id="user-defined-custom-css">`。
+每个预设主题是一段完整的 CSS，由 `ui/src/renderer/components/layout/AppThemeRuntime.tsx`
+（经 `ui/src/renderer/utils/theme/applyCustomCss.ts`）注入为 `<head>` 末尾的
+`<style id="user-defined-custom-css">`。
 注入前 `processCustomCss` 会给**所有声明自动追加 `!important`**（`@keyframes` 块内除外）。
 
 ## 为什么必须覆盖到 `body` 层
@@ -72,8 +74,9 @@ Arco 自带的 `body[arco-theme='dark']` 暗色切换就被压制了——暗色
    `.arco-modal`、`.arco-select-popup`），不要用 `*`、`div`、`[class*=...]` 这类宽选择器。
 3. **禁止网络依赖**：不允许 `@import`/`@font-face` 外联字体；`font-family` 调整必须带完整本地回退栈。
 4. **`@keyframes` 可用**（processor 已对其跳过 !important），但动画要轻（呼吸/微光级别），避免大面积重绘。
-5. **变量不要写进 `@media`**：设置页预览缩略图靠静态解析 `:root`/`[data-theme='dark']` 块取色，
-   嵌套块解析不到。
+5. **变量不要写进 `@media`**：主题选择器的色板圆点靠静态正则解析
+   `--color-primary` / `--primary-6` 字面量取色（见 `SiderThemeControl.tsx`
+   的 `pickAccent`），嵌套块解析不到。
 
 ## 内容容器可读性红线
 
@@ -97,11 +100,13 @@ Arco 自带的 `body[arco-theme='dark']` 暗色切换就被压制了——暗色
    （例如 `.workspace-btn`、`.layout-sider`、`.arco-modal`），不要把同一组样式同时打到
    `.message-item` 这类通用排版节点上。
 
-## 预览缩略图
+## 主题选择器色板
 
-无 `cover` 的主题卡片由 `CssThemeSettings` 静态解析主题 CSS 生成布局缩略图，
-取色键：`bg-1`/`bg-2`/`bg-3`/`color-primary`/`color-text-3`/`color-fill-2`/`color-primary-light-3`。
-保证这些变量在双块中有字面量或可解析的 `var()` 链即可。
+主题选择器入口在侧栏底部的 `SiderThemeControl` popover（不再是独立的
+Display 设置页）。每个预设卡片用 `pickAccent` 从 CSS 中静态提取
+`--color-primary` 或 `--primary-6` 的字面量（hex 或 `r,g,b` 三元组）作为
+色板圆点；写 `var()` 或放进 `@media` 都取不到色。保证这两个变量在亮色块里
+有字面量即可。
 
 ## 自检清单
 

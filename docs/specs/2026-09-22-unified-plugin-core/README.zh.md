@@ -1,7 +1,7 @@
 # Unified Plugin Core：最终架构与一次性重构合同
 
 > 日期：2026-09-22
-> 状态：产品方向已确认，等待一次性实施
+> 状态：已实施（`/api/plugins*`、`plugin_*` 表、`bun run check:unified-plugin-boundary` 均在位）；剩余项见 `docs/specs/2026-10-02-agent-plugin-authoring-redesign/IMPLEMENTATION.md`
 > 适用目标：Tauri Desktop 与桌面级 WebUI；最小视口继续遵守仓库的 880×600 合同
 > 数据策略：Plugin 子系统 clean cut；不保留 N1/M1 兼容层，不迁移实验期 Plugin 数据
 > 本文地位：Plugin 重构的最终产品合同、目标架构和完成门禁。实施过程中不得重新扩回双聚合，也不得以未删除旧实现宣称完成。

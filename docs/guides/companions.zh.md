@@ -138,7 +138,7 @@ install 级的**迁移** Tab 提供三种 `.zip` 迁移包（仅桌面版提供�
 | 某个伙伴的疑似重复分组 | `POST /api/companion/memories/merge-suggestions`（`{companion_id}` —— 扫描与返回都只限这个伙伴） |
 | 每个伙伴的陪伴线程 | `GET /api/companion/companions/{companionId}/companion/threads`、`…/companion/active` |
 | 某个伙伴的聊天历史日期索引 | `GET /api/companion/companions/{companionId}/history/days` → `[{day, message_count, has_digest}]`，最新在前（本地日；只读，从不铸造会话） |
-| 读取会话的某一天 | `GET /api/conversations/{conversationId}/messages?day=YYYYMMDD`（最早在前，由后端划界） |
+| 读取会话的某一天 | `GET /api/agent-sessions/{agentSessionId}/messages?day=YYYYMMDD`（最早在前，由后端划界） |
 | 导出记忆包 | `POST /api/companion/export/memory`（`{dest_path, include_events}`） |
 | 导出伙伴包 | `POST /api/companion/export/companions/{companionId}`（`{dest_path, knowledge_names, include_memories = true, include_skills = false}`） |
 | 导入记忆包 / 伙伴包 | `POST /api/companion/import`（按 manifest.kind 分发） |

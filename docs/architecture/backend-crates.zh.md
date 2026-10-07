@@ -25,14 +25,17 @@
 [数据与标识符规范](../contributing/data-and-identifier-standards.zh.md)。
 所有后端 crate 遵循统一的 v3 数据契约：
 
-- 每张 NomiFun 产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`；
+- 每张 NomiFun 产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，
+  canonical Agent Store 表与 Unified Plugin 表两组例外按基线冻结使用
+  TEXT/复合主键；
 - 需要跨数据集稳定识别的实体使用 `user_id`、`conversation_id`、
   `message_id` 等具名裸标准 UUIDv7；
 - 纯内部行只把表 `id` 作为 repository 实现细节，关系通过 owner UUIDv7、
   sequence、自然键或复合条件表达；
 - 一条关系只保留一个引用字段，不存在 `*_row_id` 双轨字段；
-- Repository/Service 维护带索引的逻辑关联；产品 DDL 不包含物理
-  `FOREIGN KEY`、`REFERENCES`、`ON DELETE` 或 `ON UPDATE`；
+- Repository/Service 维护带索引的逻辑关联；上述两组例外之外的产品 DDL
+  不包含物理 `FOREIGN KEY`、`REFERENCES`、`ON DELETE` 或 `ON UPDATE`，
+  除基线已注册的 guard trigger 外不新增数据库触发器；
 - v3 启动时发现不兼容的受管数据集，会整体 reset/quarantine，而不是迁移
   历史行。
 
@@ -64,16 +67,26 @@
 | [`nomifun-agent-kernel`](../../crates/backend/nomifun-agent-kernel/) | 冻结执行闭包、typed resource binding 与调用准入。 |
 | [`nomifun-agent-session`](../../crates/backend/nomifun-agent-session/) | 唯一 canonical Session、Turn、Event、Payload、Effect 存储及派生展示。 |
 | [`nomifun-agent-runtime`](../../crates/backend/nomifun-agent-runtime/) | 唯一官方 Nomi Runtime 的模型、工具、计划、压缩与 native 恢复循环。 |
+| [`nomifun-agent-domain-support`](../../crates/backend/nomifun-agent-domain-support/) | 打包 domain wave crate 共用的构造与校验辅助。 |
+| [`nomifun-agent-domain-wave1`](../../crates/backend/nomifun-agent-domain-wave1/) | 目标代际 Web Research、Knowledge、Memory 模块注册（Wave 1）。 |
+| [`nomifun-agent-domain-wave2`](../../crates/backend/nomifun-agent-domain-wave2/) | 打包的编码扩展能力注册（Wave 2）。 |
+| [`nomifun-agent-domain-wave3`](../../crates/backend/nomifun-agent-domain-wave3/) | 打包的创作与多模态能力注册（C7 Wave 3）。 |
+| [`nomifun-agent-domain-wave4`](../../crates/backend/nomifun-agent-domain-wave4/) | 打包的身份/渠道/设备能力注册（C7 Wave 4）。 |
+| [`nomifun-agent-domain-wave5`](../../crates/backend/nomifun-agent-domain-wave5/) | 打包的自动化、监督与 Remote 域注册（C7 Wave 5）。 |
+| [`nomifun-engine-core`](../../crates/backend/nomifun-engine-core/) | 源内集成执行引擎共享的 port；不提供策略、Session 库、插件加载或隐式授权。 |
+| [`nomifun-chat-model-broker`](../../crates/backend/nomifun-chat-model-broker/) | Provider 中立的 Agent 会话 broker 与无状态本地 Responses 桥；唯一的模型重试/故障转移权威。 |
+| [`nomifun-voice`](../../crates/backend/nomifun-voice/) | 应用侧 voice owner；canonical 工作经 port 注入。 |
+| [`nomifun-voice-core`](../../crates/backend/nomifun-voice-core/) | Provider 无关的 voice 媒体/会话机制。 |
+| [`nomifun-voice-contracts`](../../crates/backend/nomifun-voice-contracts/) | 可选 voice 合同；只引用 Agent 工作标识，不重复定义。 |
 
 ## 功能 crate（产品的主体）
 
 | Crate | 职责 |
 | --- | --- |
-| [`nomifun-conversation`](../../crates/backend/nomifun-conversation/) | 会话与消息 CRUD、send-message 路由、**流式中继**（将后端 agent token 投递到 `/ws`）、响应中间件、技能解析 / `agent_snapshot` 投影和运行时状态持久化。 |
+| [`nomifun-conversation`](../../crates/backend/nomifun-conversation/) | Canonical AgentSession 产品适配层与共享投影类型：session-owner port（`CanonicalAgentSessionOwner`）、创作入口、Creative Studio 画布 Agent session 绑定、product-agent snapshot 解析、turn 投递与模型故障转移队列服务。会话 HTTP 路由在 `nomifun-app` 的 router 中挂载。 |
 | [`nomifun-agent-execution`](../../crates/backend/nomifun-agent-execution/) | 持久化 Agent 协作：`AgentExecutionEngine` 门面统一负责规划、依赖调度、Attempt、恢复、决策、事件和显式 Conversation 关联；单 Agent 与多 Agent 共用同一聚合。详见[统一执行架构](agent-execution.zh.md)。 |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp/) | MCP 服务器 CRUD、**OAuth 流程**、多 CLI 同步（`adapters/` 下的 `Claude`、`Codex`、`CodeBuddy`、`Gemini`、`Qwen`、`OpenCode`、`Nomi`、`Nomifun` 适配器）、连接测试、向会话注入 MCP 能力（含内置图像生成）。 |
-| [`nomifun-plugin-platform`](../../crates/backend/nomifun-plugin-platform/) | Unified Plugin 的配置、授权、存储、动作与生命周期。 |
-| [`nomifun-skill-library`](../../crates/backend/nomifun-skill-library/) | Skill 清单、发现、导入与内容管理。 |
+| [`nomifun-skill-library`](../../crates/backend/nomifun-skill-library/) | Skill 库产品：内置与用户 Skill、市场发现、路由、启动物化与运行时解析。 |
 | [`nomifun-channel`](../../crates/backend/nomifun-channel/) | 外部聊天渠道适配器（Telegram、Lark、DingTalk、WeChat）——通过 feature 控制。将入站消息映射到共享的 Agent / Conversation runtime，解析按机器人或平台配置的伙伴归属，并应用渠道 Agent 上下文。它是接入边界，不是额外的 Agent 类型或模式。 |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **平台 Gateway MCP** —— `nomi_*` 兼容工具（会话、定时任务、伙伴记忆、需求平台等）的进程内能力注册表与传输层。Browser/Computer 走 canonical `AgentPlatform` Role host，不由 Gateway 持有。内部子进程经 `nomicore mcp-gateway-stdio` 接入，只接收服务端派生、带作用域、有效期和签名的能力声明；Conversation 或 build-extra 字段都不能授权。公开入口只投影其鉴权边界允许的能力子集。 |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron/) | 定时任务：cron 表达式、时区修复、cron 守护进程、由斜杠命令驱动的创建。 |
@@ -84,7 +97,10 @@
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | 知识库、来源摄取、绑定库挂载状态，以及作用域只读的知识 MCP 服务器。 |
 | [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | Canonical 创作域：持有带版本项目文档、素材、提示词、模板/运行、严格 one-shot 模板草稿、Canvas ZIP 归档，以及大部分 owner-only `/api/creative-studio/*` 路由。项目文档、模板状态与素材 metadata 在 SQLite；二进制原件/缩略图在 `{data_dir}/workshop/assets/`。唯一公开面是供浏览器媒体元素使用的只读 `GET /api/creative-studio/files/{asset_id}`。 |
 | [`nomifun-plugin-platform`](../../crates/backend/nomifun-plugin-platform/) | Unified Plugin Core：一种 Manifest/Package/Plugin 身份、内容寻址 Artifact、Draft、generation DataRoot、Action/Binding registry、独立 Service 进程、Surface Bridge、Package/Backup、回退，以及唯一 `/api/plugins` + `/api/plugin-drafts` HTTP 面。 |
-| [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 创作画布节点、独立工作台与模板 step 背后的媒体生成引擎。持有 canonical owner-only `/api/creative-studio/tasks*` 队列（`queued → running → succeeded/failed/canceled`）、exact Provider/model/task/输入身份、Provider 级与全局并发、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 Workshop `AssetSink`。 |
+| [`nomifun-plugin-development`](../../crates/backend/nomifun-plugin-development/) | 可选 Agent 模块：通过普通会话工具开发一个 Unified Plugin；Plugin 实例与运行时仍归 Plugin Core 所有。 |
+| [`nomifun-js-runtime`](../../crates/backend/nomifun-js-runtime/) | Unified Plugin Core 唯一不可变的进程级 JavaScript Runtime 权威。 |
+| [`nomifun-robot`](../../crates/backend/nomifun-robot/) | 机器人网关：LAN 接入的实体机器人（小智固件）作为桌面伙伴的物理化身。 |
+| [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 创作画布节点与模板 step 背后的媒体生成引擎。持有 canonical owner-only `/api/creative-studio/tasks*` 队列（`queued → running → succeeded/failed/canceled`）、exact Provider/model/task/输入身份、Provider 级与全局并发、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 Workshop `AssetSink`。 |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | 安装令牌鉴权的 canonical Remote MCP adapter：挂载于 `/mcp`，只通过 `AgentPlatform`/`AgentSession` 暴露 `open/turn/observe/cancel`。 |
 ## 基础设施特性
@@ -92,7 +108,9 @@
 | Crate | 职责 |
 | --- | --- |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal/) | 基于 `portable-pty` 的终端会话，支持 resize，通过 WS 进行输入 / 输出流式传输。 |
-| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | 会话持有的原生 Browser Workspace 类型契约：run/输入所有权、Tab 与 runtime generation、snapshot、上传/下载、Profile 清理，以及独立的系统浏览器授权模型。桌面宿主提供原生 WebView；隔离搜索/渲染与附着个人浏览器保持为不同消费者。 |
+| [`nomifun-ssh`](../../crates/backend/nomifun-ssh/) | SSH 远程会话：加密的 owner 作用域主机簿（`ssh_hosts`）、连接池/provider、`/api/ssh-hosts` 路由，以及给 SSH 绑定会话的 Agent 提供远程工具族的 `SshBackend` sink。传输层在隔离的共享 crate `nomi-ssh`（`russh`/`russh-sftp`）。 |
+| [`nomifun-browser-macos`](../../crates/backend/nomifun-browser-macos/) | Browser Workspace 的 macOS 专用原生 CEF 适配器；Windows 保留独立 WebView2 宿主。 |
+| [`nomifun-browser-platform`](../../crates/backend/nomifun-browser-platform/) | 会话持有的原生 Browser Workspace 类型契约：run/输入所有权、Tab 与 runtime generation、snapshot、上传/下载、Profile 清理，以及 Attached Chrome Provider 的授权模型。桌面宿主提供原生 WebView；隔离搜索/渲染与附着个人浏览器保持为不同消费者。 |
 | [`nomifun-model-invoke`](../../crates/backend/nomifun-model-invoke/) | 统一多模态模型调用层：类型化任务请求 / 结果、声明式鉴权方案、共享 HTTP 传输、协议适配器接缝 + 注册表与模型目录解析管线；被 `nomifun-shell` STT/TTS、`nomifun-creation` 等模型调用方消费。 |
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | 操作系统外壳辅助：用系统应用打开文件，针对 Deepgram 或 OpenAI 的语音转文字，剪贴板 / 粘贴集成。 |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | 在会话工作目录下的沙箱化文件系统（`browse`、`path_safety`、`watch_service`、`snapshot_service`），zip 辅助。 |
@@ -105,10 +123,10 @@
 
 | 模块 | 角色 |
 | --- | --- |
-| `cli.rs` | 顶层 `nomicore` clap 解析器：`--host/--port/--data-dir/--work-dir/--app-version/--local/--log-dir/--log-level`，加上子命令 `mcp-requirement-stdio`、`mcp-knowledge-stdio`、`mcp-gateway-stdio`、`mcp-open-stdio`、`terminal-hook`、`doctor`、`tools`、`call`、`backup`、`restore`。Web 宿主调用 `Cli::parse_from(["nomifun-web"])` 取得带默认值的实例，然后覆盖自身关心的项。 |
+| `cli.rs` | 顶层 `nomicore` clap 解析器：`--host/--port/--data-dir/--work-dir/--app-version/--local/--log-dir/--log-level`，加上子命令 `mcp-requirement-stdio`、`mcp-knowledge-stdio`、`mcp-gateway-stdio`、`mcp-open-stdio`、`terminal-hook`、`doctor`、`remote`（`open`/`turn`/`observe`/`cancel`）、`backup`、`restore`。Web 宿主调用 `Cli::parse_from(["nomifun-web"])` 取得带默认值的实例，然后覆盖自身关心的项。 |
 | `bootstrap/` | 分层初始化：`tracing_init`（文件 + 控制台层）、`work_dir` 解析、`builtin_skills` 物化、`environment::{init_environment,init_data_layer}`、`admin::ensure_admin_credentials`（认证模式下的首次运行预置）。 |
 | `services.rs` | `AppServices` 大杂烩：每个功能 crate 的服务带着对应仓储一并接好。通过 `AppServices::from_config(database, &config)` 一次构建。 |
-| `router/` | `create_router(&services)` 以及类型化的 `routes`、`state`、`health`、`trace` 辅助；Agent platform/control-plane、conversation、extension 和其它模块分别注册自己的路由。旧 `build_preset_state` / `/api/presets` 不再是当前 Agent 主链。 |
+| `router/` | `create_router(&services)` 以及类型化的 `routes`、`state`、`health`、`trace` 辅助；`build_module_states` / `build_skill_state` / `build_ws_state`。Agent platform/control-plane、conversation 和其它模块分别注册自己的路由。 |
 | `commands/` | CLI 子命令的实现体：服务器、各 stdio MCP bridge、终端生命周期 hook、诊断，以及公开能力客户端命令。 |
 | `lib.rs` | 公共门面：`run_embedded_server`、`AppServices`、`create_router`、`bootstrap` 再导出。这是宿主二进制唯一引入的 API。 |
 
