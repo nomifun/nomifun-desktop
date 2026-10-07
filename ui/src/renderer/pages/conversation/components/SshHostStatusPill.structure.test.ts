@@ -110,8 +110,8 @@ describe('SshHostStatusPill structure', () => {
 
   test('mounted in the existing nomi headerExtra beside the cron manager', () => {
     expect(conversationSource.includes('<SshHostStatusPill')).toBe(true);
-    expect(conversationSource.includes('ssh_host_id')).toBe(true);
-    expect(conversationSource.includes('sshHostIdOf(conversation)')).toBe(true);
+    expect(conversationSource.includes('<SshHostStatusPill conversation={conversation}')).toBe(true);
+    expect(pillSource.includes('conversationSshHostId(conversation)')).toBe(true);
   });
 
   test('the shared chat layout was not touched to make room for this pill', () => {

@@ -106,6 +106,18 @@ test('explicit thinking deltas can reopen a completed contiguous phase', () => {
   expect(merged[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
 });
 
+test('reasoning resumes its canonical row across narration and another completed step', () => {
+  const first = transformMessage(baseWire({ type: 'thinking', data: { content: 'Inspect. ', status: 'done' } }))!;
+  const narration = transformMessage(baseWire({ type: 'text', msg_id: SECOND_MESSAGE_ID, data: { content: 'Reading the source.' } }))!;
+  const resumed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Verify.', status: 'thinking' } }))!;
+  const merged = composeMessage(resumed, [first, narration]);
+  expect(merged).toHaveLength(2);
+  expect(merged[0].id).toBe(first.id);
+  expect(merged[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+  expect(merged[1]).toBe(narration);
+  expect(first.content).toMatchObject({ content: 'Inspect. ', status: 'done' });
+});
+
 test('cancelled tool history cannot become successful after a late frame', () => {
   const cancelled = normalizeToolCallContent({call_id:'cancelled',name:'exec_command',status:'canceled',output:'STARTED'}, 'finish');
   expect(cancelled.status).toBe('canceled');

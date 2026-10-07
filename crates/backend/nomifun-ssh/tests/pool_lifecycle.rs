@@ -211,8 +211,8 @@ async fn reconnect_replays_the_last_proven_cwd() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_macos_grep_fallback_keeps_single_file_and_recursive_shapes() {
-    const NAME: &str = "real_macos_grep_fallback_keeps_single_file_and_recursive_shapes";
+async fn real_pty_search_keeps_grep_and_ripgrep_output_shapes() {
+    const NAME: &str = "real_pty_search_keeps_grep_and_ripgrep_output_shapes";
     let sshd = sshd_or_skip!(NAME);
     let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
     let id = harness.add_fixture_host(&sshd).await;
@@ -222,16 +222,21 @@ async fn real_macos_grep_fallback_keeps_single_file_and_recursive_shapes() {
     let backend = harness.pool.backend_for(&link);
     let fixture = format!("/tmp/nomifun-ssh-grep-{}", nomifun_common::generate_id());
     let setup = format!(
-        "mkdir -p {root}/nested && cd {root} && export PATH=/usr/bin:/bin && printf 'first\\nsecond\\nthird\\n' > ./- && printf \"it's here\\n\" > {quoted} && printf 'needle\\n' > nested/match.txt",
+        "mkdir -p {root}/nested {root}/bin && cd {root} && export PATH=/usr/bin:/bin && ln -s /usr/bin/grep ./bin/grep && printf 'first\\nsecond\\nthird\\n' > ./- && printf \"it's here\\n\" > {quoted} && printf 'needle\\n' > nested/match.txt",
         root = shell_path(&fixture),
         quoted = shell_path("a'b"),
     );
     let setup_result = backend.run_command(&setup, 15_000).await;
+    let rg_available = backend.run_command("command -v rg >/dev/null 2>&1", 15_000).await.expect("probe ripgrep").exit_code == 0;
+    let ripgrep = if rg_available { Some(backend.grep("needle", ".").await) } else { None };
+    // The owned PATH contains only grep. Linux often has rg in /usr/bin, so
+    // merely removing Homebrew's prefix never proved the fallback ran there.
+    backend.run_command(&format!("export PATH={}", shell_path(&format!("{fixture}/bin"))), 15_000).await.expect("force grep fallback");
     let dash = backend.grep("first|second", "-").await;
     let quoted = backend.grep("it's", "a'b").await;
     let recursive = backend.grep("needle", ".").await;
     // Clean before assertions so a shape mismatch leaves no remote fixture.
-    let cleanup = format!("cd /tmp && rm -rf -- {}", shell_path(&fixture));
+    let cleanup = format!("export PATH=/usr/bin:/bin; cd /tmp && rm -rf -- {}", shell_path(&fixture));
     let cleanup_result = backend.run_command(&cleanup, 15_000).await;
     harness.pool.shutdown_all().await;
 
@@ -246,6 +251,11 @@ async fn real_macos_grep_fallback_keeps_single_file_and_recursive_shapes() {
             .any(|line| line.ends_with("nested/match.txt:1:needle")),
         "recursive fallback lost the path: {recursive:?}"
     );
+    if let Some(output) = ripgrep {
+        let output = output.expect("ripgrep recursive directory");
+        assert!(output.lines().any(|line| line.ends_with("nested/match.txt:1:needle")),
+            "ripgrep's PTY default headings must be disabled: {output:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -306,18 +316,23 @@ async fn a_cancelled_command_retires_then_recycles_the_shell_without_replay() {
         return;
     };
     let backend = harness.pool.backend_for(&link);
-    let cancelled = tokio::time::timeout(
-        Duration::from_millis(100),
-        backend.run_command("sleep 30", 30_000),
-    )
-    .await;
-    assert!(cancelled.is_err(), "outer cancellation budget must fire");
+    let marker = format!("/tmp/nomifun-ssh-cancel-{}", nomifun_common::generate_id());
+    let execution = {
+        let backend = Arc::clone(&backend);
+        let command = format!("printf started >> {marker}; sleep 30; printf finished >> {marker}", marker = shell_path(&marker));
+        tokio::spawn(async move { backend.run_command(&command, 30_000).await })
+    };
+    let started_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        if backend.read_file(&marker).await.is_ok_and(|bytes| bytes == b"started") { break; }
+        assert!(tokio::time::Instant::now() < started_deadline, "cancel fixture never reached the host");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    execution.abort();
+    assert!(execution.await.unwrap_err().is_cancelled());
 
-    let first_after = backend.run_command("echo must_not_run", 15_000).await;
-    assert!(
-        first_after.is_err(),
-        "the command that discovers the retired channel must not be submitted or replayed"
-    );
+    let first_after = backend.run_command("echo first_explicit_command", 15_000).await.expect("preflight recovers before submitting a new explicit command");
+    assert_eq!(first_after.stdout, "first_explicit_command");
     harness
         .events
         .await_phases_in_order(&["degraded", "connected"], SETTLE)
@@ -328,10 +343,9 @@ async fn a_cancelled_command_retires_then_recycles_the_shell_without_replay() {
         .await
         .expect("the replacement shell accepts the next explicit command");
     assert!(recovered.stdout.contains("recovered_after_cancel"));
-    assert!(
-        !recovered.stdout.contains("must_not_run"),
-        "the rejected command must not be replayed on the replacement channel: {recovered:?}"
-    );
+    let executed = backend.read_file(&marker).await.expect("read cancelled command marker");
+    backend.run_command(&format!("rm -- {}", shell_path(&marker)), 15_000).await.expect("clean marker");
+    assert_eq!(executed, b"started", "the cancelled command must neither finish nor be replayed");
     harness.pool.shutdown_all().await;
 }
 

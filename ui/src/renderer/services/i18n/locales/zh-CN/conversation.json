@@ -806,6 +806,7 @@
       "recordTooltip": "开始语音输入",
       "pickFileTooltip": "选择音频文件",
       "stopTooltip": "停止录音",
+      "cancelTooltip": "取消本次转写",
       "processing": "正在转写音频...",
       "unsupported": "当前环境不支持语音输入",
       "startShort": "语音",

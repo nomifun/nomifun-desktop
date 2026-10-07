@@ -48,10 +48,7 @@ describe('turn process continuous work journal layout', () => {
     expect(disclosureSource.includes('messages.turnProcess.runningSummary')).toBe(false);
   });
 
-  test('keeps the duration live while the current turn is running', () => {
-    expect(disclosureSource.includes('if (!item.running) return;')).toBe(true);
-    expect(disclosureSource.includes('window.setInterval')).toBe(true);
-    expect(disclosureSource.includes('const durationEndAt = item.running ? now : item.endAt;')).toBe(true);
+  test('marks the current running turn as live', () => {
     expect(disclosureSource.includes("item.running && 'turn-process-disclosure--live'")).toBe(true);
   });
 

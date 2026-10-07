@@ -113,6 +113,16 @@ pub enum AgentEngineEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_hint: Option<String>,
     },
+    /// Only an explicitly voice-started Immediate-policy Turn can emit this.
+    /// The exact unadmitted proposal is withdrawn after owned abort/join;
+    /// no Turn cancellation, tool result, applied input or success is claimed.
+    VoiceModelStepSuperseded {
+        step: u16,
+        model_operation_id: OperationId,
+        steering_receipt_ids: Vec<String>,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        cleanup: nomifun_chat_model_broker::OwnedModelCleanupReceipt,
+    },
     ContextCompacted {
         input_bytes_before: usize,
         input_bytes_after: usize,
@@ -261,6 +271,33 @@ pub enum AgentEngineEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure: Option<AgentTurnFailure>,
     },
+}
+
+impl AgentEngineEvent {
+    /// Display-only reasoning lifecycle. `None` leaves the current phase alone;
+    /// `Some(None)` closes it, and `Some(Some(step))` starts or resumes that step.
+    /// Live publication and canonical history use the same typed transitions.
+    pub fn reasoning_display_transition(&self) -> Option<Option<u16>> {
+        match self {
+            Self::ReasoningDelta { step, .. } => Some(Some(*step)),
+            Self::ModelStepStarted { .. }
+            | Self::ExecutionResumed { .. }
+            | Self::OutputTextDelta { .. }
+            | Self::CompletionDelivered { .. }
+            | Self::ToolCallDelta { .. }
+            | Self::ToolCallCompleted { .. }
+            | Self::ToolStarted { .. }
+            | Self::ModelOutputTruncated { .. }
+            | Self::ModelResponseRejected { .. }
+            | Self::DeliveryReviewSuperseded { .. }
+            | Self::VoiceModelStepSuperseded { .. }
+            | Self::TurnCompleted { .. }
+            | Self::TurnCancelled { .. }
+            | Self::TurnPaused { .. }
+            | Self::TurnFailed { .. } => Some(None),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]

@@ -122,7 +122,7 @@ impl EngineSessionHost {
             version: 1, binding: binding.clone(), turn_operation_id: turn_operation_id.clone(),
             active_set_generation: receipt.session().active_set_generation(), model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), delivery_review: Default::default(),
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(),
         };
         checkpoint.validate().map_err(error)?;
         let state = serde_json::to_value(&checkpoint).map_err(error)?;

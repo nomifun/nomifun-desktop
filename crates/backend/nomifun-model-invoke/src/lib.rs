@@ -29,6 +29,7 @@ pub mod service;
 pub mod transport;
 pub mod types;
 pub mod url_algebra;
+pub mod voice;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
 pub use adapters::{

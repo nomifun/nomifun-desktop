@@ -14,9 +14,13 @@ use crate::{
 
 pub type EngineModelStream =
     Pin<Box<dyn Stream<Item = Result<ChatModelEvent, ChatModelError>> + Send>>;
+pub struct EngineOwnedModelAttempt{pub stream:EngineModelStream,pub shutdown:Arc<dyn crate::OwnedModelShutdown>}
 
 #[async_trait]
 pub trait EngineModelPort: Send + Sync {
+    async fn open_owned_attempt(&self,_request:ChatModelRequest,_cancellation:CancellationToken)->Result<EngineOwnedModelAttempt,ChatModelError>{
+        Err(ChatModelError::new(ChatModelErrorCode::AdapterUnavailable,"engine model port has no owned attempt support",ChatRetryDirective::Never))
+    }
     async fn open_stream(
         &self,
         request: ChatModelRequest,
@@ -38,6 +42,11 @@ impl BrokerEngineModelPort {
 
 #[async_trait]
 impl EngineModelPort for BrokerEngineModelPort {
+    async fn open_owned_attempt(&self,request:ChatModelRequest,cancellation:CancellationToken)->Result<EngineOwnedModelAttempt,ChatModelError>{
+        if cancellation.is_cancelled(){return Err(ChatModelError::new(ChatModelErrorCode::Cancelled,"owned model opening cancelled",ChatRetryDirective::Never));}
+        let owned=self.broker.open_owned_chat_attempt(request,cancellation).await?;
+        Ok(EngineOwnedModelAttempt{stream:Box::pin(owned.stream.map(|result|result.map(|envelope:BrokerEventEnvelope|envelope.event))),shutdown:owned.shutdown})
+    }
     async fn open_stream(
         &self,
         request: ChatModelRequest,

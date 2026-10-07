@@ -29,6 +29,7 @@ pub(crate) fn discardable_model_event(event: &AgentEngineEvent) -> bool {
         | AgentEngineEvent::CompactionSummaryRejected { .. }
         | AgentEngineEvent::ContextCompacted { .. } | AgentEngineEvent::ContextLimitRecoveryStarted { .. }
         | AgentEngineEvent::ModelOutputTruncated { .. } | AgentEngineEvent::ModelResponseRejected { .. }
+        | AgentEngineEvent::VoiceModelStepSuperseded { .. }
         | AgentEngineEvent::ExecutionResumed { .. } | AgentEngineEvent::ExecutionBudgetPrepared { .. }
         | AgentEngineEvent::ExecutionSegmentRenewed { .. } | AgentEngineEvent::ContextPrepared { .. }
         | AgentEngineEvent::RuntimeModulesActivated { .. })
@@ -93,7 +94,7 @@ impl AgentTurnRecovery {
                 AgentEngineEvent::OutputTextDelta { step, .. } | AgentEngineEvent::ReasoningDelta { step, .. }
                 | AgentEngineEvent::ToolCallDelta { step, .. } | AgentEngineEvent::ToolCallCompleted { step, .. }
                 | AgentEngineEvent::Usage { step, .. } | AgentEngineEvent::ModelOutputTruncated { step, .. }
-                | AgentEngineEvent::ModelResponseRejected { step, .. } => Some(*step), _ => None,
+                | AgentEngineEvent::ModelResponseRejected { step, .. } | AgentEngineEvent::VoiceModelStepSuperseded {step,..} => Some(*step), _ => None,
             };
             if event_step.is_some_and(|step| step != last_model_step || step <= checkpoint.model_steps) { return Err(fail()); }
             match event {
@@ -157,7 +158,7 @@ mod tests {
                 nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() }).unwrap(),
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), delivery_review: Default::default(),
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(),
         }
     }
 

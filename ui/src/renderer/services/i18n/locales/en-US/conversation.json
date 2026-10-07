@@ -806,6 +806,7 @@
       "recordTooltip": "Start voice input",
       "pickFileTooltip": "Select an audio file",
       "stopTooltip": "Stop recording",
+      "cancelTooltip": "Cancel transcription",
       "processing": "Transcribing audio...",
       "unsupported": "Voice input is not available in this environment",
       "startShort": "Mic",

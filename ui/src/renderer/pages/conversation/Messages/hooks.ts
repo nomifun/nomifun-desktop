@@ -68,21 +68,10 @@ function getMessageIndexKey(message: TMessage): string | undefined {
   return `${message.type}:${message.msg_id}`;
 }
 
-const compactThinkingStreamText = (value: unknown): string => toDisplayText(value).replace(/\s+/g, ' ').trim();
-
 export function mergeThinkingStreamContent(existing: unknown, incoming: unknown): string {
-  const existingText = toDisplayText(existing);
-  const incomingText = toDisplayText(incoming);
-  if (!incomingText) return existingText;
-  if (!existingText) return incomingText;
-  if (incomingText === existingText) return existingText;
-  const existingCompact = compactThinkingStreamText(existingText);
-  const incomingCompact = compactThinkingStreamText(incomingText);
-  if (incomingCompact === existingCompact) return existingText;
-  if (incomingCompact && existingCompact.startsWith(incomingCompact)) return existingText;
-  if (existingCompact && incomingCompact.startsWith(existingCompact)) return incomingText;
-  if (incomingText.startsWith(existingText)) return incomingText;
-  return existingText + incomingText;
+  // The current Thinking stream contains typed deltas. Repeated words and
+  // whitespace are content, not evidence of a cumulative/replayed snapshot.
+  return toDisplayText(existing) + toDisplayText(incoming);
 }
 
 export function logDroppedToolCallWithoutCallId(message: TMessage | undefined): boolean {
@@ -280,44 +269,28 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     return list.concat(message);
   }
 
-  // thinking message: merge only with the latest contiguous thinking chunk.
+  // A canonical reasoning step can resume after another presentation row.
   // Uses "thinking:${msg_id}" key to avoid collision with text messages sharing the same msg_id.
   if (message.type === 'thinking' && message.msg_id) {
     const thinkingKey = `thinking:${message.msg_id}`;
-    if (message.content.status === 'done') {
-      const existingIdx = index.msgIdIndex.get(thinkingKey);
-      if (existingIdx !== undefined && existingIdx < list.length) {
-        const existingMsg = list[existingIdx];
-        if (existingMsg.type === 'thinking') {
-          const newList = list.slice();
-          newList[existingIdx] = {
-            ...existingMsg,
-            turn_id: message.turn_id ?? existingMsg.turn_id,
-            content: {
-              ...existingMsg.content,
-              status: 'done' as const,
-              duration: message.content.duration,
-              subject: message.content.subject || existingMsg.content.subject,
-            },
-          };
-          return newList;
-        }
+    const existingIdx = index.msgIdIndex.get(thinkingKey);
+    if (existingIdx !== undefined && existingIdx < list.length) {
+      const existingMsg = list[existingIdx];
+      if (existingMsg.type === 'thinking') {
+        const newList = list.slice();
+        newList[existingIdx] = {
+          ...existingMsg,
+          turn_id: message.turn_id ?? existingMsg.turn_id,
+          content: {
+            ...existingMsg.content,
+            content: mergeThinkingStreamContent(existingMsg.content.content, message.content.content),
+            status: message.content.status,
+            duration: message.content.duration,
+            subject: message.content.subject || existingMsg.content.subject,
+          },
+        };
+        return newList;
       }
-    }
-
-    if (last.type === 'thinking' && last.msg_id === message.msg_id) {
-      const nextContent = mergeThinkingStreamContent(last.content.content, message.content.content);
-      const newList = list.slice();
-      newList[newList.length - 1] = {
-        ...last,
-        content: {
-          ...last.content,
-          content: nextContent,
-          status: message.content.status,
-          subject: message.content.subject || last.content.subject,
-        },
-      };
-      return newList;
     }
 
     const newIdx = list.length;
@@ -861,7 +834,6 @@ const preferThinkingMessageVersion = (
   const streamLength = getThinkingTextLength(streamMessage);
   if (streamLength > dbLength) return streamMessage;
   if (dbLength > streamLength) return dbMessage;
-  if (dbMessage.content.status === 'done' && streamMessage.content.status !== 'done') return dbMessage;
   return dbMessage;
 };
 
@@ -882,7 +854,8 @@ const withFetchedCanonicalIdentity = <T extends TMessage>(dbMessage: T, preferre
 export const mergeFetchedMessagesForConversation = (
   currentList: TMessage[],
   messages: TMessage[],
-  conversationId: ConversationId
+  conversationId: ConversationId,
+  queryStartList: readonly TMessage[] = currentList
 ): TMessage[] => {
   // The history API pages newest-first for keyset pagination. Rendering and
   // stream reconciliation are chronological, including the first hydration
@@ -907,6 +880,10 @@ export const mergeFetchedMessagesForConversation = (
     message.type === 'thinking' && message.turn_id ? [message.turn_id] : []
   ));
   const streamingByKey = new Map<string, TMessage>();
+  const queryStartByKey = new Map(queryStartList.flatMap((message) => {
+    const key = getFetchedMergeKey(message);
+    return key && message.conversation_id === conversationId ? [[key, message] as const] : [];
+  }));
 
   for (const message of sameConversation) {
     const key = getFetchedMergeKey(message);
@@ -927,17 +904,17 @@ export const mergeFetchedMessagesForConversation = (
       return withFetchedCanonicalIdentity(dbMessage, preferTextMessageVersion(dbMessage, streamMessage));
     }
     if (dbMessage.type === 'thinking' && streamMessage.type === 'thinking') {
-      // Recorded reasoning fragments are returned as done by history. Until
-      // the canonical Turn receipt settles, the live event owns its explicit
-      // phase status, even when history combines several phases in one step.
+      // Body length chooses content only. Persistence bounds reasoning bytes,
+      // so length cannot establish phase freshness. History owns the state of
+      // an unchanged row; an immutable row updated during the request keeps
+      // its newer explicit stream state. No second lifecycle ledger is needed.
       const preferred = preferThinkingMessageVersion(dbMessage, streamMessage);
-      if (dbMessage.turn_id && !settledTurnIds.has(dbMessage.turn_id)) {
-        return withFetchedCanonicalIdentity(dbMessage, {
-          ...preferred,
-          content: { ...preferred.content, status: streamMessage.content.status },
-        });
-      }
-      return withFetchedCanonicalIdentity(dbMessage, preferred);
+      const status = dbMessage.turn_id && settledTurnIds.has(dbMessage.turn_id)
+        ? 'done'
+        : queryStartByKey.get(key!) === streamMessage ? dbMessage.content.status : streamMessage.content.status;
+      return withFetchedCanonicalIdentity(dbMessage, {
+        ...preferred, content: { ...preferred.content, status },
+      });
     }
     if (dbMessage.type === 'tool_call' && streamMessage.type === 'tool_call') {
       const content = mergeToolCallContent(dbMessage.content, streamMessage.content);
@@ -982,6 +959,9 @@ export const mergeFetchedMessagesForConversation = (
  * pagination; an unbounded transcript must not be fetched in one request.
  */
 export const useMessageLstCache = (key: ConversationId) => {
+  const messageList = useMessageList();
+  const messageListRef = useRef(messageList);
+  useLayoutEffect(() => { messageListRef.current = messageList; }, [messageList]);
   const update = useUpdateMessageList();
   const setLoading = useUpdateMessageListLoading();
   // A new committed scope never inherits an earlier visit's requests or cursor,
@@ -1007,17 +987,18 @@ export const useMessageLstCache = (key: ConversationId) => {
     };
   }, [scope, setLoading]);
 
-  const mergeIntoList = useCallback((messages: TMessage[], revision: number) => {
+  const mergeIntoList = useCallback((messages: TMessage[], revision: number, queryStartList: readonly TMessage[]) => {
     // React may evaluate this updater after navigation/refresh. Check ownership
     // here as well as after the await; merely guarding the enqueue is too early.
     update((currentList) => scope.active && scope.revision === revision
-      ? mergeFetchedMessagesForConversation(currentList, messages, key)
+      ? mergeFetchedMessagesForConversation(currentList, messages, key, queryStartList)
       : currentList);
   }, [key, scope, update]);
 
   const loadMessages = useCallback(async (): Promise<void> => {
     if (!scope.active) return;
     const revision = ++scope.revision;
+    const queryStartList = messageListRef.current;
     const isCurrent = () => scope.active && scope.revision === revision;
     scope.loadingNewest = true;
     scope.older = null;
@@ -1048,10 +1029,10 @@ export const useMessageLstCache = (key: ConversationId) => {
         if (!scope.hasMore || !nextCursor || nextCursor === cursor) break;
         cursor = nextCursor;
       } while (needsCompleteRequest && !completeNewestRequest && pagesAfterTurnStartReceipt === 0);
-      mergeIntoList(newestWindow, revision);
+      mergeIntoList(newestWindow, revision, queryStartList);
     } catch (error) {
       if (isCurrent()) {
-        if (newestWindow.length) mergeIntoList(newestWindow, revision);
+        if (newestWindow.length) mergeIntoList(newestWindow, revision, queryStartList);
         console.error('[useMessageLstCache] Failed to load messages from database:', error);
       }
     } finally {
@@ -1067,6 +1048,7 @@ export const useMessageLstCache = (key: ConversationId) => {
   const loadOlder = useCallback(async (): Promise<boolean> => {
     if (!scope.active || scope.loadingNewest || scope.older || !scope.hasMore || !scope.cursor) return false;
     const revision = scope.revision;
+    const queryStartList = messageListRef.current;
     const requestedCursor = scope.cursor;
     const request = {};
     const isCurrent = () => scope.active && scope.revision === revision && scope.older === request;
@@ -1083,7 +1065,7 @@ export const useMessageLstCache = (key: ConversationId) => {
       if (messages.length) scope.cursor = messageCursorOf(messages[0]);
       // A refresh can leave previously loaded older pages in the list. Merge
       // chronologically instead of prepending a page into the wrong position.
-      mergeIntoList(messages, revision);
+      mergeIntoList(messages, revision, queryStartList);
       return !scope.hasMore || scope.cursor !== requestedCursor;
     } catch (error) {
       if (isCurrent()) console.error('[useMessageLstCache] Failed to load older messages:', error);

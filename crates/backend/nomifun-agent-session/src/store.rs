@@ -75,6 +75,10 @@ pub use native_pause::{NativePauseState, NativeResumeRequest, NativeOwnerEvidenc
 mod native_effect_reconciliation;
 pub use native_effect_reconciliation::{NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates};
 
+#[path = "native_mutation_fence.rs"]
+mod native_mutation_fence;
+pub use native_mutation_fence::{NativeTurnMutationFence,NativeInputContextFence};
+
 #[derive(Clone, Copy)]
 enum CausalityFactScope {
     SessionHistory,
@@ -522,6 +526,7 @@ impl AgentSessionStore {
             operation_id,
             input,
             false,
+            None,
         )
         .await
     }
@@ -545,8 +550,14 @@ impl AgentSessionStore {
             operation_id,
             input,
             true,
+            None,
         )
         .await
+    }
+
+    pub async fn start_voice_turn(&self,session:&AgentSessionId,producer:EventProducerId,key:IdempotencyKey,operation:OperationId,input:StrictJsonValue,fence:&NativeInputContextFence)
+        ->Result<(SessionEventAppendResult,SessionEventAppendResult),SessionStoreError> {
+        self.start_turn_with_admission(session,producer,key,operation,input,false,Some(fence)).await
     }
 
     async fn start_turn_with_admission(
@@ -555,9 +566,14 @@ impl AgentSessionStore {
         producer_id: EventProducerId,
         idempotency_key: IdempotencyKey,
         operation_id: OperationId,
-        input: StrictJsonValue,
+        mut input: StrictJsonValue,
         initial_only: bool,
+        voice_context:Option<&NativeInputContextFence>,
     ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        if let Some(fence)=voice_context {
+            let admission=input.0.as_object_mut().ok_or_else(||SessionStoreError::InvalidPayload("voice input must be an object".into()))?.entry("admission").or_insert_with(||json!({}));
+            admission.as_object_mut().ok_or_else(||SessionStoreError::InvalidPayload("voice admission must be an object".into()))?.insert("voice_input_context".into(),serde_json::to_value(fence)?);
+        }
         let idmm_decision = input.0.get("idmm_decision").map(|value| {
             let decision: nomifun_agent_contracts::IdmmDecisionExplanation =
                 serde_json::from_value(value.clone()).map_err(|error| {
@@ -665,6 +681,7 @@ impl AgentSessionStore {
             }
         }
 
+        if let Some(fence)=voice_context {native_mutation_fence::validate_input_tx(&mut tx,session_id,fence).await?;}
         if let Some(question) = idmm_decision.as_ref().and_then(|decision| decision.question.as_ref()) {
             if !idmm_notice::question_is_current_tx(&mut tx, session_id, question).await? {
                 return Err(SessionStoreError::Conflict(
@@ -853,7 +870,7 @@ impl AgentSessionStore {
         idempotency_key: IdempotencyKey,
         producer_id: EventProducerId,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
-        self.cancel_selected_turn(session_id, None, idempotency_key, producer_id).await
+        self.cancel_selected_turn(session_id, None, idempotency_key, producer_id, None).await
     }
 
     /// Cancel only the specified canonical Turn. A delayed command for a
@@ -869,7 +886,15 @@ impl AgentSessionStore {
         if target_operation_id.as_ref().trim().is_empty() {
             return Err(SessionStoreError::InvalidEvent("exact cancellation requires a target Turn".into()));
         }
-        self.cancel_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id).await
+        self.cancel_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, None).await
+    }
+
+    /// Additional proof for an opt-in consumer, using the original mutation writer.
+    pub async fn cancel_exact_native_turn(&self,session_id:&AgentSessionId,target_operation_id:&OperationId,
+        idempotency_key:IdempotencyKey,producer_id:EventProducerId,fence:&NativeTurnMutationFence)
+        ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
+        if target_operation_id.as_ref().trim().is_empty(){return Err(SessionStoreError::InvalidEvent("exact cancellation requires a target Turn".into()));}
+        self.cancel_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,Some(fence)).await
     }
 
     async fn cancel_selected_turn(
@@ -878,6 +903,7 @@ impl AgentSessionStore {
         requested_target: Option<&OperationId>,
         idempotency_key: IdempotencyKey,
         producer_id: EventProducerId,
+        expected_native:Option<&NativeTurnMutationFence>,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
@@ -923,6 +949,7 @@ impl AgentSessionStore {
                     "cancellation replay differs from its original target Turn".into(),
                 ));
             }
+            if let Some(fence)=expected_native {native_mutation_fence::validate_replay(&record.payload,fence)?;}
             tx.commit().await?;
             return Ok((
                 target,
@@ -936,6 +963,7 @@ impl AgentSessionStore {
             ));
         }
 
+        if let (Some(target),Some(fence))=(requested_target,expected_native) {native_mutation_fence::validate_tx(&mut tx,session_id,target,fence).await?;}
         let (target_operation_id, closed) = mutation_target_tx(&mut tx, session_id, requested_target).await?;
         if let Some(closed) = closed {
             tx.commit().await?;
@@ -959,6 +987,8 @@ impl AgentSessionStore {
             )
         })?;
         let turn_event = event_from_row(turn_event)?;
+        let mut mutation_payload=json!({"target_operation_id":target_operation_id,"finished_at_ms":wall_clock_now_ms()});
+        if let Some(fence)=expected_native {mutation_payload["native_target_fence"]=serde_json::to_value(fence)?;}
         let append = SessionEventAppend {
             agent_session_id: session_id.clone(),
             event_id: EventId::from(format!(
@@ -973,10 +1003,7 @@ impl AgentSessionStore {
                 kind_version: 1,
                 correlation_id: CorrelationId::from(target_operation_id.as_ref().to_owned()),
                 causation_event_id: Some(turn_event.event_id),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "target_operation_id": target_operation_id,
-                    "finished_at_ms": wall_clock_now_ms()
-                }))),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(mutation_payload)),
             },
         };
         let result = self.append_event_tx(&mut tx, &append, None).await?;
@@ -993,7 +1020,7 @@ impl AgentSessionStore {
         producer_id: EventProducerId,
         input: StrictJsonValue,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
-        self.steer_selected_turn(session_id, None, idempotency_key, producer_id, input).await
+        self.steer_selected_turn(session_id, None, idempotency_key, producer_id, input, None,false).await
     }
 
     pub async fn steer_exact_turn(
@@ -1007,7 +1034,20 @@ impl AgentSessionStore {
         if target_operation_id.as_ref().trim().is_empty() {
             return Err(SessionStoreError::InvalidEvent("exact steering requires a target Turn".into()));
         }
-        self.steer_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, input).await
+        self.steer_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, input, None,false).await
+    }
+
+    pub async fn steer_exact_native_turn(&self,session_id:&AgentSessionId,target_operation_id:&OperationId,
+        idempotency_key:IdempotencyKey,producer_id:EventProducerId,input:StrictJsonValue,fence:&NativeTurnMutationFence)
+        ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
+        if target_operation_id.as_ref().trim().is_empty(){return Err(SessionStoreError::InvalidEvent("exact steering requires a target Turn".into()));}
+        self.steer_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,input,Some(fence),false).await
+    }
+
+    pub async fn steer_exact_native_immediate_turn(&self,session_id:&AgentSessionId,target_operation_id:&OperationId,
+        idempotency_key:IdempotencyKey,producer_id:EventProducerId,input:StrictJsonValue,fence:&NativeTurnMutationFence)
+        ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
+        self.steer_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,input,Some(fence),true).await
     }
 
     async fn steer_selected_turn(
@@ -1017,6 +1057,8 @@ impl AgentSessionStore {
         idempotency_key: IdempotencyKey,
         producer_id: EventProducerId,
         input: StrictJsonValue,
+        expected_native:Option<&NativeTurnMutationFence>,
+        voice_immediate:bool,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
@@ -1052,6 +1094,13 @@ impl AgentSessionStore {
                     "steering idempotency key was replayed with different input or target".to_owned(),
                 ));
             }
+            if let Some(fence)=expected_native {
+                native_mutation_fence::validate_replay(&record.payload,fence)?;
+                let SessionEventPayloadRef::InlineJson(payload)=&record.payload else{unreachable!()};
+                if payload.0.get("voice_model_step_supersede").and_then(Value::as_bool).unwrap_or(false)!=voice_immediate {
+                    return Err(SessionStoreError::IdempotencyConflict("voice steering replay changes its original model-step policy".into()));
+                }
+            }
             let ack = event_ack(&record);
             tx.commit().await?;
             return Ok((
@@ -1065,6 +1114,7 @@ impl AgentSessionStore {
                 },
             ));
         }
+        if let (Some(target),Some(fence))=(requested_target,expected_native) {native_mutation_fence::validate_tx(&mut tx,session_id,target,fence).await?;}
         let (target_operation_id, closed) = mutation_target_tx(&mut tx, session_id, requested_target).await?;
         if let Some(closed) = closed {
             tx.commit().await?;
@@ -1088,6 +1138,15 @@ impl AgentSessionStore {
             )
         })?;
         let turn_event = event_from_row(turn_event)?;
+        if voice_immediate {
+            let SessionEventPayloadRef::InlineJson(payload)=&turn_event.payload else{return Err(SessionStoreError::ExecutionFenced);};
+            if payload.0.pointer("/admission/voice_input_context/supersede_model_step").and_then(Value::as_bool)!=Some(true) {
+                return Err(SessionStoreError::ExecutionFenced);
+            }
+        }
+        let mut mutation_payload=json!({"target_operation_id":target_operation_id,"input":input});
+        if let Some(fence)=expected_native {mutation_payload["native_target_fence"]=serde_json::to_value(fence)?;}
+        if voice_immediate {mutation_payload["voice_model_step_supersede"]=Value::Bool(true);}
         let append = SessionEventAppend {
             agent_session_id: session_id.clone(),
             event_id: new_event_id(),
@@ -1098,10 +1157,7 @@ impl AgentSessionStore {
                 kind_version: 1,
                 correlation_id: CorrelationId::from(target_operation_id.as_ref().to_owned()),
                 causation_event_id: Some(turn_event.event_id),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "target_operation_id": target_operation_id,
-                    "input": input,
-                }))),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(mutation_payload)),
             },
         };
         let result = self.append_event_tx(&mut tx, &append, None).await?;

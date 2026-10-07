@@ -16,6 +16,8 @@ describe('NomiChat turn activity ownership', () => {
     expect(chatSource.includes('turnActivity.running')).toBe(true);
     expect(chatSource.includes('turnActivity.hasHydratedRunningState')).toBe(true);
     expect(chatSource.includes('isProcessing: resolvedIsProcessing')).toBe(true);
+    expect(chatSource.includes('activeTurnId: turnActivity.activeTurnId')).toBe(true);
+    expect(chatSource.includes('activeRequestMessageId: turnActivity.activeRequestMessageId')).toBe(true);
     expect(chatSource.includes('turnActivity={turnActivity}')).toBe(true);
   });
 

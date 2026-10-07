@@ -1429,6 +1429,11 @@ impl NomiCoreSessionOwner {
         operation_id: &OperationId,
         request: &SendMessageRequest,
     ) -> Result<Value, AppError> {
+        self.canonical_turn_input_with_expectation(owner_id,session_id,operation_id,request,None).await
+    }
+
+    async fn canonical_turn_input_with_expectation(&self,owner_id:&str,session_id:&AgentSessionId,operation_id:&OperationId,
+        request:&SendMessageRequest,expected_binding_version:Option<u64>)->Result<Value,AppError> {
         let mut session = self
             .canonical
             .get(
@@ -1439,6 +1444,9 @@ impl NomiCoreSessionOwner {
                 session_id,
             )
             .await?;
+        if expected_binding_version.is_some_and(|expected|session.session.agent_binding.binding_version!=expected) {
+            return Err(AppError::Conflict("voice input no longer matches its frozen Agent binding".into()));
+        }
         let receipt = self.canonical.store().read_turn_receipt(session_id, operation_id)
             .await.map_err(agent_session_store_error)?;
         if let Some(started) = receipt.started_event {
@@ -1469,7 +1477,7 @@ impl NomiCoreSessionOwner {
                 "AgentSession binding differs from its saved immutable artifacts".to_owned(),
             ));
         }
-        if session.head.active_turn_id.is_none()
+        if expected_binding_version.is_none() && session.head.active_turn_id.is_none()
             && session.head.status != "running"
             && session.session.remote_binding_provenance.is_none()
         {
@@ -2009,13 +2017,21 @@ impl NomiCoreSessionOwner {
             .session_operation_lock(session_id.as_ref())
             .write_owned()
             .await;
-        let mut input = self
+        self.dispatch_canonical_turn_locked(owner_id,session_id,idempotency_key,request,initial_only,None,None,None,false,idmm_decision).await
+    }
+
+    async fn dispatch_canonical_turn_locked(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,request:SendMessageRequest,
+        initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,idmm_decision:Option<IdmmDecisionExplanation>)->Result<IdempotentMessageDelivery,AppError> {
+        let mut input = if let Some(version)=voice_binding {
+            self.canonical_turn_input_with_expectation(owner_id,session_id,&Self::turn_operation_id(owner_id,session_id.as_ref(),idempotency_key),&request,Some(version)).await?
+        }else {self
             .canonical_turn_input_with_admission(
                 owner_id, session_id,
                 &Self::turn_operation_id(owner_id, session_id.as_ref(), idempotency_key),
                 &request,
             )
-            .await?;
+            .await?};
+        if voice_shutdown.is_some_and(|stop|stop.is_cancelled()){return Err(AppError::Conflict("voice dispatcher stopped before admission".into()));}
         if let Some(decision) = &idmm_decision {
             decision.validate().map_err(|error| AppError::BadRequest(error.into()))?;
             if request.origin.as_deref() != Some("idmm") {
@@ -2028,7 +2044,10 @@ impl NomiCoreSessionOwner {
             principal_kind: "user".to_owned(),
             principal_id: owner_id.to_owned(),
         };
-        let receipt = if initial_only {
+        let receipt = if let Some(binding)=voice_binding {
+            self.canonical.start_voice_turn(&principal,session_id,idempotency_key,input,&nomifun_agent_session::NativeInputContextFence {binding_version:binding,
+                context_floor:voice_context_floor.ok_or_else(||AppError::Conflict("voice input has no original context proof".into()))?,supersede_model_step:voice_supersede}).await?
+        }else if initial_only {
             self.canonical
                 .start_initial_turn(&principal, session_id, idempotency_key, input)
                 .await?
@@ -2655,6 +2674,34 @@ impl NomiCoreSessionOwner {
         .await
     }
 
+    /// Voice input waits on the original work boundary and does not take over
+    /// Desktop queueing. None proves no new admission was attempted.
+    pub(crate) async fn voice_start_message_with_policy(&self,owner:&str,session:&AgentSessionId,key:&str,request:SendMessageRequest,version:u64,context_floor:u64,stop:&tokio_util::sync::CancellationToken,supersede:bool)
+        ->Result<Option<IdempotentMessageDelivery>,AppError> {
+        let lock=self.session_operation_lock(session.as_ref());
+        let _guard=tokio::select! {biased;_ = stop.cancelled()=>return Ok(None),guard=lock.write_owned()=>guard};
+        let observation=self.canonical.get(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.into()},session).await?;
+        if observation.session.agent_binding.binding_version!=version{return Err(AppError::Conflict("voice input binding changed before admission".into()));}
+        if observation.head.status!="ready"||observation.head.active_turn_id.is_some(){return Ok(None);}
+        let idle=self.runtime_sessions.active_turn_generation(session.as_ref()).is_none()&&match self.runtime_sessions.get_runtime(session.as_ref()) {
+            // None is the original pristine HostedRuntime constructor state.
+            // The registry/canonical/effect fences still prove no live Turn.
+            Some(runtime)=>runtime.is_transport_healthy()&&matches!(runtime.status(),None|Some(nomifun_common::ConversationStatus::Pending|nomifun_common::ConversationStatus::Finished)),
+            None=>!self.runtime_sessions.has_owned_runtime(session.as_ref()),
+        };
+        if !idle||self.canonical.store().has_unsettled_effects(session).await.map_err(agent_session_store_error)? {return Ok(None);}
+        if stop.is_cancelled(){return Ok(None);}
+        self.dispatch_canonical_turn_locked(owner,session,key,request,false,Some(version),Some(context_floor),Some(stop),supersede,None).await.map(Some)
+    }
+
+    pub(crate) async fn voice_operation_receipt(&self,owner:&str,session:&AgentSessionId,key:&str)->Result<nomifun_agent_session::TurnReceipt,AppError> {
+        self.canonical.turn_receipt(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.into()},session,&Self::turn_operation_id(owner,session.as_ref(),key)).await
+    }
+
+    pub(crate) fn voice_register_task(&self,task:std::pin::Pin<Box<dyn std::future::Future<Output=()>+Send+'static>>)->bool {
+        self.background_tasks.spawn(task)
+    }
+
     pub(crate) async fn cancel_session(
         &self,
         owner_id: &str,
@@ -2737,6 +2784,23 @@ impl NomiCoreSessionOwner {
             session_id, idempotency_key, target_operation_id,
         ).await?;
         self.cancel_receipted_runtime_turn(session_id, &receipt, reason).await?;
+        Ok(receipt)
+    }
+
+    /// Voice opt-in adds proof, then delegates runtime cleanup to the existing owner.
+    pub(crate) async fn voice_cancel_exact_native_turn(&self,owner:&str,session:&AgentSessionId,key:&str,target:&OperationId,
+        fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
+        let receipt=self.canonical.cancel_exact_native_turn(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.into()},session,key,target,fence).await?;
+        self.cancel_receipted_runtime_turn(session,&receipt,nomifun_common::AgentKillReason::UserCancelled).await?;
+        Ok(receipt)
+    }
+
+    pub(crate) async fn voice_steer_exact_native_with_policy(&self,owner:&str,session:&AgentSessionId,key:&str,target:&OperationId,input:SendMessageRequest,
+        fence:&nomifun_agent_session::NativeTurnMutationFence,supersede:bool)->Result<AgentMutationReceipt,AppError> {
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner.into()};
+        let receipt=if supersede {self.canonical.steer_exact_native_immediate_turn(&principal,session,key,target,canonical_turn_input(&input),fence).await?}
+            else{self.canonical.steer_exact_native_turn(&principal,session,key,target,canonical_turn_input(&input),fence).await?};
+        self.queue_receipted_steering(session,&receipt).await?;
         Ok(receipt)
     }
 
@@ -3397,12 +3461,13 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
             .await
             .map_err(agent_session_store_error)?;
         let limit = query.page_size.unwrap_or(100).clamp(1, 500);
-        let (projections, has_more, total) = self
+        let (mut projections, has_more, total) = self
             .canonical
             .store()
             .messages_before(&session_id, None, limit)
             .await
             .map_err(agent_session_store_error)?;
+        super::history_thinking_display::hydrate_thinking_lifecycle(&self.pool, &session_id, &mut projections).await?;
         let mut items = Vec::new();
         for projection in projections {
             if let Some(message) = canonical_message_response(&session_id, created_at, projection)
@@ -12776,7 +12841,7 @@ fn canonical_message_response_with_observation(
             }
             (
                 MessageType::Thinking,
-                json!({ "content": content, "status": "done", "turn_id": turn_id }),
+                json!({ "content": content, "status": if state == "streaming" { "thinking" } else { "done" }, "turn_id": turn_id }),
                 MessagePosition::Left,
             )
         }
@@ -13007,13 +13072,14 @@ async fn get_nomi_core_agent_session_message_history(
             })
         })
         .transpose()?;
-    let (projections, has_more, total) = state
+    let (mut projections, has_more, total) = state
         .session_owner
         .canonical()
         .store()
         .message_history_before(&session_id, before_seq, page_size)
         .await
         .map_err(agent_session_store_error)?;
+    super::history_thinking_display::hydrate_thinking_lifecycle(&state.session_owner.pool, &session_id, &mut projections).await?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool,
         &session_id,
@@ -13088,7 +13154,7 @@ async fn get_nomi_core_agent_session_message(
                 .and_then(Value::as_str)
                 == Some(message_id.as_str())
         });
-    let projection = match projection {
+    let mut projection = match projection {
         Some(projection) => Some(projection),
         None => state.session_owner.canonical().store()
             .runtime_tool_history_message(&session_id, &message_id).await.map_err(agent_session_store_error)?,
@@ -13099,6 +13165,9 @@ async fn get_nomi_core_agent_session_message(
                 "message projection does not exist",
             )
         })?;
+    super::history_thinking_display::hydrate_thinking_lifecycle(
+        &state.session_owner.pool, &session_id, std::slice::from_mut(&mut projection),
+    ).await?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool, &session_id, std::slice::from_ref(&projection),
     ).await?;
