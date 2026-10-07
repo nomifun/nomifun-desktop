@@ -434,7 +434,7 @@ remain under each provider's control.
 
 > Product guide: [In-app terminals on NomiFun Portal](https://www.nomifun.com/docs/guides/terminal/)
 
-Run agent CLIs inside in-app PTY sessions (or the standalone `nomi` CLI). This is how **Claude Code, Codex, and Gemini CLI** are used with NomiFun: a real pseudo-terminal, the CLI's own auth and OAuth, its own approval prompts, nothing re-implemented. NomiFun injects native capabilities — knowledge search, requirement completion, and lifecycle hooks — into known CLIs through their *own* native config, so you keep full fidelity. AutoWork can drive such a terminal turn by turn.
+Run agent CLIs inside in-app PTY sessions. This is how **Claude Code, Codex, and Gemini CLI** are used with NomiFun: a real pseudo-terminal, the CLI's own auth and OAuth, its own approval prompts, nothing re-implemented. NomiFun injects native capabilities — knowledge search, requirement completion, and lifecycle hooks — into known CLIs through their *own* native config, so you keep full fidelity. AutoWork can drive such a terminal turn by turn.
 
 ### 📱 NomiFun Mobile — direct to your Desktop
 
@@ -490,11 +490,11 @@ apps/
   desktop/      Tauri 2 shell and desktop-only commands
   web/          standalone web host for API + SPA
 crates/
-  agent/        15 nomi-* crates: engine, providers, tools, MCP, skills, memory,
-                browser/computer use, and the standalone nomi CLI
-  backend/      29 nomifun-* crates: app composition, auth, database, sessions,
-                MCP, knowledge, requirements, terminal, companion, gateway, etc.
-  shared/       2 cross-layer crates: nomifun-net and nomi-redact
+  agent/        nomi-* agent engine crates: providers, tools, MCP, skills,
+                memory, browser/computer use
+  backend/      nomifun-* service crates: app composition, auth, database,
+                sessions, MCP, knowledge, requirements, terminal, etc.
+  shared/       cross-layer crates shared by agent and backend
 ui/             React 19 + Vite SPA shared by desktop and web
 docs/           technical docs, user/operator guides, architecture notes
 packaging/      Linux deployment support for the web host
