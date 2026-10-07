@@ -7132,6 +7132,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-bedrock",
  "axum",
+ "chrono",
  "dirs 6.0.0",
  "futures",
  "http-body-util",

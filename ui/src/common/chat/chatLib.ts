@@ -729,6 +729,21 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
   };
 };
 
+const GATEWAY_ACCOUNT_ACTION_CODES = new Set([
+  'USER_LLM_PROVIDER_BILLING_REQUIRED',
+  'USER_LLM_PROVIDER_AUTH_FAILED',
+  'USER_LLM_PROVIDER_RATE_LIMITED',
+]);
+
+/** Only this typed live System notice carries a gateway action; ordinary System output stays invisible. */
+const normalizeGatewayAccountAction = (value: unknown): AgentStreamErrorInfo | undefined => {
+  if (!isObject(value) || value.kind !== 'model_gateway_account_action') return undefined;
+  const error = normalizeAgentStreamError(value.error);
+  if (!error || !error.message.trim() || error.ownership !== 'user_llm_provider'
+    || !error.code || !GATEWAY_ACCOUNT_ACTION_CODES.has(error.code)) return undefined;
+  return error;
+};
+
 export const normalizeTruncatedTurnRecovery = (value: unknown): TruncatedTurnRecovery | undefined => {
   if (!isObject(value) || value.kind !== 'continue_truncated') return undefined;
   if (value.failure_code !== 'output_truncated' && value.failure_code !== 'turn_requests_exhausted') {
@@ -1070,9 +1085,18 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'skill_suggest':
     case 'cron_trigger':
     case 'info': // Stream retry notifications and similar transient agent updates
-    case 'system': // Cron system responses, ignored
     case 'request_trace': // Transient request traces are not persisted or rendered.
       return undefined;
+    case 'system': {
+      const error = normalizeGatewayAccountAction(message.data);
+      if (!error) return undefined;
+      // A presentation-only notice following canonical pause cleanup. No Session or history write.
+      return {
+        id: uuid(), type: 'tips', msg_id: message.msg_id, ...turnIdentity,
+        position: 'center', conversation_id: message.conversation_id, created_at,
+        content: { content: error.message, type: 'error', error },
+      };
+    }
     default: {
       console.warn(
         `[transformMessage] Unsupported message type '${message.type}'. All non-standard message types should be pre-processed by respective AgentManagers.`

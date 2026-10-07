@@ -45,6 +45,8 @@ import AddModelModal from '@/renderer/pages/settings/components/AddModelModal';
 import AddPlatformModal from '@/renderer/pages/settings/components/AddPlatformModal';
 import ModelAdvancedEditor, { type ModelAdvancedPatch } from '@/renderer/pages/settings/components/ModelAdvancedEditor';
 import ProviderConnectionsSection from '@/renderer/pages/settings/components/ProviderConnectionsSection';
+import ModelGatewayDetails from '@/renderer/pages/settings/components/ModelGatewayDetails';
+import EditModelGatewayModal from '@/renderer/pages/settings/components/EditModelGatewayModal';
 import EditModeModal from '@/renderer/pages/settings/components/EditModeModal';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
@@ -901,11 +903,20 @@ const ModelModalContent: React.FC = () => {
     },
   });
 
+  const [editGatewayCtrl, editGatewayContext] = EditModelGatewayModal.useModal({
+    onChanged: () => mutate(),
+  });
+  const editProvider = (provider: IProvider) => {
+    if (provider.platform === 'nomifun-model-gateway') editGatewayCtrl.open({ data: provider });
+    else editModalCtrl.open({ data: provider });
+  };
+
   return (
     <div ref={paneRef} className='flex flex-col'>
       {messageContext}
       {addPlatformModalContext}
       {editModalContext}
+      {editGatewayContext}
       {addModelModalContext}
 
       {/* Header with Add Button */}
@@ -1032,7 +1043,7 @@ const ModelModalContent: React.FC = () => {
                             <span className='mx-6px'>|</span>
                             <span
                               className='cursor-pointer hover:text-t-primary transition-colors'
-                              onClick={() => editModalCtrl.open({ data: platform })}
+                              onClick={() => editProvider(platform)}
                             >
                               {platform.has_credentials
                                 ? t('settings.connections.hasCredentials')
@@ -1052,13 +1063,15 @@ const ModelModalContent: React.FC = () => {
                             onChange={() => toggleProviderEnabled(platform)}
                           />
                           <div className='flex items-center gap-4px'>
-                            <Tooltip content={t('settings.addModel')}>
+                            <Tooltip content={platform.platform === 'nomifun-model-gateway' ? t('settings.modelGateway.syncCatalog') : t('settings.addModel')}>
                               <Button
                                 size='mini'
                                 className='model-provider-action-btn !w-28px !h-28px !min-w-28px text-t-secondary hover:text-t-primary'
                                 icon={<Plus size='14' />}
-                                aria-label={t('settings.addModel')}
-                                onClick={() => addModelModalCtrl.open({ data: platform, initialTask })}
+                                aria-label={platform.platform === 'nomifun-model-gateway' ? t('settings.modelGateway.syncCatalog') : t('settings.addModel')}
+                                onClick={() => platform.platform === 'nomifun-model-gateway'
+                                  ? setCollapseKey((prev) => ({ ...prev, [platform.id]: true }))
+                                  : addModelModalCtrl.open({ data: platform, initialTask })}
                               />
                             </Tooltip>
                             <Popconfirm
@@ -1080,7 +1093,7 @@ const ModelModalContent: React.FC = () => {
                               size='mini'
                               className='model-provider-action-btn !w-28px !h-28px !min-w-28px text-t-secondary hover:text-t-primary'
                               icon={<Write size='14' />}
-                              onClick={() => editModalCtrl.open({ data: platform })}
+                              onClick={() => editProvider(platform)}
                             />
                             <Tooltip content={t('settings.copyProviderConfig', { defaultValue: '复制整组配置' })}>
                               <Button
@@ -1095,6 +1108,7 @@ const ModelModalContent: React.FC = () => {
                       </div>
                     }
                   >
+                    {platform.platform === 'nomifun-model-gateway' && isExpanded && <ModelGatewayDetails provider={platform} onChanged={() => mutate()} />}
                     <SortableContext
                       items={modelRows.map((row) => modelSortableId(platform.id, row.model))}
                       strategy={verticalListSortingStrategy}
@@ -1289,7 +1303,7 @@ const ModelModalContent: React.FC = () => {
 
                     {/* 连接档案区 / Per-role connection profiles */}
                     {modelRows.length > 0 && <Divider className='!my-4px !border-[var(--color-border-2)]/70' />}
-                    <ProviderConnectionsSection provider={platform} />
+                    {platform.platform !== 'nomifun-model-gateway' && <ProviderConnectionsSection provider={platform} />}
                   </Collapse.Item>
                 </Collapse>
                   )}

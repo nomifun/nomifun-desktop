@@ -467,6 +467,11 @@ export const useNomiMessage = (
           // Progress is re-read by useConversationTaskPlan. It is neither a
           // transcript item nor lifecycle authority for the busy state.
           break;
+        case 'system':
+          // A gateway account notice is presentation only, including when canonical pause arrives first.
+          // It cannot reopen the turn or change its durable pause/runtime authority.
+          addOrUpdateMessage(transformMessage(message));
+          break;
         case 'tool_group':
           {
             // Check whether any tools are executing.

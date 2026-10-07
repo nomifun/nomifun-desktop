@@ -591,6 +591,20 @@ fn contains_sensitive_wire_key(value: &Value) -> bool {
 }
 
 fn sanitize_model_error(mut error: ChatModelError) -> ChatModelError {
+    // The HTTP owner has already discarded native diagnostics and supplied
+    // one of these locally authored actions. Preserve it through the final
+    // production transport seam only when code and retry semantics agree.
+    // Arbitrary provider prose, URLs, prefixes and capability claims still
+    // take the normal fixed-message sanitizer below.
+    if let Some(business) = nomifun_net::provider_gateway_error::GatewayBusinessError::from_action_message(&error.message) {
+        let expected = crate::provider_errors::gateway_error(business);
+        if error.code == expected.code && error.retry == expected.retry
+            && error.unsupported_feature.is_none()
+        {
+            error.message = business.action_message().to_owned();
+            return error;
+        }
+    }
     error.message = match error.code {
         ChatModelErrorCode::AdapterUnavailable => {
             "the provider chat adapter is unavailable".to_owned()
@@ -881,6 +895,7 @@ mod tests {
 
     enum InvokeScript {
         Error(ChatModelError),
+        StreamError(ChatModelError),
         Frames(Vec<ProviderWireFrame>),
     }
 
@@ -928,6 +943,7 @@ mod tests {
                     ))
                 }) {
                 InvokeScript::Error(error) => Err(error),
+                InvokeScript::StreamError(error) => Ok(Box::pin(stream::iter([Err(error)]))),
                 InvokeScript::Frames(frames) => Ok(Box::pin(stream::iter(
                     frames.into_iter().map(Ok),
                 ))),
@@ -1133,6 +1149,54 @@ mod tests {
                 .filter_map(|item| item.as_ref().err())
                 .any(|error| error.message.contains("super-secret-value"))
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_actions_survive_the_production_transport_sanitizer() {
+        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+        for (business, code, retry) in [
+            (GatewayBusinessError::InsufficientBalance, ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+            (GatewayBusinessError::SubscriptionExpired, ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+            (GatewayBusinessError::ModelNotInPlan, ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+            (GatewayBusinessError::KeyExpired, ChatModelErrorCode::AuthenticationFailed, ChatRetryDirective::Never),
+            (GatewayBusinessError::RateLimited, ChatModelErrorCode::RateLimited, ChatRetryDirective::RetrySameRoute),
+        ] {
+            for stream_error in [false, true] {
+                let fixture = fixture();
+                let mut error = ChatModelError::new(code, business.action_message(), retry);
+                error.provider_status = Some(business.http_status());
+                let script = if stream_error { InvokeScript::StreamError(error) } else { InvokeScript::Error(error) };
+                let invoke = ScriptedModelInvoke::new([script]);
+                let broker = ProductionChatModelBroker::new(dependencies(&fixture, invoke.clone(), false)).unwrap();
+                let events = broker.open_chat_stream(fixture.request).await.unwrap().collect::<Vec<_>>().await;
+                let error = events.last().unwrap().as_ref().unwrap_err();
+                assert_eq!(error.message, business.action_message(), "business={business:?}, stream_error={stream_error}");
+                assert_eq!(error.code, code);
+                assert_eq!(error.retry, retry);
+                assert_eq!(error.provider_status, Some(business.http_status()));
+                assert_eq!(error.unsupported_feature, None);
+                assert_eq!(invoke.calls(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_action_sanitizer_keeps_only_exact_local_actions_with_matching_semantics() {
+        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+        let action = GatewayBusinessError::InsufficientBalance.action_message();
+        for error in [
+            ChatModelError::new(ChatModelErrorCode::ProviderUnavailable, format!("{action} private-key-value"), ChatRetryDirective::Never),
+            ChatModelError::new(ChatModelErrorCode::ProviderUnavailable, format!("diagnostic: {action}"), ChatRetryDirective::Never),
+            ChatModelError::new(ChatModelErrorCode::ProviderUnavailable, action, ChatRetryDirective::Failover),
+            ChatModelError::new(ChatModelErrorCode::AuthenticationFailed, action, ChatRetryDirective::Never),
+        ] {
+            let sanitized = sanitize_model_error(error);
+            assert_ne!(sanitized.message, action);
+            assert!(!sanitized.message.contains("private-key-value"));
+        }
+        let mut error = ChatModelError::new(ChatModelErrorCode::ProviderUnavailable, action, ChatRetryDirective::Never);
+        error.unsupported_feature = Some(crate::ChatModelFeature::ToolCalls);
+        assert_ne!(sanitize_model_error(error).message, action, "gateway billing must never authorize a feature downgrade");
     }
 
     #[tokio::test]
