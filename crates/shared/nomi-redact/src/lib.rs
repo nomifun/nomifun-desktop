@@ -1,6 +1,7 @@
 //! Best-effort 文本脱敏：把文本里常见的 API key / token / 私钥 / `key=value`
 //! 形式的 secret 替换成 `[REDACTED_SECRET]`。用于「记忆 / 日志 / 事件 写入磁盘
-//! 前」堵泄漏面。移植自 codex `secrets/src/sanitizer.rs`。
+//! 前」堵泄漏面。移植自 OpenAI Codex（Apache-2.0，github.com/openai/codex）
+//! `secrets/src/sanitizer.rs`，含 nomi 增量调整。
 //!
 //! 注意：这是「尽力而为」的正则脱敏，不保证抓全；它**不是**加密，也**不**替代
 //! 「不要把密钥写进会被持久化的文本」这一原则。

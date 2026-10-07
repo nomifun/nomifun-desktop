@@ -82,7 +82,7 @@ Thumbs.db
 # Visual brainstorming companion (transient mockups)
 .superpowers/
 
-# Isolated Codex development worktrees
+# Isolated agent development worktrees
 .worktrees/
 
 # Repository policy: GitHub Actions workflows are forbidden. Keep these

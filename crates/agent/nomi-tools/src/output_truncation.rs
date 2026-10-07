@@ -2,7 +2,8 @@
 //!
 //! Preserves a prefix and a suffix on UTF-8 boundaries, dropping the middle
 //! and inserting a marker that records how much was removed. Ported (and
-//! de-dependency-ed) from codex `utils/string/src/truncate.rs`.
+//! de-dependency-ed) from OpenAI Codex (Apache-2.0, github.com/openai/codex)
+//! `utils/string/src/truncate.rs`.
 //!
 //! Unlike the engine-level fallback in the retired loop (private,
 //! char-counted, multi-pass), this is a reusable, single-pass, tested pure
