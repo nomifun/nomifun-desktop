@@ -1,18 +1,17 @@
 ﻿# Current Technical Status
 
-Updated: 2026-08-23.
+Updated: 2026-10-07.
 
-This file is a compact current-state snapshot. Historical P0-P5 migration notes
-were removed from the active status because they described the 2026-06-08
-transition plan, not the product shape in this repository now.
+This file is a compact current-state snapshot. Historical migration notes are
+intentionally not kept here; use Git history for superseded transitions.
 
 ## Current Architecture
 
 - One Cargo workspace:
-  - `crates/agent/*`: 15 `nomi-*` crates.
-  - `crates/backend/*`: 34 `nomifun-*` crates.
-  - `crates/shared/*`: 3 cross-layer crates (`nomi-process-runtime`,
-    `nomi-redact`, `nomifun-net`).
+  - `crates/agent/*`: 11 `nomi-*` crates.
+  - `crates/backend/*`: 54 `nomifun-*` crates.
+  - `crates/shared/*`: 5 cross-layer crates (`nomi-process-runtime`,
+    `nomi-redact`, `nomi-ssh`, `nomifun-audio`, `nomifun-net`).
   - `apps/web` and `apps/desktop`.
 - One frontend: `ui/`, a React 19 + Vite SPA.
 - Two host modes:
@@ -33,47 +32,33 @@ The current frontend route map lives in
 - `/models`
 - `/mcp`
 - `/open-capabilities`
-- `/browser`
-- `/presets`
 - `/skills`
+- `/agent` and `/agent-sessions/:agentSessionId`
 - `/requirements`, `/requirements/extensions`, `/requirements/sources`
 - `/scheduled` and `/scheduled/:cron_job_id`
 - `/nomi` and `/companion`
 - `/customer-service` and `/customer-service/:cs_agent_id`
 - `/knowledge` and `/knowledge/:id`
-- Creative Studio focused shell: `/workshop`, the canonical Canvas library at
-  `/workshop/canvases`, Canvas editors at `/workshop/canvas/:canvasId`,
-  independent workbenches at `/workshop/image`
-  and `/workshop/video`, plus `/workshop/prompts`, `/workshop/assets`, and
-  `/workshop/templates`.
-  `/workshop/projects` is a deprecated compatibility redirect to
-  `/workshop/canvases`; it is not a Creative Studio product object.
-  `/workshop/audio` is retired; see
-  [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md).
+- `/plugins` and `/plugins/run/:id` (feature-gated; currently hidden)
+- Creative Studio: the Canvas library at `/nomi/canvases`, Canvas editors at
+  `/nomi/canvases/:canvasId`, plus `/asset-library`,
+  `/asset-library/materials`, `/asset-library/prompts`, and
+  `/asset-library/templates` (see
+  `ui/src/renderer/pages/creativeStudio/app/resourceRoutes.ts`).
 - `/settings/system` and `/settings/execution-engines`, plus system
   sub-sections routed through the system settings page
-- `/settings/ssh-hosts` 鈥?the SSH remote-host book (instance owner only)
+- `/settings/ssh-hosts` — the SSH remote-host book (instance owner only)
+- `/settings/permissions`
 
 Several legacy paths still exist only as redirects. Do not document them as
 primary navigation.
 
 Creative Studio has no Project domain. Canvas tasks use the
-`CanvasNode { canvasId, nodeId }` owner; standalone Image/Video tasks use only
-`StandaloneWorkbench { workbenchKind }`; template executions use
-`TemplateStep { templateId, templateRunId, templateStepId }`.
-Standalone history and retirement are scoped only by `workbench_kind`, and
-legacy standalone `project_id` values are inert provenance. Image and Video
-routes have no Canvas selector or prerequisite and are usable with zero
-Canvases. The canonical Canvas HTTP API is
-`/api/creative-studio/canvases`; `/api/creative-studio/projects` remains a
-deprecated alias. Gateway Canvas capabilities are
-`nomi_creative_studio_list_canvases` and
-`nomi_creative_studio_get_canvas`, with the old project-named capabilities
-retained only as deprecated aliases. The UI/API contract version is 22.
-
-Creative Studio writes version-2 Canvas archives while retaining a version-1
-reader. Image and Video preserve versioned per-workbench session drafts in
-browser session storage without `projectId` or `canvasId` keys.
+`CanvasNode { canvasId, nodeId }` owner; template executions use
+`TemplateStep { templateId, templateRunId, templateStepId }`. The canonical
+Canvas HTTP API is `/api/creative-studio/canvases`;
+`/api/creative-studio/projects` remains a deprecated alias, and the old
+project-named Gateway capabilities are retained only as deprecated aliases.
 
 ## Commands
 
@@ -97,7 +82,7 @@ For packaging and signing, see:
 
 ## Known Documentation Policy
 
-The active docs are `README.md`, `STATUS.md`, and the non-archive sections under
-`docs/`. Dated design specs and audits are
-historical records. They can explain why code exists, but they must not be used
-as current product or operator instructions without re-checking the source.
+The active docs are `README.md`, `STATUS.md`, and the sections under `docs/`.
+Dated design specs under `docs/specs/` are point-in-time contracts: they can
+explain why code exists, but they must not be used as current product or
+operator instructions without re-checking the source.

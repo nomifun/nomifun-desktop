@@ -1,11 +1,12 @@
 ﻿# Product documentation ownership
 
-Product usage documentation is maintained in the NomiFun Portal repository:
+Product usage guides are maintained in this repository under
+[`docs/guides/`](guides/), alongside the technical documentation
+(`architecture/`, `reference/`, `contributing/`). Keep them accurate against
+the current source and keep English/Simplified Chinese siblings in sync.
 
-- Chinese: https://www.nomifun.com/zh/docs/
-- English: https://www.nomifun.com/docs/
-
-This repository keeps technical documentation only: architecture, API and protocol
-contracts, deployment, development, contribution, release, security, and source-level
-operator notes. Do not add long product tutorials or screenshots here; update Portal
-and link to the canonical page instead.
+The published product documentation site is
+[nomifun.com/docs](https://www.nomifun.com/docs/)
+([中文](https://www.nomifun.com/zh/docs/)), maintained in the NomiFun Portal
+repository; treat it as the presentation mirror, not a reason to remove or
+outsource the guides kept here.

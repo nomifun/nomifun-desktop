@@ -106,8 +106,8 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 | Vision | 带图片的聊天与分析 |
 | 语音识别（ASR） | 语音输入、伙伴和设备语音 |
 | 语音合成（TTS） | 伙伴、设备与 Canvas 音频节点 |
-| 图片生成 / 编辑 | 创作 Canvas 与 Image Workbench |
-| 视频生成 | 创作 Canvas 与 Video Workbench |
+| 图片生成 / 编辑 | 创作 Canvas 节点 |
+| 视频生成 | 创作 Canvas 节点 |
 | 音乐生成 | 会话创作与 Creation |
 | Embedding / Rerank | 检索与知识工作流 |
 
@@ -208,7 +208,7 @@ AutoWork 位于更上一层：它负责让带标签的需求队列继续认领�
   `crates/backend/nomifun-conversation/src/model_failover.rs`
 - 故障转移 API：
   `crates/backend/nomifun-app/src/router/model_failover.rs`
-- IDMM 策略：
-  `crates/backend/nomifun-idmm/src/policy.rs`
+- IDMM 监督服务：
+  `crates/backend/nomifun-idmm/src/service.rs`
 - 创作模型目录：
   `ui/src/renderer/pages/creativeStudio/models/catalog.ts`

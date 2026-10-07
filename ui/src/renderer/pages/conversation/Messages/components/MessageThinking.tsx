@@ -61,7 +61,11 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
       bodyLength={thinkingDisplay.contentLength}
       showElapsedTime={false}
     >
-      <MarkdownView fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>
+      <MarkdownView
+        variant={variant === 'process' ? 'process' : undefined}
+        fontSize={MESSAGE_BODY_FONT_SIZE}
+        lineHeight={MESSAGE_BODY_LINE_HEIGHT}
+      >
         {text}
       </MarkdownView>
     </ThinkingProcessDisplay>

@@ -130,7 +130,7 @@ make dist VERSION="$VERSION" COMMIT="$COMMIT"
 必须在 Mac 上执行。一键脚本会自动判定两种场景：
 
 - **追加(APPEND)**：该版本的 GitHub Release 已存在（可能 Windows 侧先发过）——只补 macOS
-  产物、把 `darwin-x86_64` / `darwin-aarch64` 条目并进 `latest.json`。
+  产物、把 `darwin-aarch64` 条目并进 `latest.json`（macOS 仅发 arm64）。
 - **首发(CREATE)**：该版本还没有 Release（macOS 先发）——建 tag、建 Release（带 release
   note）、上传 macOS 产物；可用 `-Version` 顺带打版本号。
 
@@ -181,9 +181,9 @@ staple / codesign / Gatekeeper、`make:latest` 合并 darwin 条目、上传（�
 
 下面命令会同时产出：
 
-- 手动安装包：`dist/desktop/NomiFun_<version>_universal.dmg`
-- 自动更新包：`target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz`
-- 自动更新签名：`target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig`
+- 手动安装包：`dist/desktop/NomiFun_<version>_aarch64.dmg`
+- 自动更新包：`target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz`
+- 自动更新签名：`target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig`
 
 ```bash
 export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
@@ -203,7 +203,7 @@ bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
-`bun run make:latest` 会把 macOS 的 `darwin-x86_64` 和 `darwin-aarch64` 都写入 `apps/desktop/updater/latest.json`。
+`bun run make:latest` 会把 macOS 的 `darwin-aarch64` 条目写入 `apps/desktop/updater/latest.json`（macOS 仅发 arm64）。
 
 ## Windows 发版
 
@@ -360,9 +360,9 @@ git tag "v$VERSION"
 git push origin main "v$VERSION"
 
 gh release create "v$VERSION" \
-  target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz \
-  target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig \
-  dist/desktop/NomiFun_${VERSION}_universal.dmg \
+  target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz \
+  target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig \
+  dist/desktop/NomiFun_${VERSION}_aarch64.dmg \
   apps/desktop/updater/latest.json \
   --title "v$VERSION" \
   --notes "发布说明"
@@ -382,9 +382,9 @@ gh release upload "v$VERSION" apps/desktop/updater/latest.json --clobber
 macOS 至少上传：
 
 ```text
-dist/desktop/NomiFun_<version>_universal.dmg
-target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz
-target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig
+dist/desktop/NomiFun_<version>_aarch64.dmg
+target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz
+target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig
 apps/desktop/updater/latest.json
 ```
 
@@ -396,7 +396,7 @@ Linux 上传对应安装包、`.sig`、`latest.json`。
 
 ```bash
 gh release view "v$VERSION" --json tagName,assets,url
-curl -fsSL https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json
+curl -fsSL https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json
 ```
 
 确认：
@@ -405,13 +405,3 @@ curl -fsSL https://github.com/nomifun/nomifun-tauri/releases/latest/download/lat
 - `latest.json` 的 `version` 等于本次版本。
 - 每个已发布平台都有 `platforms[...]` 条目。
 - 每个 URL 都指向同一个 `v$VERSION` Release。
-
-## v0.1.11 当前状态
-
-`v0.1.11` 已完成 macOS：
-
-- 已上传 `NomiFun_0.1.11_universal.dmg`。
-- 已上传 `NomiFun.app.tar.gz` 和 `NomiFun.app.tar.gz.sig`。
-- `latest.json` 目前只有 `darwin-x86_64` 和 `darwin-aarch64`。
-
-Windows 还需要在 Windows 机器上继续构建、上传 Windows 资产，并用 `--clobber` 替换 Release 上的 `latest.json`。

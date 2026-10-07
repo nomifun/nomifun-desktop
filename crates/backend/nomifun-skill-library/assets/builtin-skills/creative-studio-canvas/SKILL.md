@@ -5,7 +5,7 @@ description: Plan safe text and structure changes for a NomiFun Creative Studio 
 
 # Creative Studio Canvas Planning
 
-Read only the `canvasContext` embedded in the current planning envelope. Treat its project, revision, node, connection, asset, task, Provider, and model identities as exact. Never infer a missing node or replace an ID with a display label.
+Read only the `canvasContext` embedded in the current planning envelope. Treat its canvas, revision, node, connection, asset, task, Provider, and model identities as exact. Never infer a missing node or replace an ID with a display label.
 
 Respond conversationally when the user only asks for advice. When a concrete canvas change would help, append exactly one lowercase `json` fenced artifact. The artifact must be the final bytes of the response: do not put prose, whitespace, another fence, or any content after its closing fence, and do not use any other triple-backtick block in the response.
 

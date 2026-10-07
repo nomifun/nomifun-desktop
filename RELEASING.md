@@ -260,9 +260,9 @@ Use this order for every desktop release.
 
    ```bash
    gh release create "v$VERSION" \
-     target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz \
-     target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig \
-     dist/desktop/NomiFun_${VERSION}_universal.dmg \
+     target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz \
+     target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig \
+     dist/desktop/NomiFun_${VERSION}_aarch64.dmg \
      apps/desktop/updater/latest.json \
      --title "v$VERSION" \
      --notes "Release notes"
@@ -284,7 +284,7 @@ Use this order for every desktop release.
 
    ```bash
    gh release view "v$VERSION" --json tagName,assets,url
-   curl -fsSL https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json
+   curl -fsSL https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json
    ```
 
    Confirm the downloaded manifest version is `VERSION`, every shipped platform
@@ -296,8 +296,8 @@ Use this order for every desktop release.
 The one-click script auto-detects two scenarios:
 
 - **APPEND** — a Release for this version already exists (Windows may have gone
-  first): add the macOS assets and merge the `darwin-x86_64` / `darwin-aarch64`
-  entries into `latest.json`.
+  first): add the macOS assets and merge the `darwin-aarch64` entry into
+  `latest.json` (macOS ships arm64-only).
 - **CREATE** — no Release exists yet (macOS goes first): create the tag and the
   Release (with release notes) and upload the macOS assets; `-Version` can bump
   the version number as part of the same command.

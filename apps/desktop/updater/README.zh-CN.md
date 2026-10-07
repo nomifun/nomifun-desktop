@@ -158,9 +158,9 @@ bun run release:cloud -- verify
 macOS 需要同时上传：
 
 ```text
-dist/desktop/NomiFun_<version>_universal.dmg
-target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz
-target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig
+dist/desktop/NomiFun_<version>_aarch64.dmg
+target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz
+target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz.sig
 apps/desktop/updater/latest.json
 ```
 

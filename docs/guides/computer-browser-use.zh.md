@@ -10,28 +10,35 @@ NomiFun 将桌面范围的 Computer 自动化与会话中的原生浏览器区�
 
 开发前端项目时，先启动开发服务器，再让 Agent 在会话浏览器中打开 localhost 地址，观察页面、执行交互并验证结果。导航、点击、键盘输入和标准 HTML 选择操作使用真实浏览器，交互表面不是截图流。
 
-Windows 原生输入已有真实 smoke 验证。macOS、frame、dialog、文件和打包等完整产品验收仍在进行，请参阅[架构说明](../architecture/browser-platform.zh.md)与[实施记录](../specs/2026-09-13-browser-workspace-v2-progress.zh.md)中的当前限制。
+Windows 原生输入已有真实 smoke 验证。macOS、frame、dialog、文件和打包等完整产品验收仍在进行，请参阅[架构说明](../architecture/browser-platform.zh.md)中的当前限制。
 
-## 可选系统浏览器（Windows，实施中）
+## 可选 Attached Chrome（Windows，实施中）
 
-在 Agent 工作台“网页”分类选择 `nomi_system_browser`，再从会话标题栏的“系统浏览器”连接正在运行、已登录的 Chrome 144+。
-首次使用需在 Chrome 的 `chrome://inspect/#remote-debugging` 中启用并批准连接，然后选择允许本会话使用的标签。
-不要求重启 Chrome，不创建替代 Profile，也不导入 Cookie、密码或历史。Chrome 原生许可覆盖所选个人资料；标签限制由 NomiFun 额外执行。
+Agent session 的 `browser` 能力可以由一个附着的、正在运行的 Chrome 提供，
+而不必使用内嵌 Browser Workspace。该 Provider 是安装级的：在 Chrome 的
+`chrome://inspect/#remote-debugging` 中启用远程调试并批准提示后，通过
+`POST /api/browser-providers/attached-chrome` 连接一次，再把 session 绑定到
+`attached-chrome` Provider 资源。同一路由的 `GET`/`DELETE` 用于读取和释放
+附加连接。
 
-当前支持主文档观察、导航、点击、输入、按键和滚动。页面仍在原 Chrome 窗口中，不是嵌入式截图；没有测试面板或接管模式。
-Agent 运行时不能在 NomiFun 更改授权；NomiFun 无法物理锁定 Chrome 地址栏、关闭按钮或用户撤销许可。
-断开只释放连接和自动化状态，不关闭用户浏览器或标签。连接请求可以取消，连接结果不确定时只刷新状态，不自动重连或重放操作。
+不要求重启 Chrome，不创建替代 Profile，也不导入 Cookie、密码或历史。断开
+只释放连接和自动化状态，不关闭用户浏览器或标签。Agent 持有 run 时，浏览器
+可变操作 fail closed。
 
-主文档的真实输入已在独立临时 Chrome 中验证；个人登录页面授权实测、完整 iframe/文件/对话框矩阵与发行验收仍未完成。
-Edge、macOS 和 Linux 尚未声明支持。这项能力与内嵌浏览器、`nomi_local_websearch` 和厂商搜索相互独立。
+前端接线与完整 iframe/文件/对话框验收矩阵仍在进行；Provider 及其 REST 面
+已在 `nomifun-app`（`browser_workspace_provider/attached_provider.rs`）实现。
+Edge、macOS 和 Linux 尚未声明支持。这项能力与内嵌浏览器、本地/厂商搜索相互
+独立。
 
-## 可选网页搜索
+## 可选网页研究
 
-Agent 工作台“网页”分类中的 `nomi_local_websearch` 与模型厂商的 `web.search` 是两项独立能力。本地搜索通过隔离的 Headless 运行时将查询发送给搜索引擎，不使用会话登录态，不要求模型原生搜索，也不授予浏览器自动化权限。
+`web.research` 能力模块独立于模型厂商的原生搜索承担公网检索。查询通过隔离
+后台浏览器运行时执行，不读取会话登录态；启用它不授予 Browser 自动化权限。
 
-Windows 桌面会识别已安装的 Chrome 120+；没有合格安装时不能启用。发现过程不启动浏览器，实际查询才启动隔离运行时并核对版本。
-搜索词发送给 Bing，引擎域名通过 Google Public DNS（HTTPS）解析，不读取会话登录态。Chrome 更新导致旧绑定失效时需重启应用。
-Windows 目录接线及公网查询已验证；主应用完整交互和安装包验收仍在进行，macOS 尚待后续移交实施。
+Windows 桌面会识别已安装的 Chrome 120+；没有合格安装时不能启用。发现过程
+不启动浏览器，实际查询才启动隔离运行时并核对版本。
+搜索词发送给 Bing，引擎域名通过 Google Public DNS（HTTPS）解析，不读取会话
+登录态。Chrome 更新导致旧绑定失效时需重启应用。
 
 ## Computer Use
 
