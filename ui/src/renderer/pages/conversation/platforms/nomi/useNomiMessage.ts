@@ -107,8 +107,17 @@ export const useNomiMessage = (
   const [stopNotice, setStopNotice] = useState<{ stoppedAt: number } | null>(null);
   const [pauseNotice, setPauseNotice] = useState<ConversationPauseNotice | null>(null);
   // Current active message ID to filter out events from old requests (prevents aborted request events from interfering with new ones)
-  const activeMsgIdRef = useRef<string | null>(null);
+  const activeMsgIdRef = useRef<MessageId | null>(null);
   const rootTurnIdRef = useRef<MessageId | null>(null);
+  const [activeTurnId, setActiveTurnId] = useState<MessageId | null>(null);
+  const [activeRequestMessageId, setActiveRequestMessageId] = useState<MessageId | null>(null);
+  // Publish the same verified identity used by stream fencing to the renderer.
+  // Ref-only identity cannot notify the timeline when hydration/start replaces
+  // its provisional request boundary or a delayed row splits the active Turn.
+  const setRootTurnId = useCallback((turnId: MessageId | null) => {
+    rootTurnIdRef.current = turnId;
+    setActiveTurnId(turnId);
+  }, []);
   const awaitingBackendTurnRef = useRef(false);
   const turnClosedRef = useRef(false);
   const cancelledTurnIdsRef = useRef(new Set<MessageId>());
@@ -192,8 +201,9 @@ export const useNomiMessage = (
   const running = isTurnRunning(turnState);
 
   // Set current active message ID
-  const setActiveMsgId = useCallback((msgId: string | null) => {
+  const setActiveMsgId = useCallback((msgId: MessageId | null) => {
     activeMsgIdRef.current = msgId;
+    setActiveRequestMessageId(msgId);
   }, []);
 
   const dispatchTurnIfOpen = useCallback((event: NomiTurnEvent) => {
@@ -209,33 +219,33 @@ export const useNomiMessage = (
     turnLifecycleGenerationRef.current += 1;
     turnCompletionGenerationRef.current += 1;
     turnReconcileSequenceRef.current += 1;
-    rootTurnIdRef.current = null;
+    setRootTurnId(null);
     awaitingBackendTurnRef.current = false;
     turnClosedRef.current = true;
     rejectUnannouncedStartRef.current = false;
     verifyUnannouncedStartRuntimeRef.current = true;
-    activeMsgIdRef.current = null;
+    setActiveMsgId(null);
     turnSettledRef.current = true;
     dispatchTurn({ type: 'finish' });
     setThought({ subject: '', description: '' });
-  }, []);
+  }, [setActiveMsgId, setRootTurnId]);
 
   const adoptAuthoritativePause = useCallback((conversation: TChatConversation) => {
     const notice = getConversationPauseNotice(conversation);
     if (!notice || rejectUnannouncedStartRef.current || cancelledTurnIdsRef.current.has(notice.turnId)) return;
     turnLifecycleGenerationRef.current += 1;
     turnReconcileSequenceRef.current += 1;
-    rootTurnIdRef.current = notice.turnId;
+    setRootTurnId(notice.turnId);
     awaitingBackendTurnRef.current = false;
     turnClosedRef.current = true;
     turnSettledRef.current = false;
     verifyUnannouncedStartRuntimeRef.current = true;
-    activeMsgIdRef.current = null;
+    setActiveMsgId(null);
     dispatchTurn({ type: 'reset' });
     setThought({ subject: '', description: '' });
     setPauseNotice(notice);
     setHasHydratedRunningState(true);
-  }, []);
+  }, [setActiveMsgId, setRootTurnId]);
 
   const adoptAuthoritativeProcessing = useCallback((conversation: TChatConversation) => {
     const activeTurnId = conversation.runtime?.active_turn_id;
@@ -255,8 +265,9 @@ export const useNomiMessage = (
       !isTurnRunning(turnStateRef.current);
     if (changedTurn) {
       turnStartGenerationRef.current += 1;
+      if (rootTurnIdRef.current !== null) setActiveMsgId(null);
     }
-    rootTurnIdRef.current = activeTurnId;
+    setRootTurnId(activeTurnId);
     awaitingBackendTurnRef.current = false;
     turnClosedRef.current = false;
     rejectUnannouncedStartRef.current = false;
@@ -266,7 +277,7 @@ export const useNomiMessage = (
     setPauseNotice(null);
     if (shouldRaiseRunning) dispatchTurn({ type: 'hydrate', isRunning: true });
     setHasHydratedRunningState(true);
-  }, []);
+  }, [setActiveMsgId, setRootTurnId]);
 
   const startAuthoritativeRuntimeReconciliation = useCallback(
     ({ immediate = false }: { immediate?: boolean } = {}) => {
@@ -299,12 +310,12 @@ export const useNomiMessage = (
     () => {
       if (!awaitingBackendTurnRef.current || rejectUnannouncedStartRef.current) return;
       if (!verifyUnannouncedStartRuntimeRef.current) turnLifecycleGenerationRef.current += 1;
-      rootTurnIdRef.current = null;
+      setRootTurnId(null);
       awaitingBackendTurnRef.current = false;
       turnSettledRef.current = false;
       startAuthoritativeRuntimeReconciliation();
     },
-    [startAuthoritativeRuntimeReconciliation]
+    [setRootTurnId, startAuthoritativeRuntimeReconciliation]
   );
 
   const reconcilePublicDeliveryReplay = useCallback(
@@ -318,13 +329,13 @@ export const useNomiMessage = (
       // reopen this already-accepted delivery.
       turnLifecycleGenerationRef.current += 1;
       turnReconcileSequenceRef.current += 1;
-      rootTurnIdRef.current = null;
+      setRootTurnId(null);
       awaitingBackendTurnRef.current = false;
       turnClosedRef.current = true;
       turnSettledRef.current = true;
       rejectUnannouncedStartRef.current = false;
       verifyUnannouncedStartRuntimeRef.current = true;
-      activeMsgIdRef.current = null;
+      setActiveMsgId(null);
       dispatchTurn({ type: 'hydrate', isRunning: false, settleIdle: true });
 
       const generation = turnLifecycleGenerationRef.current;
@@ -345,7 +356,7 @@ export const useNomiMessage = (
         logLabel: 'accepted delivery replay',
       });
     },
-    [adoptAuthoritativePause, adoptAuthoritativeProcessing, conversation_id, settleCompletedTurn]
+    [adoptAuthoritativePause, adoptAuthoritativeProcessing, conversation_id, setActiveMsgId, setRootTurnId, settleCompletedTurn]
   );
 
   useEffect(() => {
@@ -544,7 +555,8 @@ export const useNomiMessage = (
       const acceptStart = () => {
         turnStartGenerationRef.current += 1;
         turnLifecycleGenerationRef.current += 1;
-        rootTurnIdRef.current = event.turn_id;
+        if (rootTurnIdRef.current && rootTurnIdRef.current !== event.turn_id) setActiveMsgId(null);
+        setRootTurnId(event.turn_id);
         awaitingBackendTurnRef.current = false;
         turnClosedRef.current = false;
         rejectUnannouncedStartRef.current = false;
@@ -592,7 +604,7 @@ export const useNomiMessage = (
       disposed = true;
       unsubscribe();
     };
-  }, [conversation_id, startAuthoritativeRuntimeReconciliation]);
+  }, [conversation_id, setActiveMsgId, setRootTurnId, startAuthoritativeRuntimeReconciliation]);
 
   useEffect(() => {
     return ipcBridge.conversation.reconnected.on(() => {
@@ -670,7 +682,8 @@ export const useNomiMessage = (
     setPauseNotice(null);
     setTokenUsage(null);
     setHasHydratedRunningState(false);
-    rootTurnIdRef.current = null;
+    setRootTurnId(null);
+    setActiveMsgId(null);
     awaitingBackendTurnRef.current = false;
     // Start behind the same idle fence before the async snapshot resolves.
     // Otherwise a delayed turn.started could advance the generation first and
@@ -704,7 +717,7 @@ export const useNomiMessage = (
         turnReconcileSequenceRef.current === hydrationSequence,
       onIdle: (res) => {
         const fence = getNomiHydrationLifecycleFence(false);
-        rootTurnIdRef.current = null;
+        setRootTurnId(null);
         awaitingBackendTurnRef.current = false;
         turnClosedRef.current = fence.turnClosed;
         verifyUnannouncedStartRuntimeRef.current = fence.verifyUnannouncedStartRuntime;
@@ -735,6 +748,8 @@ export const useNomiMessage = (
     adoptAuthoritativePause,
     adoptAuthoritativeProcessing,
     conversation_id,
+    setActiveMsgId,
+    setRootTurnId,
     startAuthoritativeRuntimeReconciliation,
   ]);
 
@@ -759,15 +774,15 @@ export const useNomiMessage = (
     dispatchTurn({ type: 'reset' });
     setThought({ subject: '', description: '' });
     // Clear active message ID to prevent filtering events from new messages after stop
-    activeMsgIdRef.current = null;
-  }, []);
+    setActiveMsgId(null);
+  }, [setActiveMsgId]);
 
   // External setter used by the send box to raise the spinner on submit.
   const setWaitingResponse = useCallback((value: boolean) => {
     turnLifecycleGenerationRef.current += 1;
     if (value) {
       turnStartGenerationRef.current += 1;
-      rootTurnIdRef.current = null;
+      setRootTurnId(null);
       awaitingBackendTurnRef.current = true;
       turnClosedRef.current = false;
       rejectUnannouncedStartRef.current = false;
@@ -776,7 +791,7 @@ export const useNomiMessage = (
       setStopNotice(null);
       setPauseNotice(null);
     } else {
-      rootTurnIdRef.current = null;
+      setRootTurnId(null);
       awaitingBackendTurnRef.current = false;
       turnClosedRef.current = true;
       rejectUnannouncedStartRef.current = false;
@@ -784,7 +799,7 @@ export const useNomiMessage = (
       turnSettledRef.current = true;
     }
     dispatchTurn({ type: 'setWaiting', value });
-  }, []);
+  }, [setRootTurnId]);
 
   const restoreRunningAfterStopFailure = useCallback(() => {
     turnLifecycleGenerationRef.current += 1;
@@ -803,13 +818,13 @@ export const useNomiMessage = (
   const confirmStopped = useCallback(() => {
     setPauseNotice(null);
     turnLifecycleGenerationRef.current += 1;
-    rootTurnIdRef.current = null;
+    setRootTurnId(null);
     awaitingBackendTurnRef.current = false;
     turnClosedRef.current = true;
     rejectUnannouncedStartRef.current = false;
     turnSettledRef.current = true;
     dispatchTurn({ type: 'reset' });
-  }, []);
+  }, [setRootTurnId]);
 
   const getTurnStartGeneration = useCallback(() => turnStartGenerationRef.current, []);
   const getTurnCompletionGeneration = useCallback(() => turnCompletionGenerationRef.current, []);
@@ -818,6 +833,8 @@ export const useNomiMessage = (
     thought,
     setThought,
     running,
+    activeTurnId: running ? activeTurnId ?? undefined : undefined,
+    activeRequestMessageId: running ? activeRequestMessageId ?? undefined : undefined,
     hasHydratedRunningState,
     stopNotice,
     pauseNotice,

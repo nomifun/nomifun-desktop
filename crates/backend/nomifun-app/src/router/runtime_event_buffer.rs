@@ -13,6 +13,7 @@ pub(super) struct AgentEventBuffer {
     text: Option<(u16, String)>,
     thinking: Option<(u16, String)>,
     thinking_bytes: usize,
+    active_thinking_step: Option<u16>,
     instruction_reads: BTreeSet<ToolCallId>,
     proposal_ids: BTreeSet<ToolCallId>,
 }
@@ -20,6 +21,13 @@ pub(super) struct AgentEventBuffer {
 impl AgentEventBuffer {
     pub(super) fn project(&mut self, event: &AgentEngineEvent) -> Vec<AgentEngineEvent> {
         let mut records = Vec::new();
+        let starts_thinking = matches!(event.reasoning_display_transition(), Some(Some(step))
+            if self.active_thinking_step != Some(step));
+        let closes_thinking = self.active_thinking_step.is_some()
+            && event.reasoning_display_transition() == Some(None);
+        if let Some(next) = event.reasoning_display_transition() {
+            self.active_thinking_step = next;
+        }
         match event {
             AgentEngineEvent::ContextCompacted {
                 retained_context: Some(items),
@@ -56,7 +64,8 @@ impl AgentEventBuffer {
                 // Truncated calls may never reach ToolCallCompleted. Keep
                 // one identity-only proposal fact, not private/partial JSON,
                 // so replay can corroborate ModelOutputTruncated exactly.
-                if self.proposal_ids.len() < 64 && self.proposal_ids.insert(call_id.clone()) {
+                let new_proposal = self.proposal_ids.len() < 64 && self.proposal_ids.insert(call_id.clone());
+                if closes_thinking || new_proposal {
                     self.flush(&mut records);
                     records.push(AgentEngineEvent::ToolCallDelta {
                         step: *step,
@@ -101,7 +110,7 @@ impl AgentEventBuffer {
                 }
                 let (_, pending) = self.text.get_or_insert_with(|| (*step, String::new()));
                 pending.push_str(text);
-                if pending.len() >= FLUSH_BYTES {
+                if closes_thinking || pending.len() >= FLUSH_BYTES {
                     self.flush(&mut records);
                 }
             }
@@ -120,9 +129,16 @@ impl AgentEventBuffer {
                     let (_, pending) = self.thinking.get_or_insert_with(|| (*step, String::new()));
                     pending.push_str(&text[..end]);
                     self.thinking_bytes += end;
-                    if pending.len() >= FLUSH_BYTES {
+                    // Commit the first fragment of a phase before publishing
+                    // it live, so a cold history read can observe the same
+                    // active step. Later fragments retain bounded buffering.
+                    if starts_thinking || pending.len() >= FLUSH_BYTES {
                         self.flush(&mut records);
                     }
+                } else if starts_thinking {
+                    // The bounded body budget must not hide a real phase
+                    // transition for a step that already has visible content.
+                    records.push(AgentEngineEvent::ReasoningDelta { step: *step, text: String::new() });
                 }
             }
             // Partial tool argument fragments remain transient; completed calls
@@ -245,4 +261,62 @@ pub(super) fn bounded_result(
     result: &nomifun_agent_runtime::AgentToolResult,
 ) -> nomifun_agent_runtime::AgentToolResult {
     super::engine_tool_host::bounded_engine_tool_result(result)
+}
+
+#[cfg(test)]
+mod thinking_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_phase_boundaries_commit_before_publication_and_keep_intermediate_chunks_buffered() {
+        let mut buffer = AgentEventBuffer::default();
+        let first = AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect. ".into() };
+        assert_eq!(buffer.project(&first), vec![first]);
+        let suffix = AgentEngineEvent::ReasoningDelta { step: 1, text: "Review the details. ".into() };
+        assert!(buffer.project(&suffix).is_empty());
+        let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading the file.".into() };
+        assert_eq!(buffer.project(&handoff), vec![suffix, handoff]);
+        let resumed = AgentEngineEvent::ReasoningDelta { step: 1, text: "Verify. ".into() };
+        assert_eq!(buffer.project(&resumed), vec![resumed]);
+        let suffix = AgentEngineEvent::ReasoningDelta { step: 1, text: "Check the result.".into() };
+        assert!(buffer.project(&suffix).is_empty());
+        let next = AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "model:2".into() };
+        assert_eq!(buffer.project(&next), vec![suffix, next]);
+        let reasoning = AgentEngineEvent::ReasoningDelta { step: 2, text: "Next step.".into() };
+        assert_eq!(buffer.project(&reasoning), vec![reasoning]);
+        let mut tail = Vec::new();
+        buffer.flush(&mut tail);
+        assert!(tail.is_empty(), "boundary fragments are never written twice");
+    }
+
+    #[test]
+    fn an_exhausted_reasoning_body_budget_still_records_a_reopened_phase() {
+        let mut buffer = AgentEventBuffer::default();
+        let first = AgentEngineEvent::ReasoningDelta { step: 1, text: "x".repeat(MAX_THINKING_BYTES_PER_TURN) };
+        assert_eq!(buffer.project(&first), vec![first]);
+        let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading.".into() };
+        assert_eq!(buffer.project(&handoff), vec![handoff]);
+        let resumed = AgentEngineEvent::ReasoningDelta { step: 1, text: "Visible live suffix".into() };
+        assert_eq!(buffer.project(&resumed), vec![AgentEngineEvent::ReasoningDelta { step: 1, text: String::new() }]);
+        assert_eq!(buffer.thinking_bytes, MAX_THINKING_BYTES_PER_TURN);
+        assert!(buffer.project(&resumed).is_empty(), "budget exhaustion does not write per-delta lifecycle records");
+    }
+
+    #[test]
+    fn repeated_tool_argument_fragments_still_commit_a_reasoning_handoff() {
+        let mut buffer = AgentEventBuffer::default();
+        let call = AgentEngineEvent::ToolCallDelta { step: 1, call_id: "call-a".into(), name: "read_file".into(), arguments_delta: "PRIVATE_PARTIAL_ARGUMENTS".into() };
+        let mut expected = call.clone();
+        if let AgentEngineEvent::ToolCallDelta { arguments_delta, .. } = &mut expected { arguments_delta.clear(); }
+        assert_eq!(buffer.project(&call), vec![expected.clone()]);
+        assert_eq!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect. ".into() }).len(), 1);
+        let suffix = AgentEngineEvent::ReasoningDelta { step: 1, text: "Check. ".into() };
+        assert!(buffer.project(&suffix).is_empty());
+        assert_eq!(buffer.project(&call), vec![suffix, expected.clone()]);
+        // The proposal bound also cannot swallow a real phase boundary.
+        buffer.proposal_ids = (0..64).map(|index| ToolCallId::from(format!("call-{index}"))).collect();
+        assert_eq!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "Review again.".into() }).len(), 1);
+        assert_eq!(buffer.project(&call), vec![expected]);
+        assert!(buffer.project(&call).is_empty(), "ordinary repeated argument fragments remain transient");
+    }
 }

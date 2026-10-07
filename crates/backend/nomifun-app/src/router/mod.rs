@@ -57,6 +57,7 @@ mod engine_process_host;
 mod engine_process_recovery;
 mod runtime_event_buffer;
 mod history_process_display;
+mod history_thinking_display;
 mod agent_tool_surface;
 mod agent_tool_presentation;
 mod runtime_attachments;
