@@ -673,6 +673,19 @@ async fn startup_recovery_scenario(
     assert_eq!(inspection["state"], "running");
     assert_eq!(inspection["checkpoint_retained"], true);
     assert_eq!(inspection["automatic_replay_authorized"], false);
+    let started_event_id: String = sqlx::query_scalar(
+        "SELECT started_event_id FROM agent_turns WHERE session_id=? AND state='running'",
+    )
+    .bind(&id)
+    .fetch_one(first.database.pool())
+    .await
+    .unwrap();
+    let (seconds, nanos) = uuid::Uuid::parse_str(&started_event_id)
+        .unwrap()
+        .get_timestamp()
+        .unwrap()
+        .to_unix();
+    let original_started_at = i64::try_from(seconds * 1000 + u64::from(nanos / 1_000_000)).unwrap();
     let snapshot = root.path().join("crash-image.db");
     first.database.snapshot_into(&snapshot).await.unwrap();
     // Graceful cleanup affects only the original DB. The snapshot preserves
@@ -873,6 +886,23 @@ async fn startup_recovery_scenario(
         third.shutdown_browser_platform().await.unwrap(); third.database.close().await;
         return;
     }
+    let resumed_start = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let envelope = user_events.recv().await.unwrap();
+            if envelope.event.name == "turn.started"
+                && envelope.event.data["conversation_id"].as_str() == Some(id.as_str())
+            {
+                break envelope;
+            }
+        }
+    })
+    .await
+    .expect("recovery must publish the original Turn's start clock");
+    assert_eq!(
+        resumed_start.event.data["runtime"]["processing_started_at"],
+        original_started_at,
+        "reattaching a Runtime cannot restart the canonical Turn's elapsed clock",
+    );
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let state: String = sqlx::query_scalar("SELECT state FROM agent_turns WHERE session_id=? ORDER BY accepted_at DESC LIMIT 1")

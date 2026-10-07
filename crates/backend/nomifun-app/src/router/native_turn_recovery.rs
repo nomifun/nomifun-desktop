@@ -94,6 +94,10 @@ impl NomiCoreSessionOwner {
             .ok_or_else(|| AppError::Conflict("recovery Turn start missing".into()))?;
         let root = facts.event_payloads.get(started.event_id.as_ref()).and_then(|value| value.get("source_message_id")).and_then(Value::as_str)
             .ok_or_else(|| AppError::Conflict("recovery source identity missing".into()))?;
+        let processing_started_at = canonical_active_turn_runtime(&facts.head, &facts.events)?
+            .filter(|(source, _)| source == root)
+            .map(|(_, started_at)| started_at)
+            .ok_or_else(|| AppError::Conflict("recovery Turn has no authoritative start time".into()))?;
         let input = facts.event_payloads.get(root).ok_or_else(|| AppError::Conflict("recovery source input missing".into()))?;
         let content = input.get("content").and_then(Value::as_str).ok_or_else(|| AppError::Conflict("recovery source text is missing".into()))?.to_owned();
         let files = super::super::runtime_attachments::references(input)?;
@@ -130,7 +134,10 @@ impl NomiCoreSessionOwner {
         };
         let mut monitor = runtime.subscribe();
         let stream = runtime.subscribe();
-        self.user_events.send_to_user(&owner_id, Self::canonical_turn_started_wire_event(session, root));
+        self.user_events.send_to_user(
+            &owner_id,
+            Self::canonical_turn_started_wire_event(session, root, processing_started_at),
+        );
         self.spawn_canonical_stream_relay(owner_id, session.clone(), root.to_owned(), journal.response_message_id().await?,
             generation, operation.clone(), cancellation, stream);
         if let Err(error) = runtime.send_message(delivery).await {

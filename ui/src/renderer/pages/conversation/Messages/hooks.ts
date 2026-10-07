@@ -29,6 +29,7 @@ import {
   normalizeToolCallContent,
   normalizeToolGroupContent,
   normalizeWireAgentMessageMetadata,
+  normalizeAgentStatusContent,
   normalizeAgentStreamError,
   normalizeTruncatedTurnRecovery,
   preferTextMessageVersion,
@@ -736,6 +737,11 @@ const normalizeDecodedTextMetadata = (parsed: Record<string, unknown>): Partial<
  */
 export function normalizeDbMessage(msg: TMessage): TMessage {
   if (msg.type === 'tips') return normalizeDbTipsMessage(msg);
+  if (msg.type === 'agent_status') {
+    // REST and stream receipts share the same timing contract. In particular,
+    // a running Turn's JSON null end time does not prove completion.
+    return { ...msg, content: normalizeAgentStatusContent(msg.content) };
+  }
   if (msg.type === 'tool_call') {
     const parsed = parseJsonRecord(msg.content) ?? {};
     const content = normalizeToolCallContent(parsed, msg.status ?? null);

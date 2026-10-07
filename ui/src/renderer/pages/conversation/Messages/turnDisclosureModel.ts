@@ -50,6 +50,8 @@ export type TurnDisclosureOutputItem =
 export interface BuildTurnDisclosureOptions {
   tailClosed?: boolean;
   activeTurnId?: MessageId;
+  /** Canonical runtime start when the current history window omits the Turn summary. */
+  activeTurnStartedAt?: number;
   /**
    * Present when the user stopped the latest turn in this session. The tail
    * disclosure (once closed) renders as canceled with `endAt` pinned to the
@@ -65,6 +67,11 @@ export interface AssignTurnIdOptions {
 }
 
 const unique = <T extends string>(values: T[]): T[] => Array.from(new Set(values.filter(Boolean)));
+
+// REST optional timestamps can be JSON null; only finite numbers mark a Turn
+// boundary. A missing finish must never settle an otherwise running Turn.
+const isTurnTimestamp = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
 
 export function collectPublicContinuationIds(
   items: TurnDisclosureInputItem[], final: TurnDisclosureInputItem | undefined
@@ -524,12 +531,17 @@ export function buildTurnDisclosureItems(
   const authoritativeStartedTurns = new Set<MessageId>();
   const processObservedAtByItemId = new Map<string, number>();
 
+  if (activeTurnId && isTurnTimestamp(options.activeTurnStartedAt)) {
+    turnStartedAtByTurn.set(activeTurnId, options.activeTurnStartedAt);
+    authoritativeStartedTurns.add(activeTurnId);
+  }
+
   for (const item of items) {
-    if (item.turnId && item.turnStartedAt !== undefined) {
+    if (item.turnId && isTurnTimestamp(item.turnStartedAt)) {
       turnStartedAtByTurn.set(item.turnId, item.turnStartedAt);
       authoritativeStartedTurns.add(item.turnId);
     }
-    if (item.turnId && item.turnEndedAt !== undefined) {
+    if (item.turnId && isTurnTimestamp(item.turnEndedAt)) {
       turnEndedAtByTurn.set(item.turnId, item.turnEndedAt);
       if (item.role === 'metadata' && item.processState && item.processState !== 'running') {
         terminalStateByTurn.set(item.turnId, item.processState);
