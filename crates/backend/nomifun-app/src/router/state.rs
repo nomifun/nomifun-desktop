@@ -84,6 +84,7 @@ use super::idmm::IdmmRouterState;
 /// Reduces parameter bloat on router constructors and makes it easy for
 /// tests to override individual modules.
 pub struct ModuleStates {
+    pub(crate) mobile_voice:Option<super::mobile_voice_host::VoiceRouterState>,
     pub system: SystemRouterState,
     pub ssh_host: nomifun_ssh::SshHostRouterState,
     pub agent: AgentRouterState,
@@ -378,7 +379,17 @@ pub(crate) async fn try_build_module_states(
         conversation_owner.clone(),
     )
         .with_knowledge_service(services.knowledge_service.clone());
+    let voice_journal=Arc::new(nomifun_voice::SharedVoiceJournal::new(services.data_dir.clone()));
+    let mobile_voice=match super::mobile_voice_registry::AppVoiceRegistry::new(services.model_invoke_service.clone(),services.database.pool().clone(),services.authoritative_user_id.clone()){
+    Ok(voice_registry)=>{
+    let voice_authority=Arc::new(super::mobile_voice_authority::AppVoiceAuthority::new(conversation_owner.clone(),voice_registry.clone(),voice_journal.clone(),services.database.pool().clone()));
+    let voice_shutdown=services.background_shutdown.child_token();
+    let voice_work=Arc::new(super::voice_work_host::AppVoiceWorkHost::new(conversation_owner.clone(),voice_journal.clone(),nomi_core_agent_api.control_plane.clone(),Some(agent_execution.clone())).with_shutdown_token(voice_shutdown.clone()));
+    let voice_service=Arc::new(nomifun_voice::VoiceSessionService::with_journal(voice_registry.registry.clone(),voice_work,voice_authority.clone(),voice_journal,voice_shutdown.clone()));
+    Some(super::mobile_voice_host::VoiceRouterState{service:voice_service,registry:voice_registry,authority:voice_authority,allowed_origins:Arc::from([]),token_validator:services.instance_token_validator.clone(),jwt:services.jwt_service.clone(),shutdown:voice_shutdown,cleanup_registered:Arc::new(std::sync::atomic::AtomicBool::new(false))})
+    },Err(error)=>{tracing::warn!(error=%error,"optional Mobile voice registration unavailable");None}};
     let states = ModuleStates {
+        mobile_voice,
         system: build_system_state(services),
         ssh_host: build_ssh_host_state(services),
         agent: AgentRouterState {

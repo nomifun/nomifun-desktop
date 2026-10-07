@@ -1,6 +1,6 @@
 //! Receipt-backed, turn-local inbox. A queued acknowledgement is not proof
 //! that a model consumed or followed the text. No automatic cross-turn replay.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap,BTreeSet};
 use std::sync::Weak;
 
 use async_trait::async_trait;
@@ -18,6 +18,8 @@ pub(super) struct Inbox {
     generation: Option<u64>,
     seen: BTreeMap<String, AgentSteeringInput>,
     pending: Vec<AgentSteeringInput>,
+    immediate_receipts:BTreeSet<String>,
+    admitted_model_steps:BTreeSet<u16>,
     prepared_image_bytes: usize,
     prepared_image_count: usize,
     prepared_skill_bytes: usize,
@@ -29,6 +31,8 @@ impl Default for Inbox {
             generation: None,
             seen: BTreeMap::new(),
             pending: Vec::new(),
+            immediate_receipts:BTreeSet::new(),
+            admitted_model_steps:BTreeSet::new(),
             prepared_image_bytes: 0,
             prepared_image_count: 0,
             prepared_skill_bytes: 0,
@@ -37,6 +41,8 @@ impl Default for Inbox {
 }
 
 impl Inbox {
+    pub(super) fn immediate_receipt_ids(&self)->Vec<String>{self.immediate_receipts.iter().cloned().collect()}
+    pub(super) fn has_admitted_model_tools(&self,step:u16)->bool{self.admitted_model_steps.contains(&step)}
     pub(super) fn permits_resource_dispatch(&self) -> bool {
         self.open && self.pending.is_empty()
     }
@@ -56,7 +62,7 @@ impl std::fmt::Debug for HostPort {
 fn engine_error(value: impl std::fmt::Display) -> AgentEngineError {
     AgentEngineError::InvalidContract(format!("Agent Runtime steering: {value}"))
 }
-fn admitted(
+pub(super) fn admitted(
     turn: &ActiveTurn,
     host: &ConversationRuntimeHost,
     causality: &ChatCausality,
@@ -128,6 +134,9 @@ impl ConversationRuntimeHost {
                 return Err(error("recovery steering exceeds its admitted budget"));
             }
             turn.steering.seen.insert(input.receipt_operation_id.clone(), input.journal_record());
+            if turn.voice_control.is_some()&&facts.event_payloads.get(event.event_id.as_ref()).and_then(|payload|payload.get("voice_model_step_supersede")).and_then(serde_json::Value::as_bool)==Some(true) {
+                turn.steering.immediate_receipts.insert(input.receipt_operation_id.clone());
+            }
             turn.steering.pending.push(input);
         }
         turn.steering.generation = Some(turn.epoch as u64);
@@ -191,6 +200,7 @@ impl ConversationRuntimeHost {
             turn.cancellation.cancel();
             return Err(error);
         }
+        if turn.voice_control.is_some()&&let AgentEngineEvent::ToolStarted {step,..}=event {turn.steering.admitted_model_steps.insert(*step);}
         Ok(true)
     }
 
@@ -370,6 +380,10 @@ impl ConversationRuntimeHost {
             .seen
             .insert(input.receipt_operation_id.clone(), recorded);
         turn.steering.pending.push(input);
+        if turn.voice_control.is_some()&&facts.event_payloads.get(steering.event_id.as_ref()).and_then(|payload|payload.get("voice_model_step_supersede")).and_then(serde_json::Value::as_bool)==Some(true) {
+            turn.steering.immediate_receipts.insert(steering.event_id.as_ref().to_owned());
+            if let Some(port)=&turn.voice_control{port.notify();}
+        }
         Ok(true)
     }
 
@@ -392,6 +406,7 @@ impl ConversationRuntimeHost {
             )
             .await?;
             turn.steering.pending.clear();
+            turn.steering.immediate_receipts.clear();
         }
         Ok(())
     }
@@ -465,6 +480,7 @@ impl AgentInputPort for HostPort {
             .await
             .map_err(engine_error)?;
         let inputs = std::mem::take(&mut turn.steering.pending);
+        turn.steering.immediate_receipts.clear();
         turn.steering.open = true;
         Ok(inputs)
     }

@@ -35,24 +35,26 @@ struct Fixture {
     services: crate::services::AppServices,
     host: Arc<ConversationRuntimeHost>,
     owner: Arc<super::super::nomi_core_session::NomiCoreSessionOwner>,
+    voice_control:Arc<nomifun_agent_control_plane::AgentControlPlane>,
+    voice_execution:Arc<nomifun_agent_execution::AgentExecutionEngine>,
     message: SendMessageData,
     database_path: PathBuf,
 }
 
 impl Fixture {
     async fn new(scenario: &str) -> Self {
-        Self::build_delivery(scenario, vec![], vec![], None, false,
+        Self::build_delivery(scenario, vec![], vec![], None, false,None,
             #[cfg(feature = "browser-use")] None,
         ).await
     }
 
     async fn with_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>) -> Self {
-        Self::build_delivery(scenario, files, inject_skills, origin, true,
+        Self::build_delivery(scenario, files, inject_skills, origin, true,None,
             #[cfg(feature = "browser-use")] None,
         ).await
     }
 
-    async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,
+    async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>,
         #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -78,11 +80,13 @@ impl Fixture {
         }
         let (states, _components) = super::super::state::try_build_module_states(&services).await.unwrap();
         let owner = states.nomi_core_agent_api.session_owner.clone();
+        let voice_control=states.nomi_core_agent_api.control_plane.clone();let voice_execution=states.agent_execution.clone();
         let router = super::super::create_router_with_states(&services, states);
         #[cfg(feature = "browser-use")]
         let model_base = browser.as_ref().map(|(_, url)| url.as_str()).unwrap_or("http://127.0.0.1:9/v1");
         #[cfg(not(feature = "browser-use"))]
         let model_base = "http://127.0.0.1:9/v1";
+        let model_base=model_base_override.unwrap_or(model_base);
         let provider = api(&router, "/api/providers", json!({
             "platform":"custom", "name":"cleanup fixture", "base_url":model_base,
             "auth_scheme":"bearer", "credentials":{"api_keys":["local-fixture-not-a-secret"]}, "enabled":true,
@@ -147,7 +151,7 @@ impl Fixture {
         let message = SendMessageData { content:"cancel before model dispatch".into(), msg_id:"cleanup-wire".into(),
             source_message_id:Some(root.as_ref().into()), files, inject_skills, origin };
         println!("CLEANUP_FIXTURE scenario={scenario} session={id} operation=cleanup-retry-turn database={}", database_path.display());
-        Self { _directory:directory, _router:router, runtime, services, host, owner, message, database_path }
+        Self { _directory:directory, _router:router, runtime, services, host, owner,voice_control,voice_execution, message, database_path }
     }
 
     fn pool(&self) -> &nomifun_db::SqlitePool { self.services.database.pool() }
@@ -185,6 +189,183 @@ impl Fixture {
         assert_eq!(head.status, "ready");
         assert!(head.active_turn_id.is_none());
     }
+}
+
+fn voice_port(fixture:&Fixture)->super::super::voice_work_host::AppVoiceWorkHost {
+    super::super::voice_work_host::AppVoiceWorkHost::new(fixture.owner.clone(),Arc::new(nomifun_voice::SharedVoiceJournal::new(fixture._directory.path().join("voice-only"))),
+        fixture.voice_control.clone(),Some(fixture.voice_execution.clone()))
+}
+
+#[tokio::test]
+async fn voice_actual_host_validates_assembler_active_context_without_projection_or_fake_refs() {
+    use nomifun_voice::VoiceWorkPort;
+    let fixture=Fixture::new("voice-source-complete-context").await;let port=voice_port(&fixture);
+    let owner=&fixture.host.options.user_id;let session=&fixture.host.options.conversation_id;
+    let binding=fixture.owner.canonical().store().get_live_session(&session.clone().into()).await.unwrap().agent_binding;
+    let context=port.context(owner,session,binding.binding_version).await.unwrap();assert_eq!(context.facts.len(),1);
+    let assembled=nomifun_voice::VoiceContextAssembler::initial_facts(&context);assert!(assembled.len()>context.initial_facts.len());
+    assert!(port.validate_initial_facts(owner,session,&assembled).await.unwrap(),"real work receipt facts from assembler must validate");
+    let authority=fixture.owner.canonical().store().chat_causality_facts(&session.clone().into(),&"voice-reader".into()).await.unwrap();
+    assert!(authority.events.iter().any(|event|event.event_id.as_ref()==context.context_reference));
+    let mut forged=assembled.clone();let receipt=forged.iter_mut().find(|fact|fact.work_context.is_some()).unwrap();receipt.canonical_receipt_id="binding:invented".into();
+    assert!(!port.validate_initial_facts(owner,session,&forged).await.unwrap());
+    let mut forged=assembled;let receipt=forged.iter_mut().find(|fact|fact.work_context.is_some()).unwrap();let mut value:Value=serde_json::from_str(&receipt.content).unwrap();
+    value["target"]["execution_generation"]=json!(99999);receipt.content=value.to_string();
+    assert!(!port.validate_initial_facts(owner,session,&forged).await.unwrap());fixture.finish().await;
+}
+
+#[tokio::test]
+async fn voice_actual_host_restored_namespace_defers_old_queued_inputs_without_main_admission() {
+    let fixture=Fixture::new("voice-restored-queued-namespace").await;
+    fixture.voice_execution.shutdown().await.unwrap();
+    let owner=fixture.host.options.user_id.clone();let session=fixture.host.options.conversation_id.clone();
+    let store=fixture.owner.canonical().store();let binding=store.get_live_session(&session.clone().into()).await.unwrap().agent_binding;
+    let data_dir=fixture.services.data_dir.clone();std::fs::write(data_dir.join("storage-generation"),nomifun_common::generate_id()).unwrap();
+    let original=super::super::mobile_voice_authority::current_voice_namespace(&data_dir).unwrap();
+    let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir.clone()));let journal=shared.get_or_open().await.unwrap();let mut keys=Vec::new();
+    for (voice,lease) in [("known-namespace",Some(format!("ns:{original}:{}","b".repeat(64)))),("legacy-namespace",None)] {
+        journal.activate(nomifun_voice::VoiceActivationFact {voice_session_id:voice.into(),epoch:1,owner_id:owner.clone(),agent_session_id:session.clone(),binding_version:binding.binding_version,
+            context_floor:Some(0),lease_revision:lease,route_digest:"a".repeat(64),started_ms:0}).await.unwrap();
+        let key=journal.reserve_trigger(voice.into(),1,"explicit-input".into(),"revision-1".into()).await.unwrap().0.operation_key;
+        journal.record_pending_intent(owner.clone(),session.clone(),binding.binding_version,0,key.clone(),"This old input must not start after restore".into()).await.unwrap();keys.push(key);
+    }
+    drop(journal);drop(shared);
+    // Reuse the exact Main Session/binding/context while the lifecycle owner
+    // supplies a new generation, as a restore does. The sidecar is reopened.
+    std::fs::write(data_dir.join("storage-generation"),nomifun_common::generate_id()).unwrap();
+    assert_ne!(original,super::super::mobile_voice_authority::current_voice_namespace(&data_dir).unwrap());
+    let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir));let journal=shared.get_or_open().await.unwrap();
+    let port=super::super::voice_work_host::AppVoiceWorkHost::new(fixture.owner.clone(),shared,fixture.voice_control.clone(),Some(fixture.voice_execution.clone()));
+    let before=store.head(&session.clone().into()).await.unwrap().last_seq;
+    port.drain_inputs(owner.clone(),session.clone()).await;
+    assert_eq!(store.head(&session.clone().into()).await.unwrap().last_seq,before,"restored voice inputs never mutate the Main fact chain");
+    for key in keys {
+        assert_eq!(journal.pending_intent(owner.clone(),session.clone(),key.clone()).await.unwrap().unwrap().phase,nomifun_voice::VoicePendingPhase::Deferred);
+        assert_eq!(fixture.owner.voice_operation_receipt(&owner,&session.clone().into(),&key).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::NotFound);
+    }
+    assert!(journal.queued_intents().await.unwrap().is_empty());fixture.finish().await;
+}
+
+async fn recovery_input(journal:&nomifun_voice::VoiceJournal,owner:&str,session:&str,voice:&str,binding:u64,floor:u64,namespace:&str,dispatched:bool)->String {
+    journal.activate(nomifun_voice::VoiceActivationFact {voice_session_id:voice.into(),epoch:1,owner_id:owner.into(),agent_session_id:session.into(),binding_version:binding,
+        context_floor:Some(floor),lease_revision:Some(format!("ns:{namespace}:{}","b".repeat(64))),route_digest:"a".repeat(64),started_ms:0}).await.unwrap();
+    let key=journal.reserve_trigger(voice.into(),1,"explicit-human-input".into(),"revision-1".into()).await.unwrap().0.operation_key;
+    journal.record_pending_intent(owner.into(),session.into(),binding,floor,key.clone(),"The explicitly queued work must keep its original operation key".into()).await.unwrap();
+    if dispatched {journal.begin_dispatch_intent(owner.into(),session.into(),key.clone(),1).await.unwrap();}key
+}
+#[tokio::test]
+async fn voice_actual_lazy_recovery_defers_old_namespace_binding_and_cleared_context_without_main_admission(){
+    use nomifun_voice::VoiceWorkPort;
+    let fixture=Fixture::new("voice-lazy-recovery-stale-scopes").await;fixture.voice_execution.shutdown().await.unwrap();
+    let owner=fixture.host.options.user_id.clone();let session=fixture.host.options.conversation_id.clone();let id=AgentSessionId::from(session.clone());let store=fixture.owner.canonical().store();
+    let binding=store.get_live_session(&id).await.unwrap().agent_binding.binding_version;let data_dir=fixture.services.data_dir.clone();std::fs::write(data_dir.join("storage-generation"),nomifun_common::generate_id()).unwrap();
+    let namespace=super::super::mobile_voice_authority::current_voice_namespace(&data_dir).unwrap();
+    let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir.clone()));let journal=shared.get_or_open().await.unwrap();let mut keys=vec![];
+    keys.push(recovery_input(&journal,&owner,&session,"old-root",binding,0,&"c".repeat(64),false).await);
+    keys.push(recovery_input(&journal,&owner,&session,"old-binding",binding+1,0,&namespace,false).await);
+    keys.push(recovery_input(&journal,&owner,&session,"old-context",binding,0,&namespace,false).await);
+    fixture.owner.canonical().cancel_exact_turn(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.clone()},&id,"recovery-fixture-close",&"cleanup-retry-turn".into()).await.unwrap();
+    // This fixture's original Runtime descriptor does not expose API clear.
+    // Use the original typed canonical event owner to test the floor fence;
+    // this is not evidence that the fixture supports Runtime/UI clear.
+    let facts=store.chat_causality_facts(&id,&"recovery-clear-reader".into()).await.unwrap();let identity=nomifun_common::generate_id();
+    store.append_event(&SessionEventAppend {agent_session_id:id.clone(),event_id:identity.clone().into(),producer_id:"session_api".into(),idempotency_key:identity.into(),
+        semantic_event:SemanticSessionEventDraft {kind:SessionEventKind("context/cleared".into()),kind_version:1,correlation_id:session.clone().into(),causation_event_id:facts.events.last().map(|event|event.event_id.clone()),
+            payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"reason":"isolated_fixture_floor_fence"})))}}).await.unwrap();
+    drop(journal);drop(shared);let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir));let journal=shared.get_or_open().await.unwrap();
+    let port=super::super::voice_work_host::AppVoiceWorkHost::new(fixture.owner.clone(),shared,fixture.voice_control.clone(),Some(fixture.voice_execution.clone()));let before=store.head(&id).await.unwrap().last_seq;
+    assert!(port.recover_pending_inputs("wrong-owner",&session).await.is_err());port.recover_pending_inputs(&owner,&session).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2),async{loop {if journal.queued_intents().await.unwrap().is_empty(){break;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
+    for key in keys {assert_eq!(journal.pending_intent(owner.clone(),session.clone(),key.clone()).await.unwrap().unwrap().phase,nomifun_voice::VoicePendingPhase::Deferred);assert_eq!(fixture.owner.voice_operation_receipt(&owner,&id,&key).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::NotFound);}
+    assert_eq!(store.head(&id).await.unwrap().last_seq,before);port.shutdown_pending_inputs().await.unwrap();fixture.finish().await;
+}
+#[tokio::test]
+async fn voice_actual_lazy_recovery_admits_known_queued_original_key_once_and_unknown_dispatch_is_lookup_only(){
+    use nomifun_voice::VoiceWorkPort;use tokio::io::AsyncWriteExt;
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+    let server=tokio::spawn(async move{loop {let(mut socket,_)=listener.accept().await.unwrap();let _=socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").await;let _=socket.shutdown().await;}});
+    let model_base=format!("http://{address}/v1");
+    let fixture=Fixture::build_delivery("voice-lazy-recovery-original-key",vec![],vec![],None,false,Some(&model_base),#[cfg(feature="browser-use")]None).await;
+    fixture.voice_execution.shutdown().await.unwrap();let owner=fixture.host.options.user_id.clone();let session=fixture.host.options.conversation_id.clone();let id=AgentSessionId::from(session.clone());
+    let store=fixture.owner.canonical().store();let binding=store.get_live_session(&id).await.unwrap().agent_binding.binding_version;let data_dir=fixture.services.data_dir.clone();std::fs::write(data_dir.join("storage-generation"),nomifun_common::generate_id()).unwrap();
+    let namespace=super::super::mobile_voice_authority::current_voice_namespace(&data_dir).unwrap();let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir.clone()));let journal=shared.get_or_open().await.unwrap();
+    let known=recovery_input(&journal,&owner,&session,"known-queued",binding,0,&namespace,false).await;let unknown=recovery_input(&journal,&owner,&session,"unknown-dispatch",binding,0,&namespace,true).await;
+    fixture.owner.canonical().cancel_exact_turn(&PrincipalRef {principal_kind:"user".into(),principal_id:owner.clone()},&id,"recovery-fixture-close",&"cleanup-retry-turn".into()).await.unwrap();
+    drop(journal);drop(shared);let shared=Arc::new(nomifun_voice::SharedVoiceJournal::new(data_dir));let journal=shared.get_or_open().await.unwrap();
+    let port=super::super::voice_work_host::AppVoiceWorkHost::new(fixture.owner.clone(),shared,fixture.voice_control.clone(),Some(fixture.voice_execution.clone()));
+    assert_eq!(fixture.runtime.status(),None,"the actual cold official Runtime has not opened any task; recovery must handle its pristine state");
+    let(a,b)=tokio::join!(port.recover_pending_inputs(&owner,&session),port.recover_pending_inputs(&owner,&session));a.unwrap();b.unwrap();
+    let receipt=tokio::time::timeout(Duration::from_secs(5),async{loop {let receipt=fixture.owner.voice_operation_receipt(&owner,&id,&known).await.unwrap();if receipt.started_event.is_some(){break receipt;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
+    let starts:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/started' AND correlation_id=?").bind(&session).bind(receipt.operation_id.as_ref()).fetch_one(fixture.pool()).await.unwrap();assert_eq!(starts,1);
+    assert_eq!(fixture.owner.voice_operation_receipt(&owner,&id,&unknown).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::NotFound);
+    assert_eq!(journal.pending_intent(owner.clone(),session.clone(),unknown).await.unwrap().unwrap().phase,nomifun_voice::VoicePendingPhase::Dispatched);
+    port.shutdown_pending_inputs().await.unwrap();fixture.owner.canonical().cancel_exact_turn(&PrincipalRef {principal_kind:"user".into(),principal_id:owner},&id,"recovery-cleanup",&receipt.operation_id).await.unwrap();fixture.finish().await;server.abort();let _=server.await;
+}
+
+async fn voice_pending_decision_fixture(fixture:&Fixture)->nomifun_agent_contracts::AgentSessionId {
+    use nomifun_db::{IAgentExecutionRepository,SqliteAgentExecutionRepository,CreateAgentExecutionParams,NewAgentExecutionParticipant,NewAgentExecutionEvent,ReconcileAgentExecutionPlanParams,
+        NewAgentExecutionStep,CreateAgentExecutionAttemptParams,AgentExecutionAttemptSessionKind,SettleAgentExecutionAttemptParams,AgentExecutionActiveTurnGuard,AttemptConversationEffects};
+    use nomifun_common::{AgentExecutionStatus,AgentExecutionEventKind,AgentExecutionActor,ExecutionStepStatus,ExecutionAttemptStatus};
+    fixture.voice_execution.shutdown().await.unwrap();let repository=SqliteAgentExecutionRepository::new(fixture.pool().clone());
+    let owner=&fixture.host.options.user_id;let session=&fixture.host.options.conversation_id;let participant=nomifun_common::generate_id();let step=nomifun_common::generate_id();
+    let event=|kind|NewAgentExecutionEvent {event_type:kind,step_id:None,attempt_id:None,actor:AgentExecutionActor::system(),payload:"{}".into()};
+    let projection=fixture.owner.get_session(owner,session).await.unwrap();
+    let model=projection.model.as_ref().expect("the admitted fixture has a frozen model binding");
+    let created=repository.create_execution_with_participants(owner,&CreateAgentExecutionParams {goal:"Choose a pending option".into(),status:AgentExecutionStatus::Planning,
+        adaptation_policy:nomifun_common::AdaptationPolicy::Fixed,decision_policy:nomifun_common::DecisionPolicy::AskUser,delegation_policy:nomifun_common::DelegationPolicy::Automatic,max_parallel:1,
+        work_dir:None,lead_conversation_id:None,initial_plan_input:r#"{"mode":"automatic"}"#.into()},&[NewAgentExecutionParticipant {participant_id:participant.clone(),
+            // This is the original model-configured participant path. The
+            // Desktop presentation snapshot is not AgentPreset lineage.
+            source_agent_id:"0190f5fe-7c00-7a00-8000-000000000114".into(),preset_id:None,preset_revision:None,agent_snapshot:None,
+            provider_id:Some(model.provider_id.to_string()),model:Some(model.model.clone()),role:Some("builder".into()),capability:None,constraints:None,description:None,system_prompt:None,
+            enabled_skills:"[]".into(),disabled_builtin_skills:"[]".into(),sort_order:0}],&event(AgentExecutionEventKind::Created)).await.unwrap();
+    let profile=nomifun_api_types::ExecutionStepProfile {kind:"general".into(),needs_vision:false,needs_web_search:false,needs_long_context:false,needs_high_reasoning:false,bulk:false,managed_process_only:false};
+    let planned=repository.reconcile_plan(owner,&created.execution_id,created.version,&ReconcileAgentExecutionPlanParams {goal:None,adaptation_policy:None,decision_policy:None,delegation_policy:None,
+        keep_step_ids:vec![],new_participants:vec![],retire_participant_ids:vec![],new_dependencies:vec![],execution_status:AgentExecutionStatus::Running,new_steps:vec![NewAgentExecutionStep {step_id:step.clone(),
+            title:"Choose option".into(),spec:"Await exact decision".into(),role:Some("builder".into()),tool_policy:nomifun_common::AgentToolPolicy::Full,kind:nomifun_common::ExecutionStepKind::Agent,
+            agent_mode:Some(nomifun_common::AgentStepMode::Normal),profile:Some(serde_json::to_string(&profile).unwrap()),fanout_group:None,control_policy:None,status:ExecutionStepStatus::Pending,assigned_participant_id:Some(participant.clone()),
+            assignment_score:Some(1.0),assignment_rationale:None,assignment_source:Some(nomifun_common::ParticipantAssignmentSource::Planner),assignment_locked:false,failure_policy:nomifun_common::StepFailurePolicy::FailExecution,
+            preset_prompt:None,graph_x:None,graph_y:None}]},&event(AgentExecutionEventKind::PlanChanged)).await.unwrap();
+    let queued=repository.create_attempt(owner,&created.execution_id,&step,planned.steps[0].version,None,&CreateAgentExecutionAttemptParams {participant_id:Some(participant),start_immediately:false,
+        trigger_reason:"initial".into(),effective_config:"{}".into(),retry_after:None,runtime_state:None},&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+    let attempt=queued.current_attempt.unwrap().attempt;
+    let running=repository.start_attempt(owner,&created.execution_id,&step,queued.step.version,&attempt.attempt_id,attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None,
+        &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();let attempt=running.current_attempt.unwrap().attempt;let stop=nomifun_common::generate_id();
+    let mut effects=AttemptConversationEffects::default();effects.push_stop_turn(stop.clone(),"cleanup-retry-turn".into()).unwrap();
+    repository.settle_attempt(owner,&created.execution_id,&step,running.step.version,&attempt.attempt_id,attempt.version,None,&SettleAgentExecutionAttemptParams {
+        expected_active_session_turn:Some(AgentExecutionActiveTurnGuard {conversation_id:session.clone(),canonical_operation_id:"cleanup-retry-turn".into()}),attempt_status:ExecutionAttemptStatus::WaitingInput,
+        step_status:ExecutionStepStatus::WaitingInput,execution_status:Some(AgentExecutionStatus::WaitingInput),question:Some(Some("Choose option A or option B?".into())),error:None,output_summary:None,
+        output_files:None,tokens:None,retry_after:None,runtime_state:Some(Some(effects.encode().unwrap())),started_at:None,finished_at:None,loop_repeat_reset:None},
+        &NewAgentExecutionEvent {event_type:AgentExecutionEventKind::DecisionRequested,step_id:Some(step.clone()),attempt_id:Some(attempt.attempt_id.clone()),actor:AgentExecutionActor::system(),
+            payload:json!({"question":"Choose option A or option B?","stop_turn_operation_id":stop}).to_string()}).await.unwrap();session.clone().into()
+}
+
+#[tokio::test]
+async fn voice_actual_host_decision_uses_original_cas_and_stable_exact_answer_receipt() {
+    use nomifun_voice::VoiceWorkPort;use nomifun_voice_contracts::{VoiceApprovalAnswer,ApprovalInteractionMode};
+    let fixture=Fixture::new("voice-original-decision-cas").await;let session=voice_pending_decision_fixture(&fixture).await;let port=voice_port(&fixture);let owner=&fixture.host.options.user_id;
+    let binding=fixture.owner.canonical().store().get_live_session(&session).await.unwrap().agent_binding;
+    let context=port.context(owner,session.as_ref(),binding.binding_version).await.unwrap();assert_eq!(context.approvals.len(),1);assert!(port.validate_initial_facts(owner,session.as_ref(),&nomifun_voice::VoiceContextAssembler::initial_facts(&context)).await.unwrap());
+    let target=context.approvals[0].target.clone();let answer=VoiceApprovalAnswer {target:target.clone(),answer:"Use option A".into(),presented_context_id:target.presentation_id.clone()};
+    let mut isolated=answer.clone();isolated.presented_context_id.clear();assert!(port.answer_approval(owner,"isolated",isolated).await.is_err());
+    let mut click=answer.clone();click.target.interaction_mode=ApprovalInteractionMode::ExplicitClick;assert!(port.answer_approval(owner,"click",click).await.is_err());
+    let first=port.answer_approval(owner,"exact-answer",answer.clone()).await.unwrap();assert!(!first.duplicate);assert_eq!(first.status,nomifun_voice_contracts::VoiceWorkStatus::Applied);
+    let replay=port.answer_approval(owner,"exact-answer",answer.clone()).await.unwrap();assert!(replay.duplicate);assert_eq!(replay.receipt_id,first.receipt_id);
+    let mut different=answer;different.answer="Use option B".into();assert!(port.answer_approval(owner,"exact-answer",different).await.is_err());
+    let events=fixture.voice_execution.events(owner,&target.execution_id,None,Some(128)).await.unwrap();assert_eq!(events.iter().filter(|event|event.event_type==nomifun_common::AgentExecutionEventKind::DecisionAnswered).count(),1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn voice_off_original_decision_cas_keeps_its_unextended_payload() {
+    use nomifun_voice::VoiceWorkPort;
+    let fixture=Fixture::new("voice-off-original-decision").await;let session=voice_pending_decision_fixture(&fixture).await;let port=voice_port(&fixture);let owner=&fixture.host.options.user_id;
+    let binding=fixture.owner.canonical().store().get_live_session(&session).await.unwrap().agent_binding;let context=port.context(owner,session.as_ref(),binding.binding_version).await.unwrap();let target=&context.approvals[0].target;
+    fixture.voice_execution.answer_decision(owner,&nomifun_common::AgentExecutionActor::user(owner),&target.execution_id,&target.step_id,&target.attempt_id,
+        nomifun_api_types::AnswerExecutionDecisionRequest {answer:"Use original UI answer".into(),expected_execution_version:target.expected_execution_version,expected_step_version:target.expected_step_version,expected_attempt_version:target.expected_attempt_version}).await.unwrap();
+    let events=fixture.voice_execution.events(owner,&target.execution_id,None,Some(128)).await.unwrap();let answer=events.iter().find(|event|event.event_type==nomifun_common::AgentExecutionEventKind::DecisionAnswered).unwrap();
+    assert_eq!(answer.payload.as_object().unwrap().len(),2);assert_eq!(answer.payload["answered"],true);assert!(answer.payload["operation_id"].is_string());
+    assert!(answer.payload.get("voice_operation_key").is_none());fixture.finish().await;
 }
 
 #[tokio::test]
@@ -800,7 +981,7 @@ mod browser_terminal_recovery {
     async fn recovery_scenario(poison_only_final_unlock: bool) {
         let factory = Arc::new(FaultBrowserFactory { poison_only_final_unlock, ..Default::default() });
         let (model, calls, model_task) = model_fixture(if poison_only_final_unlock { 2 } else { 1 }).await;
-        let fixture = Fixture::build_delivery("browser-native-failure-reopen-successor", vec![], vec![], None, false,
+        let fixture = Fixture::build_delivery("browser-native-failure-reopen-successor", vec![], vec![], None, false,None,
             Some((factory.clone(), model))).await;
         let session: AgentSessionId = fixture.host.options.conversation_id.clone().into();
         let store = fixture.owner.canonical().store();

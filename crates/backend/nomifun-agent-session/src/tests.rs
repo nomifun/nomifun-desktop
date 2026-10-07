@@ -34,6 +34,8 @@ mod native_checkpoint_tests;
 mod native_execution_tests;
 #[path = "runtime_state_tests.rs"]
 mod runtime_state_tests;
+#[path = "native_mutation_fence_tests.rs"]
+mod native_mutation_fence_tests;
 
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())

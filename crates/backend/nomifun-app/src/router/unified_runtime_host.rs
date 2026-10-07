@@ -21,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 mod capabilities;
 #[path = "runtime_steering.rs"]
 mod steering;
+#[path="voice_runtime_correction.rs"]
+mod voice_correction;
 #[path = "runtime_history_port.rs"]
 mod history_port;
 
@@ -401,6 +403,7 @@ struct ActiveTurn {
     root: String,
     wire_id: String,
     steering: steering::Inbox,
+    voice_control: Option<Arc<voice_correction::VoiceCorrectionPort>>,
     operation: String,
     epoch: i64,
     journal: super::engine_journal::EngineTurnJournal,
@@ -589,6 +592,11 @@ impl ConversationRuntimeHost {
             "Nomi Turn preparation acquired native authority",
         );
         let epoch = i64::try_from(journal.generation()).map_err(error)?;
+        let voice_control=if admitted.request_payload().pointer("/admission/voice_input_context/supersede_model_step").and_then(Value::as_bool)==Some(true) {
+            let model=self.session_host.compose_model_port_with_configuration(Arc::new(voice_correction::VoiceGate(self.self_reference.clone())),Some(self.model_configuration.clone()))?;
+            let model=self.resources.wrap_model_middleware(model)?;
+            Some(Arc::new(voice_correction::VoiceCorrectionPort::new(self.self_reference.clone(),model)))
+        }else{None};
         let mut active = self.active.lock().await;
         if active.is_some() {
             return Err(error("previous turn has not reached its recorded terminal"));
@@ -597,6 +605,7 @@ impl ConversationRuntimeHost {
             root: root.into(),
             wire_id: message.msg_id.clone(),
             steering: Default::default(),
+            voice_control,
             operation,
             epoch,
             journal: journal.clone(),
@@ -1013,6 +1022,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .with_patch_recovery(patch_recovery)
             .with_input_port(self.input_port.clone());
         request.unscoped_tool_hooks = self.resources.has_unscoped_tool_hooks();
+        if let Some(port)=self.active.lock().await.as_ref().and_then(|turn|turn.voice_control.clone()) {
+            request=request.with_voice_immediate_correction(port);
+        }
         if self.resources.mcp_resources_selected() {
             request = request.with_resource_port(self.capability_port.clone());
         }
@@ -1046,6 +1058,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         message: &SendMessageData,
         event: &AgentEngineEvent,
     ) -> Result<(), AppError> {
+        if let AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,cleanup,..}=event {
+            let port={let active=self.active.lock().await;let turn=active.as_ref().ok_or_else(||error("voice supersede has no active Turn"))?;
+                if model_operation_id.as_ref()!=format!("{}:model:{step}",turn.operation)||cleanup.operation_id!=*model_operation_id||turn.steering.has_admitted_model_tools(*step){return Err(error("voice supersede has a different model operation or an admitted effect"));}
+                turn.voice_control.clone().ok_or_else(||error("ordinary text Turn cannot publish a voice supersede"))?};
+            if !port.confirms(cleanup).await{return Err(error("voice supersede lacks the actual owned task join receipt"));}
+        }
         let terminal_event = matches!(
             event,
             AgentEngineEvent::TurnCompleted { .. }
@@ -1158,6 +1176,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             if terminal_event && !turn.cleanup_proven {
                 return Err(error("terminal requires the durable cleanup witness"));
             }
+            if let AgentEngineEvent::VoiceModelStepSuperseded {step,..}=event {turn.assistant_text_by_step.remove(step);}
             turn.event_buffer.project(event)
         };
         for event in &records {
@@ -1269,6 +1288,10 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         }
         // Always attempt owned-effect cleanup even if inbox journaling fails.
         let steering = nomifun_ai_agent::engine_effect_scope::guard_effect_settlement(|| self.close_steering()).await;
+        let voice_control={self.active.lock().await.as_ref().and_then(|turn|turn.voice_control.clone())};
+        if let Some(port)=voice_control {
+            port.quiesce_all(tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await.map_err(error)?;
+        }
         self.resources.cleanup_turn(root).await?;
         steering?;
         // Persist the last partial response before the cleanup witness, so a

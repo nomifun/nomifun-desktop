@@ -237,6 +237,26 @@
     "check:agent-session-boundary": {
       "group": "check",
       "desc": "校验canonical事件上下文、单native字段、单数据库基线及旧代码和文档物理删除"
+    },
+    "check:voice-boundary": {
+      "group": "check",
+      "desc": "校验可选Mobile语音的独立合同、核心port和供应商wire隔离"
+    },
+    "check:voice-contracts": {
+      "group": "check",
+      "desc": "校验独立Voice JSON schema与同级Mobile生成合同，不改主Agent合同"
+    },
+    "gen:voice-contracts": {
+      "group": "gen",
+      "desc": "生成独立Voice JSON schema与同级Mobile TypeScript合同"
+    },
+    "test:voice-smoke-runner": {
+      "group": "test",
+      "desc": "测试有界Mobile语音无头观测脚本，不作为真机体验证据"
+    },
+    "test:mobile-voice-live": {
+      "group": "test",
+      "desc": "显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI"
     }
   }
 }
