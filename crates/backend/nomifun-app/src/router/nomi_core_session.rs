@@ -3241,12 +3241,13 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
             .await
             .map_err(agent_session_store_error)?;
         let limit = query.page_size.unwrap_or(100).clamp(1, 500);
-        let (projections, has_more, total) = self
+        let (mut projections, has_more, total) = self
             .canonical
             .store()
             .messages_before(&session_id, None, limit)
             .await
             .map_err(agent_session_store_error)?;
+        super::history_thinking_display::hydrate_thinking_lifecycle(&self.pool, &session_id, &mut projections).await?;
         let mut items = Vec::new();
         for projection in projections {
             if let Some(message) = canonical_message_response(&session_id, created_at, projection)
@@ -12566,7 +12567,7 @@ fn canonical_message_response_with_observation(
             }
             (
                 MessageType::Thinking,
-                json!({ "content": content, "status": "done", "turn_id": turn_id }),
+                json!({ "content": content, "status": if state == "streaming" { "thinking" } else { "done" }, "turn_id": turn_id }),
                 MessagePosition::Left,
             )
         }
@@ -12797,13 +12798,14 @@ async fn get_nomi_core_agent_session_message_history(
             })
         })
         .transpose()?;
-    let (projections, has_more, total) = state
+    let (mut projections, has_more, total) = state
         .session_owner
         .canonical()
         .store()
         .message_history_before(&session_id, before_seq, page_size)
         .await
         .map_err(agent_session_store_error)?;
+    super::history_thinking_display::hydrate_thinking_lifecycle(&state.session_owner.pool, &session_id, &mut projections).await?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool,
         &session_id,
@@ -12878,7 +12880,7 @@ async fn get_nomi_core_agent_session_message(
                 .and_then(Value::as_str)
                 == Some(message_id.as_str())
         });
-    let projection = match projection {
+    let mut projection = match projection {
         Some(projection) => Some(projection),
         None => state.session_owner.canonical().store()
             .runtime_tool_history_message(&session_id, &message_id).await.map_err(agent_session_store_error)?,
@@ -12889,6 +12891,9 @@ async fn get_nomi_core_agent_session_message(
                 "message projection does not exist",
             )
         })?;
+    super::history_thinking_display::hydrate_thinking_lifecycle(
+        &state.session_owner.pool, &session_id, std::slice::from_mut(&mut projection),
+    ).await?;
     let observations = load_historical_tool_observations(
         &state.session_owner.pool, &session_id, std::slice::from_ref(&projection),
     ).await?;

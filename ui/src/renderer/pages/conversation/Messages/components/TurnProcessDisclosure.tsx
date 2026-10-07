@@ -66,7 +66,46 @@ const formatTurnDuration = (ms: number, t: ReturnType<typeof useTranslation>['t'
   if (minutes < 60) return `${minutes}${mUnit} ${seconds}${sUnit}`;
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
-  return `${hours}${hUnit} ${remainingMinutes}${mUnit}`;
+  return `${hours}${hUnit} ${remainingMinutes}${mUnit} ${seconds}${sUnit}`;
+};
+
+// The clock owns its tick so a one-second update does not rerender the entire
+// thinking/tool journal. Stream renders also sample wall time, and foreground
+// events catch up immediately after desktop/browser timer throttling.
+const TurnWorkDuration: React.FC<{
+  startAt: number;
+  endAt: number;
+  running: boolean;
+  state: TurnDisclosureProcessState;
+}> = ({ startAt, endAt, running, state }) => {
+  const { t } = useTranslation();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const refresh = () => setNow(Date.now());
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [running, startAt]);
+
+  const durationEndAt = running ? Math.max(now, Date.now()) : endAt;
+  const durationMs = durationEndAt - startAt;
+  const durationLabel = Number.isFinite(durationMs) && durationMs >= 0
+    ? t('messages.turnDuration', {
+        duration: formatTurnDuration(durationMs, t),
+        defaultValue: 'Took {{duration}}',
+      })
+    : t('messages.turnDurationUnknown', { defaultValue: 'Time --' });
+  const label = state === 'canceled'
+    ? `${t('messages.canceledExecution', { defaultValue: 'Execution canceled' })} · ${durationLabel}`
+    : durationLabel;
+  return <span className='turn-process-disclosure__label'>{label}</span>;
 };
 
 function TurnProcessDisclosure<T>({
@@ -82,7 +121,6 @@ function TurnProcessDisclosure<T>({
   const { t } = useTranslation();
   const hasProcessItems = item.processItems.length > 0 || processFooter != null;
   const [expanded, setExpanded] = useState(() => getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
-  const [now, setNow] = useState(() => Date.now());
   const expansionSnapshotRef = useRef<TurnProcessDisclosureExpansionSnapshot>({
     itemId: item.id,
     hasProcessItems,
@@ -106,39 +144,20 @@ function TurnProcessDisclosure<T>({
     if (highlighted && hasProcessItems) setExpanded(true);
   }, [hasProcessItems, highlighted]);
 
-  useEffect(() => {
-    if (!item.running) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [item.running]);
-
   const currentItemKey = useMemo(() => {
     if (!item.running) return undefined;
-    const latestItem = item.processItems.at(-1);
-    if (!latestItem || getProcessItemState(latestItem) !== 'running') return undefined;
-    const latestKind = getProcessItemLayoutKind?.(latestItem);
-    return latestKind === 'thinking' || latestKind === 'tool'
-      ? getProcessItemKey(latestItem)
-      : undefined;
+    const latestItem = item.processItems.findLast(processItem => {
+      const kind = getProcessItemLayoutKind?.(processItem);
+      return getProcessItemState(processItem) === 'running' && (kind === 'thinking' || kind === 'tool');
+    });
+    return latestItem ? getProcessItemKey(latestItem) : undefined;
   }, [getProcessItemKey, getProcessItemLayoutKind, getProcessItemState, item.processItems, item.running]);
 
-  const durationEndAt = item.running ? now : item.endAt;
-  const durationMs = durationEndAt - item.startAt;
-  const durationLabel = Number.isFinite(durationMs) && durationMs >= 0
-    ? t('messages.turnDuration', {
-        duration: formatTurnDuration(durationMs, t),
-        defaultValue: 'Took {{duration}}',
-      })
-    : t('messages.turnDurationUnknown', { defaultValue: 'Time --' });
-  const label = item.state === 'canceled'
-    ? `${t('messages.canceledExecution', { defaultValue: 'Execution canceled' })} · ${durationLabel}`
-    : durationLabel;
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
   const headerContent = (
     <>
-      <span className='turn-process-disclosure__label'>{label}</span>
+      <TurnWorkDuration startAt={item.startAt} endAt={item.endAt} running={item.running} state={item.state} />
       {activityLabel && <span className='turn-process-disclosure__activity' role='status'>{activityLabel}</span>}
       {hasProcessItems && (
         <Right

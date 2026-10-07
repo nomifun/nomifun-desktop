@@ -1507,11 +1507,11 @@ mod history_display_tests {
     async fn buffered_thinking_survives_a_cold_history_read() {
         let (journal, pool) = test_fixture().await;
         let mut buffer = AgentEventBuffer::default();
-        assert!(buffer.project(&AgentEngineEvent::ReasoningDelta {
+        let mut records = buffer.project(&AgentEngineEvent::ReasoningDelta {
             step: 1,
             text: "Inspect the workspace. ".to_owned(),
-        }).is_empty());
-        let mut records = Vec::new();
+        });
+        assert_eq!(records.len(), 1, "phase start is committed before live publication");
         buffer.flush(&mut records);
         assert_eq!(records.len(), 1);
         journal.append(
