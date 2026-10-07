@@ -5838,9 +5838,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         let database_path = directory.path().join("agent.db");
-        let blocked_target = workspace.join("blocked");
-        std::fs::create_dir_all(&blocked_target).unwrap();
-        std::fs::write(blocked_target.join("keep.txt"),b"keep").unwrap();
+        let outside_target = directory.path().join("outside.txt");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(&outside_target,b"keep").unwrap();
         let database = nomifun_db::init_database(&database_path).await.unwrap();
         let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
         let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
@@ -5857,8 +5857,11 @@ mod tests {
         call.operation_id = OperationId::from("failed-write-uncommitted-terminal-operation");
         ensure_test_effect_context(&store,&call).await;
         let effect_id = wave2_effect_id(&call).unwrap();
+        // The File owner rejects traversal before preparing a publication.
+        // A staged-directory replacement is not a known failure on Unix:
+        // retaining its temporary name correctly leaves cleanup uncertain.
         let input = StrictJsonValue(json!({
-            "path":"blocked","content":"must not replace a directory"
+            "path":"../outside.txt","content":"must not escape the workspace"
         }));
         let invoke_host = Arc::clone(&host);
         let invoke_call = call.clone();
@@ -5871,7 +5874,8 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(5),hook.entered.notified()).await
             .expect("known owner failure must reach terminal settlement");
-        assert_eq!(std::fs::read(blocked_target.join("keep.txt")).unwrap(),b"keep");
+        assert_eq!(std::fs::read(&outside_target).unwrap(),b"keep");
+        assert_eq!(std::fs::read_dir(&workspace).unwrap().count(),0,"owner rejection must precede staging");
         let mut writer = lock_database.pool().begin().await.unwrap();
         sqlx::query("UPDATE users SET updated_at=updated_at")
             .execute(&mut *writer).await.unwrap();
@@ -5880,12 +5884,12 @@ mod tests {
             .expect("failed-effect settlement must stop at the bounded SQLite busy timeout")
             .unwrap().unwrap_err();
         assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
-        assert!(error.message.contains("owner failed with CAPABILITY_UNAVAILABLE"),"{error:?}");
+        assert!(error.message.contains("owner failed with INVALID_PAYLOAD"),"{error:?}");
         assert!(error.message.contains("terminal observation could not be committed"),"{error:?}");
         assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
         assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Pending);
-        assert_eq!(std::fs::read(blocked_target.join("keep.txt")).unwrap(),b"keep");
+        assert_eq!(std::fs::read(&outside_target).unwrap(),b"keep");
         writer.commit().await.unwrap();
         drop(host);
         drop(store);
@@ -5909,7 +5913,7 @@ mod tests {
         assert!(different_key.message.contains("unsettled"),"{different_key:?}");
         assert!(!workspace.join("other.txt").exists());
         assert_eq!(reopened_store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
-        assert_eq!(std::fs::read(blocked_target.join("keep.txt")).unwrap(),b"keep");
+        assert_eq!(std::fs::read(&outside_target).unwrap(),b"keep");
         drop(restarted);
         drop(reopened_store);
         reopened_database.close().await;
@@ -6011,18 +6015,21 @@ mod tests {
     #[tokio::test]
     async fn failed_write_with_committed_terminal_replays_the_owner_error() {
         let directory = tempfile::tempdir().unwrap();
-        let blocked_target = directory.path().join("blocked");
-        std::fs::create_dir(&blocked_target).unwrap();
+        let workspace = directory.path().join("workspace");
+        let outside_target = directory.path().join("outside.txt");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(&outside_target,b"keep").unwrap();
         let store = test_effect_store().await;
-        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
             .with_effect_store(store.clone());
-        let mut call = context(directory.path());
+        let mut call = context(&workspace);
         call.idempotency_key = IdempotencyKey::from("failed-write-committed-terminal");
         call.operation_id = OperationId::from("failed-write-committed-terminal-operation");
-        let input = json!({"path":"blocked","content":"must not replace a directory"});
+        let input = json!({"path":"../outside.txt","content":"must not escape the workspace"});
         let first = invoke(&host,call.clone(),"workspace.files/write",input.clone()).await.unwrap_err();
-        assert_eq!(first.code,"CAPABILITY_UNAVAILABLE");
-        assert!(first.message.contains("changed to a non-regular file"),"{first:?}");
+        assert_eq!(first.code,"INVALID_PAYLOAD");
+        assert_eq!(std::fs::read(&outside_target).unwrap(),b"keep");
+        assert_eq!(std::fs::read_dir(&workspace).unwrap().count(),0,"owner rejection must precede staging");
         let effect_id = wave2_effect_id(&call).unwrap();
         assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
             nomifun_agent_session::AgentEffectState::Rejected);
@@ -6030,7 +6037,8 @@ mod tests {
         assert_eq!(replay.code,first.code);
         assert_eq!(replay.message,first.message);
         assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
-        assert!(blocked_target.is_dir());
+        assert_eq!(std::fs::read(&outside_target).unwrap(),b"keep");
+        assert_eq!(std::fs::read_dir(&workspace).unwrap().count(),0);
     }
 
     #[tokio::test(flavor="multi_thread", worker_threads=2)]
@@ -7177,8 +7185,9 @@ mod tests {
     }
 
     /// Same single-connection pool, but pinned to rollback-journal mode so a
-    /// fault on the `*-journal` path only blocks write transactions — reads
-    /// never need the journal file. Switching WAL -> DELETE checkpoints the
+    /// fault on the `*-journal` path exercises SQLite's real IO boundary.
+    /// Reads can inspect this path for hot-journal recovery too. Switching
+    /// WAL -> DELETE checkpoints the
     /// WAL under an exclusive lock, so the connect retries briefly while the
     /// previous pool's worker threads finish releasing file handles.
     async fn rollback_journal_pool(path: &std::path::Path) -> sqlx::SqlitePool {
@@ -7236,45 +7245,44 @@ mod tests {
         let host = Wave2ApplicationHost::for_workspace_root(&workspace)
             .with_effect_store(store.clone());
         // Occupying the journal path with a directory is a real filesystem
-        // fault: the next write cannot create the journal SQLite requires,
-        // while reads never touch it.
+        // fault: the next admission cannot create the journal SQLite requires.
+        // Hot-journal detection may make reads fail while it is mounted too.
         let journal_path = PathBuf::from(format!(
             "{}-journal",
             database_path.as_os_str().to_string_lossy()
         ));
         assert!(!journal_path.exists());
         std::fs::create_dir(&journal_path).unwrap();
-        // A direct write on the same connection still cannot create the
-        // journal, while the read path above stays healthy — the fault sits at
-        // the write boundary, not in pool or schema setup.
+        // A direct write proves a real SQLite IO fault after healthy pool and
+        // schema setup, rather than relying on an error injected by the host.
         let probe = sqlx::query("CREATE TABLE __fault_probe (x INTEGER)")
             .execute(&pool)
             .await;
         let Err(probe_error) = probe else {
             panic!("the journal fault must block writes, got {probe:?}")
         };
-        assert!(
-            probe_error.to_string().contains("unable to open"),
-            "the journal path must fault writes with an IO error, got {probe_error:?}"
-        );
-        // Reads never touch the journal path and must stay healthy while the
-        // write boundary is faulted.
-        assert!(
-            store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none()
-        );
+        // SQLite exposes this directory fault as CANTOPEN on some platforms
+        // and an extended IOERR (for example IOERR_READ=266) on others.
+        assert!(matches!(&probe_error, sqlx::Error::Database(error)
+            if error.code().as_deref().and_then(|code| code.parse::<i32>().ok())
+                .is_some_and(|code| matches!(code & 0xff, 10 | 14))),
+            "the journal path must fault writes with SQLite IOERR or CANTOPEN, got {probe_error:?}");
         let error = host.invoke(Wave2HostRequest {
             context: call.clone(),
             operation: Wave2CapabilityOperation::WorkspaceExecution { input: input.clone() },
         }).await.unwrap_err();
         assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
         assert!(!workspace.join("io-fault.txt").exists());
+        // Remove the actual IO fault before inspecting durable state: an
+        // ordinary SQLite read may also perform hot-journal detection.
+        std::fs::remove_dir(&journal_path).unwrap();
         assert!(
             store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none(),
             "an IO-faulted admission must not leave a durable Effect"
         );
-        // Removing the fault lets the explicit retry execute exactly once on
+        // A healthy read and explicit retry use the same pool. The retry
+        // executes exactly once on
         // the same pooled connection — no restart is required.
-        std::fs::remove_dir(&journal_path).unwrap();
         let result = host.invoke(Wave2HostRequest {
             context: call.clone(),
             operation: Wave2CapabilityOperation::WorkspaceExecution { input },

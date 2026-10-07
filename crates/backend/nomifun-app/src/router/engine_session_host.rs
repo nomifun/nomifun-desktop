@@ -235,7 +235,6 @@ impl EngineSessionHost {
         let context = self.open_kernel_session(session)?;
         let registry = context.registry_snapshot()?;
         let skills = super::engine_skills::compile(context.compiled(), &registry).await?;
-        skills.validate_extra(&session.session().extra)?;
         Ok(skills)
     }
 

@@ -13,7 +13,6 @@ Current crates:
 | `nomi-providers` | LLM provider clients and streaming logic. |
 | `nomi-tools` | Built-in tool registry. |
 | `nomi-mcp` | MCP client, config, transports, and tool proxying. |
-| `nomi-skills` | Skill discovery, loading, and execution support. |
 | `nomi-memory` | Long-term project/user memory. |
 | `nomi-agent` | Core session engine, tool execution, and Agent delegation. |
 | `nomi-cli` | Standalone `nomi` CLI. |

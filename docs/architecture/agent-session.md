@@ -51,6 +51,21 @@ creation fail closed while canonical running precedes a proven gate. User profil
 profile even when no Agent Browser binding exists; there is no second active Agent authority ledger.
 See the [browser architecture](browser-platform.md).
 
+## Global extensions and composer selection
+
+Skills and MCP are shared installation capabilities without a preset master gate. Creation or an explicit
+idle update captures the global Skill inventory and compiles selected MCP tools into the same
+Session-only Revision/Snapshot. Variants use the existing Agent Store, with no second binding or
+permission ledger. Library locks freeze bodies, supporting resources, sources, and digests; `selected`
+controls default input injection. Current Package locks retain their exact JSON contract.
+
+The composer uses typed `session_capabilities` and versioned capability-selection commands instead of
+Skill or MCP `extra` mirrors. Idle updates reuse canonical binding transitions, preserve non-MCP
+resources, prove Runtime teardown and settled effects, then commit binding, resource definitions, and
+active set atomically. Active or paused Turns, Remote Sessions, and Attempts cannot update selection.
+Bodies and resources use the same native frozen context reader; Skill hooks, shell, and forks do not
+execute or grant tools. Tool search is a built-in Runtime facility.
+
 ## Consumers and deletion
 
 UI consumes current stream and Message projections directly. It has no marker-dependent local terminal-processing state machine or prose-based reclassification of old errors. Channel binds through its current owner; orphan rows without an authority binding produce a conflict instead of being automatically rebound.

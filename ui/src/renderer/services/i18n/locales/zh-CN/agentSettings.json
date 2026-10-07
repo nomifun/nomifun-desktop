@@ -120,7 +120,7 @@
     "chat": {
       "minimal": {
         "name": "最简",
-        "description": "只保留基础对话和当前消息输入；不绑定能力模块、Skill、MCP 或资源。"
+        "description": "保留基础对话；可在会话输入框旁选择全局技能与 MCP。"
       }
     },
     "assistant": {
@@ -173,7 +173,6 @@
     "requirements": { "name": "需求", "description": "读取、编写、更新和认领需求平台中的工作。" },
     "robot": { "name": "机器人", "description": "观察和控制明确绑定的机器人设备。" },
     "ssh": { "name": "SSH", "description": "在所选 SSH 主机读取文件或运行已授权命令。" },
-    "toolDiscovery": { "name": "工具选择策略", "description": "工具较多时按当前请求筛选和排序已授权工具；不会增加权限。" },
     "webResearch": { "name": "Web 调研", "description": "搜索公开来源并读取网页，不使用浏览器登录状态。" },
     "workspaceArtifacts": { "name": "交付产物", "description": "将工作区文件固化为可校验的交付物，或按产物 ID 读取已发布内容。" },
     "workspaceFiles": { "name": "工作区读写", "description": "按路径读取、搜索、创建和修改工作区中的文件。" },
@@ -211,11 +210,7 @@
     "basic": "Agent 信息",
     "basicHint": "定义身份、模型和工作方式",
     "capabilities": "能力模块",
-    "capabilitiesHint": "先选择产品模块，再细化允许的操作",
-    "skillsMcp": "技能与扩展",
-    "skillsMcpHint": "Skill 只贡献 Instructions；MCP Tool 通过可用的能力进入这个 Agent。",
-    "skills": "Skills",
-    "mcp": "MCP 物化"
+    "capabilitiesHint": "先选择产品模块，再细化允许的操作"
   },
   "fields": {
     "name": "名称",
@@ -249,13 +244,6 @@
     "tools": "{{count}} 个 action",
     "contexts": "{{count}} 个 Context contributor",
     "enabled": "已启用"
-  },
-  "skills": {
-    "missingCapabilities": "缺少已选择能力：{{capabilities}}",
-    "empty": "暂无已物化 Skill。"
-  },
-  "mcp": {
-    "empty": "暂无 MCP Tool 物化。"
   },
   "resources": {
     "noneRequired": "不依赖具体资源",
@@ -384,7 +372,7 @@
     "capabilityTab": "模块与操作",
     "settingsTab": "名称与行为",
     "runtimeTab": "运行策略",
-    "skillsTab": "技能与扩展",
+    "extensionsTab": "执行扩展",
     "saveAsMine": "保存为我的 Agent",
     "customizeTitle": "自定义这份预设",
     "customizeHint": "自由调整能力，保存为你的 Agent。官方预设仍可随时使用。",

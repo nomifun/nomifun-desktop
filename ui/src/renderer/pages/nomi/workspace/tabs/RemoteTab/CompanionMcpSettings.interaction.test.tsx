@@ -16,16 +16,17 @@ const restores: (() => void)[] = [];
 const track = <T extends { mockRestore: () => void }>(spy: T) => { restores.push(() => spy.mockRestore()); return spy; };
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach((restore) => restore()); });
 
-test('management shows the frozen MCP selection without an in-place mutation path', async () => {
+test.each([true, false])('management uses canonical session selection and respects editable=%s', async (editable) => {
   const companionId = parseCompanionId('019b0000-0000-7000-8000-000000000001');
   const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000002');
   const serverId = parseMcpServerId('019b0000-0000-7000-8000-000000000003');
+  track(spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockImplementation(() => () => {}));
+  track(spyOn(ipcBridge.agentPlatform.sessions.onCapabilitiesChanged, 'on').mockImplementation(() => () => {}));
   track(spyOn(ipcBridge.companion.getCompanionSession, 'invoke').mockResolvedValue({ conversation_id: conversationId }));
   track(spyOn(ipcBridge.mcpService.listServers, 'invoke').mockResolvedValue([{ mcp_server_id: serverId, name: 'Shared MCP', enabled: true }] as any));
-  track(spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', extra: { mcp_server_ids: [serverId] }, agent_snapshot: { enabled_capabilities: [`nomi.mcp.v1.${'a'.repeat(64)}`] } } as any));
+  track(spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke').mockResolvedValue({ selection: { skill_names: [], mcp_server_ids: [serverId] }, binding_version: 2, editable }));
   const view = render(<I18nextProvider i18n={i18n}><CompanionMcpSettings companionId={companionId} /></I18nextProvider>);
+  await waitFor(() => expect(view.getByRole('combobox', { name: 'MCP connection' }).textContent).toContain('Shared MCP'));
   const select = view.getByRole('combobox', { name: 'MCP connection' });
-  await waitFor(() => expect(select.textContent).toContain('Shared MCP'));
-  expect(select.getAttribute('aria-disabled')).toBe('true');
-  expect(view.getByText('Frozen for this conversation')).toBeTruthy();
+  expect(select.getAttribute('aria-disabled') === 'true').toBe(!editable);
 });

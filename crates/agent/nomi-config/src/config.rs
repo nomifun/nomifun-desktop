@@ -224,18 +224,8 @@ pub struct ProfileConfig {
     pub compat: Option<ProviderCompat>,
 }
 
-/// Per-skill deny rules loaded from `[tools.skills]` in config.toml.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct SkillsPermissionConfig {
-    #[serde(default)]
-    pub deny: Vec<String>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolsConfig {
-    /// Skill-level deny/allow rules. Merged by concatenation across global + project configs.
-    #[serde(default)]
-    pub skills: SkillsPermissionConfig,
     /// How many individual recent tool-result images remain in history.
     /// Older/excess attachments are stripped (text kept), and the engine also
     /// enforces the supported-provider ceiling of 20 images per request.
@@ -293,7 +283,6 @@ pub struct LspServerConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            skills: SkillsPermissionConfig::default(),
             max_recent_images: default_max_recent_images(),
             computer: ComputerConfig::default(),
             write_root: String::new(),
@@ -949,7 +938,7 @@ fn merge_config_tables(global: &mut toml::Table, project: toml::Table, path: &[&
             (["bedrock" | "vertex"] | ["providers", _, "compat", "extra_body"], _, incoming) => {
                 global.insert(key, incoming);
             }
-            (["tools", "skills", "deny"] | ["tools", "lsp_servers"]
+            (["tools", "lsp_servers"]
                 | ["hooks", "pre_tool_use" | "post_tool_use" | "stop"],
                 Some(Value::Array(base)), Value::Array(overlay)) => base.extend(overlay),
             (["tools", "bash_sandbox"] | ["tools", "computer", "enabled"],
@@ -1632,41 +1621,6 @@ project_root_markers = [".git", ".hg"]
         // Vertex uses GCP credentials, so an empty key is the expected success value.
         let result = resolve_api_key(None, None, ProviderType::Vertex).unwrap();
         assert_eq!(result, "");
-    }
-
-    // -------------------------------------------------------------------------
-    // P5-14: SkillsPermissionConfig TOML deserialization
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn p5_14_skills_deny_deserialized() {
-        let toml_str = r#"
-[tools.skills]
-deny = ["dangerous-skill", "admin:*"]
-"#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(
-            config.tools.skills.deny,
-            vec!["dangerous-skill".to_string(), "admin:*".to_string()]
-        );
-    }
-
-    #[test]
-    fn p5_14_skills_defaults_to_empty() {
-        // When [tools.skills] is absent, deny defaults to an empty vec.
-        let config: ConfigFile = toml::from_str("").unwrap();
-        assert!(config.tools.skills.deny.is_empty());
-    }
-
-    #[test]
-    fn p5_14_merge_skills_concat() {
-        let merged = audit_tests::merge_sources(r#"[tools.skills]
-deny = ["global-deny"]"#, r#"[tools.skills]
-deny = ["project-deny"]"#);
-        assert_eq!(
-            merged.tools.skills.deny,
-            vec!["global-deny".to_string(), "project-deny".to_string()]
-        );
     }
 
     // -------------------------------------------------------------------------

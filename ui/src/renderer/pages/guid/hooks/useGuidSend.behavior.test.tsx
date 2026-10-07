@@ -501,6 +501,21 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls[0].body).not.toHaveProperty('runtime_build');
   });
 
+  test('creates the session with an explicit global capability selection, including none', async () => {
+    for (const selection of [{ skill_names: ['user-skill'], mcp_server_ids: ['019b0000-0000-7000-8000-000000000003'] }, { skill_names: [], mcp_server_ids: [] }]) {
+      resetBrowserStorage();
+      const calls = installFetchRecorder();
+      const hook = renderHook(() => useGuidSend({
+        ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+        sessionCapabilities: selection,
+      }));
+      await act(async () => { await hook.result.current.handleSend(); });
+      expect(calls[0].body).toMatchObject({ session_capabilities: selection });
+      expect(calls[0].body).not.toHaveProperty('extra');
+      hook.unmount();
+    }
+  });
+
   test('persists the selected reasoning effort on the new session', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();

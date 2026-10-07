@@ -172,6 +172,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("runtime_attachments.rs"),
                     include_str!("runtime_skills.rs"),
                     include_str!("engine_skills.rs"),
+                    include_str!("session_capabilities.rs"),
+                    include_str!("session_capability_selection.rs"),
                     include_str!("../../../nomifun-engine-core/src/context_resource.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context_resources.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/remote_resources.rs"),
@@ -182,8 +184,6 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-ai-agent/src/model_attachments.rs"),
                     include_str!("nomi_core_wave2.rs"),
                     include_str!("nomi_core_mcp.rs"),
-                    include_str!("nomi_core_mcp_resources.rs"),
-                    include_str!("../../../nomifun-ai-agent/src/nomi_resources.rs"),
                     include_str!("mcp_effect_receipts.rs"),
                     include_str!("hosted_effect_receipts.rs"),
                     include_str!("engine_tool_discovery.rs"),
@@ -230,7 +230,6 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-mcp/src/connection_test/protocol.rs"),
                     include_str!("agent_wave2_host.rs"),
                     include_str!("agent_wave2_vcs_push.rs"),
-                    include_str!("engine_git_lifecycle.rs"),
                     include_str!("../../../nomifun-file/src/agent_text_read.rs"),
                     include_str!("../../../nomifun-file/src/agent_instruction_scope.rs"),
                     include_str!("../../../nomifun-file/src/agent_patch_lines.rs"),
@@ -302,7 +301,7 @@ pub(crate) fn factory(
         let supervision = supervision.clone();
         Box::pin(async move {
             let admitted = session_host.resolve(&options, &binding).await?;
-            super::agent_tool_surface::validate_session_mcp(admitted.snapshot(), &admitted.agent_binding().typed_resource_bindings, &admitted.session().extra)?;
+            super::agent_tool_surface::validate_session_mcp(admitted.snapshot(), &admitted.agent_binding().typed_resource_bindings)?;
             let principal = admitted.principal().clone();
             let route = admitted.snapshot()
                 .content
@@ -802,7 +801,6 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let operation = admitted.operation_id().to_owned();
         let response = admitted.session().session();
         let receipt = admitted.request_payload();
-        self.skills.validate_extra(&response.extra)?;
         self.skills.validate_ids(&message.inject_skills)?;
         if self.activation_failed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(error("activation persistence is uncertain; reopen the runtime to restore its durable state"));
@@ -928,7 +926,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             instructions.push(context);
         }
         if !message.inject_skills.is_empty() {
-            instructions.push(format!("For this accepted request, the user explicitly requested these already-selected Skills: {}", serde_json::to_string(&message.inject_skills).map_err(error)?));
+            instructions.push(format!("For this accepted request, use these Session-selected Skills as reference: {}", serde_json::to_string(&message.inject_skills).map_err(error)?));
         }
         let turn_plan = self
             .resources

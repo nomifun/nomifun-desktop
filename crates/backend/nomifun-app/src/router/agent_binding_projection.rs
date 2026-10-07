@@ -139,7 +139,10 @@ pub fn project(input: ProjectionInput<'_>) -> Result<AgentBindingProjection, App
         .content
         .skill_locks
         .iter()
-        .map(|lock| lock.skill.id.as_ref().to_owned())
+        .filter_map(|lock| match lock {
+            nomifun_agent_contracts::ResolvedSkillLock::Package(lock) => Some(lock.skill.id.as_ref().to_owned()),
+            nomifun_agent_contracts::ResolvedSkillLock::Library { skill, selected, .. } => selected.then(|| skill.name.clone()),
+        })
         .collect();
     let resolved_model = route.as_ref().map(|route| ExecutionModelRef {
         provider_id: route.primary.provider_id.clone(),

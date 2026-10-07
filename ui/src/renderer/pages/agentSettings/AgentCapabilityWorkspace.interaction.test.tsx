@@ -159,6 +159,17 @@ describe('Agent capability Module workbench', () => {
     expect(screen.getByText(en.workbench.noModulesHint)).toBeTruthy();
   });
 
+  test('keeps host tool discovery and individual MCP tools out of preset authoring', () => {
+    const discovery = moduleItem('agent.tool-discovery');
+    const mcp = moduleItem(`nomi.mcp.v1.${'a'.repeat(64)}`);
+    const initial = documentWith([[discovery.module, ['agent.tool-discovery/read']], [mcp.module, [`${mcp.module.id}/read`]]]);
+    const screen = mount(initial, catalog([files, discovery, mcp]));
+    expect(screen.queryByText('agent.tool-discovery')).toBeNull();
+    expect(screen.queryByText(String(mcp.module.id))).toBeNull();
+    expect(screen.getByRole('switch', { name: 'Enable Workspace I/O' })).toBeTruthy();
+    expect(screen.state()).toEqual(initial);
+  });
+
   test('shows one searchable Module catalog without the legacy transfer controls', () => {
     const screen = mount(documentWith([[files.module, ['workspace.files/read']]]));
     expect(screen.getByRole('region', { name: en.workbench.moduleCatalog })).toBeTruthy();

@@ -10,6 +10,8 @@ use std::time::Duration;
 
 #[path = "native_turn_recovery.rs"]
 mod native_turn_recovery;
+#[path = "session_capability_selection.rs"]
+mod session_capability_selection;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
 
@@ -28,13 +30,7 @@ use dashmap::DashMap;
 use futures_util::FutureExt;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
-    AgentRuntimeSessions, AgentSendError, AgentStreamEvent, KernelNomiPluginToolSession,
-    NomiPluginToolSchemaResolver, NomiPluginToolSession,
-    NomiPluginToolSessionProvider, NomiPluginToolSessionRequest,
-    NomiPlatformBuiltinContextAdmission,
-    NomiPlatformBuiltinLifecycleAdmission,
-    NomiPlatformBuiltinToolAdmission,
-    SessionControlSink,
+    AgentRuntimeSessions, AgentSendError, AgentStreamEvent,
 };
 use nomifun_agent_contracts::{
     IdmmDecisionExplanation, IdmmDecisionNotice,
@@ -43,9 +39,9 @@ use nomifun_agent_contracts::{
     AgentHandoffMode, AgentHandoffPlanStepV1, AgentHandoffPlanV1,
     AgentHandoffRequirementOriginV1, AgentHandoffRequirementV1,
     AgentHandoffVerifiedArtifactV1, AgentSessionId, ArtifactId, ChatRouteFeature,
-    ChatRouteProtocol, ContributionSourceKind,
-    DeleteAgentSessionCommand, EffectClass, OperationId, PrincipalRef, RemoteBindingProvenance,
-    ReasoningEffort, ScopeKey, SessionPayloadBody, StrictJsonValue, UserId, digest_bytes,
+    ChatRouteProtocol,
+    DeleteAgentSessionCommand, OperationId, PrincipalRef, RemoteBindingProvenance,
+    ReasoningEffort, SessionPayloadBody, StrictJsonValue, UserId, digest_bytes,
     digest_payload,
 };
 use nomifun_agent_control_plane::{
@@ -79,7 +75,6 @@ use nomifun_api_types::{
     AgentChatModelSelectionDto, AgentResolvedSnapshot, SessionCursorDto,
     SessionReasoningEffortDto, UpdateAgentSessionReasoningRequestDto,
     UpdateAgentSessionReasoningResponseDto,
-    McpServerId,
     SendMessageRequest, SideQuestionRequest, SideQuestionResponse,
     TypedResourceBindingDto, UpdateConversationRequest, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
     CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
@@ -1220,7 +1215,6 @@ impl NomiCoreSessionOwner {
         super::nomi_core_mcp_catalog::validate_product_session_selection(
             &resolved,
             &saved_binding.typed_resource_bindings,
-            &request.extra,
         )?;
         let active_capabilities = resolved
             .content
@@ -2620,697 +2614,6 @@ impl NomiCoreSessionOwner {
 
 }
 
-/// App-owned bridge from a Conversation-backed Nomi session to one exact
-/// Kernel-backed Plugin Tool session.
-///
-/// It resolves every authority fact from the persisted owner/session/binding
-/// chain. The runtime registry supplies only the first-class owner and
-/// conversation IDs; no `extra` field is interpreted as Mount, Artifact,
-/// action, schema, or activation authority.
-pub(crate) struct NomiCorePluginToolSessionProvider {
-    hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
-    wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
-    session_owner: Arc<NomiCoreSessionOwner>,
-    control_plane: Arc<AgentControlPlane>,
-    kernel: Arc<KernelRegistry>,
-    compiler_environment: CompilerEnvironment,
-    schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
-    platform_builtin_tool_admission:
-        Arc<NomiPlatformBuiltinToolAdmission>,
-    platform_builtin_context_admission:
-        Arc<NomiPlatformBuiltinContextAdmission>,
-    platform_builtin_lifecycle_admission:
-        Arc<NomiPlatformBuiltinLifecycleAdmission>,
-    robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
-}
-
-impl NomiCorePluginToolSessionProvider {
-    pub(crate) fn new(
-        session_owner: Arc<NomiCoreSessionOwner>,
-        control_plane: Arc<AgentControlPlane>,
-        kernel: Arc<KernelRegistry>,
-        compiler_environment: CompilerEnvironment,
-        schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
-        platform_builtin_tool_admission: Arc<
-            NomiPlatformBuiltinToolAdmission,
-        >,
-        platform_builtin_context_admission: Arc<
-            NomiPlatformBuiltinContextAdmission,
-        >,
-        platform_builtin_lifecycle_admission: Arc<
-            NomiPlatformBuiltinLifecycleAdmission,
-        >,
-        robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
-        wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
-        pool: nomifun_db::SqlitePool,
-    ) -> Self {
-        Self {
-            hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts::new(pool),
-            wave2_owner,
-            session_owner,
-            control_plane,
-            kernel,
-            compiler_environment,
-            schema_resolver,
-            platform_builtin_tool_admission,
-            platform_builtin_context_admission,
-            platform_builtin_lifecycle_admission,
-            robot_owner,
-        }
-    }
-
-    // The same persisted binding and Compiler admission serve description and
-    // execution. Everything below this method's result is runtime materialization.
-    async fn compile_request(
-        &self,
-        request: NomiPluginToolSessionRequest,
-    ) -> Result<Option<PreparedNomiPluginSession>, AppError> {
-        let common_owner = nomifun_common::UserId::parse(
-            request.owner_id.clone(),
-        )
-        .map_err(|error| {
-            AppError::Forbidden(format!(
-                "invalid Nomi Plugin Tool session owner: {error}"
-            ))
-        })?;
-        let session_id = parse_agent_session_id(&request.conversation_id)
-            .map_err(|error| AppError::Conflict(error.message))?;
-        self.hosted_effects.ensure_settled(common_owner.as_ref(), session_id.as_ref()).await?;
-        self.session_owner
-            .materialize_session_workspace(common_owner.as_ref(), &session_id)
-            .await?;
-        let response = self
-            .session_owner
-            .get_session(common_owner.as_ref(), session_id.as_ref())
-            .await?;
-        if response.extra.get(NOMI_CORE_SESSION_METADATA_KEY).is_none() {
-            return Ok(None);
-        }
-        let constraints = nomifun_api_types::ExecutionConstraints::from_extra(&response.extra)?;
-        let owner = AuthenticatedOwner(UserId::from(
-            common_owner.as_ref().to_owned(),
-        ));
-        let metadata =
-            session_metadata(&response, &owner).map_err(|error| {
-                AppError::Conflict(error.message)
-            })?;
-        let binding_dto =
-            agent_binding_dto(&metadata.binding).map_err(|error| {
-                AppError::Conflict(error.message)
-            })?;
-        let (binding, revision, snapshot) = self
-            .control_plane
-            .saved_binding_artifacts(&owner.0, &binding_dto)
-            .await
-            .map_err(control_plane_error_to_app)?;
-        if binding != metadata.binding {
-            return Err(AppError::Conflict(
-                "Nomi Plugin Tool Session binding differs from the persisted Conversation binding"
-                    .to_owned(),
-            ));
-        }
-        // Revalidate the same contribution-driven consumer contract on every
-        // Session load. Runtime family identity never decides capability support.
-        let materialized = self
-            .kernel
-            .snapshot()
-            .map_err(|error| AppError::Conflict(error.to_string()))?;
-        super::nomi_core_tool_discovery::validate_snapshot(&materialized, &snapshot)
-            .map_err(control_plane_error_to_app)?;
-        super::nomi_core_mcp_catalog::validate_product_session_selection(
-            &snapshot,
-            &binding.typed_resource_bindings,
-            &response.extra,
-        )?;
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: common_owner.as_ref().to_owned(),
-        };
-        let wave2_workspace_selected = revision
-            .payload
-            .enabled_capabilities
-            .iter()
-            .any(|selection| {
-                matches!(
-                    selection.capability.id.as_ref(),
-                    "workspace.files" | "workspace.vcs" | "workspace.artifacts"
-                )
-            });
-        let wave2_process_selected = revision
-            .payload
-            .enabled_capabilities
-            .iter()
-            .any(|selection| {
-                selection.capability.id.as_ref()
-                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
-            });
-        let server_workspace = (wave2_workspace_selected || wave2_process_selected)
-            .then(|| {
-                response
-                    .extra
-                    .get("workspace")
-                    .and_then(Value::as_str)
-                    .filter(|workspace| !workspace.trim().is_empty())
-                    .ok_or_else(|| {
-                        AppError::Conflict(
-                            "Nomi Wave 2 AgentSession has no server-resolved workspace"
-                                .to_owned(),
-                        )
-                    })
-            })
-            .transpose()?;
-        let mut runtime_binding = binding;
-        if wave2_workspace_selected {
-            let server_workspace = server_workspace.ok_or_else(|| {
-                AppError::Internal(
-                    "workspace capability lost its resolved Session root".to_owned(),
-                )
-            })?;
-            let workspace_resources = runtime_binding
-                .typed_resource_bindings
-                .iter()
-                .filter(|binding| {
-                    binding.resource_kind.as_ref()
-                        == nomifun_file::WORKSPACE_RESOURCE_KIND
-                })
-                .collect::<Vec<_>>();
-            let [workspace_authority] = workspace_resources.as_slice() else {
-                return Err(AppError::Conflict(
-                    "Nomi Wave 2 requires one server-resolved Session workspace resource"
-                        .to_owned(),
-                ));
-            };
-            let workspace = super::nomi_core_wave2::session_workspace_binding(
-                server_workspace,
-                &principal,
-                &session_id,
-                workspace_authority,
-            )?;
-            runtime_binding.typed_resource_bindings =
-                super::nomi_core_wave2::with_session_workspace_binding(
-                    runtime_binding.typed_resource_bindings,
-                    workspace.clone(),
-                );
-        }
-        if wave2_process_selected {
-            let server_workspace = server_workspace.ok_or_else(|| {
-                AppError::Internal(
-                    "process capability lost its resolved Session root".to_owned(),
-                )
-            })?;
-            let process_resources = runtime_binding
-                .typed_resource_bindings
-                .iter()
-                .enumerate()
-                .filter(|(_, binding)| binding.resource_kind.as_ref() == "process_session")
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let [index] = process_resources.as_slice() else {
-                return Err(AppError::Conflict(
-                    "Nomi Wave 2 requires one server-resolved Session process resource"
-                        .to_owned(),
-                ));
-            };
-            runtime_binding.typed_resource_bindings[*index] =
-                super::nomi_core_wave2::session_process_binding(
-                    server_workspace,
-                    &principal,
-                    &session_id,
-                    &runtime_binding.typed_resource_bindings[*index],
-                )?;
-        }
-        let resource_image_model = revision.payload.chat_route_records
-            .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
-            .is_some_and(|route| route.primary.features.contains(&nomifun_agent_contracts::ChatRouteFeature::ImageInput));
-        let compiled = compile_nomi_plugin_snapshot(
-            &self.kernel,
-            &self.compiler_environment,
-            runtime_binding,
-            revision,
-            snapshot,
-            &principal,
-        )?;
-        let compiled = Arc::new(compiled);
-        Ok(Some(PreparedNomiPluginSession { owner, session_id, principal, compiled, response, constraints, resource_image_model }))
-    }
-
-    async fn compile_command_request(
-        &self,
-        request: NomiPluginToolSessionRequest,
-    ) -> Result<Arc<CompiledSnapshot>, AppError> {
-        let common_owner = nomifun_common::UserId::parse(request.owner_id)
-            .map_err(|error| AppError::Forbidden(format!(
-                "invalid Nomi Plugin Tool session owner: {error}"
-            )))?;
-        let session_id = parse_agent_session_id(&request.conversation_id)
-            .map_err(|error| AppError::Conflict(error.message))?;
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: common_owner.as_ref().to_owned(),
-        };
-        let observation = self
-            .session_owner
-            .canonical()
-            .get(&principal, &session_id)
-            .await?;
-        let binding_dto = agent_binding_dto(&observation.session.agent_binding)
-            .map_err(|error| AppError::Conflict(error.message))?;
-        let owner = AuthenticatedOwner(UserId::from(common_owner.as_ref().to_owned()));
-        let (binding, revision, snapshot) = self
-            .control_plane
-            .saved_binding_artifacts(&owner.0, &binding_dto)
-            .await
-            .map_err(control_plane_error_to_app)?;
-        if binding != observation.session.agent_binding {
-            return Err(AppError::Conflict(
-                "Skill discovery binding differs from the canonical AgentSession binding"
-                    .to_owned(),
-            ));
-        }
-        let materialized = self
-            .kernel
-            .snapshot()
-            .map_err(|error| AppError::Conflict(error.to_string()))?;
-        super::nomi_core_tool_discovery::validate_snapshot(&materialized, &snapshot)
-            .map_err(control_plane_error_to_app)?;
-        let compiled = compile_nomi_plugin_snapshot(
-            &self.kernel,
-            &self.compiler_environment,
-            binding,
-            revision,
-            snapshot,
-            &principal,
-        )?;
-        // Cold discovery is description-only, but it must authenticate the
-        // same owner-scoped typed resources as execution. It may skip Context
-        // activation and resource acquisition; it may not skip Binding
-        // validation merely because no runtime has been started.
-        super::nomi_core_mcp_catalog::validate_resources(
-            &compiled,
-            &materialized,
-            &principal,
-        )?;
-        Ok(Arc::new(compiled))
-    }
-
-    async fn command_items(
-        &self,
-        compiled: Arc<CompiledSnapshot>,
-        extra: Option<&Value>,
-    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
-        let registry = self
-            .kernel
-            .snapshot()
-            .map_err(|error| AppError::Conflict(error.to_string()))?;
-        let skills = super::engine_skills::compile_commands(
-            &compiled,
-            &registry,
-        )
-        .await?;
-        if let Some(extra) = extra {
-            skills.validate_extra(extra)?;
-        }
-        let commands = nomifun_ai_agent::plugin_skills::verified_skill_commands(
-            Arc::clone(&self.kernel),
-            compiled,
-            None,
-            skills.commands,
-        )
-        .map_err(|error| {
-            AppError::Conflict(format!("Nomi Skill discovery failed: {error}"))
-        })?;
-        let mut items = commands
-            .iter()
-            .filter(|skill| skill.metadata().user_invocable)
-            .map(|skill| nomifun_api_types::SlashCommandItem {
-                command: skill.command_name(),
-                description: skill.metadata().description.clone(),
-            })
-            .collect::<Vec<_>>();
-        items.sort_by(|a, b| a.command.cmp(&b.command));
-        Ok(items)
-    }
-
-    /// Canonical AgentSession discovery never accepts legacy Conversation
-    /// `extra`. Its saved Binding and typed resources are the complete input.
-    pub(crate) async fn discover_canonical_skill_commands(
-        &self,
-        owner: &AuthenticatedOwner,
-        session_id: &AgentSessionId,
-    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
-        let compiled = self
-            .compile_command_request(NomiPluginToolSessionRequest {
-                owner_id: owner.0.as_ref().to_owned(),
-                conversation_id: session_id.as_ref().to_owned(),
-            })
-            .await?;
-        self.command_items(compiled, None).await
-    }
-}
-
-struct PreparedNomiPluginSession {
-    owner: AuthenticatedOwner,
-    session_id: AgentSessionId,
-    principal: PrincipalRef,
-    compiled: Arc<CompiledSnapshot>,
-    response: ConversationResponse,
-    constraints: nomifun_api_types::ExecutionConstraints,
-    resource_image_model: bool,
-}
-
-#[async_trait]
-impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
-    async fn discover_skill_commands(
-        &self,
-        request: NomiPluginToolSessionRequest,
-    ) -> Result<Vec<nomifun_api_types::SlashCommandItem>, AppError> {
-        let Some(prepared) = self.compile_request(request).await? else {
-            return Ok(Vec::new());
-        };
-        if prepared.constraints.restricted() {
-            return Ok(Vec::new());
-        }
-        self.command_items(prepared.compiled, Some(&prepared.response.extra))
-            .await
-    }
-
-    async fn resolve(
-        &self,
-        request: NomiPluginToolSessionRequest,
-    ) -> Result<Option<NomiPluginToolSession>, AppError> {
-        let Some(PreparedNomiPluginSession { owner, session_id, principal, compiled, response, constraints, resource_image_model }) =
-            self.compile_request(request).await? else { return Ok(None); };
-        let registry = self.kernel.snapshot().map_err(|error| AppError::Conflict(error.to_string()))?;
-        super::nomi_core_mcp_catalog::validate_resources(&compiled, &registry, &principal)?;
-        let skills = super::engine_skills::compile(&compiled, &registry).await?;
-        skills.validate_extra(&response.extra)?;
-        let mut mcp_schemas = BTreeMap::new();
-        for selected in compiled.content().enabled_capabilities.iter() {
-            if selected.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::McpBinding {
-                let tool = super::nomi_core_mcp_catalog::frozen_tool(&registry, selected)?;
-                mcp_schemas.insert(selected.capability.id.clone(), StrictJsonValue(tool.input_schema));
-            }
-        }
-        let tool_admission = Arc::new(self.platform_builtin_tool_admission.as_ref().clone()
-            .with_mcp_tools(&registry, mcp_schemas)
-            .map_err(|error| AppError::Conflict(error.to_string()))?);
-        let plugin_session = KernelNomiPluginToolSession::materialize_for_execution(
-            Arc::clone(&self.kernel),
-            Arc::clone(&compiled),
-            principal.clone(),
-            session_id.clone(),
-            ScopeKey::from(format!(
-                "session:{}",
-                session_id.as_ref()
-            )),
-            Arc::clone(&self.schema_resolver),
-            tool_admission,
-            Arc::clone(&self.platform_builtin_context_admission),
-            Arc::clone(&self.platform_builtin_lifecycle_admission),
-            constraints,
-        )
-        .await
-        .map_err(|error| {
-            AppError::Conflict(format!(
-                "Nomi Plugin Tool session materialization failed: {error}"
-            ))
-        })?;
-        // Bundled planning Skills are admitted by their frozen locks, then
-        // supplied only for the turn's exact inject_skills selection. They have
-        // no resource index or global instruction; installing an empty Skill
-        // resource prompt would advertise a tool that cannot read anything.
-        let plugin_session = if skills.instructions.is_empty() && skills.resources.is_empty() { plugin_session } else {
-            plugin_session.with_selected_skills(nomifun_ai_agent::nomi_skills::NomiSelectedSkills::new(
-                skills.instructions, skills.resources, resource_image_model,
-            ).map_err(|error| AppError::Conflict(error.to_string()))?)
-                .map_err(|error| AppError::Conflict(error.to_string()))?
-        };
-        let plugin_session = if constraints.restricted() { plugin_session } else {
-            plugin_session.with_verified_skill_commands(
-                Arc::clone(&self.kernel), Arc::clone(&compiled), skills.commands,
-            ).map_err(|error| AppError::Conflict(format!("Nomi Skill command materialization failed: {error}")))?
-        };
-        let robot_module_id = super::nomi_core_robot::module_capability_id();
-        let robot_selected = compiled.resolved_capability(&robot_module_id);
-        let robot_resources_bound = robot_selected
-            .is_some()
-            && compiled
-                .capability_resources_bound(&robot_module_id)
-                .map_err(kernel_error_to_app)?;
-        let dynamic = if !robot_resources_bound || constraints.restricted() {
-            None
-        } else {
-            let selected = robot_selected.expect("checked above");
-            let policy = compiled.policy(&robot_module_id).ok_or_else(|| {
-                AppError::Conflict(
-                    "Nomi Robot Module has no compiled Action/resource policy".to_owned(),
-                )
-            })?;
-            let declared_actions = super::nomi_core_robot::action_ids();
-            if selected.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
-                || policy.allowed_actions.is_empty()
-                || policy
-                    .allowed_actions
-                    .iter()
-                    .any(|action| !declared_actions.contains(action))
-            {
-                return Err(AppError::Conflict(
-                    "Nomi Robot Module requires its bundled owner and exact Action grants"
-                        .to_owned(),
-                ));
-            }
-            let owner = self.robot_owner.as_ref().ok_or_else(|| {
-                AppError::Conflict(
-                    "Nomi Robot Module owner is unavailable for this Session".to_owned(),
-                )
-            })?;
-            let robot_bindings = compiled
-                .target_resource_bindings
-                .iter()
-                .filter(|binding| {
-                    binding.resource_kind.as_ref() == "robot"
-                        && policy.resource_binding_ids.contains(&binding.binding_id)
-                })
-                .collect::<Vec<_>>();
-            let [robot_binding] = robot_bindings.as_slice() else {
-                return Err(AppError::Conflict(
-                    "Nomi Robot Module requires one exact server-resolved Robot binding"
-                        .to_owned(),
-                ));
-            };
-            match owner
-                .resolve_session_tools_if_available(
-                    &principal,
-                    &session_id,
-                    robot_binding,
-                    &policy.allowed_actions,
-                )
-                .await
-                .map_err(|error| AppError::Conflict(error.to_string()))?
-            {
-                None => None,
-                Some(resolved) => {
-                    let mut provider_actions = BTreeMap::new();
-                    let descriptors = resolved
-                        .descriptors
-                        .iter()
-                        .map(|descriptor| {
-                            if provider_actions
-                                .insert(
-                                    descriptor.provider_name.clone(),
-                                    descriptor.action_id.clone(),
-                                )
-                                .is_some()
-                            {
-                                return Err(AppError::Conflict(format!(
-                                    "Nomi Robot Module published duplicate provider tool {}",
-                                    descriptor.provider_name
-                                )));
-                            }
-                            Ok(nomifun_ai_agent::NomiHostDynamicToolDescriptor {
-                                capability_id: robot_module_id.clone(),
-                                provider_name: descriptor.provider_name.clone(),
-                                description: descriptor.description.clone(),
-                                input_schema: descriptor.input_schema.clone(),
-                                effect_class: if descriptor.action_id.as_ref()
-                                    == nomifun_robot::capability::ROBOT_VISION_ACTION_ID
-                                {
-                                    EffectClass::ReadSensitive
-                                } else {
-                                    EffectClass::Physical
-                                },
-                                deferred: false,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, AppError>>()?;
-                    let provider_actions = Arc::new(provider_actions);
-                    Some((descriptors, Arc::new(super::hosted_effect_receipts::RobotReceiptInvoker {
-                            receipts: self.hosted_effects.clone(), user: principal.principal_id.clone(),
-                            session: session_id.as_ref().to_owned(),
-                            provider_actions,
-                            delegate: Arc::clone(&resolved.invoker),
-                        }) as Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker>))
-                }
-            }
-        };
-        let hosted_witness = self.hosted_effects.witness(principal.principal_id.clone(), session_id.as_ref().to_owned());
-        let git_witness = if !constraints.restricted()
-            && compiled.content().enabled_capabilities.iter().any(|capability| {
-                capability.capability.id.as_ref() == "workspace.vcs"
-                    && capability.action_allowlist.contains(
-                        &nomifun_agent_contracts::ActionId::from("workspace.vcs/push"),
-                    )
-            })
-        {
-            Some(super::engine_git_lifecycle::WorkspaceGitWitness::new(
-                self.wave2_owner.clone(),
-                response.extra.get("workspace").and_then(Value::as_str)
-                    .ok_or_else(|| AppError::Conflict("Git Session workspace is missing".into()))?,
-                self.hosted_effects.clone(), principal.principal_id.clone(), session_id.as_ref().to_owned(),
-            )?)
-        } else { None };
-        let mut witnesses: Vec<Arc<dyn nomifun_ai_agent::engine_effect_scope::EngineEffectSettlement>> = vec![
-            hosted_witness.clone(),
-            super::nomi_core_mcp_catalog::settlement_witness(
-                Arc::clone(&self.wave2_owner), principal.principal_id.clone(), session_id.as_ref().to_owned(),
-            ),
-        ];
-        if let Some(witness) = &git_witness { witnesses.push(witness.clone()); }
-        let effect_scope = Arc::new(nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(witnesses)?);
-        let mcp_resources = if !constraints.restricted()
-            && compiled
-                .resource_bindings()
-                .iter()
-                .any(|binding| binding.resource_kind.as_ref() == "mcp_server")
-        {
-            let active = plugin_session.capability_state().ok_or_else(|| AppError::Conflict("MCP resource binding state is unavailable".into()))?;
-            let resources = super::nomi_core_mcp_resources::adapter(self.kernel.clone(), compiled.clone(),
-                active, self.wave2_owner.clone(), principal.clone(), session_id.clone(), resource_image_model, constraints)?;
-            Some(resources)
-        } else { None };
-        self.wave2_owner.ensure_mcp_settled(&principal.principal_id, session_id.as_ref()).await?;
-        let mut context: Vec<Arc<dyn nomifun_ai_agent::ContextContributor>> = vec![
-            super::nomi_core_mcp_catalog::recovery_context(Arc::clone(&self.wave2_owner),
-                principal.principal_id.clone(), session_id.as_ref().to_owned()),
-            hosted_witness,
-        ];
-        if let Some(witness) = git_witness { context.push(witness); }
-        plugin_session.bind_hosted_execution(nomifun_ai_agent::NomiHostedSessionBindings {
-            effect_scope,
-            dynamic,
-            context,
-            mcp_resources,
-            session_control: Some(Arc::new(NomiCoreSessionControlSink {
-                session_owner: Arc::clone(&self.session_owner),
-                owner,
-                session_id: session_id.clone(),
-            })),
-        })
-            .map(Some)
-        .map_err(|error| {
-            AppError::Conflict(format!(
-                "Nomi hosted Tool session assembly failed: {error}"
-            ))
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ExactSessionMcpSelection {
-    ids: Vec<McpServerId>,
-}
-
-async fn exact_session_mcp_selection(
-    repository: &Arc<dyn nomifun_db::IMcpServerRepository>,
-    owner: &AuthenticatedOwner,
-    binding: &AgentBindingValue,
-) -> Result<ExactSessionMcpSelection, NomiCoreApiError> {
-    let bindings = binding
-        .typed_resource_bindings
-        .iter()
-        .filter(|binding| binding.resource_kind.as_ref() == "mcp_server")
-        .collect::<Vec<_>>();
-    if bindings.len() > super::nomi_core_mcp_catalog::MAX_SESSION_SERVERS {
-        return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
-            "MCP_RESOURCE_CARDINALITY_INVALID", "the AgentSession MCP server bound was exceeded"));
-    }
-    let mut selection = ExactSessionMcpSelection { ids: Vec::new() };
-    let mut seen = BTreeSet::new();
-    for binding in bindings {
-        if !seen.insert(binding.resource_id.clone()) {
-            return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
-                "MCP_RESOURCE_CARDINALITY_INVALID", "duplicate MCP server resource"));
-        }
-        if binding.owner_id != owner.as_ref() {
-            return Err(NomiCoreApiError::new(
-                StatusCode::FORBIDDEN,
-                "RESOURCE_OWNER_MISMATCH",
-                "the selected MCP server belongs to a different owner",
-            ));
-        }
-        let row = repository
-            .find_by_id(binding.resource_id.as_ref())
-            .await
-            .map_err(|error| AppError::Internal(error.to_string()))?
-            .ok_or_else(|| {
-                NomiCoreApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "MCP_SERVER_NOT_FOUND",
-                    "the selected MCP server no longer exists",
-                )
-            })?;
-        if !row.enabled || row.deleted_at.is_some() {
-            return Err(NomiCoreApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "MCP_SERVER_DISABLED",
-                "the selected MCP server is disabled",
-            ));
-        }
-        let expected_ref = format!(
-            "mcp-server:{}@{}",
-            row.mcp_server_id, row.updated_at
-        );
-        if binding.connection_config_ref.as_ref().map(AsRef::as_ref)
-            != Some(expected_ref.as_str())
-        {
-            return Err(NomiCoreApiError::new(
-                StatusCode::CONFLICT,
-                "MCP_CONNECTION_CONFIG_STALE",
-                "the selected MCP server changed after the Agent binding was resolved",
-            ));
-        }
-        let server = nomifun_mcp::McpServer::from_row(row).map_err(|error| {
-            NomiCoreApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "MCP_SERVER_CONFIG_INVALID",
-                error.to_string(),
-            )
-        })?;
-        selection.ids.push(server.mcp_server_id);
-    }
-    Ok(selection)
-}
-
-fn install_creation_mcp_selection(
-    extra: &mut Value,
-    selection: &ExactSessionMcpSelection,
-) -> Result<(), NomiCoreApiError> {
-    let object = extra.as_object_mut().ok_or_else(|| {
-        NomiCoreApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "NOMI_CORE_SESSION_EXTRA_INVALID",
-            "Nomi-core Session extra must be a JSON object",
-        )
-    })?;
-    object.insert(
-        "selected_mcp_server_ids".to_owned(),
-        serde_json::to_value(&selection.ids)?,
-    );
-    object.remove("selected_session_mcp_servers");
-    object.remove("session_mcp_servers");
-    Ok(())
-}
-
 pub(super) fn compile_nomi_plugin_snapshot(
     kernel: &KernelRegistry,
     compiler_environment: &CompilerEnvironment,
@@ -3472,7 +2775,6 @@ fn merge_product_agent_resolution(
         nomifun_api_types::EXECUTION_CONSTRAINTS_KEY,
         "chat_config_revision_digest",
         "system_prompt",
-        "selected_mcp_server_ids",
     ] {
         if let Some(value) = projected.get(key) {
             object.insert(key.to_owned(), value.clone());
@@ -4136,7 +3438,8 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
     async fn create(
         &self,
         owner_id: &str,
-        request: CreateConversationRequest,
+        mut request: CreateConversationRequest,
+        skill_names: Vec<String>,
     ) -> Result<ConversationResponse, AppError> {
         let companion_id = request
             .extra
@@ -4146,6 +3449,23 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
                 "Companion Session requires companion_id".to_owned(),
             ))?
             .to_owned();
+        let resolver = self.product_agent_resolver.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Companion Agent resolver is unavailable".into()))?;
+        let target = ProductAgentTarget { target_kind: "companion".into(), target_id: companion_id.clone(), default_template_key: "companion.default".into() };
+        let resolution = resolver.resolve(owner_id, &target, request.model.as_ref()).await?;
+        merge_product_agent_resolution(&mut request.extra, &target, &resolution)?;
+        let owner = UserId::from(owner_id.to_owned());
+        let current = resolution.snapshot.canonical_binding.as_ref()
+            .ok_or_else(|| AppError::Conflict("Companion Agent has no canonical binding".into()))?;
+        let (_, _, snapshot) = resolver.control_plane.saved_binding_artifacts(&owner, current).await.map_err(control_plane_error_to_app)?;
+        let mut selection = session_capability_selection::selection(&snapshot);
+        selection.skill_names = skill_names;
+        let mut binding = resolver.control_plane.resolve_agent_session_capabilities_binding(&owner, current, Some(&selection)).await.map_err(control_plane_error_to_app)?;
+        let mcp = resolver.resource_bindings.resolve_mcp_for_saved_binding(&resolver.control_plane, &owner, &binding).await
+            .map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
+        binding.typed_resource_bindings = current.typed_resource_bindings.iter().filter(|resource| resource.resource_kind != "mcp_server").cloned().chain(mcp).collect();
+        let binding: AgentBindingValue = serde_json::to_value(binding).and_then(serde_json::from_value).map_err(|error| AppError::Conflict(error.to_string()))?;
+        attach_session_metadata(&mut request.extra, &binding, None).map_err(|error| AppError::Conflict(error.message))?;
         self.create_session_idempotent(
             owner_id,
             request,
@@ -5431,29 +4751,6 @@ fn cron_session_projection_from_response(
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     };
-    let legacy_skills = || match response.extra.get("skills") {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(values)) => values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        AppError::Conflict(format!(
-                            "AgentSession {} has an invalid skills projection",
-                            response.conversation_id
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>(),
-        Some(_) => Err(AppError::Conflict(format!(
-            "AgentSession {} has an invalid skills projection",
-            response.conversation_id
-        ))),
-    };
     let temp_workspace_id = optional_string("temp_workspace_id");
     let cli_path = optional_string("cli_path").or_else(|| {
         response
@@ -5505,13 +4802,7 @@ fn cron_session_projection_from_response(
                     Some(snapshot.preset_revision),
                 )
             }
-            None => (
-                legacy_skills()?,
-                optional_string("agent_name"),
-                optional_string("custom_agent_id"),
-                response.preset_id.clone(),
-                response.preset_revision,
-            ),
+            None => return Err(AppError::Conflict("canonical AgentSession has no frozen Snapshot projection".to_owned())),
         };
     Ok(nomifun_cron::CronSessionProjection {
         agent_session_id,
@@ -5604,7 +4895,6 @@ fn runtime_options_from_session(
             delegation_policy,
             extra: Value::Object(session_extra).into(),
             conversation_created_at: Some(created_at),
-            device_mcp_servers: Vec::new(),
             workspace_binding_lease: Some(workspace_binding_lease),
         },
         workspace,
@@ -6339,7 +5629,6 @@ mod session_boundary_tests {
             "/api/agent-sessions/{agent_session_id}/turns/cancel",
             "/api/agent-sessions/{agent_session_id}/events",
             "/api/agent-sessions/{agent_session_id}/messages",
-            "/api/agent-sessions/{agent_session_id}/slash-commands",
             "/api/agent-sessions/{agent_session_id}/forks",
         ] {
             assert!(source.contains(route), "missing {route}");
@@ -6894,14 +6183,12 @@ const NOMI_CORE_REMOTE_CANCEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30
 pub(crate) struct NomiCoreAgentApiState {
     authoritative_user_id: Arc<str>,
     product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
-    skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
     pub(crate) session_owner: Arc<NomiCoreSessionOwner>,
     pub(crate) control_plane: Arc<AgentControlPlane>,
     pub(crate) remote_repository: Arc<dyn IRemoteBindingRepository>,
     pub(crate) remote_runtime: super::remote_runtime::NomiCoreRemoteRuntimeCoordinator,
     pub(crate) resource_bindings:
         super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
-    pub(crate) mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository>,
     pub(crate) wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub(crate) wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     ssh_pool: nomifun_ssh::SshConnectionPool,
@@ -6932,12 +6219,10 @@ impl NomiCoreAgentApiState {
         remote_repository: Arc<dyn IRemoteBindingRepository>,
         remote_runtime: super::remote_runtime::NomiCoreRemoteRuntimeCoordinator,
         resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
-        mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository>,
         wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
         wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
         product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
-        skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
-        ssh_pool: nomifun_ssh::SshConnectionPool,
+            ssh_pool: nomifun_ssh::SshConnectionPool,
         #[cfg(feature = "browser-use")]
         browser_resources: Option<
             Arc<nomifun_browser_platform::workspace::BrowserResourceService>,
@@ -6952,13 +6237,11 @@ impl NomiCoreAgentApiState {
         Self {
             authoritative_user_id,
             product_agent_resolver,
-            skill_discovery,
             session_owner,
             control_plane,
             remote_repository,
             remote_runtime,
             resource_bindings,
-            mcp_server_repository,
             wave4_owners,
             wave5_owner,
             ssh_pool,
@@ -7923,105 +7206,6 @@ fn agent_session_delete_blocked(
     )
 }
 
-/// Native Nomi tool owner bound to one exact authenticated AgentSession.
-///
-/// The model-facing tools have no owner/session selectors. This adapter keeps
-/// those identities in host memory and revalidates canonical Store ownership
-/// before every read or mutation.
-struct NomiCoreSessionControlSink {
-    session_owner: Arc<NomiCoreSessionOwner>,
-    owner: AuthenticatedOwner,
-    session_id: AgentSessionId,
-}
-
-#[async_trait]
-impl SessionControlSink for NomiCoreSessionControlSink {
-    async fn observe(&self, after_seq: u64, limit: u32) -> Result<Value, String> {
-        let principal = authenticated_principal(&self.owner);
-        self
-            .session_owner
-            .canonical()
-            .get(&principal, &self.session_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        let after = (after_seq > 0).then(|| nomifun_agent_contracts::SessionEventCursor {
-            agent_session_id: self.session_id.clone(),
-            seq: after_seq,
-        });
-        let events = self.session_owner.canonical().events(
-            &principal,
-            &self.session_id,
-            after.as_ref(),
-            limit,
-        ).await.map_err(|error| error.to_string())?;
-        let messages = self.session_owner.canonical().messages(
-            &principal,
-            &self.session_id,
-            after_seq,
-        ).await.map_err(|error| error.to_string())?;
-        serde_json::to_value(json!({
-            "agent_session_id": self.session_id,
-            "events": events.events,
-            "messages": messages.into_iter().take(limit as usize).collect::<Vec<_>>(),
-            "next_cursor": events.next_cursor,
-        })).map_err(|error| error.to_string())
-    }
-
-    async fn steer(&self, message: &str, operation_id: &str) -> Result<Value, String> {
-        let receipt = self
-            .session_owner
-            .canonical()
-            .steer(
-                &authenticated_principal(&self.owner),
-                &self.session_id,
-                operation_id,
-                json!({"content": message}),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(json!({
-            "agent_session_id": self.session_id,
-            "target_operation_id": receipt.target_operation_id,
-            "replayed": receipt.duplicate,
-            "status": "accepted",
-            "cursor": receipt.cursor,
-        }))
-    }
-
-    async fn fork(&self, title: Option<&str>, operation_id: &str) -> Result<Value, String> {
-        let principal = authenticated_principal(&self.owner);
-        self
-            .session_owner
-            .canonical()
-            .get(&principal, &self.session_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        let through_seq = self.session_owner.canonical().store()
-            .current_cursor(&self.session_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .seq;
-        let result = self.session_owner.canonical().fork(
-            &principal,
-            &self.session_id,
-            through_seq,
-            title.map(str::to_owned),
-            operation_id,
-            now_ms(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        self.session_owner
-            .inherit_idmm_state(
-                self.session_id.as_ref(),
-                result.child_session.agent_session_id.as_ref(),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        serde_json::to_value(result).map_err(|error| error.to_string())
-    }
-}
-
 #[derive(Debug)]
 enum NomiCoreRemoteDetachedFailure<E> {
     Failed(E),
@@ -8209,8 +7393,8 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             get(get_nomi_core_agent_session_capabilities),
         )
         .route(
-            "/api/agent-sessions/{agent_session_id}/slash-commands",
-            get(get_nomi_core_agent_session_slash_commands),
+            "/api/agent-sessions/{agent_session_id}/capability-selection",
+            get(session_capability_selection::get_selection).put(session_capability_selection::update_selection),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/turns",
@@ -10891,7 +10075,7 @@ async fn create_nomi_core_agent_session(
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
     let binding = state
         .control_plane
-        .resolve_agent_session_binding_with_model(&owner.0, &request.preset_id, request.model.as_ref())
+        .resolve_agent_session_binding_with_capabilities(&owner.0, &request.preset_id, request.model.as_ref(), request.session_capabilities.as_ref())
         .await?;
     let mut binding = state
         .resource_bindings
@@ -11991,6 +11175,11 @@ async fn prepare_agent_session_switch(
                 error.into()
             }
         })?;
+    let preserved_extensions = session_capability_selection::selection(&current_snapshot);
+    let raw_target = state.control_plane.resolve_agent_session_capabilities_binding(&owner.0, &raw_target, Some(&preserved_extensions)).await?;
+    if raw_target.preset_revision_ref == current_dto.preset_revision_ref && raw_target.resolved_snapshot_ref == current_dto.resolved_snapshot_ref {
+        return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_SESSION_AGENT_UNCHANGED", "the selected Agent and Session extensions are already active"));
+    }
     let (_, target_revision, target_snapshot) = state
         .control_plane
         .saved_binding_artifacts(&owner.0, &raw_target)
@@ -14233,19 +13422,6 @@ async fn get_nomi_core_agent_session_capabilities(
     )))
 }
 
-async fn get_nomi_core_agent_session_slash_commands(
-    State(state): State<NomiCoreAgentApiState>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path(agent_session_id): Path<String>,
-) -> Result<Json<ApiResponse<Vec<nomifun_api_types::SlashCommandItem>>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    let commands = state
-        .skill_discovery
-        .discover_canonical_skill_commands(&owner, &session_id)
-        .await?;
-    Ok(Json(ApiResponse::ok(commands)))
-}
-
 async fn start_nomi_core_agent_session_turn(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
@@ -14901,11 +14077,7 @@ async fn open_nomi_core_remote(
     let remote_id = nomifun_agent_contracts::RemoteBindingId::from(
         remote_binding.remote_binding_id.clone(),
     );
-    let mcp_selection =
-        exact_session_mcp_selection(&state.mcp_server_repository, &owner, &projection.binding)
-            .await?;
     let mut create_request = projection.projection.request;
-    install_creation_mcp_selection(&mut create_request.extra, &mcp_selection)?;
     attach_session_metadata(
         &mut create_request.extra,
         &projection.binding,

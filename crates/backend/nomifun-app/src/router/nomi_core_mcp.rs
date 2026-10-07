@@ -103,13 +103,6 @@ impl NomiCoreMcpRuntimeBindingSource {
                 "The exact MCP server is not available",
             ));
         }
-        let config = format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at);
-        if resource.connection_config_ref.as_ref().map(AsRef::as_ref) != Some(config.as_str()) {
-            return Err(error(
-                "MCP_CONNECTION_CONFIG_STALE",
-                "MCP configuration changed after resource admission",
-            ));
-        }
         // Do not parse/require an unrelated tools catalog for resources-only servers.
         let transport =
             nomifun_mcp::McpServerTransport::from_db(&row.transport_type, &row.transport_config)
@@ -119,6 +112,16 @@ impl NomiCoreMcpRuntimeBindingSource {
                         "MCP transport configuration is unsupported",
                     )
                 })?;
+        let server_id = nomifun_api_types::McpServerId::parse(row.mcp_server_id.clone())
+            .map_err(|_| error("MCP_SERVER_CONFIG_INVALID", "MCP server identity is invalid"))?;
+        let config = nomifun_mcp::canonical_mcp_connection_config_ref(&server_id, &transport)
+            .map_err(|_| error("MCP_SERVER_CONFIG_INVALID", "MCP connection cannot be canonicalized"))?;
+        if resource.connection_config_ref.as_ref().map(AsRef::as_ref) != Some(config.as_str()) {
+            return Err(error(
+                "MCP_CONNECTION_CONFIG_STALE",
+                "MCP configuration changed after resource admission",
+            ));
+        }
         Ok(nomifun_mcp::McpServerBinding {
             server_id: row.mcp_server_id,
             server_owner_id: self.installation_owner.to_string(),
@@ -184,16 +187,6 @@ impl McpRuntimeBindingSource for NomiCoreMcpRuntimeBindingSource {
                 "the exact MCP server is not active",
             ));
         }
-        let config_ref = ConnectionConfigRef::from(format!(
-            "mcp-server:{}@{}",
-            row.mcp_server_id, row.updated_at
-        ));
-        if resource.connection_config_ref.as_ref() != Some(&config_ref) {
-            return Err(error(
-                "MCP_CONNECTION_CONFIG_STALE",
-                "MCP configuration changed after resource resolution",
-            ));
-        }
         if row.transport_config.len() > 256 * 1024
             || row
                 .tools
@@ -211,6 +204,18 @@ impl McpRuntimeBindingSource for NomiCoreMcpRuntimeBindingSource {
                 "MCP configuration or tool catalog is malformed",
             )
         })?;
+        let config_ref = nomifun_mcp::canonical_mcp_connection_config_ref(
+            &server.mcp_server_id,
+            &server.transport,
+        )
+        .map(ConnectionConfigRef::from)
+        .map_err(|_| error("MCP_SERVER_CONFIG_INVALID", "MCP connection cannot be canonicalized"))?;
+        if resource.connection_config_ref.as_ref() != Some(&config_ref) {
+            return Err(error(
+                "MCP_CONNECTION_CONFIG_STALE",
+                "MCP configuration changed after resource resolution",
+            ));
+        }
         if server.tools.len() > MAX_TOOLS {
             return Err(error(
                 "MCP_CATALOG_TOO_LARGE",
@@ -572,27 +577,6 @@ impl NomiCoreMcpHost {
         self.receipts.ensure_settled(owner, session).await
     }
 
-    pub(crate) async fn ensure_source_replay_safe(
-        &self,
-        owner: &str,
-        session: &str,
-        source: &str,
-    ) -> Result<(), AppError> {
-        self.ensure_memory_settled(owner, session)?;
-        self.receipts
-            .ensure_source_replay_safe(owner, session, source)
-            .await
-    }
-
-    pub(crate) async fn recovery_context(
-        &self,
-        owner: &str,
-        session: &str,
-    ) -> Result<Option<String>, AppError> {
-        self.ensure_memory_settled(owner, session)?;
-        self.receipts.recovery_context(owner, session).await
-    }
-
     fn ensure_memory_settled(&self, owner: &str, session: &str) -> Result<(), AppError> {
         let sessions = self
             .sessions
@@ -607,5 +591,63 @@ impl NomiCoreMcpHost {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use nomifun_db::{CreateMcpServerParams, SqliteMcpServerRepository, UpdateMcpServerParams};
+    use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn unchanged_probe_and_metadata_preserve_exact_connection_but_transport_edit_is_stale() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repository = Arc::new(SqliteMcpServerRepository::new(db.pool().clone()));
+        let tools = serde_json::json!([{
+            "name": "lookup", "description": "Lookup one value",
+            "input_schema": {"type": "object", "additionalProperties": false}
+        }]).to_string();
+        let row = repository.create(CreateMcpServerParams {
+            name: "test-server", description: None, enabled: true,
+            transport_type: "http", transport_config: r#"{"url":"https://example.test/mcp"}"#,
+            tools: Some(&tools), original_json: None, builtin: false,
+        }).await.unwrap();
+        let descriptor = super::super::nomi_core_mcp_catalog::server_tools(row.clone()).unwrap().remove(0);
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: "owner".into() };
+        let resource = TypedResourceBinding {
+            binding_id: "mcp-binding".into(), resource_kind: "mcp_server".into(),
+            resource_id: row.mcp_server_id.clone().into(), owner_id: principal.principal_id.clone(),
+            operations: BTreeSet::from(["connect".into(), "read".into(), "invoke".into()]),
+            connection_config_ref: Some(descriptor.connection_config_ref.clone()),
+            typed_parameters: BTreeMap::new(),
+        };
+        let source = NomiCoreMcpRuntimeBindingSource {
+            repository: repository.clone(), installation_owner: "owner".into(),
+        };
+        source.resolve(&descriptor.lock, &resource, &principal).await.unwrap();
+        assert!(repository.update_probe_if_revision(
+            &row.mcp_server_id, row.updated_at, "connected", Some(row.updated_at + 1), Some(&tools),
+        ).await.unwrap());
+        let probed = repository.find_by_id(&row.mcp_server_id).await.unwrap().unwrap();
+        assert!(probed.updated_at > row.updated_at);
+        assert_eq!(super::super::nomi_core_mcp_catalog::server_tools(probed).unwrap()[0].connection_config_ref,
+            descriptor.connection_config_ref);
+        source.resolve(&descriptor.lock, &resource, &principal).await.unwrap();
+        source.resource_server(&principal, &resource).await.unwrap();
+
+        repository.update(&row.mcp_server_id, UpdateMcpServerParams {
+            description: Some(Some("Updated presentation")), ..Default::default()
+        }).await.unwrap();
+        source.resolve(&descriptor.lock, &resource, &principal).await.unwrap();
+        source.resource_server(&principal, &resource).await.unwrap();
+
+        repository.update(&row.mcp_server_id, UpdateMcpServerParams {
+            transport_config: Some(r#"{"url":"https://changed.test/mcp"}"#), ..Default::default()
+        }).await.unwrap();
+        assert_eq!(source.resolve(&descriptor.lock, &resource, &principal).await.unwrap_err().canonical_code().as_ref(),
+            "MCP_CONNECTION_CONFIG_STALE");
+        assert_eq!(source.resource_server(&principal, &resource).await.unwrap_err().canonical_code().as_ref(),
+            "MCP_CONNECTION_CONFIG_STALE");
     }
 }

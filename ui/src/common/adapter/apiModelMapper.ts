@@ -17,7 +17,6 @@ import {
   parseExecutionStepId,
   parseExecutionTemplateId,
   parseMessageId,
-  parseMcpServerId,
   parseCompanionId,
   parseProviderId,
 } from '../types/ids';
@@ -200,56 +199,6 @@ export function fromApiConversation(raw: unknown): TChatConversation {
     extra = {
       ...extra,
       custom_workspace: workspace.length > 0 && !isTemporary,
-    };
-  }
-
-  if (extra && 'mcp_server_ids' in extra) {
-    if (!Array.isArray(extra.mcp_server_ids)) {
-      throw new TypeError('conversation extra.mcp_server_ids must be an array');
-    }
-    extra = {
-      ...extra,
-      mcp_server_ids: extra.mcp_server_ids.map(parseMcpServerId),
-    };
-  }
-
-  if (extra && 'mcp_statuses' in extra) {
-    if (!Array.isArray(extra.mcp_statuses)) {
-      throw new TypeError('conversation extra.mcp_statuses must be an array');
-    }
-    extra = {
-      ...extra,
-      mcp_statuses: extra.mcp_statuses.map((status) => {
-        if (!status || typeof status !== 'object' || Array.isArray(status)) {
-          throw new TypeError('conversation extra.mcp_statuses[] must be an object');
-        }
-        return {
-          ...status,
-          mcp_server_id: parseMcpServerId(
-            (status as Record<string, unknown>).mcp_server_id,
-          ),
-        };
-      }),
-    };
-  }
-
-  if (extra && 'session_mcp_servers' in extra) {
-    if (!Array.isArray(extra.session_mcp_servers)) {
-      throw new TypeError('conversation extra.session_mcp_servers must be an array');
-    }
-    extra = {
-      ...extra,
-      session_mcp_servers: extra.session_mcp_servers.map((server) => {
-        if (!server || typeof server !== 'object' || Array.isArray(server)) {
-          throw new TypeError('conversation extra.session_mcp_servers[] must be an object');
-        }
-        return {
-          ...server,
-          mcp_server_id: parseMcpServerId(
-            (server as Record<string, unknown>).mcp_server_id,
-          ),
-        };
-      }),
     };
   }
 

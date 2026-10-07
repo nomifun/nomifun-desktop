@@ -42,7 +42,6 @@ pub mod engine_model_facts;
 pub mod engine_tool_host;
 pub mod engine_kernel_session;
 mod engine_plugin_bindings;
-mod engine_git_lifecycle;
 mod engine_tool_discovery;
 mod engine_robot_tools;
 #[cfg(feature = "browser-use")]
@@ -62,12 +61,12 @@ mod agent_tool_surface;
 mod agent_tool_presentation;
 mod runtime_attachments;
 mod runtime_skills;
+mod session_capabilities;
 pub mod engine_skills;
 pub(crate) mod nomi_core_wave2;
 #[cfg(feature = "browser-use")]
 pub(crate) mod knowledge_browser;
 mod nomi_core_mcp;
-mod nomi_core_mcp_resources;
 mod mcp_effect_receipts;
 mod hosted_effect_receipts;
 mod idmm;

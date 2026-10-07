@@ -49,7 +49,7 @@ pub use session_ops::{
 };
 pub use agent_build_extra::{
     NomiBuildExtra, NomiGoalSpec, NomiMcpCapabilityPolicy, NomiRuntimeProfile,
-    SessionMcpServer, SessionMcpTransport, SlashCommandItem,
+    SlashCommandItem,
 };
 pub use agent_discovery::{
     AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,
@@ -207,8 +207,8 @@ pub use shell::{
 };
 pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, ExportSkillRequest,
-    ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest,
-    MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadBuiltinResourceRequest,
+    ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse,
+    NamedPathResponse, ReadBuiltinResourceRequest,
     ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse, SetSkillTagsRequest,
     SkillListItemResponse, SkillMarketItemResponse, SkillMarketMcpConfigRequest,

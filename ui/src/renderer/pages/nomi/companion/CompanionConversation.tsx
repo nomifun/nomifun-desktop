@@ -13,7 +13,6 @@ import type { IProvider, TChatConversation } from '@/common/config/storage';
 import NomiChat from '@/renderer/pages/conversation/platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '@/renderer/pages/conversation/platforms/nomi/useNomiModelSelection';
 import type { useCompanion } from '../useNomi';
-import CompanionCapabilityControls from './CompanionCapabilityControls';
 import CompanionAgentIndicator from './CompanionAgentIndicator';
 import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
@@ -101,7 +100,6 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
           )
           : undefined}
       agentSelectorNode={compact ? undefined : <CompanionAgentIndicator />}
-      capabilityControls={compact ? undefined : <CompanionCapabilityControls companion={companion} conversation={conversation} />}
       agent_name={profile?.name}
       creationEnabled={false}
       creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}

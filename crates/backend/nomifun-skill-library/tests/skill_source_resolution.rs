@@ -2,7 +2,7 @@ use nomifun_skill_library::{SkillPaths, skill_service};
 use tempfile::TempDir;
 
 #[tokio::test]
-async fn materialize_returns_only_listed_skill_source_paths() {
+async fn source_resolution_returns_only_listed_skill_source_paths() {
     let tmp = TempDir::new().unwrap();
     // Stage two builtin auto-inject skills on disk.
     let builtin_root = tmp.path().join("builtin-skills");
@@ -28,7 +28,7 @@ async fn materialize_returns_only_listed_skill_source_paths() {
         builtin_rules_dir: tmp.path().join("builtin-rules"),
     };
 
-    let resolved = skill_service::materialize_skills_for_agent(&paths, "conv-1", &["cron".to_owned()])
+    let resolved = skill_service::resolve_skill_sources(&paths, "conv-1", &["cron".to_owned()])
         .await
         .unwrap();
 

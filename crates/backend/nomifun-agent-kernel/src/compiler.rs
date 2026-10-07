@@ -6,7 +6,7 @@ use nomifun_agent_contracts::{
     DigestHex, ExecutionRoleId, InstallationRoleBinding,
     ModelRouteId, OperationId, PlatformConstraint,
     PrincipalRef, ResolvedCapability, ResolvedMcpToolLock, ResolvedRoleProviderLock,
-    ResolvedSkillLock, ResolvedSnapshotContent,
+    AgentSkillBinding, ResolvedPackageSkillLock, ResolvedSkillLock, ResolvedSnapshotContent,
     ResolvedSnapshotEnvelope, ResolvedSnapshotId, ResolvedSnapshotRef,
     ResourceBindingId, ResourceKind, RoleProviderSelection, RuntimeFeatureId,
     RuntimeProfileKind, RuntimeTarget, SkillId, TypedResourceBinding, VersionString,
@@ -443,7 +443,7 @@ impl AgentPresetCompiler {
                 authority_policies: authority_policies.clone(),
                 skill_ids: skill_locks
                     .iter()
-                    .map(|lock| lock.skill.id.clone())
+                    .map(|lock| lock.id().clone())
                     .collect(),
                 model_route_refs: request.revision.payload.model_route_refs.clone(),
                 resolved_role_providers: resolved_role_providers.clone(),
@@ -620,7 +620,8 @@ fn validate_revision_contribution_locks(
             });
         }
     }
-    for reference in &revision.payload.skill_bindings {
+    for binding in &revision.payload.skill_bindings {
+        let Some(reference) = binding.package_ref() else { continue; };
         let skill = registry
             .skill(&reference.id)
             .filter(|skill| skill.definition.version == reference.version)
@@ -856,12 +857,20 @@ fn resolved_capability_operation_lock(
 
 fn compile_skill_locks(
     registry: &MaterializedRegistry,
-    skill_refs: &[nomifun_agent_contracts::SkillRef],
+    skill_refs: &[AgentSkillBinding],
     direct_capability_ids: &BTreeSet<CapabilityId>,
     surface: &str,
 ) -> Result<Vec<ResolvedSkillLock>, KernelError> {
     let mut locks = Vec::with_capacity(skill_refs.len());
-    for skill_ref in skill_refs {
+    for binding in skill_refs {
+        let skill_ref = match binding {
+            AgentSkillBinding::Library { skill, selected, .. } => {
+                skill.validate().map_err(|error| KernelError::Digest { reason: error.message })?;
+                locks.push(ResolvedSkillLock::library_selected(skill.clone(), *selected));
+                continue;
+            }
+            AgentSkillBinding::Package(skill) => skill,
+        };
         let Some(skill) = registry.skill(&skill_ref.id) else {
             return Err(KernelError::SkillNotMaterialized {
                 skill_id: skill_ref.id.clone(),
@@ -890,7 +899,7 @@ fn compile_skill_locks(
                 });
             }
         }
-        locks.push(ResolvedSkillLock {
+        locks.push(ResolvedSkillLock::Package(ResolvedPackageSkillLock {
             skill: skill_ref.clone(),
             body_digest: skill.definition.body_ref.digest.clone(),
             contribution_lock: skill.contribution_lock.clone(),
@@ -903,9 +912,9 @@ fn compile_skill_locks(
                 .iter()
                 .map(|capability| capability.id.clone())
                 .collect(),
-        });
+        }));
     }
-    locks.sort_by(|left, right| left.skill.id.cmp(&right.skill.id));
+    locks.sort_by(|left, right| left.id().cmp(right.id()));
     Ok(locks)
 }
 

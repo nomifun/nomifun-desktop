@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{CanonicalDigestError, digest_payload};
+use crate::digest::{CanonicalDigestError, digest_payload, digest_bytes};
 use crate::package::{
     CapabilityActionDescriptor, CapabilityRef, ExactRoleProviderRef, PackageRef,
     PluginSourceMetadata, RoleProviderSelection, SkillRef,
@@ -47,6 +47,8 @@ pub fn is_direct_creation_agent<'a>(capabilities: impl IntoIterator<Item = &'a s
         match capability {
             "creation.media" => has_generation = true,
             "creative.workshop" | "office" => {}
+            "agent.tool-discovery" => {}
+            id if id.starts_with("nomi.mcp.v1.") => {}
             _ => return false,
         }
     }
@@ -219,7 +221,7 @@ pub struct AgentPresetRevisionPayload {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_route_records: BTreeMap<String, ChatRouteRecord>,
     pub enabled_capabilities: Vec<CapabilitySelection>,
-    pub skill_bindings: Vec<SkillRef>,
+    pub skill_bindings: Vec<AgentSkillBinding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system_role_provider_overrides:
         BTreeMap<crate::ExecutionRoleId, RoleProviderSelection>,
@@ -270,6 +272,13 @@ impl AgentPresetRevision {
 
     pub fn validate(&self) -> Result<(), PresetContractViolation> {
         self.payload.runtime_policy.validate()?;
+        validate_library_skill_inventory(self.payload.skill_bindings.iter().filter_map(|binding| match binding { AgentSkillBinding::Library { skill, .. } => Some(skill), _ => None }))?;
+        let mut skill_ids = BTreeSet::new();
+        for binding in &self.payload.skill_bindings {
+            if !skill_ids.insert(binding.id()) { return Err(contribution_lock_violation("duplicate Skill binding")); }
+            if let AgentSkillBinding::Library { skill, .. } = binding { skill.validate()?; }
+        }
+
         validate_chat_route_records_for_revision(
             &self.payload,
             Some(&self.reference.revision_id()),
@@ -562,9 +571,149 @@ impl ResolvedCapability {
     }
 }
 
+/// An exact package selection or host-captured current library content.
+/// Library data grants no executable capabilities and never impersonates a package.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum AgentSkillBinding {
+    Package(SkillRef),
+    Library { kind: LibrarySkillKind, skill: FrozenLibrarySkill, #[serde(default)] selected: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySkillKind { Library }
+
+impl AgentSkillBinding {
+    pub fn package(skill: SkillRef) -> Self { Self::Package(skill) }
+    pub fn library(skill: FrozenLibrarySkill) -> Self { Self::Library { kind: LibrarySkillKind::Library, skill, selected: false } }
+    pub fn library_selected(skill: FrozenLibrarySkill, selected: bool) -> Self { Self::Library { kind: LibrarySkillKind::Library, skill, selected } }
+    pub fn id(&self) -> &crate::SkillId {
+        match self { Self::Package(skill) => &skill.id, Self::Library { skill, .. } => &skill.id }
+    }
+    pub fn package_ref(&self) -> Option<&SkillRef> {
+        match self { Self::Package(skill) => Some(skill), Self::Library { .. } => None }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySkillSource { Custom, Builtin, BuiltinAuto, Cron }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FrozenSkillContent {
+    Text { text: String },
+    Image { media_type: String, data_base64: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ResolvedSkillLock {
+pub struct FrozenSkillResource {
+    pub digest: DigestHex,
+    pub content: FrozenSkillContent,
+}
+
+impl FrozenSkillResource {
+    pub fn new(content: FrozenSkillContent) -> Result<Self, CanonicalDigestError> {
+        Ok(Self { digest: digest_payload(&content)?, content })
+    }
+}
+
+/// Immutable data in the canonical Revision/Snapshot, never a mutable path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenLibrarySkill {
+    pub id: crate::SkillId,
+    pub name: String,
+    pub description: String,
+    pub source: LibrarySkillSource,
+    pub body: String,
+    pub body_digest: DigestHex,
+    pub resources: BTreeMap<String, FrozenSkillResource>,
+    pub source_digest: DigestHex,
+}
+
+impl FrozenLibrarySkill {
+    pub fn new(name: String, description: String, source: LibrarySkillSource, body: String,
+        resources: BTreeMap<String, FrozenSkillResource>) -> Result<Self, CanonicalDigestError> {
+        let mut skill = Self { id: crate::SkillId::from(format!("library:{name}")), name, description,
+            source, body_digest: digest_bytes(body.as_bytes()), body, resources, source_digest: DigestHex::from("") };
+        skill.source_digest = skill.content_digest()?;
+        Ok(skill)
+    }
+    pub fn content_digest(&self) -> Result<DigestHex, CanonicalDigestError> {
+        // The source digest covers the actual frozen data, including all resource digests.
+        digest_payload(&(&self.id, &self.name, &self.description, self.source, &self.body,
+            &self.body_digest, &self.resources))
+    }
+    pub fn validate(&self) -> Result<(), PresetContractViolation> {
+        let invalid = || PresetContractViolation { code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+            message: format!("library Skill {} has invalid frozen content", self.id.as_ref()) };
+        if self.name.is_empty() || self.name.len() > 128 || self.name.trim() != self.name
+            || self.name.contains(['/', '\\', ':']) || self.name.contains("..") || self.name.chars().any(char::is_control)
+            || self.id.as_ref() != format!("library:{}", self.name) || self.description.len() > 2048
+            || self.body.trim().is_empty() || self.body.len() > 128 * 1024
+            || digest_bytes(self.body.as_bytes()) != self.body_digest || self.resources.len() > 64
+            || self.content_digest().map_err(|_| invalid())? != self.source_digest { return Err(invalid()); }
+        let mut text_bytes = 0usize; let mut image_bytes = 0usize; let mut images = 0usize;
+        for (path, resource) in &self.resources {
+            if path.is_empty() || path.len() > 128 || path.starts_with('/') || path.contains('\\')
+                || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+                || path.chars().any(char::is_control) || path == "SKILL.md"
+                || digest_payload(&resource.content).map_err(|_| invalid())? != resource.digest { return Err(invalid()); }
+            match &resource.content {
+                FrozenSkillContent::Text { text } => { if text.len() > 256 * 1024 { return Err(invalid()); } text_bytes += text.len(); }
+                FrozenSkillContent::Image { media_type, data_base64 } => {
+                    if !matches!(media_type.as_str(), "image/png" | "image/jpeg") || data_base64.is_empty()
+                        || data_base64.len() > 2 * 1024 * 1024 { return Err(invalid()); }
+                    images += 1; image_bytes += data_base64.len();
+                }
+            }
+        }
+        if text_bytes > 512 * 1024 || images > 4 || image_bytes > 8 * 1024 * 1024 { return Err(invalid()); }
+        Ok(())
+    }
+}
+
+/// The complete global inventory has one bounded Snapshot envelope. Bodies
+/// remain available through the native reader rather than a giant prompt.
+pub fn validate_library_skill_inventory<'a>(skills: impl IntoIterator<Item = &'a FrozenLibrarySkill>) -> Result<(), PresetContractViolation> {
+    let mut count = 0usize; let mut resources = 0usize; let mut text = 0usize; let mut images = 0usize; let mut image_bytes = 0usize;
+    for skill in skills {
+        count += 1; resources += 1 + skill.resources.len(); text += skill.body.len();
+        for resource in skill.resources.values() {
+            match &resource.content { FrozenSkillContent::Text { text: content } => text += content.len(),
+                FrozenSkillContent::Image { data_base64, .. } => { images += 1; image_bytes += data_base64.len(); } }
+        }
+        if count > 128 || resources > 4096 || text > 8 * 1024 * 1024 || images > 64 || image_bytes > 16 * 1024 * 1024 {
+            return Err(contribution_lock_violation("global Skill inventory exceeds the bounded Snapshot envelope"));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ResolvedSkillLock {
+    Package(ResolvedPackageSkillLock),
+    Library { kind: LibrarySkillKind, skill: FrozenLibrarySkill, #[serde(default)] selected: bool },
+}
+
+impl ResolvedSkillLock {
+    pub fn library(skill: FrozenLibrarySkill) -> Self { Self::Library { kind: LibrarySkillKind::Library, skill, selected: false } }
+    pub fn library_selected(skill: FrozenLibrarySkill, selected: bool) -> Self { Self::Library { kind: LibrarySkillKind::Library, skill, selected } }
+    pub fn id(&self) -> &crate::SkillId {
+        match self { Self::Package(lock) => &lock.skill.id, Self::Library { skill, .. } => &skill.id }
+    }
+    pub fn package_lock(&self) -> Option<&ResolvedPackageSkillLock> {
+        match self { Self::Package(lock) => Some(lock), Self::Library { .. } => None }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedPackageSkillLock {
     pub skill: SkillRef,
     pub body_digest: DigestHex,
     pub required_capabilities: BTreeSet<crate::CapabilityId>,
@@ -679,24 +828,23 @@ impl ResolvedSnapshotEnvelope {
             .collect();
         validate_context_order(&self.content.context_order, &order_candidates)?;
         validate_contribution_order(&self.content.middleware_order, &order_candidates, "middleware_order")?;
+        validate_library_skill_inventory(self.content.skill_locks.iter().filter_map(|lock| match lock { ResolvedSkillLock::Library { skill, .. } => Some(skill), _ => None }))?;
         let mut skill_ids = BTreeSet::new();
-        for lock in &self.content.skill_locks {
-            lock.contribution_lock.validate()?;
-            if !skill_ids.insert(&lock.skill.id)
-                || lock.skill.id.as_ref().trim().is_empty()
-                || lock.skill.version.as_ref().trim().is_empty()
-                || lock.resolved_mount_id.as_ref().trim().is_empty()
-                || lock.resolved_source.source_identity.trim().is_empty()
-                || !is_lowercase_hex_digest(&lock.body_digest)
-                || !is_lowercase_hex_digest(&lock.target_artifact_digest)
-                || (lock.contribution_lock.source_kind == ContributionSourceKind::AgentModule
-                    && lock.contribution_lock.mount_id.as_ref() != Some(&lock.resolved_mount_id))
-                || !lock.required_capabilities.is_subset(&self.content.capability_allowlist)
-            {
-                return Err(PresetContractViolation {
-                    code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
-                    message: format!("Skill {} has invalid identity, provenance or dependencies", lock.skill.id.as_ref()),
-                });
+        for selected in &self.content.skill_locks {
+            if !skill_ids.insert(selected.id()) { return Err(contribution_lock_violation("duplicate selected Skill")); }
+            match selected {
+                ResolvedSkillLock::Library { skill, .. } => skill.validate()?,
+                ResolvedSkillLock::Package(lock) => {
+                    lock.contribution_lock.validate()?;
+                    if lock.skill.id.as_ref().trim().is_empty() || lock.skill.version.as_ref().trim().is_empty()
+                        || lock.resolved_mount_id.as_ref().trim().is_empty() || lock.resolved_source.source_identity.trim().is_empty()
+                        || !is_lowercase_hex_digest(&lock.body_digest) || !is_lowercase_hex_digest(&lock.target_artifact_digest)
+                        || (lock.contribution_lock.source_kind == ContributionSourceKind::AgentModule
+                            && lock.contribution_lock.mount_id.as_ref() != Some(&lock.resolved_mount_id))
+                        || !lock.required_capabilities.is_subset(&self.content.capability_allowlist) {
+                        return Err(contribution_lock_violation(format!("Skill {} has invalid identity, provenance or dependencies", lock.skill.id.as_ref())));
+                    }
+                }
             }
         }
         validate_resolved_role_provider_locks(
@@ -1933,5 +2081,56 @@ mod tests {
             .canonical_error_codes
             .iter()
             .all(|code| code.as_ref() == code.as_ref().to_ascii_uppercase()));
+    }
+}
+
+#[cfg(test)]
+mod frozen_skill_tests {
+    use super::*;
+    fn library() -> FrozenLibrarySkill {
+        FrozenLibrarySkill::new("guide".into(), "Use the guide".into(), LibrarySkillSource::Custom,
+            "---\nallowed-tools: everything\nhooks: inert\n---\nRead the references.".into(),
+            BTreeMap::from([("references/guide.md".into(), FrozenSkillResource::new(
+                FrozenSkillContent::Text { text: "Exact source".into() }).unwrap())])).unwrap()
+    }
+    #[test]
+    fn current_package_skill_json_stays_exact_and_unknown_fields_fail_closed() {
+        let json = serde_json::json!({"id":"current.guide","version":"1.0.0"});
+        let binding: AgentSkillBinding = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(binding).unwrap(), json);
+        assert!(serde_json::from_value::<AgentSkillBinding>(serde_json::json!({"id":"current.guide","version":"1.0.0","body":"forged"})).is_err());
+        let binding = AgentSkillBinding::library(library());
+        let mut json = serde_json::to_value(&binding).unwrap();
+        assert_eq!(json["kind"], "library");
+        assert_eq!(serde_json::from_value::<AgentSkillBinding>(json.clone()).unwrap(), binding);
+        json["capabilities"] = serde_json::json!(["fake.authority"]);
+        assert!(serde_json::from_value::<AgentSkillBinding>(json).is_err());
+    }
+    #[test]
+    fn current_package_lock_json_retains_the_existing_flat_shape() {
+        let package = ResolvedPackageSkillLock { skill: SkillRef { id: "current.guide".into(), version: "1.0.0".into() },
+            body_digest: "a".repeat(64).into(), required_capabilities: BTreeSet::new(),
+            contribution_lock: ContributionLock { source_kind: ContributionSourceKind::PlatformBuiltin, source_identity: "bundled:current".into(),
+                mount_id: None, mcp_binding_id: None, contribution_id: "skill:current.guide".into(), contract_digest: "b".repeat(64).into() },
+            resolved_mount_id: "current-mount".into(), resolved_source: PluginSourceMetadata { source_kind: crate::PluginSourceKind::Bundled,
+                source_identity: "bundled:current".into(), source_digest: None }, target_artifact_digest: "c".repeat(64).into() };
+        let existing = serde_json::to_value(&package).unwrap();
+        let decoded: ResolvedSkillLock = serde_json::from_value(existing.clone()).unwrap();
+        assert_eq!(decoded.package_lock(), Some(&package));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), existing);
+        assert!(existing.get("kind").is_none());
+    }
+    #[test]
+    fn library_body_resources_and_identity_are_all_frozen() {
+        let original = library(); original.validate().unwrap();
+        let mut altered = original.clone(); altered.body.push_str(" changed"); assert!(altered.validate().is_err());
+        let mut altered = original.clone(); altered.name = "other".into(); assert!(altered.validate().is_err());
+        let mut altered = original.clone();
+        altered.resources.get_mut("references/guide.md").unwrap().content = FrozenSkillContent::Text { text: "changed".into() };
+        assert!(altered.validate().is_err());
+        let mut altered = original;
+        altered.resources.insert("../escape".into(), FrozenSkillResource::new(FrozenSkillContent::Text { text: "escape".into() }).unwrap());
+        altered.source_digest = altered.content_digest().unwrap();
+        assert!(altered.validate().is_err());
     }
 }

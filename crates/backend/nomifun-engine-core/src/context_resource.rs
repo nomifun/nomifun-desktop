@@ -3,6 +3,9 @@
 //! when it admits them into model context.
 #[derive(Clone, Debug)]
 pub struct EngineContextResource {
+    /// Whether this entry appears in the initial context index. Supporting
+    /// resources remain readable by exact ID advertised by their Skill body.
+    pub indexed: bool,
     pub label: String,
     pub provenance: String,
     pub content: EngineContextContent,

@@ -230,6 +230,22 @@
         ]
       },
       {
+        "operation_id": "agent_sessions.capability_selection.get",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/capability-selection",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "agent_sessions.capability_selection.update",
+        "method": "PUT",
+        "path": "/api/agent-sessions/{agent_session_id}/capability-selection",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
         "operation_id": "agent_sessions.turns.create",
         "method": "POST",
         "path": "/api/agent-sessions/{agent_session_id}/turns",
@@ -483,5 +499,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "e3079ba597a2248631538342d78812738e2fc7a940f414d9cbe15c0023ee17b9"
+  "payload_digest": "0dff87b295c7e967afb84ad461cbf6da41cec0960749137fd525990622d589d8"
 }

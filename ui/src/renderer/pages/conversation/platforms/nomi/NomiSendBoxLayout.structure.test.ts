@@ -90,7 +90,7 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('collaborationControlNode')).toBe(false);
     expect(nomiChatSource.includes('collaboratorSelectorNode')).toBe(false);
     expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
-    expect(sendBoxSource.includes('sideTools={compactProductComposer ? undefined : capabilityControls}')).toBe(true);
+    expect(sendBoxSource.includes('sideTools={compactProductComposer ? undefined : <SessionCapabilityPicker')).toBe(true);
   });
 
   test('does not load frozen collaboration configuration solely for the conversation composer', () => {
@@ -133,7 +133,7 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('modelLocked')).toBe(false);
     expect(sendBoxSource.includes('<NomiModelSelector')).toBe(true);
     expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
-    expect(sendBoxSource.includes('<SessionCapabilityPicker')).toBe(false);
+    expect(sendBoxSource.includes('<SessionCapabilityPicker')).toBe(true);
     expect(sendBoxSource.includes('updateCapabilitySelection')).toBe(false);
     expect(selectorSource.includes('const modelControl = disabled ? modelTrigger')).toBe(true);
     expect(selectorSource.indexOf('{modelControl}')).toBeLessThan(
@@ -177,9 +177,10 @@ describe('Nomi sendbox control layout', () => {
 
     expect(initialMessageBlock.includes('!initialDeliveryReady')).toBe(true);
     expect(initialMessageBlock.includes('initialDeliveryReady')).toBe(true);
+    expect(initialMessageBlock.includes('sessionCapabilities.loading || !sessionCapabilities.state')).toBe(true);
     expect(initialMessageBlock.includes('initialOnly: true')).toBe(true);
     expect(source.includes('setInitialDeliveryReady(true)')).toBe(true);
-    expect(source.includes('setAgentWarmed(warmed)')).toBe(true);
+    expect(source.includes('useSlashCommands')).toBe(false);
   });
 
   test('consuming the Agent identity draft cannot strand the Guid initial message', () => {

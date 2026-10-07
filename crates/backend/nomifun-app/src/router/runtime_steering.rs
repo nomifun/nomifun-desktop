@@ -89,7 +89,7 @@ impl ConversationRuntimeHost {
         let capabilities = self.capability_state.snapshot().map_err(error)?;
         for input in recovery.as_ref().map(|recovery| recovery.prepared_inputs()).unwrap_or_default() {
             self.skills.validate_active(&input.inject_skills, &capabilities.active)?;
-            let selected = self.skills.turn_instructions(&input.inject_skills)?;
+            let selected = self.skills.explicit_instructions(&input.inject_skills)?;
             if input.prepared_skill_instructions != selected {
                 return Err(error("recovery Skill body differs from frozen selected Skill"));
             }
@@ -111,7 +111,7 @@ impl ConversationRuntimeHost {
             let files = super::super::runtime_attachments::references(value)?;
             let inject_skills = super::super::runtime_attachments::selected_skills(value)?;
             self.skills.validate_active(&inject_skills, &capabilities.active)?;
-            let prepared_skill_instructions = self.skills.turn_instructions(&inject_skills)?;
+            let prepared_skill_instructions = self.skills.explicit_instructions(&inject_skills)?;
             let images = super::super::runtime_attachments::prepare_images(&files, &self.options.extra, self.route_image_input).await?;
             let input = AgentSteeringInput { receipt_operation_id: event.event_id.as_ref().to_owned(), message_id: event.event_id.as_ref().to_owned(),
                 text: text.to_owned(), files, inject_skills, image_count: images.len(), prepared_images: images,
@@ -284,7 +284,7 @@ impl ConversationRuntimeHost {
         }
         let capabilities = self.capability_state.snapshot().map_err(error)?;
         self.skills.validate_active(&inject_skills, &capabilities.active)?;
-        let prepared_skill_instructions = self.skills.turn_instructions(&inject_skills)?;
+        let prepared_skill_instructions = self.skills.explicit_instructions(&inject_skills)?;
         let mut input = AgentSteeringInput {
             receipt_operation_id: delivery.receipt_operation_id,
             message_id,
@@ -444,7 +444,7 @@ impl AgentInputPort for HostPort {
         let capabilities = host.capability_state.snapshot().map_err(engine_error)?;
         for input in &turn.steering.pending {
             host.skills.validate_active(&input.inject_skills, &capabilities.active).map_err(engine_error)?;
-            if input.prepared_skill_instructions != host.skills.turn_instructions(&input.inject_skills).map_err(engine_error)? {
+            if input.prepared_skill_instructions != host.skills.explicit_instructions(&input.inject_skills).map_err(engine_error)? {
                 return Err(engine_error("queued Skill body differs from frozen active selection"));
             }
         }

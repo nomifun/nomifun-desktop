@@ -123,9 +123,6 @@ fn constraints_allow_action(
 
 #[path = "engine_mcp_resources.rs"]
 mod mcp_resources;
-pub(crate) use mcp_resources::{page as project_resource_page, validate_page as validate_resource_page, resource_operation as mcp_resource_operation};
-pub(crate) use mcp_resources::{resource_server_ids, select_resource_server};
-pub(crate) use mcp_resources::validate_owner_result as validate_resource_owner_result;
 
 struct Turn {
     operation: String,
