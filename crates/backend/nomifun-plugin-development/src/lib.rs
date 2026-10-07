@@ -41,10 +41,19 @@ impl CapabilityHandler for Handler {
             return Err(KernelError::CapabilityExecution { reason: "Unknown Plugin development action".into() });
         }
         let action = context.action_id.as_ref().strip_prefix("plugin.development/").expect("checked action");
+        if action == "plan" {
+            let diagnostics = plan_case_diagnostics(&input.0["plan"]);
+            if !diagnostics.is_empty() {
+                return Err(KernelError::CapabilityExecution {
+                    reason: bounded(&format!("PLUGIN_INVALID_INPUT: {}", diagnostics.join("; ")), 2048),
+                });
+            }
+        }
         let validator = jsonschema::validator_for(&input_schema(action))
             .map_err(|error| KernelError::CapabilityExecution { reason: error.to_string() })?;
-        validator.validate(&input.0)
-            .map_err(|error| KernelError::CapabilityExecution { reason: format!("PLUGIN_INVALID_INPUT: {error}") })?;
+        if let Some(reason) = validation_message(&validator, &input.0) {
+            return Err(KernelError::CapabilityExecution { reason });
+        }
         if serde_json::to_vec(&input.0).map_or(true, |bytes| bytes.len() > 4 * 1024 * 1024) {
             return Err(KernelError::CapabilityExecution { reason: "Plugin tool input exceeds 4 MiB".into() });
         }
@@ -54,6 +63,26 @@ impl CapabilityHandler for Handler {
 }
 
 pub fn action_id(action: &str) -> String { format!("{MODULE_ID}/{action}") }
+
+/// Model-supplied values can be arbitrarily large; bound diagnostics on a
+/// char boundary so a rejection stays small instead of echoing the input.
+fn bounded(text: &str, max_chars: usize) -> String {
+    let mut bounded: String = text.chars().take(max_chars).collect();
+    if text.chars().nth(max_chars).is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+/// Up to 8 schema issues as "path: message", so one rejection names every
+/// actual problem instead of forcing repeated blind retries.
+fn validation_message(validator: &jsonschema::Validator, instance: &Value) -> Option<String> {
+    let mut issues = validator.iter_errors(instance).take(8).peekable();
+    issues.peek()?;
+    Some(bounded(&format!("PLUGIN_INVALID_INPUT: {}", issues
+        .map(|error| bounded(&format!("{}: {}", error.instance_path(), error), 256))
+        .collect::<Vec<_>>().join("; ")), 2048))
+}
 
 pub fn registration(host: Arc<dyn PluginDevelopmentHost>) -> Result<PluginRegistration, String> {
     const CAPS: &[CapabilitySpec] = &[CapabilitySpec::tool(MODULE_ID, EffectClass::WriteDurable, &[])];
@@ -173,8 +202,8 @@ pub fn input_schema(action: &str) -> Value {
         "plan" => "Before editing, record every requested output, this draft's output key, required features and exact business cases. Include restart/reopen assertions for persistence. The accepted plan cannot be weakened during repair.",
         "preview" => "Run the actual draft with temporary storage; UI handshake/business tests are required before UI delivery.",
         "install" => "Save the exact verified draft. May return confirmation_required; the user must approve actual additional privileges.",
-        "test_action" => "Execute a required business case on the real preview Service. Compare actual output with the requirement's expected result; do not weaken the oracle.",
-        "test_ui" => "Run typed DOM interactions on the real conversation preview. text/count assert the exact requirement result; include reopen followed by an assertion to verify persistence. No arbitrary JavaScript.",
+        "test_action" => "Execute a business case on the real preview Service. Planned cases retain their exact oracle; extra named cases are diagnostic probes and do not add delivery requirements.",
+        "test_ui" => "Run typed DOM interactions on the real conversation preview. Planned cases retain their exact steps; extra named cases are diagnostic probes. text/count assert the exact result; include reopen followed by an assertion to verify persistence. Failure diagnostics report the step, expected and actual values. No arbitrary JavaScript.",
         "open" => "Open a managed draft for this conversation. Replays use the same draft; editing requires the exact installed revision.",
         _ => DESCRIPTION,
     }.into());
@@ -183,10 +212,37 @@ pub fn input_schema(action: &str) -> Value {
 
 pub fn capability_ids() -> BTreeSet<CapabilityId> { BTreeSet::from([MODULE_ID.into()]) }
 
+fn plan_action_case_schema() -> Value {
+    object(json!({"kind":{"const":"action"},"action":string(),"input":{},"expected_output":{},"restart":{"type":"boolean"}}),
+        &["kind","action","input","expected_output"])
+}
+fn plan_ui_case_schema() -> Value {
+    object(json!({"kind":{"const":"ui"},"steps":input_schema("test_ui")["properties"]["steps"]}),&["kind","steps"])
+}
+/// Precise per-case diagnostics for the plan's oneOf case branches. Errors
+/// carry their full /plan/cases/<name> path so a rejected plan names the
+/// exact property instead of collapsing into an opaque oneOf failure.
+fn plan_case_diagnostics(plan: &Value) -> Vec<String> {
+    let mut diagnostics=Vec::new();
+    let Some(cases)=plan.get("cases").and_then(Value::as_object) else { return diagnostics; };
+    let action=jsonschema::validator_for(&plan_action_case_schema());
+    let ui=jsonschema::validator_for(&plan_ui_case_schema());
+    for (name,case) in cases {
+        let validator=match case.get("kind").and_then(Value::as_str) {
+            Some("action")=>action.as_ref().ok(),
+            Some("ui")=>ui.as_ref().ok(),
+            _=>None,
+        };
+        match validator {
+            Some(validator)=>diagnostics.extend(validator.iter_errors(case).take(8)
+                .map(|error|bounded(&format!("/plan/cases/{name}{}: {error}",error.instance_path()),256))),
+            None=>diagnostics.push(bounded(&format!("/plan/cases/{name}/kind: must be \"ui\" or \"action\""),256)),
+        }
+    }
+    diagnostics
+}
+
 pub fn plan_schema() -> Value {
-    let action=object(json!({"kind":{"const":"action"},"action":string(),"input":{},"expected_output":{},"restart":{"type":"boolean"}}),
-        &["kind","action","input","expected_output"]);
-    let ui=object(json!({"kind":{"const":"ui"},"steps":input_schema("test_ui")["properties"]["steps"]}),&["kind","steps"]);
     object(json!({
         "summary":string(),"output_key":string(),
         "current_conversation_case":object(json!({"action":string(),"input":{},"expected_output":{}}),&["action","input","expected_output"]),
@@ -197,7 +253,7 @@ pub fn plan_schema() -> Value {
             "description":string(),"case_names":{"type":"array","minItems":1,"maxItems":32,"uniqueItems":true,"items":string()},
             "requires_persistence":{"type":"boolean"}
         }),&["description","case_names"])},
-        "cases":{"type":"object","minProperties":1,"maxProperties":64,"propertyNames":string(),"additionalProperties":{"oneOf":[action,ui]}}
+        "cases":{"type":"object","minProperties":1,"maxProperties":64,"propertyNames":string(),"additionalProperties":{"oneOf":[plan_action_case_schema(),plan_ui_case_schema()]}}
     }),&["summary","output_key","outputs","features","cases"])
 }
 
@@ -206,36 +262,51 @@ pub fn validate_plan(plan: &Value) -> Result<(), String> {
         .validate(plan).map_err(|error|error.to_string())?;
     let mut outputs=BTreeSet::new();
     for output in plan["outputs"].as_array().expect("validated") {
-        if !outputs.insert(output["key"].as_str().expect("validated")) { return Err("Duplicate output key".into()); }
+        let key=output["key"].as_str().expect("validated");
+        if !outputs.insert(key) { return Err(format!("output '{key}': duplicate output key")); }
     }
-    if !outputs.contains(plan["output_key"].as_str().expect("validated")) { return Err("The draft must identify one required output".into()); }
+    let output_key=plan["output_key"].as_str().expect("validated");
+    if !outputs.contains(output_key) { return Err(format!("output_key '{output_key}': the draft must identify one declared output")); }
     let cases=plan["cases"].as_object().expect("validated");
     let kind=plan["outputs"].as_array().expect("validated").iter().find(|output|output["key"]==plan["output_key"])
         .expect("validated output key")["kind"].as_str().expect("validated");
     let ui=cases.values().any(|case|case["kind"]=="ui");
     let service=cases.values().any(|case|case["kind"]=="action");
     if kind=="ui" && (!ui || service) || kind=="headless" && (!service || ui) || kind=="mixed" && (!ui || !service) {
-        return Err("Cases must cover the planned UI/Service shape".into());
+        return Err(format!("output '{output_key}' kind '{kind}': cases must cover the planned UI/Service shape"));
     }
-    for case in cases.values().filter(|case|case["kind"]=="ui") {
+    // The accepted plan is immutable; a non-canonical action id here would
+    // make the plan permanently unsatisfiable after a manifest rename.
+    for (name,case) in cases.iter() {
+        if case["kind"]=="action" && let Some(action)=case["action"].as_str()
+            && nomifun_agent_contracts::plugin::validate_machine_id(action,"actions.<id>",96,false).is_err() {
+            return Err(format!("case {name}: action '{action}' must be a lowercase machine identifier such as trim_and_uppercase"));
+        }
+    }
+    if let Some(action)=plan["current_conversation_case"]["action"].as_str()
+        && nomifun_agent_contracts::plugin::validate_machine_id(action,"actions.<id>",96,false).is_err() {
+        return Err(format!("current_conversation_case: action '{action}' must be a lowercase machine identifier such as trim_and_uppercase"));
+    }
+    for (name,case) in cases.iter().filter(|(_,case)|case["kind"]=="ui") {
         let steps=case["steps"].as_array().expect("validated");
         if !steps.iter().any(|step|step["operation"]=="text" || step["operation"]=="count") {
-            return Err("UI cases require a concrete result assertion".into());
+            return Err(format!("case {name}: UI cases require a concrete result assertion (text or count)"));
         }
-        for step in steps {
+        for (index,step) in steps.iter().enumerate() {
             if step["operation"]!="reopen" && step["selector"].as_str().is_none_or(str::is_empty) {
-                return Err("UI steps require a selector".into());
+                return Err(format!("case {name} step {index}: UI steps require a selector"));
             }
             if matches!(step["operation"].as_str(),Some("fill"|"text")) && !step["value"].is_string()
                 || step["operation"]=="count" && step["value"].as_u64().is_none() {
-                return Err("UI steps require correctly typed inputs and expectations".into());
+                return Err(format!("case {name} step {index}: UI steps require correctly typed inputs and expectations"));
             }
         }
     }
     for feature in plan["features"].as_array().expect("validated") {
+        let description=feature["description"].as_str().expect("validated");
         let names=feature["case_names"].as_array().expect("validated");
-        if names.iter().any(|name|!cases.contains_key(name.as_str().expect("validated"))) {
-            return Err("Every required feature must link to a declared case".into());
+        if let Some(missing)=names.iter().filter_map(Value::as_str).find(|name|!cases.contains_key(*name)) {
+            return Err(format!("feature '{description}': case '{missing}' is not a declared case"));
         }
         if feature["requires_persistence"]==json!(true) && !names.iter().any(|name| {
             let case=&cases[name.as_str().expect("validated")];
@@ -245,7 +316,7 @@ pub fn validate_plan(plan: &Value) -> Result<(), String> {
                 if step["operation"]=="reopen" { reopened=true; }
                 reopened && (step["operation"]=="text" || step["operation"]=="count")
             })
-        }) { return Err("Persistence requires a case that reads after restart/reopen".into()); }
+        }) { return Err(format!("feature '{description}': persistence requires a case that reads after restart/reopen")); }
     }
     Ok(())
 }
@@ -253,10 +324,138 @@ pub fn validate_plan(plan: &Value) -> Result<(), String> {
 pub fn plan_evidence_complete(report: &Value) -> bool {
     let plan=&report["plan"];
     if validate_plan(plan).is_err() { return false; }
+    // Only the immutable plan defines required cases. Diagnostic probes may
+    // fail without changing delivery, while every declared case remains due
+    // even when no feature happens to reference it.
+    if !plan["cases"].as_object().expect("validated").keys()
+        .all(|name|report["cases"][name]["passed"]==json!(true)) { return false; }
     plan["features"].as_array().expect("validated").iter().all(|feature| {
         let names=feature["case_names"].as_array().expect("validated");
         names.iter().all(|name|report["cases"][name.as_str().expect("validated")]["passed"]==json!(true))
             && (feature["requires_persistence"]!=json!(true) || names.iter().any(|name|
                 report["cases"][name.as_str().expect("validated")]["persistence_checked"]==json!(true)))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_plan() -> Value {
+        json!({
+            "summary":"Deliver a todo plugin.",
+            "output_key":"todo",
+            "outputs":[{"key":"todo","kind":"ui"}],
+            "features":[{"description":"persist","case_names":["add_todo"],"requires_persistence":true}],
+            "cases":{"add_todo":{"kind":"ui","steps":[
+                {"operation":"fill","selector":"#input","value":"milk"},
+                {"operation":"click","selector":"#add"},
+                {"operation":"reopen"},
+                {"operation":"text","selector":"#list","value":"milk"}
+            ]}}
+        })
+    }
+
+    #[test]
+    fn plan_case_diagnostics_names_the_offending_step_property() {
+        let mut plan=valid_plan();
+        plan["cases"]["add_todo"]["steps"][3]["description"]=json!("oops");
+        let diagnostics=plan_case_diagnostics(&plan);
+        assert_eq!(diagnostics.len(),1);
+        assert!(diagnostics[0].starts_with("/plan/cases/add_todo/steps/3"),"{diagnostics:?}");
+        assert!(diagnostics[0].contains("'description'"),"{diagnostics:?}");
+    }
+
+    #[test]
+    fn plan_case_diagnostics_rejects_an_unknown_case_kind() {
+        let mut plan=valid_plan();
+        plan["cases"]["add_todo"]["kind"]=json!("widget");
+        assert_eq!(plan_case_diagnostics(&plan),
+            ["/plan/cases/add_todo/kind: must be \"ui\" or \"action\""]);
+    }
+
+    #[test]
+    fn planned_action_ids_must_be_manifest_machine_ids() {
+        let mut plan=valid_plan();
+        plan["output_key"]=json!("service");
+        plan["outputs"]=json!([{"key":"service","kind":"headless"}]);
+        plan["features"]=json!([{"description":"trim","case_names":["trim"]}]);
+        plan["cases"]=json!({"trim":{"kind":"action","action":"trimAndUppercase","input":{},"expected_output":{}}});
+        let error=validate_plan(&plan).unwrap_err();
+        assert!(error.contains("case trim") && error.contains("trimAndUppercase")
+            && error.contains("lowercase machine identifier"),"{error}");
+        plan["cases"]["trim"]["action"]=json!("trim_and_uppercase");
+        plan["current_conversation_case"]=json!({"action":"trimAndUppercase","input":{},"expected_output":{}});
+        let error=validate_plan(&plan).unwrap_err();
+        assert!(error.contains("current_conversation_case") && error.contains("trimAndUppercase"),"{error}");
+        plan["current_conversation_case"]["action"]=json!("trim_and_uppercase");
+        validate_plan(&plan).unwrap();
+    }
+
+    #[test]
+    fn a_valid_plan_passes_diagnostics_and_semantic_validation() {
+        let plan=valid_plan();
+        assert!(plan_case_diagnostics(&plan).is_empty());
+        validate_plan(&plan).unwrap();
+        let validator=jsonschema::validator_for(&input_schema("plan")).unwrap();
+        assert!(validation_message(&validator,&json!({
+            "draft_id":"draft-1","expected_revision":1,"plan":plan
+        })).is_none());
+    }
+
+    #[test]
+    fn delivery_requires_every_planned_case_but_ignores_diagnostic_failures() {
+        let mut plan=valid_plan();
+        plan["cases"]["extra-planned-check"]=json!({"kind":"ui","steps":[
+            {"operation":"count","selector":"#list","value":1}
+        ]});
+        let mut report=json!({"plan":plan,"cases":{
+            "add_todo":{"passed":true,"persistence_checked":true},
+            "debug-probe":{"passed":false}
+        }});
+        assert!(!plan_evidence_complete(&report),"unreferenced planned cases are still required");
+        report["cases"]["extra-planned-check"]=json!({"passed":true});
+        assert!(plan_evidence_complete(&report),"a failed diagnostic does not change the plan");
+        report["cases"]["add_todo"]["persistence_checked"]=json!(false);
+        assert!(!plan_evidence_complete(&report),"required persistence evidence cannot be weakened");
+    }
+
+    #[test]
+    fn generic_validation_reports_each_issue_with_its_path() {
+        let validator=jsonschema::validator_for(&input_schema("plan")).unwrap();
+        let message=validation_message(&validator,&json!({
+            "expected_revision":"not an integer","plan":{"summary":"x"}
+        })).unwrap();
+        assert!(message.starts_with("PLUGIN_INVALID_INPUT: "),"{message}");
+        assert!(message.contains("/expected_revision"),"{message}");
+        assert!(message.contains("draft_id"),"{message}");
+        assert!(message.contains("; "),"{message}");
+    }
+
+    #[test]
+    fn validation_and_plan_diagnostics_stay_bounded_for_huge_inputs() {
+        let validator=jsonschema::validator_for(&input_schema("plan")).unwrap();
+        let message=validation_message(&validator,&json!({
+            "draft_id":"d","expected_revision":"x".repeat(100_000),"plan":{"summary":"x"}
+        })).unwrap();
+        assert!(message.chars().count()<=2049,"truncation adds one ellipsis: {message}");
+        assert!(message.contains("/expected_revision"),"{message}");
+
+        let mut plan=valid_plan();
+        plan["cases"]["add_todo"]["steps"][0]["value"]=json!("y".repeat(100_000));
+        // A still-schema-valid step keeps the case quiet; an unknown kind
+        // names it without echoing the oversized sibling values.
+        plan["cases"]["add_todo"]["kind"]=json!("widget");
+        let diagnostics=plan_case_diagnostics(&plan);
+        assert_eq!(diagnostics.len(),1);
+        assert!(diagnostics[0].chars().count()<=257,"{diagnostics:?}");
+        let mut plan=valid_plan();
+        plan["cases"]["add_todo"]["steps"][0]["selector"]=json!("s".repeat(100_000));
+        plan["cases"]["add_todo"]["steps"][0]["description"]=json!("oops");
+        let diagnostics=plan_case_diagnostics(&plan);
+        assert!(!diagnostics.is_empty() && diagnostics.len()<=8);
+        assert!(diagnostics.iter().all(|entry|entry.chars().count()<=257),
+            "truncation adds one ellipsis: {diagnostics:?}");
+        assert!(diagnostics[0].starts_with("/plan/cases/add_todo/steps/0"),"{diagnostics:?}");
+    }
 }

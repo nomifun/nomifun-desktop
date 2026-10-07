@@ -1241,7 +1241,9 @@ impl CompletionTracker {
         let checked = self.check_with_history(call, &closing, work, inputs,archive);
         let report = match checked {
             Ok(report) => report,
-            Err(reason) => return Ok(AgentToolResult::text(call.call_id.clone(), reason, true)),
+            Err(reason) => return Ok(AgentToolResult::text(call.call_id.clone(), format!(
+                "{reason} This rejected report also records one tool error. After it is recorded, the NEXT report must use observed_tool_error_count={} (copy the next advertised const); later successful calls do not erase earlier errors.",
+                work.failed_tools.saturating_add(1)), true)),
         };
         let scoped_out = unresolved_before_input.is_some_and(|boundary| {
             report.scopes_out_requirements_before(boundary)
@@ -1297,7 +1299,7 @@ impl CompletionTracker {
             || (work.failed_tools > 0 && submission.observed_tool_error_count.is_none())
         {
             return Err(format!(
-                "Completion must include observed_tool_error_count={} and disclose that exact cumulative count; later successful calls do not erase earlier tool errors",
+                "The submitted observed tool-error count does not match the current cumulative count ({})",
                 work.failed_tools));
         }
         if submission.observed_command_failure_count.unwrap_or(0) != work.failed_commands
@@ -3555,6 +3557,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_report_feedback_can_be_copied_after_the_rejection_is_counted() {
+        let inputs = vec![crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User, "Inspect and report".into())];
+        let mut tracker = CompletionTracker::default();
+        let mut plan = AgentPlan::default();
+        let mut work = AgentWorkStatus { failed_tools: 7, ..Default::default() };
+        let call = |id: &str, count: u32| ChatToolCall { call_id: id.into(), name: TOOL_NAME.into(), provider_metadata: None,
+            arguments: StrictJsonValue(serde_json::json!({"summary":"Earlier failures are disclosed without another operation.",
+                "observed_tool_error_count":count,"criteria":[{"disposition":"unverified","rationale":"No current observation supports a broader claim."}]})) };
+        let rejected = tracker.submit(&call("wrong", 6), &mut plan, &work, &inputs,
+            false, None, &crate::NoopAgentEventSink).await.unwrap();
+        assert!(rejected.is_error);
+        assert!(rejected.output_text().contains("NEXT report must use observed_tool_error_count=8"));
+        work.observe_deferred();
+        let accepted = tracker.submit(&call("correct", 8), &mut plan, &work, &inputs,
+            false, None, &crate::NoopAgentEventSink).await.unwrap();
+        assert!(!accepted.is_error, "{}", accepted.output_text());
+        assert_eq!(tracker.current(&plan, &work, 1).unwrap().observed_tool_error_count, 8);
+    }
+
+    #[tokio::test]
     async fn completion_rejects_erasing_recovered_tool_errors_and_discloses_the_exact_count() {
         let inputs = vec![crate::context_lifecycle::text_message(
             nomifun_chat_model_broker::ChatRole::User,
@@ -3579,7 +3601,7 @@ mod tests {
             let result = tracker.submit(&call(id, count), &mut plan, &work, &inputs,
                 false, None, &crate::NoopAgentEventSink).await.unwrap();
             assert!(result.is_error);
-            assert!(result.output_text().contains("observed_tool_error_count=2"));
+            assert!(result.output_text().contains("NEXT report must use observed_tool_error_count=3"));
             assert!(tracker.current(&plan, &work, 1).is_none());
         }
 
@@ -4372,7 +4394,7 @@ impl AgentCompletionReport {
         text == legacy || text == format!("\n\n{legacy}")
     }
 
-    pub(crate) fn is_blocked(&self) -> bool {
+    pub fn is_blocked(&self) -> bool {
         self.delivery_items.iter().any(|item| item.status == "missing") || self.criteria
             .iter()
             .any(|criterion| criterion.disposition == AgentCriterionDisposition::Blocked)

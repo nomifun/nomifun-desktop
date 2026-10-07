@@ -1,11 +1,9 @@
 //! Conservative media intent hints within the Session's frozen tool surface.
 //!
 //! This is deliberately conservative: an affirmative result may force a
-//! billable durable Creation Action. Hints reveal an already-authorized schema
-//! and describe the requested output; they never discard other tools.
+//! billable durable Creation Action. Hints pre-activate an already-authorized
+//! schema and describe the requested output; they never discard other tools.
 
-use nomifun_agent_runtime::AgentToolPlan;
-use nomifun_common::AppError;
 use nomifun_ai_agent::image_generation::{
     ImageGenerationIntent, classify_image_generation_intent,
 };
@@ -36,17 +34,6 @@ impl AutomaticCreationRoute {
         )
     }
 
-    pub(super) fn expose(self, plan: &AgentToolPlan) -> Result<AgentToolPlan, AppError> {
-        AgentToolPlan::new(plan.model_definitions().into_iter().map(|definition| {
-            let mut binding = plan.binding(&definition.name).expect("compiled tool has a binding").clone();
-            if binding.capability_id.as_ref() == super::engine_creation_tools::CREATION_CAPABILITY_ID
-                && binding.action_id.as_ref() == self.action_id()
-            {
-                binding.definition.deferred = false;
-            }
-            binding
-        })).map_err(|error| AppError::Internal(error.to_string()))
-    }
 }
 
 fn contains_any(input: &str, values: &[&str]) -> bool {
@@ -195,34 +182,5 @@ mod tests {
         let media = serde_json::json!({"task_brief":"Read the design code", "step_spec":"生成一段猫咪视频"}).to_string();
         assert_eq!(classify(&media), Some(AutomaticCreationRoute::Video));
         assert_eq!(classify(r#"{"example":"generate a video"}"#), None);
-    }
-
-    #[test]
-    fn a_media_hint_exposes_its_schema_without_removing_other_authorized_tools() {
-        use nomifun_agent_contracts::StrictJsonValue;
-        use nomifun_agent_runtime::{AgentEffectClass, AgentToolBinding, input_schema_digest};
-        use nomifun_chat_model_broker::ChatToolDefinition;
-        let binding = |name: &str, capability: &str, action: &str, deferred| {
-            let schema = StrictJsonValue(serde_json::json!({"type":"object","additionalProperties":false}));
-            AgentToolBinding {
-                model_name:name.into(), definition:ChatToolDefinition {name:name.into(),description:action.into(),input_schema:schema.clone(),deferred},
-                schema_digest:input_schema_digest(&schema).unwrap(),canonical_input_schema_ref:format!("schema://{name}/input").into(),
-                capability_contract_digest:"a".repeat(64).into(),capability_id:capability.into(),action_id:action.into(),resource_binding_ids:Default::default(),
-                effect_class:AgentEffectClass::ManagedEffect,parallel_safe:false,
-            }
-        };
-        let plan = AgentToolPlan::new([
-            binding("write_file", "workspace.files", "workspace.files/write", false),
-            binding("video", super::super::engine_creation_tools::CREATION_CAPABILITY_ID, "creation.media/video", true),
-            binding("music", super::super::engine_creation_tools::CREATION_CAPABILITY_ID, "creation.media/music", true),
-        ]).unwrap();
-        let exposed = AutomaticCreationRoute::Video.expose(&plan).unwrap();
-        assert_eq!(exposed.len(), plan.len());
-        assert_eq!(exposed.binding("write_file"), plan.binding("write_file"));
-        assert_eq!(exposed.binding("music"), plan.binding("music"));
-        let mut expected = plan.binding("video").unwrap().clone();
-        expected.definition.deferred = false;
-        assert_eq!(exposed.binding("video"), Some(&expected));
-        assert!(plan.binding("video").unwrap().definition.deferred, "the frozen source plan is unchanged");
     }
 }

@@ -603,7 +603,7 @@ impl PluginRepository for SqlitePluginRepository {
             .ok_or_else(|| PluginRepositoryError::InvalidData("committed Plugin disappeared".into()))?;
         if let Some(draft) = draft_association {
             let updated = sqlx::query(
-                "UPDATE plugin_drafts SET plugin_id=?,base_revision=?,revision=revision+1,name=?,updated_at_ms=MAX(updated_at_ms,?) WHERE owner_user_id=? AND draft_id=? AND revision=? AND ((? IS NULL AND plugin_id IS NULL AND base_revision IS NULL) OR (plugin_id=? AND base_revision=?))"
+                "UPDATE plugin_drafts SET plugin_id=?,base_revision=?,revision=revision+1,name=?,updated_at_ms=MAX(updated_at_ms,?),verification_json=json_set(verification_json,'$.edit_revision',revision+1) WHERE owner_user_id=? AND draft_id=? AND revision=? AND ((? IS NULL AND plugin_id IS NULL AND base_revision IS NULL) OR (plugin_id=? AND base_revision=?))"
             ).bind(plugin.plugin_id.as_ref()).bind(u64_to_i64(plugin.revision)?)
                 .bind(&plugin.name).bind(commit.now_ms).bind(&commit.owner_user_id).bind(draft.draft_id.as_ref())
                 .bind(u64_to_i64(draft.expected_revision)?).bind(commit.expected_revision.map(u64_to_i64).transpose()?)
@@ -783,7 +783,7 @@ impl PluginRepository for SqlitePluginRepository {
             let restored = get_plugin_tx(&mut transaction, owner_user_id, plugin_id).await?
                 .ok_or(PluginRepositoryError::NotFound)?;
             sqlx::query(
-                "UPDATE plugin_drafts SET base_revision=?,revision=revision+1,updated_at_ms=MAX(updated_at_ms,?) WHERE owner_user_id=? AND draft_id=? AND plugin_id=? AND base_revision=?"
+                "UPDATE plugin_drafts SET base_revision=?,revision=revision+1,updated_at_ms=MAX(updated_at_ms,?),verification_json=json_set(verification_json,'$.edit_revision',revision+1) WHERE owner_user_id=? AND draft_id=? AND plugin_id=? AND base_revision=?"
             ).bind(u64_to_i64(restored.revision)?).bind(now_ms).bind(owner_user_id)
                 .bind(draft.draft_id.as_ref()).bind(plugin_id.as_ref()).bind(committed_revision)
                 .execute(&mut *transaction).await?;
@@ -1070,7 +1070,8 @@ impl PluginRepository for SqlitePluginRepository {
         }
         sqlx::query(
             "UPDATE plugin_drafts SET plugin_id = NULL, base_revision = NULL, \
-                    revision = revision + 1, updated_at_ms = ? \
+                    revision = revision + 1, updated_at_ms = ?, \
+                    verification_json = json_set(verification_json, '$.edit_revision', revision + 1) \
              WHERE owner_user_id = ? AND plugin_id = ?",
         )
         .bind(journal_updated_at_ms)

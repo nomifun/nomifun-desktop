@@ -16,6 +16,7 @@ Usage:
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -CodingSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -GameSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -LongCodingSmoke
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -PluginSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BrowserGui -DataDir C:/new-disposable-gui-data
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Delete
 #>
@@ -31,6 +32,7 @@ param(
   [switch]$CodingSmoke,
   [switch]$GameSmoke,
   [switch]$LongCodingSmoke,
+  [switch]$PluginSmoke,
   [string]$DataDir,
   [string]$TargetName = 'NomiFun/StepFun/LiveProvider'
 )
@@ -40,7 +42,7 @@ $ErrorActionPreference = 'Stop'
 if ($Setup -and $Delete) {
   throw 'Setup and Delete cannot be used together.'
 }
-if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke, $CodingSmoke, $GameSmoke, $LongCodingSmoke).Where({ [bool]$_ }).Count -gt 1) {
+if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke, $CodingSmoke, $GameSmoke, $LongCodingSmoke, $PluginSmoke).Where({ [bool]$_ }).Count -gt 1) {
   throw 'Smoke modes are mutually exclusive.'
 }
 if ($BrowserGui -and ([string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
@@ -226,6 +228,8 @@ try {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
   } elseif ($LongCodingSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
+  } elseif ($PluginSmoke) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --plugin-smoke
   } else {
     & bun run test:nomi-core-live-provider
   }
