@@ -449,11 +449,21 @@ struct PluginBeforeModelPort {
 
 #[async_trait]
 impl EngineModelPort for PluginBeforeModelPort {
+    async fn open_owned_attempt(&self,request:ChatModelRequest,cancellation:CancellationToken)->Result<nomifun_chat_model_broker::EngineOwnedModelAttempt,ChatModelError> {
+        let request=self.prepare_model_request(request,cancellation.clone()).await?;
+        self.inner.open_owned_attempt(request,cancellation).await
+    }
     async fn open_stream(
         &self,
-        mut request: ChatModelRequest,
+        request: ChatModelRequest,
         cancellation: CancellationToken,
     ) -> Result<EngineModelStream, ChatModelError> {
+        let request=self.prepare_model_request(request,cancellation.clone()).await?;
+        self.inner.open_stream(request,cancellation).await
+    }
+}
+impl PluginBeforeModelPort {
+    async fn prepare_model_request(&self,mut request:ChatModelRequest,cancellation:CancellationToken)->Result<ChatModelRequest,ChatModelError> {
         for action in self.actions.iter() {
             let input = before_model_input(&request);
             let value = serde_json::to_value(input)
@@ -495,7 +505,7 @@ impl EngineModelPort for PluginBeforeModelPort {
                 .map_err(|_| hook_model_error("before_model returned an invalid patch"))?;
             apply_model_patch(&mut request, patch)?;
         }
-        self.inner.open_stream(request, cancellation).await
+        Ok(request)
     }
 }
 

@@ -150,6 +150,8 @@ fn upgrade_credentials(headers: &HeaderMap, state: &WsHandlerState) -> Result<Up
 /// Non-browser clients can forge it, but they hold no ambient credential:
 /// with no Origin they already take the [`OriginDisposition::NonBrowser`]
 /// path, and either way the handshake still requires a valid token.
+/// Reuse the exact existing Origin policy for optional authenticated media.
+pub fn validate_attachment_origin(headers:&HeaderMap,allowed_origins:&[String])->bool{validate_origin(headers,allowed_origins).is_ok()}
 fn validate_origin(headers: &HeaderMap, allowed_origins: &[String]) -> Result<OriginDisposition, ()> {
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let Some(origin_value) = origins.next() else {

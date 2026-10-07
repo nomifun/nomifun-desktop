@@ -153,6 +153,9 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const mountedRef = useRef(true);
+  const captureEpochRef = useRef(0);
+  const transcriptionAbortRef = useRef<AbortController | null>(null);
   const recordingStartedAtRef = useRef<number | null>(null);
   const visualizerIntervalRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -200,12 +203,13 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
     analyserDataRef.current = null;
 
     if (audioContextRef.current) {
+      const context = audioContextRef.current;
+      audioContextRef.current = null;
       try {
-        await audioContextRef.current.close();
+        await context.close();
       } catch {
         // Ignore close failures during teardown.
       }
-      audioContextRef.current = null;
     }
   }, []);
 
@@ -284,13 +288,27 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
     resetSpeechVisualizer();
   }, [resetSpeechVisualizer]);
 
+  const cancel = useCallback(() => {
+    captureEpochRef.current += 1;
+    transcriptionAbortRef.current?.abort(); transcriptionAbortRef.current = null;
+    const recorder = recorderRef.current;
+    if (recorder) { recorder.ondataavailable = null; recorder.onerror = null; recorder.onstop = null; }
+    if (recorder && recorder.state !== 'inactive') { try { recorder.stop(); } catch { /* Partially started recorder. */ } }
+    cleanupRecorder();
+    if (mountedRef.current) { setStatus('idle'); setErrorCode(null); setErrorMessage(null); resetSpeechVisualizer(); }
+  }, [cleanupRecorder, resetSpeechVisualizer]);
+
   const transcribeBlob = useCallback(
     async (blob: Blob) => {
+      const epoch = captureEpochRef.current;
+      transcriptionAbortRef.current?.abort();
+      const abort = new AbortController(); transcriptionAbortRef.current = abort;
       try {
         setStatus('transcribing');
         setErrorCode(null);
         setErrorMessage(null);
-        const result = await transcribeAudioBlob(blob, recognitionLocale);
+        const result = await transcribeAudioBlob(blob, recognitionLocale, abort.signal);
+        if (!mountedRef.current || epoch !== captureEpochRef.current || abort.signal.aborted) return;
         const transcript = result.text.trim();
         if (!transcript) {
           setErrorCode('empty-transcript');
@@ -303,6 +321,7 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
         setStatus('idle');
         resetSpeechVisualizer();
       } catch (error) {
+        if (!mountedRef.current || epoch !== captureEpochRef.current || abort.signal.aborted) return;
         setErrorCode(mapSpeechInputError(error));
         const message = error instanceof Error ? error.message : String(error);
         setErrorMessage(
@@ -310,6 +329,8 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
         );
         setStatus('error');
         resetSpeechVisualizer();
+      } finally {
+        if (transcriptionAbortRef.current === abort) transcriptionAbortRef.current = null;
       }
     },
     [onTranscriptRef, recognitionLocale, resetSpeechVisualizer]
@@ -329,8 +350,11 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
       return;
     }
 
+    cancel();
+    const epoch = captureEpochRef.current;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current || epoch !== captureEpochRef.current) { stream.getTracks().forEach(track => track.stop()); return; }
       const mimeType = pickRecordingMimeType();
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
 
@@ -338,20 +362,24 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
       recorderRef.current = recorder;
       chunksRef.current = [];
       await startSpeechVisualizer(stream);
+      if (!mountedRef.current || epoch !== captureEpochRef.current) { stream.getTracks().forEach(track => track.stop()); return; }
 
       recorder.ondataavailable = (event) => {
+        if (!mountedRef.current || epoch !== captureEpochRef.current) return;
         if (event.data.size > 0) {
           chunksRef.current.push(event.data);
         }
       };
 
       recorder.onerror = () => {
+        if (!mountedRef.current || epoch !== captureEpochRef.current) return;
         cleanupRecorder();
         setErrorCode('unknown');
         setStatus('error');
       };
 
       recorder.onstop = () => {
+        if (!mountedRef.current || epoch !== captureEpochRef.current) return;
         const audioBlob = new Blob(chunksRef.current, {
           type: recorder.mimeType || mimeType || 'audio/webm',
         });
@@ -364,13 +392,14 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
       setStatus('recording');
       recorder.start();
     } catch (error) {
+      if (!mountedRef.current || epoch !== captureEpochRef.current) return;
       cleanupRecorder();
       setErrorCode(mapSpeechInputError(error));
       setErrorMessage(null);
       setStatus('error');
       resetSpeechVisualizer();
     }
-  }, [availability, cleanupRecorder, resetSpeechVisualizer, startSpeechVisualizer, transcribeRecordedBlob]);
+  }, [availability, cancel, cleanupRecorder, resetSpeechVisualizer, startSpeechVisualizer, transcribeRecordedBlob]);
 
   const stopRecording = useCallback(() => {
     const recorder = recorderRef.current;
@@ -383,7 +412,10 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
   }, [status]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false; captureEpochRef.current += 1;
+      transcriptionAbortRef.current?.abort(); transcriptionAbortRef.current = null;
       const recorder = recorderRef.current;
       if (recorder) {
         recorder.ondataavailable = null;
@@ -403,6 +435,7 @@ export const useSpeechInput = ({ locale, onTranscript }: UseSpeechInputOptions) 
 
   return {
     availability,
+    cancel,
     clearError,
     errorCode,
     errorMessage,

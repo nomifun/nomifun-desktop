@@ -240,7 +240,8 @@ impl TurnProjection {
             | AgentEngineEvent::ToolStarted { .. }
             | AgentEngineEvent::ModelOutputTruncated { .. }
             | AgentEngineEvent::ModelResponseRejected { .. }
-            | AgentEngineEvent::DeliveryReviewSuperseded { .. } => self.complete_thinking(),
+            | AgentEngineEvent::DeliveryReviewSuperseded { .. }
+            | AgentEngineEvent::VoiceModelStepSuperseded {..} => self.complete_thinking(),
             _ => {}
         }
         let projected = match event {
@@ -279,7 +280,8 @@ impl TurnProjection {
                 None
             }
             AgentEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. }
-            | AgentEngineEvent::ModelResponseRejected { discarded_tool_call_ids, .. } => {
+            | AgentEngineEvent::ModelResponseRejected { discarded_tool_call_ids, .. }
+            | AgentEngineEvent::VoiceModelStepSuperseded {discarded_tool_call_ids,..} => {
                 let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
                 for id in discarded_tool_call_ids { calls.remove(id.as_ref()); }
                 None

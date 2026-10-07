@@ -6168,6 +6168,9 @@ dependencies = [
  "nomifun-ssh",
  "nomifun-system",
  "nomifun-terminal",
+ "nomifun-voice",
+ "nomifun-voice-contracts",
+ "nomifun-voice-core",
  "nomifun-webhook",
  "nomifun-workshop",
  "notify",
@@ -6214,6 +6217,13 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "nomifun-audio"
+version = "0.7.6"
+dependencies = [
+ "nomifun-voice-contracts",
 ]
 
 [[package]]
@@ -6803,6 +6813,8 @@ dependencies = [
  "nomifun-common",
  "nomifun-db",
  "nomifun-net",
+ "nomifun-voice-contracts",
+ "nomifun-voice-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6810,6 +6822,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tracing",
  "url",
  "wiremock",
@@ -7160,6 +7173,49 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "nomifun-voice"
+version = "0.7.6"
+dependencies = [
+ "async-trait",
+ "getrandom 0.2.17",
+ "hex",
+ "nomifun-agent-contracts",
+ "nomifun-voice-contracts",
+ "nomifun-voice-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "nomifun-voice-contracts"
+version = "0.7.6"
+dependencies = [
+ "nomifun-agent-contracts",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nomifun-voice-core"
+version = "0.7.6"
+dependencies = [
+ "async-trait",
+ "nomifun-voice-contracts",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

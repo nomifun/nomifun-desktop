@@ -5,6 +5,11 @@ use thiserror::Error;
 pub enum AgentEngineError {
     #[error("invalid Agent Runtime contract: {0}")]
     InvalidContract(String),
+    /// Internal voice-only yield after the original atomic tool admission
+    /// rejected a batch with no admitted effects. Never an execution failure
+    /// or cancellation of the enclosing Turn.
+    #[error("voice correction reached the unadmitted model boundary")]
+    VoiceCorrectionBoundary,
 
     #[error("Agent Runtime turn is already running")]
     TurnAlreadyRunning,
