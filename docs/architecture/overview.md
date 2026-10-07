@@ -9,8 +9,8 @@ custom protocol.
 
 This document is the map. The sibling documents drill into the parts:
 
-- [`backend-crates.md`](backend-crates.md) — the 36 `nomifun-*` backend crates.
-- [`agent-engine.md`](agent-engine.md) — the 15 `nomi-*` agent crates.
+- [`backend-crates.md`](backend-crates.md) — the 54 `nomifun-*` backend crates.
+- [`agent-engine.md`](agent-engine.md) — the 11 `nomi-*` agent crates.
 - [`agent-execution.zh.md`](agent-execution.zh.md) — the unified persistent AgentExecution model.
 - [`frontend.md`](frontend.md) — the React SPA, adapter layer, routing.
 - [`communication.md`](communication.md) — HTTP / WebSocket / Tauri IPC / MCP.
@@ -51,7 +51,7 @@ This document is the map. The sibling documents drill into the parts:
                           │                       │
                           ▼                       ▼
               ┌─────────────────────┐   ┌─────────────────────┐
-              │  nomifun-* (34)     │   │  nomi-* (15)         │
+              │  nomifun-* (54)     │   │  nomi-* (11)         │
               │  backend crates     │◀─▶│  agent engine crates │
               │  data, auth, MCP,   │   │  via the SEAM:       │
               │  conversation, etc. │   │  nomifun-ai-agent     │
@@ -75,7 +75,7 @@ in the diagram. The trace below names the real types and files that participate.
    (a thin wrapper produced by the adapter factory in ui/src/common/adapter)
 2. httpBridge → fetch
    ui/src/common/adapter/httpBridge.ts
-   POST http://127.0.0.1:<port>/api/conversations/{id}/messages
+   POST http://127.0.0.1:<port>/api/agent-sessions/{id}/turns
    In WebUI mode, the CSRF cookie is echoed into x-csrf-token (double-submit).
 3. axum router (composition root)
    crates/backend/nomifun-app/src/router/  — assembled in create_router()
@@ -105,9 +105,9 @@ on disk, not just in package names:
 
 | Folder | Purpose | Crate prefix | Count |
 | --- | --- | --- | --- |
-| `crates/agent/` | AI engine — providers, tools, sessions, MCP, skills, computer/browser use | `nomi-*` | 15 |
-| `crates/backend/` | The HTTP/WS server, data, auth, features, public capability gateway | `nomifun-*` | 34 |
-| `crates/shared/` | Cross-layer utilities used by both groups | mixed | 3 |
+| `crates/agent/` | AI engine — providers, tools, sessions, MCP, skills, computer/browser use | `nomi-*` | 11 |
+| `crates/backend/` | The HTTP/WS server, data, auth, features, public capability gateway | `nomifun-*` | 54 |
+| `crates/shared/` | Cross-layer utilities used by both groups | mixed | 5 |
 
 The agent group is **self-contained** — no `nomi-*` crate references any
 `nomifun-*` crate, the workspace root, or frameworks like Tauri / sqlx / axum.
@@ -120,14 +120,14 @@ default pattern.
 ## What lives where
 
 ```
-nomifun-tauri/
+nomifun-desktop/
 ├─ apps/
 │   ├─ desktop/   nomifun-desktop  (Tauri 2 shell, this is "NomiFun" the product)
 │   └─ web/       nomifun-web      (standalone server: /api + SPA on one port)
 ├─ crates/
-│   ├─ agent/     15 nomi-* crates  → see agent-engine.md
-│   ├─ backend/   34 nomifun-* crates → see backend-crates.md
-│   └─ shared/    3 shared crates
+│   ├─ agent/     11 nomi-* crates  → see agent-engine.md
+│   ├─ backend/   54 nomifun-* crates → see backend-crates.md
+│   └─ shared/    5 shared crates
 ├─ ui/            React 19 + Vite 6 + Arco + UnoCSS  → see frontend.md
 └─ docs/
     ├─ architecture/   (this folder)

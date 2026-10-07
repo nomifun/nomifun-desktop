@@ -5,7 +5,7 @@ provide the HTTP/WS server, data layer, auth, conversations, MCP/skills,
 knowledge, requirements/AutoWork, terminal sessions, companions, public
 capability gateway, and app composition.
 
-The current backend group contains 32 crates. The most important entry points
+The current backend group contains 54 crates. The most important entry points
 are:
 
 | Crate | Role |

@@ -13,9 +13,10 @@ The authority order is:
 2. [`architecture/id-system.md`](../architecture/id-system.md) and
    [`architecture/data-and-storage.md`](../architecture/data-and-storage.md) —
    architecture contract and storage behavior;
-3. this page — contributor workflow and review checklist;
-4. `docs/continuity/` — historical context, decisions, handoff, and audit
-   evidence. It cannot override the current architecture contract.
+3. this page — contributor workflow and review checklist.
+
+Historical decisions and audit evidence live in Git history. They cannot
+override the current architecture contract.
 
 If implementation and documentation disagree, do not invent a compatibility
 exception. Update the implementation and its authoritative documentation
@@ -117,9 +118,16 @@ infer identity or reference semantics from a column suffix alone.
 
 ## 4. Logical references replace physical foreign keys
 
-Non-Agent product DDL must not contain the following. Canonical Agent Store
-tables may use physical foreign keys and guard constraints exactly as frozen in
-the Agent Store schema; this exception does not extend to other domains.
+Non-Agent product DDL must not contain the following. Two frozen exception
+groups may use physical foreign keys and `ON DELETE`/`ON UPDATE` actions
+exactly as declared in the canonical baseline: the canonical Agent Store
+tables, and the Unified Plugin tables (`plugins`, `plugin_drafts`,
+`plugin_credential_bindings`, `plugin_grants`, `plugin_mutations`,
+`plugin_artifacts`, and related plugin-owned tables). The baseline also ships
+registered guard/validator triggers in a few domains (channel, requirements,
+terminal, creation, plugin, Agent mutation guards). These exceptions do not
+extend to other domains, and no new domain may add physical constraints,
+cascades, or triggers without an explicit schema-contract update.
 
 ```text
 FOREIGN KEY

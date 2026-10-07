@@ -108,39 +108,31 @@ export function getBaseUrl(): string {
 1. Tauri 外壳通过 `tauri://` / `file://` 协议加载 SPA；`BrowserRouter` 在该协议下经历的页面重新加载（如深链接或应用内导航）后无法保留状态。
 2. Web 宿主通过 `tower_http::services::ServeDir` 提供 SPA，并启用 `append_index_html_on_directories(true)`。Hash 路由意味着浏览器访问的任何路径都返回 `index.html`，由 SPA 完成其余工作 —— 静态服务器无需自定义 catch-all。
 
-路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、设定（`/presets`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements/*`、`/autowork` redirect）、定时任务（`/scheduled`、`/scheduled/:job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、知识库（`/knowledge`、`/knowledge/:id`）、Plugin 产品（`/plugins` 产品库、`/plugins/new` 创建或导入、`/plugins/create/:draftId` 从草稿创建、`/plugins/run/:id` Workshop 与运行 Surface）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
+路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、Agent 设置与 Agent Preset（`/agent`、单个 Agent 会话 `/agent-sessions/:agentSessionId`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements`、`/requirements/extensions`、`/requirements/sources`，`/autowork` 等旧路径仅作重定向）、定时任务（`/scheduled`、`/scheduled/:cron_job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、客服（`/customer-service`、`/customer-service/:cs_agent_id`）、知识库（`/knowledge`、`/knowledge/:id`）、Plugin 产品（`/plugins` 产品库、`/plugins/run/:id` 运行 Surface，均为 feature-gated）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
 
 创作位于普通应用布局内，复用默认标题栏的回退、前进、侧栏开关与系统窗口控制；
 进入产品后，左侧主侧栏会像“设置”一样切换为创作内部导航，并把“返回工作台”
 固定在底部。应用会话内还会保存最后一个经过 exact-match 验证的创作完整地址；
-再次从主侧栏进入时恢复该地址，非法、未知或越界记录回退 `/workshop/canvases`。
+再次从主侧栏进入时恢复该地址，非法、未知或越界记录回退 `/nomi/canvases`。
 产品侧栏不再提供独立首页项，通过需求发起创作的能力由 Canvas 内的创作助手提供。
 其子路由如下：
 
 | 路由 | 用户界面 |
 | --- | --- |
-| `/workshop` | 创作兼容入口，重定向到 Canvas 库。 |
-| `/workshop/canvases` | canonical Canvas 库。 |
-| `/workshop/canvas/:canvasId` | Canvas 无限画布。 |
-| `/workshop/image`、`/workshop/video` | 独立 Image/Video Workbench；零 Canvas 时也可用。 |
-| `/workshop/prompts`、`/workshop/assets`、`/workshop/templates` | 提示词库、素材库与私有模板工作台。 |
+| `/nomi/canvases` | canonical Canvas 库。 |
+| `/nomi/canvases/:canvasId` | Canvas 无限画布。 |
+| `/asset-library` | 重定向到 `/asset-library/materials`。 |
+| `/asset-library/materials`、`/asset-library/prompts`、`/asset-library/templates` | 素材库、提示词库与私有模板工作台。 |
 
 路由常量与 exact-match 规则在
-[`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)。
-`/workshop/projects` 是 deprecated 兼容重定向，目标为 `/workshop/canvases`，不是
-产品页面。创作没有 Project 领域：规范 HTTP 资源是
+[`pages/creativeStudio/app/resourceRoutes.ts`](../../ui/src/renderer/pages/creativeStudio/app/resourceRoutes.ts)。
+存储的旧 `/workshop/*` 恢复地址由 `migratedCreativeRoute` 改写，旧路径不再作为路由挂载。
+创作没有 Project 领域：规范 HTTP 资源是
 `/api/creative-studio/canvases`，旧 `/api/creative-studio/projects` 仅作为 deprecated
-alias 保留。Image/Video Workbench 没有 Canvas 选择器或父级加载门槛；任务 owner、
-历史与退役只使用 `workbenchKind`，旧 standalone `project_id` 只是 inert provenance。
-Gateway 当前的 Canvas capability 是 `nomi_creative_studio_list_canvases` 和
+alias 保留。Gateway 当前的 Canvas capability 是 `nomi_creative_studio_list_canvases` 和
 `nomi_creative_studio_get_canvas`，旧项目命名 capability 是 deprecated alias。
-UI/API contract version 为 23。
 
-Canvas 导出使用 archive v2 writer，并继续保留 archive v1 reader。Image/Video 按工作台
-从浏览器 session storage 恢复版本化 session 草稿，草稿 key 不含 `projectId` 或
-`canvasId`。
-
-`/workshop/audio` 已退役；音频创作通过 Canvas 音频节点提供，不再设独立路由。
+Canvas 导出使用 archive v3 writer，并继续保留 archive v1/v2 reader。
 
 页面通过 `React.lazy` 加载，使用 `<AppLoader>` 作为 fallback，使初始包保持精简。
 
@@ -152,13 +144,13 @@ Canvas 导出使用 archive v2 writer，并继续保留 archive v1 reader。Imag
 
 ## 主题
 
-Arco 的 `ConfigProvider` 在根处包裹应用，主色为 `primaryColor: '#4E5969'`，并按语言提供 locale（`enUS`、`zhCN`、`zhTW`、`jaJP`、`koKR` —— 韩语包用英语日历 / datepicker 字段做了补丁，因为 Arco 的 `koKR` 缺这些）。主题（`light`、`dark`、品牌变体）以纯 CSS 文件叠在 `ui/src/renderer/styles/themes/index.css` 中，通过 `ThemeProvider` 切换。
+Arco 的 `ConfigProvider` 在根处包裹应用，主色为 `primaryColor: '#4E5969'`，并按当前语言提供 locale（`enUS`、`zhCN`）。主题（`light`、`dark`、品牌变体）以纯 CSS 文件叠在 `ui/src/renderer/styles/themes/index.css` 中，通过 `ThemeProvider` 切换。
 
-UnoCSS 与 Arco 并行提供 utility 类 —— 其配置位于仓库根目录的 `uno.config.ts`。Arco 的自定义覆盖位于 `ui/src/renderer/styles/arco-override.css`。
+UnoCSS 与 Arco 并行提供 utility 类 —— 其配置位于 `ui/uno.config.ts`。Arco 的自定义覆盖位于 `ui/src/renderer/styles/arco-override.css`。
 
 ## 国际化
 
-[`ui/src/renderer/services/i18n`](../../ui/src/renderer/services/) 用上述五种语言初始化 `i18next`。字符串按功能组织，解析后的语言通过 `main.tsx` 中的 `arcoLocales` map 流入 Arco。切换语言无需重新加载 —— i18next 与 Arco 都会按新语言重新计算。
+[`ui/src/renderer/services/i18n`](../../ui/src/renderer/services/) 用 `zh-CN` 与 `en-US` 两种语言初始化 `i18next`。字符串按功能组织，解析后的语言通过 `main.tsx` 中的 `arcoLocales` map 流入 Arco。切换语言无需重新加载 —— i18next 与 Arco 都会按新语言重新计算。
 
 ## 一点平台特定的 UX
 

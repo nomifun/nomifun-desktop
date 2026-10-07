@@ -11,7 +11,7 @@ for the runtime story (how the two app hosts boot the same backend) see
 ## Top-level layout
 
 ```
-nomifun-tauri/
+nomifun-desktop/
 ├── apps/
 │   ├── web/                      nomifun-web bin: standalone server (API + SPA)
 │   └── desktop/                  nomifun-desktop bin: Tauri shell (embedded backend)
@@ -32,7 +32,7 @@ nomifun-tauri/
 │   ├── architecture/             current runtime, crates, and frontend architecture
 │   ├── reference/                configuration, API surface, troubleshooting
 │   ├── contributing/             contributor standards and this repo map
-│   ├── continuity/               historical decisions, handoff context, release audits
+│   ├── specs/                    current-domain design contracts
 │   ├── skills/                   exported instructions for external agents
 │   └── images/                   screenshot manifest and referenced assets
 ├── packaging/
@@ -122,6 +122,10 @@ from silently tying themselves to engine internals.
 
 ## `crates/backend/` — the `nomifun-*` crates (the backend)
 
+54 crates. The table below lists the main roles; it is not exhaustive — the
+Agent Store, Unified Plugin, robot, voice, workshop, and platform crates are
+covered in [`../architecture/backend-crates.md`](../architecture/backend-crates.md).
+
 | Crate | One-line role |
 | --- | --- |
 | [`nomifun-common`](../../crates/backend/nomifun-common) | Shared primitives: `AppError`, enums, ID generation, AES-GCM crypto, timestamps, pagination, common constants. |
@@ -137,7 +141,7 @@ from silently tying themselves to engine internals.
 | [`nomifun-shell`](../../crates/backend/nomifun-shell) | OS shell integration: opener, tool detection, speech-to-text. |
 | [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent) | **The single bridge to `crates/agent/`.** Built-in `nomi` Agent factory, runtime registry, and runtime handles; re-exports `nomi_config` / `nomi_types` / `RequirementSink`. |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp) | MCP server config, multi-agent sync adapters, OAuth, connection testing. |
-| [`nomifun-conversation`](../../crates/backend/nomifun-conversation) | Conversation + message CRUD with streaming relay and response middleware. |
+| [`nomifun-conversation`](../../crates/backend/nomifun-conversation) | Canonical AgentSession product adapters and shared projection types. |
 | [`nomifun-channel`](../../crates/backend/nomifun-channel) | External channel integration: plugin system, pairing handshake, per-session messaging, formatter. |
 | [`nomifun-agent-execution`](../../crates/backend/nomifun-agent-execution) | Persistent single- and multi-Agent execution aggregate: participants, steps, attempts, scheduling, decisions, recovery, and events. |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron) | Scheduled-job engine: cron scheduler, executor, lifecycle event emitter, busy-guard. |
@@ -161,14 +165,17 @@ Both app crates are thin: they parse a small CLI, call into `nomifun-app`'s
 public boot helpers, and own the shape of the host process.
 
 ```text
-apps/web/src/main.rs         ~165 lines
+apps/web/src/main.rs
   init runtime → init data layer → AppServices → create_router →
-  ServeDir(ui/dist) fallback → axum::serve
+  ServeDir(ui/dist) SPA fallback → axum::serve
 
-apps/desktop/src/main.rs     ~250 lines
-  pick free port → init runtime → spawn embedded backend on a tokio
+apps/desktop/src/main.rs     (plus sibling modules: browser_surface,
+  native_api_plugins, companion_pointer, relay_pairing, updater_install_context,
+  headless_browser_runtime)
+  pick free port → init runtime → start embedded backend on a tokio
   thread → tauri::Builder with single-instance/dialog/notification/
   deep-link/updater plugins → window init-script injects window.__backendPort
+  and the per-boot local-trust secret
 ```
 
 `nomifun-app` exposes the boot entry as a library: `bootstrap`, `cli`,
@@ -185,9 +192,8 @@ The frontend is a single Bun workspace, built with **plain Vite + UnoCSS**
 | [`ui/src/common/`](../../ui/src/common) | Cross-host code reused regardless of shell: `adapter/` (HTTP / WS bridges), `api/`, `chat/`, `config/`, `platform/`, `types/`, `update/`, `utils/`, plus the package barrel `index.ts`. |
 | [`ui/src/platform/`](../../ui/src/platform) | The tiny host-bridge layer: `bridge.ts`, `logger.ts`, `storage.ts`, `theme.ts`. The renderer never imports Tauri / Electron APIs directly — it goes through this layer. |
 | [`ui/src/renderer/`](../../ui/src/renderer) | The app itself: `pages/`, `components/`, `hooks/`, `services/`, `styles/`, `utils/`, `assets/`, `main.tsx`, `index.html`, `types.d.ts`. |
-| [`ui/src/common/utils/shims/`](../../ui/src/common/utils/shims) | Stubs for renderer-safe compatibility paths and build-time aliases. |
 | [`ui/public/`](../../ui/public) | Static assets copied straight to `ui/dist/` (icons, etc.). |
-| `ui/vite.config.ts` | Vite config, including the externalized-shim aliases. |
+| `ui/vite.config.ts` | Vite config, including the `@` / `@common` / `@renderer` aliases. |
 | `ui/uno.config.ts` | UnoCSS preset config. |
 | `ui/tsconfig.json` | TypeScript paths and aliases that match the directory shape above. |
 

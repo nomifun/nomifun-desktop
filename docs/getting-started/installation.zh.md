@@ -37,8 +37,8 @@ NomiFun 有两种宿主模式，共享同一个 Rust 后端（参见
 ### 克隆仓库
 
 ```bash
-git clone <your-fork-or-mirror>/nomifun-tauri.git
-cd nomifun-tauri
+git clone <your-fork-or-mirror>/nomifun-desktop.git
+cd nomifun-desktop
 ```
 
 本页其余内容均假设你的工作目录为仓库根目录。
@@ -188,7 +188,7 @@ nomifun-web \
 
 官方 Docker Hub 镜像是
 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
-它是一个**无 GUI**镜像：在 `debian:bookworm-slim` 上的 SPA + `nomifun-web` +
+它是一个**无 GUI**镜像：在 `debian:trixie-slim` 上的 SPA + `nomifun-web` +
 `bun`。仓库也附带一份多阶段 `Dockerfile` 与一份 `docker-compose.yml`，
 用于从源码本地构建。下面示例使用 Docker Hub 发布的稳定滚动标签 `latest`。
 如需可复现部署，请固定明确版本或镜像 digest。
@@ -277,7 +277,8 @@ docker compose up -d --build
 若错误发生在 `load metadata for docker.io/...`，构建尚未进入 apt/cargo
 阶段。请配置 Docker daemon 的 registry mirror，或通过 `BUN_IMAGE`、
 `RUST_IMAGE`、`RUNTIME_IMAGE` 指向你所信任的兼容镜像。默认 Rust 构建层使用
-更小的 `rust:1-slim-bookworm`，apt/cargo 下载也已启用重试与长超时。
+`rust:1-slim-trixie`，运行时层使用 `debian:trixie-slim`；apt/cargo 下载也已
+启用重试与长超时。
 
 完整的部署指南（TLS、反向代理模式、systemd unit、安全注意事项）请参见
 [`../guides/web-server-deployment.md`](../guides/web-server-deployment.md)。

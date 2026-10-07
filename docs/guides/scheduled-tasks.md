@@ -37,8 +37,9 @@ skill.
 - A **busy guard** prevents the same conversation from being entered
   concurrently. If the previous run is still going when the next fire
   lands, the new run is skipped (logged as `skipped`).
-- A **missed-trigger handler** runs at boot and after the OS wakes from
-  sleep (`/api/cron/internal/system-resume`). It walks every enabled job
+- A **missed-trigger handler** runs inside the backend at boot and after the
+  OS wakes from sleep (`CronService::handle_system_resume`; there is no HTTP
+  endpoint for it). It walks every enabled job
   whose `next_run` is in the past and emits a system message so you can
   see that a fire was missed (e.g. while your laptop was asleep), then
   re-arms the timer for the next cron tick.
@@ -80,8 +81,9 @@ Pick what runs each fire. Two flavours show up in the picker:
 - **Nomi (built-in)** — uses Nomi's own engine with your selected
   provider/model. This is the only agent that can run a scheduled
   conversation.
-- **Presets** — reusable launch configurations; the job records the preset id,
-  revision, and resolved snapshot.
+- **Agents** — presets authored in the Agent workbench (`/agent`); the job
+  records the AgentPreset provenance (preset id + revision) plus the resolved
+  `agent_snapshot` so later edits never change an existing job.
 
 The **Advanced** section lets you override the workspace (working
 directory the agent runs in), the model, and arbitrary `config_options`
@@ -201,9 +203,9 @@ Scheduled Tasks page directly.
 | List / create job               | `GET /api/cron/jobs`, `POST /api/cron/jobs`                      |
 | Get / update / delete           | `GET|PUT|DELETE /api/cron/jobs/:id`                              |
 | Run now                         | `POST /api/cron/jobs/:id/run`                                    |
+| List runs for a job             | `GET /api/cron/jobs/:id/runs`                                    |
 | List conversations for a job    | `GET /api/cron/jobs/:id/conversations`                           |
 | Per-job skill                   | `GET|POST|DELETE /api/cron/jobs/:id/skill`                       |
-| System resume (internal)        | `POST /api/cron/internal/system-resume` (requires internal hdr)  |
 
 Realtime events the UI subscribes to: `cron.job-created`,
 `cron.job-updated`, `cron.job-removed`, and `cron.job-executed`. A missed

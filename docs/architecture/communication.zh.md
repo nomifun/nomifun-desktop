@@ -18,8 +18,8 @@ SPA 的适配层（[`httpBridge.ts`](../../ui/src/common/adapter/httpBridge.ts)�
 
 ```ts
 // Approximate shape — see httpBridge.ts for the real definitions.
-const conversation = httpGet<Conversation, { id: string }>(p => `/api/conversations/${p.id}`);
-const sendMessage  = httpPost<SendMessageResponse, SendMessageRequest>(p => `/api/conversations/${p.id}/messages`);
+const messages   = httpGet<AgentSessionMessages, { id: string }>(p => `/api/agent-sessions/${p.id}/messages`);
+const sendTurn   = httpPost<StartTurnResponse, StartTurnRequest>(p => `/api/agent-sessions/${p.id}/turns`);
 ```
 
 线上格式依赖的若干常量：
@@ -174,7 +174,7 @@ canonical Nomi host 对同一个安装令牌认证的 Remote contract 提供两�
 | 事件或操作 | 传输 |
 | --- | --- |
 | 登录 / 设置 | HTTP `/api/auth/*` |
-| 发送会话消息 | HTTP `/api/conversations/*`，流式事件走 `/ws` |
+| 发送会话消息 | HTTP `POST /api/agent-sessions/{id}/turns`，流式事件走 `/ws` |
 | 持久化 Agent 协作 | HTTP `/api/agent-executions/*`，失效通知与瞬时思考流走 `/ws` |
 | 终端输入 / 输出 | 输入走 HTTP 终端路由，输出走 `/ws` |
 | 桌面 keep-awake | Tauri command |

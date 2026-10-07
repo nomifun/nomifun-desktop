@@ -88,7 +88,12 @@ Agent 冻结的 SSH 动作授权和精确主机资源操作授权决定它可以
 NomiFun 保证的是：凭据加密存储、永不以明文返回界面、永不进入会话或模型请求、且强制
 主机密钥校验（首连 accept-new，变更即阻止）。
 
+也可以在 SSH 主机设置页从 `~/.ssh/config` 导入主机：后端扫描本机 config
+（`GET /api/ssh-hosts/import-candidates`），由你勾选别名后导入
+（`POST /api/ssh-hosts/import`）——只导入 host/port/key 路径，不会从请求中
+读取任意凭据路径。
+
 ## 本版不做
 
-从 `~/.ssh/config` 导入主机、实时远程输出终端面板、ProxyJump/跳板机、MFA/
+实时远程输出终端面板、ProxyJump/跳板机、MFA/
 keyboard-interactive 认证，都留待后续阶段。远程目标假定为 POSIX Linux 主机。

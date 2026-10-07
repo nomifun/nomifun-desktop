@@ -28,7 +28,8 @@ describe('replayed process trace', () => {
     const view = render(<I18nextProvider i18n={locale}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>);
     const header = view.getByRole('button');
     expect(header.textContent).toContain('读取网页 · pvp.qq.com');
-    expect(header.textContent).toContain(chineseMessages.toolState.failed);
+    expect(header.textContent).toContain('INVALID_PAYLOAD');
+    expect(header.querySelector('.turn-process-trace__status')).toBeNull();
     expect(header.textContent).not.toContain('platform__');
     expect(view.queryByText(name)).toBeNull();
     fireEvent.click(header);
@@ -37,6 +38,31 @@ describe('replayed process trace', () => {
     expect(view.container.textContent).toContain('web.research/fetch');
     expect(view.container.textContent).toContain('/ingame/kis/hero.shtml');
   });
+
+  test.each(['running', 'completed', 'error', 'canceled'] as const)(
+    '%s tools omit the trailing state and keep their input and output inspectable', (status) => {
+      const item: IMessageToolCall = {
+        id: `inspectable-${status}`, type: 'tool_call', conversation_id: conversationId,
+        position: 'left', created_at: 2,
+        content: { call_id: `call-${status}`, name: 'read_file', status,
+          args: { path: 'src/app.ts' }, output: 'saved tool output', artifacts: [] },
+      };
+      for (const variant of ['list', 'receipt'] as const) {
+        const { container, getByRole, unmount } = render(
+          <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant={variant} /></I18nextProvider>
+        );
+        const toggle = getByRole('button');
+        expect(toggle.querySelector('.turn-process-trace__status')).toBeNull();
+        expect(toggle.lastElementChild?.classList.contains('turn-process-trace-tool__arrow')).toBe(true);
+        fireEvent.click(toggle);
+        expect(toggle.getAttribute('aria-expanded')).toBe('true');
+        expect(container.textContent).toContain('saved tool output');
+        expect(container.textContent).toContain('src/app.ts');
+        expect(item.content.status).toBe(status);
+        unmount();
+      }
+    }
+  );
 
   test('shows a clean timeout as a deadline outcome and retains its failed receipt details', () => {
     const output = JSON.stringify({ state: 'timed_out', success: false, process_id: 'owned', output: { text: '' },

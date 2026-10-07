@@ -13,7 +13,9 @@ Workspace/
 ├── types.ts                  # WorkspaceSource, SelectedFile, tab/source types
 ├── components/               # toolbar, tab bar, context menu, dialogs
 ├── hooks/                    # tree, file ops, paste/drag, search, changes
+├── KnowledgePanel/           # session knowledge mounts tab and binding target
 ├── utils/                    # preview and tree helpers
+├── workspaceRefresh.ts       # workspace tree refresh event helper
 └── workspace.css
 ```
 
@@ -36,7 +38,8 @@ source and reuse the same body.
 - `WorkspaceTreeSource`: lazy root/child loader used by `useWorkspaceTree`.
 - `SelectedFile`: source-agnostic file/folder selection shape.
 - `WorkspaceUploadConfig`: presence enables upload, drag, and paste UI.
-- `eventPrefix`: one of `'acp' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote'`.
+- `eventPrefix`: the conversation's agent type. `AgentType` currently has a
+  single variant, so the value is always `'nomi'`.
 
 ## Persistence And Settings
 

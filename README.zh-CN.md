@@ -145,7 +145,7 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 
 <p>
   <img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="NomiFun 创意工坊 Canvas 库" width="100%">
-  <br/><sub><b>创意工坊 · 持久化 Canvas、独立媒体工作台、可复用提示词与素材和模板</b></sub>
+  <br/><sub><b>创意工坊 · 持久化 Canvas、媒体节点 Composer、可复用提示词与素材和模板</b></sub>
 </p>
 
 <table>
@@ -155,7 +155,7 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/zh/skills.png" alt="当前 NomiFun Skill 中心"><br/><sub><b>Skill 中心 · 可复用、受治理的 Agent 能力</b></sub></td>
-    <td width="50%"><sub><b>更多创意工坊截图见下方</b><br/>编号画廊覆盖当前 Canvas、工作台、素材库、模板、Assistant、技能与伙伴协同流程。</sub></td>
+    <td width="50%"><sub><b>更多创意工坊截图见下方</b><br/>编号画廊覆盖当前 Canvas、素材库、模板、Assistant、技能与伙伴协同流程。</sub></td>
   </tr>
 </table>
 
@@ -168,17 +168,13 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 ## 🎨 创意工坊 —— 亮点新创作面
 
 创意工坊是 NomiFun Desktop 中新加入的专注创作面，不是一张宣传图。
-下面的编号画廊按真实产品入口展开：持久化 Canvas、独立图像与视频工作台、
+下面的编号画廊按真实产品入口展开：持久化 Canvas 与媒体节点 Composer、
 Prompt Center、My Assets、私有模板与 AI Create、多图系列、
 Canvas Assistant、明确选择的 Creative Studio 技能，以及可选的原生桌面伙伴。
 
 <table>
   <tr>
     <td colspan="2" width="100%"><img src="docs/images/creative-studio/zh-CN/01-canvas-library.png" alt="创意工坊无限画布库"><br/><sub><b>Canvas 库</b> · 新建、打开、管理、导入、导出持久化 Canvas</sub></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/03-image-workbench.png" alt="创意工坊图像工作台"><br/><sub><b>图像工作台</b> · 独立 T2I/I2I、精确图像任务与真实素材参考</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/zh-CN/04-video-workbench.png" alt="创意工坊视频工作台"><br/><sub><b>视频工作台</b> · 独立 T2V/单图 I2V、时长、画幅与历史记录</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/creative-studio/zh-CN/05-prompt-center.png" alt="创意工坊 Prompt Center"><br/><sub><b>Prompt Center</b> · 可搜索、带来源归属的提示词目录，支持分类、标签、复制与保存到素材</sub></td>
@@ -194,14 +190,14 @@ Canvas Assistant、明确选择的 Creative Studio 技能，以及可选的原�
   </tr>
 </table>
 
-保留的编号路径是 Creative Studio 画廊的稳定 README 约定：`01`、`03`–`08` 与 `11`–`12`。上方
+保留的编号路径是 Creative Studio 画廊的稳定 README 约定：`01`、`05`–`08` 与 `11`–`12`。
+`03`/`04` 工作台截图对应已退役的独立页面，仅在清单中作为历史记录保留。上方
 Skills Hub 截图展示 Creative Studio 技能作为可复用能力包。所有截图都应来自正在运行的产品，不应是
 mockup 或凭空扩展的能力。完整来源与采集说明见
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md)。
 
-面向用户的教程、首次使用与排障请使用
-[NomiFun Portal 创意工坊指南](https://www.nomifun.com/zh/docs/guides/creative-workshop/)；
-下方本地链接保留 Desktop 技术契约。
+面向用户的指南见 [`docs/guides/creative-studio.zh.md`](docs/guides/creative-studio.zh.md)；
+同一内容在 [NomiFun Portal](https://www.nomifun.com/zh/docs/) 有展示镜像。
 
 ---
 
@@ -213,14 +209,14 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 | 产品能力 | 带来的价值 |
 |---|---|
 | **多 Agent 执行集群** | 按依赖规划任务，委派给专用 Agent，并行调度执行，同时提供实时状态、真实会话、审批、重试与恢复。 |
-| **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
-| **创意工坊** | 提供持久化 Canvas、独立 Image/Video Workbench、Prompt Center、My Assets、私有模板、AI Create、多图系列、Canvas Assistant、Creative Studio 技能，以及可选的桌面伙伴协同。 |
+| **插件与小程序（Unified Plugins）** | 通过 Chat 创建或导入目录/ZIP 包，统一走 `install_artifact` 校验安装；可选 App/Service 入口，向 Agent、桌面与自动化暴露 Action/Binding 能力，并提供 generation 安全的存储、备份、恢复与删除。 |
+| **创意工坊** | 提供持久化 Canvas 与媒体节点 Composer、Prompt Center、My Assets、私有模板、AI Create、多图系列、Canvas Assistant、Creative Studio 技能，以及可选的桌面伙伴协同。 |
 | **按任务路由的多模型控制面** | 将 provider 凭据与模型记录分开管理，支持原生与兼容/自定义 endpoint（含本地、自托管服务），并为聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 提供任务级路由和故障切换。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
 
 ### 🐾 桌面伙伴 —— 越用越懂你
 
-> 产品使用文档：[NomiFun Portal 桌面伙伴指南](https://www.nomifun.com/zh/docs/guides/companions/)
+> 产品使用文档：[`docs/guides/companions.zh.md`](docs/guides/companions.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/companions/)
 
 每天与你对话的伙伴，会悄悄变成那个最懂你的助理。
 
@@ -233,25 +229,28 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 
 ### 🤖 小智机器人 —— 让桌面伙伴走进实体设备
 
-> 产品使用文档：[NomiFun Portal 小智机器人指南](https://www.nomifun.com/zh/docs/guides/xiaozhi-robot/) · 固件：[nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai)
+> 产品使用文档：[`docs/guides/xiaozhi-robot.zh.md`](docs/guides/xiaozhi-robot.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/xiaozhi-robot/) · 固件：[nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai)
 
 通过局域网把兼容的小智 ESP32 机器人直接连接到 NomiFun。机器人提供麦克风、
 扬声器、显示屏、舵机和设备端 MCP 工具；NomiFun 提供伙伴人格、模型、记忆、
 ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控制 → 机器人连接**：
 复制 OTA 地址，输入机器人显示的 6 位激活码，即可把实体设备绑定到该伙伴。
 
-### 🧩 Agent 小程序 —— 把一次会话变成可复用工具
+### 🧩 插件与小程序（Unified Plugins）—— 创建并运行受治理的本地软件
 
-在普通 Agent 会话中创建小程序，在同一工作区预览，并显式发布稳定快照到本地小程序
-库。Desktop 会把已发布版本与可编辑工作副本分开管理，因此后续迭代不会悄悄改变用户
-正在启动的版本。每次修改仍然依附于一条正常、可审计的会话，而不是藏在小程序里的
-第二套聊天系统；最终的小程序可以继续复用同一套本地 Agent、数据、模型和受治理工具。
+通过 Chat 创建插件，或导入包目录/ZIP。两种来源进入同一套校验与 `install_artifact`
+路径。一个本地插件指向一个活跃的不可变 Artifact 与一个 generation DataRoot；可选的
+UI 与 Service 入口覆盖纯 UI、无头与混合形态，不需要额外的产品模型。Action 通过稳定
+的 `plugin:<plugin_id>/<action_id>` 身份直接绑定到 Agent、Desktop 与 Automation 挂载点。
+
+统一 SDK 暴露 SQLite、KV、Files、内存态 Cache、Config、Credential 引用、Host 能力与
+跨插件 Action。Preview 复用同一套 Bridge 与存储适配器，落在临时 DataRoot 上。Package
+导出不含用户数据；Backup 携带当前数据与非机密配置，但绝不包含 Credential 明文。参见
+[Unified Plugin Core 合同](docs/specs/2026-09-22-unified-plugin-core/README.zh.md)。
 
 ### 🎨 创意工坊 —— 专注的无限画布创作
 
-> 产品使用文档：[NomiFun Portal 创意工坊指南](https://www.nomifun.com/zh/docs/guides/creative-workshop/)
->
-> 技术契约：[`docs/guides/creative-studio.zh.md`](docs/guides/creative-studio.zh.md)
+> 产品使用文档：[`docs/guides/creative-studio.zh.md`](docs/guides/creative-studio.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/creative-workshop/)
 
 创意工坊不是一次性的白板，而是一套持久化的创意文档系统。无限 Canvas 支持文字、
 图片、视频、音频、时间线、配置与分组节点。媒体节点负责可见的创作表面；
@@ -259,8 +258,8 @@ ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控
 每次生成都可审计。**Canvas Assistant** 只提出经过严格校验的图结构操作，失败时拒绝
 执行，并等待用户点击**应用到画布**；它不会在后台静默修改文档或偷偷启动生成。
 
-图像与视频工作台独立于 Canvas，即使没有任何 Canvas 也能使用。图像支持 T2I 与带真实
-参考素材的 I2I；视频支持 T2V 与单张真实图片 I2V；音频创作通过 Canvas 音频节点与 TTS
+Canvas 媒体节点覆盖完整生成矩阵：图像支持 T2I 与带真实参考素材的 I2I，视频支持
+T2V 与单张真实图片 I2V，音频创作通过 Canvas 音频节点与 TTS
 提供。**Prompt Center** 提供可搜索、带来源归属的提示词集合；**My Assets** 管理可
 复用的文字、图片、视频和音频，并支持类型筛选、集合、标签、元数据和素材选择器。参考
 图只保存素材 ID，重载时逐项恢复，不会复用过期的浏览器对象。
@@ -272,9 +271,8 @@ ASR、TTS、会话和工具协同。接入入口就在每个伙伴的**远程控
 每项操作都携带精确启用的 `{ providerId, model, task }`：Canvas Assistant 与模板草稿使用
 `chat`，T2I/I2I 使用 `image_generation`/`image_edit`，T2V/I2V 使用 `video_generation`，
 TTS 使用 `speech_synthesis`。Canvas 写入使用基于 revision 的 CAS；冲突会停止自动保存而
-不会覆盖新版本，任务历史在重载后只对账同一个 owner。Canvas ZIP v2 导出经过校验的文档
-与引用素材闭包，同时继续兼容 v1 reader。独立工作台历史只按
-`workbenchKind` 归属，不会暗中绑定 Canvas。
+不会覆盖新版本，任务历史在重载后只对账同一个 owner。Canvas ZIP v3 导出经过校验的文档
+与引用素材闭包，同时继续兼容 v1/v2 reader。
 
 ### 🧠 多 Agent 执行集群 —— 规划、调度与监督
 
@@ -290,18 +288,18 @@ Agent；主 Agent 始终是整次执行的控制点。
 
 ### 🤖 智能值守 —— 需求平台 + AutoWork + IDMM
 
-> 产品使用文档：[需求平台与 AutoWork](https://www.nomifun.com/zh/docs/guides/autowork/) · [智能决策（IDMM）](https://www.nomifun.com/zh/docs/guides/intelligent-decision/)
+> 产品使用文档：[`docs/guides/autowork-requirements.zh.md`](docs/guides/autowork-requirements.zh.md) · [`docs/guides/intelligent-decision.zh.md`](docs/guides/intelligent-decision.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/autowork/)
 
 你只管下令，NomiFun 可靠地把活干完。
 
 - **需求平台** —— 带有序轮转的 CRUD 存储、看板、标签与逐项 claim。
-- **AutoWork** —— 自动 claim 待办需求、驱动一个回合、轮转到下一个，并在回合进行中续租保活。目标可以是**会话智能体**，也可以是**终端 PTY**。
+- **AutoWork** —— 自动 claim 待办需求、驱动一个回合、轮转到下一个，并在回合进行中续租保活。目标是绑定已保存 Agent 的 canonical **AgentSession**。
 - **IDMM（智能决策）** —— 逐会话的守护，穿越供应商故障与决策停滞维持会话存活；无 LLM 的规则层 + 旁路备用模型层，叠加在 AutoWork 之上。
 - **出站通知** —— 完成通知可推送到**飞书/Lark** 自定义机器人、**Slack** 与 HTTP webhook。
 
 ### 📚 统一知识库
 
-> 产品使用文档：[NomiFun Portal MCP 与 Skills 指南](https://www.nomifun.com/zh/docs/guides/mcp-and-skills/)
+> 产品使用文档：[`docs/guides/mcp-and-skills.zh.md`](docs/guides/mcp-and-skills.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/mcp-and-skills/)
 
 把散落在系统各处的知识，收拢到一个可管理、可追踪的地方。
 
@@ -312,7 +310,7 @@ Agent；主 Agent 始终是整次执行的控制点。
 
 ### 🖥️ 原生 Computer Use 与 Browser Use *（桌面版）*
 
-> 产品使用文档：[NomiFun Portal Computer / Browser Use 指南](https://www.nomifun.com/zh/docs/guides/computer-browser-use/)
+> 产品使用文档：[`docs/guides/computer-browser-use.zh.md`](docs/guides/computer-browser-use.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/computer-browser-use/)
 
 自研、**进程内 Rust** 实现 —— 不依赖 Playwright、不依赖 Node、不依赖第三方自动化守护进程。能力更强、速度更快、token 更省，提供细粒度控制，且完全开源供你增强。
 
@@ -321,25 +319,25 @@ Agent；主 Agent 始终是整次执行的控制点。
 - **一条简单的输入规则** —— Agent 工作期间，浏览器输入只属于 Agent，用户可以直接观察真实交互；本轮结束后，用户即可手动操作页面。系统不存在暂停后“接管”的流程。
 - **无需额外测试产品的前端闭环** —— 启用相应能力后，Agent 可以观察渲染元素，并用真实鼠标、键盘、拖拽、上传、下载和网站对话框交互测试自己开发的应用。Browser 不提供控制台、问题列表、测试步骤面板或专门测试模式。
 - **会话持有状态** —— 每个持久会话拥有独立的浏览器 Profile 与标签页。Browser 从会话内打开，不再有全局管理页或 Browser 设置中心；站点数据与下载只放在简洁的会话浏览器菜单中管理。
-- **可选的本地网页搜索** —— `nomi_local_websearch` 为不支持厂商原生搜索的模型提供独立、可选择的公开网页检索工具。它使用隔离的后台浏览器，不读取会话标签页或登录状态。
-- **可选的系统浏览器连接** —— `nomi_system_browser` 是另一项独立能力，用于连接 Windows 上已经运行并登录的 Chrome。用户按会话明确授权标签页；NomiFun 不导入 Profile，也不把凭据搬进内嵌浏览器。
+- **可选的网页研究** —— `web.research` 能力模块为不支持厂商原生搜索的模型提供独立、可选择的公开网页检索面。它使用隔离的后台浏览器，不读取会话标签页或登录状态。
+- **可选的 Attached Chrome Provider** —— Agent session 的 `browser` 能力可以由 Windows 上正在运行、已登录的 Chrome 提供（`/api/browser-providers/attached-chrome`）。NomiFun 不启动 Chrome、不导入 Profile，也不把凭据搬进内嵌浏览器。
 - **不做隐藏的交互降级** —— 隔离 headless Chromium 只用于本地搜索与内容渲染。交互式 Browser 始终使用会话内原生 Surface；创建失败时直接报告，不会悄悄切换执行引擎。
 
 > ℹ️ computer/browser 控制随**桌面应用**提供；无头的 web/server 宿主按设计不含。
 
 ### 🌐 开放能力总线 —— MCP + REST
 
-> 产品使用文档：[NomiFun Portal 开放能力指南](https://www.nomifun.com/zh/docs/guides/open-capability/)
+> 产品使用文档：[`docs/guides/remote-capability-api.zh.md`](docs/guides/remote-capability-api.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/open-capability/)
 
-NomiFun 的每一项能力都经由单一、强类型的能力注册表对外开放 —— **约 20 个域、150+ 个工具** —— 让你能把 NomiFun 接进任何地方。
+外部智能体通过 canonical remote-AgentSession 面驱动 NomiFun —— 一个显式、按 token 授权的契约，而不是通用工具堆。
 
-- **MCP 前门** 位于 `/mcp`（鉴权，Streamable-HTTP）。把 **Claude Code、Cursor 或你自己的智能体**指向它，它们就能像桌面伙伴一样操作 NomiFun。
-- **REST + OpenAPI** 位于 `/v1/tools`，支持流式，并自动生成 `/v1/openapi.json`。
-- 在总线上新增一项能力，会自动同时出现在 MCP **与** REST 上 —— 不漂移。
+- **MCP 前门** 位于 `/mcp`（Streamable-HTTP，安装令牌），只暴露 `open`、`turn`、`observe`、`cancel`。把 **Claude Code、Cursor 或你自己的智能体**指向它，即可驱动持久的 AgentSession。
+- **Canonical REST** 位于 `/api/remote/{open,turn,observe,cancel}`，适合不走 MCP 的普通 HTTP 客户端。
+- **RemoteBinding** 由本地 `/api/remote-bindings` 管理，决定远程令牌可以打开哪个 Agent/能力组合；WebUI 远程访问使用 `/api/webui/access-token`。
 
 ### 🧩 一个内置智能体，任意模型
 
-> 产品使用文档：[NomiFun Portal 模型管理与路由指南](https://www.nomifun.com/zh/docs/guides/model-routing/)
+> 产品使用文档：[`docs/guides/model-routing.zh.md`](docs/guides/model-routing.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/model-routing/)
 
 - **内置 `nomi` 智能体** —— 无需额外安装，也是唯一的会话引擎。支持 **26+ 模型供应商/预设**（OpenAI、Anthropic、Gemini + Vertex AI、AWS Bedrock、DeepSeek、OpenRouter、Moonshot/Kimi、通义千问/Dashscope、智谱/GLM、MiniMax、SiliconFlow、xAI、火山/豆包 等），覆盖 **4 种线缆协议**，并支持 **New API** 聚合网关。
 - **只有一条代码路径** —— 每个会话跑的都是同一个引擎，因此不论你选哪个模型，能力、工具策略、审批与故障转移的行为完全一致。
@@ -382,13 +380,13 @@ URL、协议或鉴权方式。
 
 ### 💻 终端模式 —— 第三方 agent CLI 的落脚处
 
-> 产品使用文档：[NomiFun Portal 应用内终端指南](https://www.nomifun.com/zh/docs/guides/terminal/)
+> 产品使用文档：[`docs/guides/terminal.zh.md`](docs/guides/terminal.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/terminal/)
 
-在应用内 PTY 会话里运行各种 agent CLI。**Claude Code、Codex、Gemini CLI** 就是这样与 NomiFun 配合使用的：真实的伪终端，CLI 自己的登录与 OAuth，自己的审批提示，没有任何一处被重新实现。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度。AutoWork 也能逐回合驱动这样的终端。
+在应用内 PTY 会话里运行各种 agent CLI。**Claude Code、Codex、Gemini CLI** 就是这样与 NomiFun 配合使用的：真实的伪终端，CLI 自己的登录与 OAuth，自己的审批提示，没有任何一处被重新实现。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度。终端保持交互式使用；AutoWork 只驱动 canonical AgentSession。
 
 ### 📱 NomiFun Mobile —— 直连你的 Desktop
 
-> 产品使用文档：[NomiFun Portal WebUI 远程访问指南](https://www.nomifun.com/zh/docs/guides/webui-remote/)
+> 产品使用文档：[`docs/guides/webui-remote-access.zh.md`](docs/guides/webui-remote-access.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/webui-remote/)
 > · 应用：[nomifun-mobile](https://github.com/nomifun/nomifun-mobile)
 
 局域网内无需社交平台，也无需 NomiFun 云中转。一键**扫码配对**会给手机签发短时效、
@@ -398,11 +396,11 @@ Desktop 中同一套会话、任务、需求、伙伴、模型和工具；Deskto
 
 ### ⚙️ config one，use anywhere
 
-**知识库**、**设定 & Skills**、**MCP**、**模型**、**开放能力**的集中管理中枢 —— 配置一次，再按会话、终端、渠道或伙伴逐一选用。单一事实源，处处复用。
+**知识库**、**Agent 工作台 & Skills**、**MCP**、**模型**、**开放能力**的集中管理中枢 —— 配置一次，再按会话、终端、渠道或伙伴逐一选用。单一事实源，处处复用。
 
 ### 💬 11 个 IM 渠道
 
-> 产品使用文档：[NomiFun Portal 渠道接入指南](https://www.nomifun.com/zh/docs/guides/channels/)
+> 产品使用文档：[`docs/guides/channels.zh.md`](docs/guides/channels.zh.md) · [Portal 镜像](https://www.nomifun.com/zh/docs/guides/channels/)
 
 把伙伴绑定到下列任意渠道，从你已经在用的聊天工具里指挥它：
 
@@ -466,7 +464,7 @@ packaging/      web 宿主的 Linux 部署支持
 
 ```bash
 git clone https://github.com/nomifun/nomifun-desktop.git
-cd nomifun-tauri
+cd nomifun-desktop
 bun install
 
 bun run dev      # 热重载开发
