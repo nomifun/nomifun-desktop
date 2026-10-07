@@ -21,7 +21,6 @@ const NOMI_TARGETS: &[&str] = &[
     "nomi_providers",
     "nomi_protocol",
     "nomi_tools",
-    "nomi_skills",
     "nomi_memory",
 ];
 

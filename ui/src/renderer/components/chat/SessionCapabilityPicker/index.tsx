@@ -19,6 +19,7 @@ type SessionCapabilityPickerProps = {
   onChange: (draft: SessionCapabilityDraft) => void;
   loading?: boolean;
   loadFailed?: boolean;
+  errorMessage?: string;
   onRetry?: () => void;
   applyMode: 'create' | 'next-send';
   /** Product-owned settings use the same rail and popup with their own scope. */
@@ -36,6 +37,7 @@ export { ComposerToolRail, SessionCapabilityComposerLayout } from './ComposerLay
 const mcpStatus = (server: IMcpServer) => {
   if (!server.enabled) return 'disabled';
   if (server.last_test_status === 'error') return 'error';
+  if (server.last_test_status !== 'connected' || !server.tools?.length) return 'unavailable';
   return 'available';
 };
 
@@ -75,6 +77,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   onChange,
   loading = false,
   loadFailed = false,
+  errorMessage,
   onRetry,
   applyMode,
   applyNote: customApplyNote,
@@ -129,6 +132,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
     : t('conversation.capabilityPicker.nextSendApplyNote', { defaultValue: '本会话 · 下次发送时应用' });
 
   const toggleSkill = (skill: SessionSkillOption, checked: boolean) => {
+    if (checked && skill.session_available === false) return;
     onChange({
       ...draft,
       skillNames: checked
@@ -150,6 +154,9 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
     const isSkills = kind === 'skills';
     const selectedCount = isSkills ? draft.skillNames.length : draft.mcpServerIds.length;
     const rows = isSkills ? catalog.skills : catalog.mcpServers;
+    const missing = isSkills
+      ? draft.skillNames.filter((name) => !catalog.skills.some((skill) => skill.name === name))
+      : draft.mcpServerIds.filter((id) => !catalog.mcpServers.some((server) => server.mcp_server_id === id));
     return (
       <section
         ref={refs.setFloating}
@@ -177,10 +184,10 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
             <div className={styles.feedback}><Spin size={20} /></div>
           ) : loadFailed ? (
             <div className={styles.feedback}>
-              <span>{t('conversation.capabilityPicker.loadFailed', { defaultValue: '加载失败' })}</span>
+              <span>{errorMessage || t('conversation.capabilityPicker.loadFailed', { defaultValue: '加载失败' })}</span>
               <Button type='text' size='mini' onClick={onRetry}>{t('common.retry')}</Button>
             </div>
-          ) : rows.length === 0 ? (
+          ) : rows.length === 0 && missing.length === 0 ? (
             <div className={styles.feedback}>
               {t('conversation.capabilityPicker.empty', { defaultValue: '暂无可用项目' })}
             </div>
@@ -188,20 +195,27 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
             catalog.skills.map((skill) => {
               const display = resolveSkillDisplay(skill, i18n.language);
               const checked = selectedSkills.has(skill.name);
+              const unavailable = skill.session_available === false;
+              const rowDisabled = disabled || readOnlyKinds.includes('skills') || (unavailable && !checked);
+              const description = unavailable
+                ? skill.session_error?.trim() || t('conversation.capabilityPicker.unavailable')
+                : display.description || skill.name;
               return (
                 <div
                   key={skill.name}
-                  className={`${styles.row} ${disabled ? styles.rowDisabled : ''}`}
+                  className={`${styles.row} ${rowDisabled ? styles.rowDisabled : ''}`}
                   onClick={() => {
-                    if (!disabled) toggleSkill(skill, !checked);
+                    if (!rowDisabled) toggleSkill(skill, !checked);
                   }}
                 >
-                  <CapabilityCheckbox checked={checked} disabled={disabled} label={display.name} onChange={(value) => toggleSkill(skill, value)} />
+                  <CapabilityCheckbox checked={checked} disabled={rowDisabled} label={display.name} onChange={(value) => toggleSkill(skill, value)} />
                   <span className={styles.copy}>
                     <strong>{display.name}</strong>
-                    <CapabilityDescription>{display.description || skill.name}</CapabilityDescription>
+                    <CapabilityDescription>{description}</CapabilityDescription>
                   </span>
-                  <span className={styles.status}>{skill.source === 'builtin'
+                  <span className={`${styles.status} ${unavailable ? styles.error : ''}`}>{unavailable
+                    ? t('conversation.capabilityPicker.error', { defaultValue: '异常' })
+                    : skill.source === 'builtin'
                     ? t('conversation.capabilityPicker.builtin', { defaultValue: '内置' })
                     : t('conversation.capabilityPicker.installed', { defaultValue: '已安装' })}</span>
                 </div>
@@ -212,7 +226,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
               const checked = selectedMcp.has(server.mcp_server_id);
               const status = mcpStatus(server);
               const locked = lockedMcpServerIds.has(server.mcp_server_id);
-              const rowDisabled = disabled || readOnlyKinds.includes('mcp') || locked || (!server.enabled && !checked);
+              const rowDisabled = disabled || readOnlyKinds.includes('mcp') || locked || (status !== 'available' && !checked);
               return (
                 <div
                   key={server.mcp_server_id}
@@ -237,13 +251,26 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
                   <span className={`${styles.status} ${styles[status]}`}>
                     {status === 'available' && <CheckOne theme='outline' size={12} fill='currentColor' />}
                     {t(`conversation.capabilityPicker.${status}` as const, {
-                      defaultValue: status === 'available' ? '可用' : status === 'disabled' ? '已停用' : '异常',
+                      defaultValue: status === 'available' ? '可用' : status === 'disabled' ? '已停用' : status === 'unavailable' ? '不可用' : '异常',
                     })}
                   </span>
                 </div>
               );
             })
           )}
+          {!loading && !loadFailed && missing.map((id) => {
+            const rowDisabled = disabled || readOnlyKinds.includes(kind);
+            const remove = () => {
+              if (rowDisabled) return;
+              onChange(isSkills
+                ? { ...draft, skillNames: draft.skillNames.filter((name) => name !== id) }
+                : { ...draft, mcpServerIds: draft.mcpServerIds.filter((serverId) => serverId !== id) });
+            };
+            return <div key={`missing:${id}`} className={`${styles.row} ${rowDisabled ? styles.rowDisabled : ''}`} onClick={remove}>
+              <CapabilityCheckbox checked disabled={rowDisabled} label={id} onChange={remove} />
+              <span className={styles.copy}><strong>{id}</strong><small>{t('conversation.capabilityPicker.unavailable')}</small></span>
+            </div>;
+          })}
         </div>
         <footer className={styles.footer}>
           <span>{t('conversation.capabilityPicker.selectedCount', {

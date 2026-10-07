@@ -7,11 +7,14 @@ use axum::http::StatusCode;
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
     AgentSessionMetadata, CorrelationId, DigestHex, EventProducerId, IdempotencyKey,
+    IdmmDecisionNotice, IdmmDecisionNoticeStatus, IdmmDecisionSource,
     OperationId, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
     SemanticSessionEventDraft, SessionEventAppend, SessionEventKind, SessionEventPayloadRef,
     StrictJsonValue,
 };
 use serde_json::json;
+use serde_json::Value;
+use std::time::Duration;
 use tower::ServiceExt;
 
 use common::{body_json, build_app, get_with_token, json_with_token, setup_and_login};
@@ -374,12 +377,201 @@ async fn evaluate_reads_canonical_message_projection_and_reserves_rule_action() 
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status=response.status();
     let body = body_json(response).await;
+    assert_eq!(status, StatusCode::OK,"{body}");
     assert_eq!(body["data"]["recent_interventions"][0]["kind"], "option_decision");
     assert_eq!(
         body["data"]["recent_interventions"][0]["action"],
         "select_safe_option"
     );
     assert_eq!(body["data"]["recent_interventions"][0]["status"], "failed");
+}
+
+#[tokio::test]
+async fn public_turn_routes_reject_forged_idmm_sources_before_admission() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let session_id=uuid::Uuid::now_v7().to_string();
+    seed_session(&services,&session_id).await;
+    for input in [json!({"content":"hello","origin":"idmm"}),
+        json!({"content":"hello","idmm_decision":null}),
+        json!({"content":"hello","input_source":{"kind":"idmm"}})] {
+        let response=app.clone().oneshot(json_with_token("POST",&format!("/api/agent-sessions/{session_id}/turns"),
+            json!({"input":input,"idempotency_key":uuid::Uuid::now_v7().to_string()}),&token,&csrf)).await.unwrap();
+        assert_eq!(response.status(),StatusCode::BAD_REQUEST);
+    }
+    let turns:i64=nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?")
+        .bind(&session_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(turns,0,"source forgery must not create an accepted input or model request");
+}
+
+fn scripted_chat(request: &wiremock::Request) -> wiremock::ResponseTemplate {
+    let body:Value=serde_json::from_slice(&request.body).unwrap();
+    let messages=body["messages"].as_array().unwrap();
+    let system=messages.iter().filter(|message| message["role"]=="system")
+        .map(|message|message["content"].to_string()).collect::<String>();
+    let last=messages.last().unwrap()["content"].to_string();
+    let text=if system.contains("constrained decision sidecar") {
+        r#"{"action":"answer_text","text":"简单","reason":"UI basis remains metadata only."}"#
+    } else if last.contains("rule_case") {
+        "请选择实现方式：\n1. React\n2. HTML（推荐）"
+    } else if last.contains("sidecar_case") {
+        "请问初始难度设置成什么？"
+    } else { "设计已确认。" };
+    scripted_response(text)
+}
+
+fn scripted_response(text: &str) -> wiremock::ResponseTemplate {
+    let delta=json!({"id":"idmm-scripted-provider","choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
+    let done=json!({"id":"idmm-scripted-provider","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+    wiremock::ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
+        .set_body_string(format!("data: {delta}\n\ndata: {done}\n\ndata: [DONE]\n\n"))
+}
+
+fn stored_content(row:&Value) -> Value {
+    if let Some(content)=row["content"].as_str() { serde_json::from_str(content).unwrap() }
+    else { row["content"].clone() }
+}
+
+#[tokio::test]
+async fn invalid_sidecar_decision_reaches_both_history_routes_as_the_same_typed_failed_notice() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(scripted_response("invalid JSON")).mount(&server).await;
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let provider_id = uuid::Uuid::now_v7().to_string();
+    seed_chat_model(&services, &provider_id, "sidecar").await;
+    nomifun_db::sqlx::query("UPDATE providers SET base_url = ? WHERE provider_id = ?")
+        .bind(format!("{}/v1", server.uri())).bind(&provider_id)
+        .execute(services.database.pool()).await.unwrap();
+    let session_id = uuid::Uuid::now_v7().to_string();
+    seed_session(&services, &session_id).await;
+    project_assistant_message(&services, &session_id, "请问初始难度设置成什么？").await;
+    let path = format!("/api/agent-sessions/{session_id}/idmm");
+    let response = app.clone().oneshot(json_with_token("PUT", &path,
+        json!({"mode":"rule_plus_model", "scan_interval_secs":300, "min_interval_secs":0,
+            "bypass_model":{"provider_id":provider_id,"model":"sidecar"}}), &token, &csrf,
+    )).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app.clone().oneshot(json_with_token("POST", &format!("{path}/evaluate"),
+        json!({}), &token, &csrf,
+    )).await.unwrap();
+    let status = response.status();
+    let body = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["recent_interventions"][0]["status"], "failed");
+    assert_eq!(body["data"]["recent_interventions"][0]["reason"], "bypass_model_failed");
+    let turns: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id = ?")
+        .bind(&session_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(turns, 0, "an invalid sidecar answer must never be admitted as a primary-model Turn");
+    let notices: i64 = nomifun_db::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'idmm/notice-recorded'",
+    ).bind(&session_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(notices, 1, "the still-unanswered question must have one durable canonical failed notice");
+
+    let response = app.clone().oneshot(get_with_token(
+        &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"), &token,
+    )).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let history = body_json(response).await;
+    let row = history["data"]["items"].as_array().unwrap().iter()
+        .find(|row| stored_content(row)["idmm_notice"].is_object())
+        .expect("the invalid sidecar answer must publish a notice for the still-unanswered question");
+    let notice: IdmmDecisionNotice = serde_json::from_value(stored_content(row)["idmm_notice"].clone()).unwrap();
+    notice.validate().unwrap();
+    assert_eq!(notice.status, IdmmDecisionNoticeStatus::Failed);
+    assert_eq!(notice.decision.source, IdmmDecisionSource::BypassModel);
+    assert_eq!(notice.decision.reason_code, "bypass_model_failed");
+    assert_eq!(notice.decision.model.as_ref().unwrap().provider_id, provider_id);
+    let response = app.oneshot(get_with_token(
+        &format!("/api/agent-sessions/{session_id}/message-history/{}", row["message_id"].as_str().unwrap()), &token,
+    )).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let single = body_json(response).await;
+    let single_notice: IdmmDecisionNotice = serde_json::from_value(stored_content(&single["data"])["idmm_notice"].clone()).unwrap();
+    assert_eq!(single_notice, notice,
+        "cold history and single-message history must expose the same typed failed notice");
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.is_empty(), "the failure must come from the actual sidecar provider call");
+    assert!(requests.iter().all(|request| String::from_utf8_lossy(&request.body).contains("constrained decision sidecar")),
+        "the invalid decision must not start a primary-model request");
+}
+
+#[tokio::test]
+async fn canonical_idmm_decisions_reach_ui_history_with_exact_sources_and_no_prompt_metadata() {
+    let server=wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(scripted_chat).mount(&server).await;
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let provider_id=uuid::Uuid::now_v7().to_string();
+    seed_chat_model(&services,&provider_id,"primary").await;
+    nomifun_db::sqlx::query("UPDATE providers SET base_url=? WHERE provider_id=?")
+        .bind(format!("{}/v1",server.uri())).bind(&provider_id).execute(services.database.pool()).await.unwrap();
+    let preset=body_json(app.clone().oneshot(json_with_token("POST","/api/agent-presets/from-template/chat.minimal",
+        json!({"display_name":"Canonical IDMM UI","reuse_existing":false,"model":{"provider_id":provider_id,"model":"primary"}}),
+        &token,&csrf)).await.unwrap()).await;
+    let preset_id=preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    for (case,source,expected) in [("rule_case","rule","2"),("sidecar_case","bypass_model","简单")] {
+        let session=body_json(app.clone().oneshot(json_with_token("POST","/api/agent-sessions",
+            json!({"preset_id":preset_id,"title":case}),&token,&csrf)).await.unwrap()).await;
+        let sid=session["data"]["agent_session_id"].as_str().unwrap();
+        let response=app.clone().oneshot(json_with_token("PUT",&format!("/api/agent-sessions/{sid}/idmm"),
+            json!({"mode":"rule_plus_model","scan_interval_secs":5,"min_interval_secs":0,
+                "bypass_model":{"provider_id":provider_id,"model":"primary"}}),&token,&csrf)).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let response=app.clone().oneshot(json_with_token("POST",&format!("/api/agent-sessions/{sid}/turns"),
+            json!({"input":{"content":case},"idempotency_key":uuid::Uuid::now_v7().to_string()}),&token,&csrf)).await.unwrap();
+        let status=response.status();
+        let body=body_json(response).await;
+        assert_eq!(status,StatusCode::OK,"{body}");
+        let row=tokio::time::timeout(Duration::from_secs(25),async {
+            loop {
+                let response=app.clone().oneshot(get_with_token(&format!("/api/agent-sessions/{sid}/message-history?page_size=100"),&token)).await.unwrap();
+                assert_eq!(response.status(),StatusCode::OK);
+                let body=body_json(response).await;
+                if let Some(row)=body["data"]["items"].as_array().unwrap().iter()
+                    .find(|row| stored_content(row)["idmm_decision"].is_object()) {
+                    let turn_state: Option<String> = nomifun_db::sqlx::query_scalar(
+                        "SELECT state FROM agent_turns WHERE session_id = ? AND source_message_id = ?",
+                    ).bind(sid).bind(row["message_id"].as_str().unwrap())
+                        .fetch_optional(services.database.pool()).await.unwrap();
+                    if turn_state.as_deref() == Some("completed") {
+                        break row.clone();
+                    }
+                    assert!(!matches!(turn_state.as_deref(), Some("failed" | "cancelled" | "interrupted")),
+                        "the automatic reply must complete its primary-model Turn: {turn_state:?}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }).await.expect("the real background supervisor must deliver a typed decision and complete its primary-model Turn");
+        let content=stored_content(&row);
+        assert_eq!(content["content"],expected);
+        assert_eq!(content["idmm_decision"]["source"],source);
+        assert!(content["idmm_decision"]["question"]["message_id"].as_str().is_some());
+        assert!(!content["idmm_decision"]["rationale"].as_str().unwrap().is_empty());
+        if source=="rule" {
+            assert!(content["idmm_decision"]["model"].is_null());
+            assert_eq!(content["idmm_decision"]["reason_code"],"rule_selected_recommended_option");
+        } else {
+            assert_eq!(content["idmm_decision"]["model"]["model"],"primary");
+            assert_eq!(content["idmm_decision"]["rationale"],"UI basis remains metadata only.");
+        }
+        let response=app.clone().oneshot(get_with_token(&format!("/api/agent-sessions/{sid}/message-history/{}",row["message_id"].as_str().unwrap()),&token)).await.unwrap();
+        assert_eq!(stored_content(&body_json(response).await["data"]),content,
+            "annotation fetch and cold history must return the same immutable provenance");
+        let response=app.clone().oneshot(json_with_token("PUT",&format!("/api/agent-sessions/{sid}/idmm"),
+            json!({"mode":"off"}),&token,&csrf)).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+    }
+    let requests=server.received_requests().await.unwrap();
+    let main_requests:Vec<_>=requests.iter().filter(|request|!String::from_utf8_lossy(&request.body).contains("constrained decision sidecar")).collect();
+    assert!(main_requests.len() >= 4,
+        "both initial prompts and both automatic replies must reach the primary model before checking metadata isolation; saw {} requests", main_requests.len());
+    assert!(main_requests.iter().all(|request|!String::from_utf8_lossy(&request.body).contains("UI basis remains metadata only.")),
+        "the UI-only rationale must not become primary-model instructions or history text");
 }

@@ -1762,6 +1762,7 @@ fn merge_chat_provider_params(
                 | "require_reasoning_content"
                 | "reasoning_effort"
                 | "_nomifun_context_limit_kind"
+                | nomifun_api_types::MODEL_GATEWAY_CATALOG_BASELINE_PARAM
         ) {
             continue;
         }
@@ -2005,6 +2006,22 @@ fn repository_error_status(error: ProductionRepositoryError) -> u16 {
 }
 
 fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
+    if let Some(business) = error.gateway_business_error {
+        let (code, retry) = match business {
+            nomifun_model_invoke::GatewayBusinessError::InsufficientBalance
+            | nomifun_model_invoke::GatewayBusinessError::SubscriptionExpired
+            | nomifun_model_invoke::GatewayBusinessError::ModelNotInPlan =>
+                (ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+            nomifun_model_invoke::GatewayBusinessError::KeyExpired =>
+                (ChatModelErrorCode::AuthenticationFailed, ChatRetryDirective::Never),
+            nomifun_model_invoke::GatewayBusinessError::RateLimited =>
+                (ChatModelErrorCode::RateLimited, ChatRetryDirective::RetrySameRoute),
+        };
+        let mut mapped = ChatModelError::new(code, business.action_message(), retry);
+        mapped.provider_status = error.http_status;
+        mapped.retry_after_ms = error.retry_after_ms;
+        return mapped;
+    }
     if error.is_context_length_rejected() {
         let mut mapped = ChatModelError::new(
             ChatModelErrorCode::PromptTooLong,
@@ -2465,6 +2482,7 @@ mod tests {
                 "max_tokens_field": "max_completion_tokens",
                 "require_reasoning_content": false,
                 "_nomifun_context_limit_kind": "input_only",
+                "_nomifun_gateway_catalog_baseline": {"protocol":"openai.chat_text"},
                 "temperature": 0.25
             }),
             ChatProtocol::OpenaiChat,
@@ -2477,6 +2495,7 @@ mod tests {
         assert!(merged.get("max_tokens_field").is_none());
         assert!(merged.get("require_reasoning_content").is_none());
         assert!(merged.get("_nomifun_context_limit_kind").is_none());
+        assert!(merged.get("_nomifun_gateway_catalog_baseline").is_none());
     }
 
     #[test]
@@ -2673,6 +2692,27 @@ mod tests {
         for kind in [InvokeErrorKind::Auth, InvokeErrorKind::QuotaExhausted, InvokeErrorKind::InvalidParams] {
             let mapped = invoke_error_to_chat_error(InvokeError::new(kind, "permanent"));
             assert_ne!(mapped.retry, ChatRetryDirective::RetrySameRoute);
+        }
+    }
+
+    #[test]
+    fn gateway_http_business_failures_preserve_safe_actions_without_failover() {
+        use nomifun_model_invoke::GatewayBusinessError;
+        for business in [GatewayBusinessError::InsufficientBalance, GatewayBusinessError::SubscriptionExpired,
+            GatewayBusinessError::ModelNotInPlan, GatewayBusinessError::KeyExpired, GatewayBusinessError::RateLimited] {
+            let mut source = InvokeError::new(InvokeErrorKind::ProviderError, "private upstream diagnostic")
+                .with_http_status(business.http_status());
+            source.gateway_business_error = Some(business);
+            source.retry_after_ms = Some(5_000);
+            source.unsupported_technical_capability = Some(ModelTechnicalCapability::FunctionCalling);
+            let mapped = invoke_error_to_chat_error(source);
+            assert_eq!(mapped.message, business.action_message());
+            assert_eq!(mapped.provider_status, Some(business.http_status()));
+            assert_eq!(mapped.retry_after_ms, Some(5_000));
+            assert_eq!(mapped.unsupported_feature, None);
+            assert_eq!(mapped.retry, if business == GatewayBusinessError::RateLimited {
+                ChatRetryDirective::RetrySameRoute
+            } else { ChatRetryDirective::Never });
         }
     }
 

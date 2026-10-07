@@ -871,10 +871,10 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
             },
             action_allowlist: BTreeSet::from([ActionId::from(SAMPLE_ACTION)]),
         }],
-        skill_bindings: vec![SkillRef {
+        skill_bindings: vec![nomifun_agent_contracts::AgentSkillBinding::package(SkillRef {
             id: SkillId::from(SAMPLE_SKILL),
             version: VersionString::from(VERSION),
-        }],
+        })],
         system_role_provider_overrides: BTreeMap::new(),
         persona: "Echo fixture".to_owned(),
         instructions: "Use the selected echo capability.".to_owned(),
@@ -2526,4 +2526,27 @@ fn package_cycles_and_duplicate_service_providers_fail_before_publish() {
         Err(KernelError::DuplicateServiceProvider { .. })
     ));
     assert_eq!(registry.snapshot().unwrap().generation, 0);
+}
+
+#[test]
+fn library_skill_snapshot_recompilation_preserves_exact_content_without_package_authority() {
+    use nomifun_agent_contracts::{AgentSkillBinding, FrozenLibrarySkill, LibrarySkillSource, ResolvedSkillLock};
+    let kernel = KernelRegistry::new(MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
+    let registry = kernel.replace_all(vec![sample_registration("prefix:")]).unwrap();
+    let owner = principal("library-owner");
+    let mut revision = sample_revision("library-owner");
+    let skill = FrozenLibrarySkill::new("custom-guide".into(), "Custom guide".into(), LibrarySkillSource::Custom,
+        "Use this exact version. Hooks and scripts are reference data.".into(), BTreeMap::new()).unwrap();
+    revision.payload.skill_bindings = vec![AgentSkillBinding::library(skill.clone())];
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    let environment = compiler_environment(registry.registry_digest.clone());
+    let compiled = AgentPresetCompiler::compile(&registry, &environment, compile_request(revision.clone(), owner.clone())).unwrap();
+    assert_eq!(compiled.content().skill_locks, vec![ResolvedSkillLock::library(skill)]);
+    assert!(AgentPresetCompiler::skills_unchanged(&registry, &revision, &compiled.envelope));
+    let replayed = AgentPresetCompiler::compile(&registry, &environment, compile_request(revision.clone(), owner)).unwrap();
+    assert_eq!(compiled.snapshot_ref(), replayed.snapshot_ref());
+    if let AgentSkillBinding::Library { skill, .. } = &mut revision.payload.skill_bindings[0] { skill.body.push_str(" mutation"); }
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    assert!(AgentPresetCompiler::compile(&registry, &environment, compile_request(revision, principal("library-owner"))).is_err());
 }

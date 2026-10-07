@@ -24,6 +24,7 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --general-desktop-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --companion-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --creative-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --report .tmp-idmm-demo-report.json
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compaction-smoke
  *   NOMIFUN_LIVE_FIXTURE_PARENT=/absolute/repo/.git/hook-product-validation \
@@ -40,9 +41,10 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, realpathSync, statSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, realpathSync, statSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { IDMM_DEMO_CASES, parseIdmmDemoCase, parseIdmmDemoEvidence } from './idmm-demo-evidence.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WINDOWS_TOOLCHAIN_MODULE_URL = pathToFileURL(
@@ -70,6 +72,7 @@ const GENERAL_DESKTOP_TEST_NAME = 'nomi_core_general_desktop_reaches_live_stepfu
 const COMPANION_TEST_NAME = 'nomi_core_official_companion_reaches_live_stepfun';
 const CREATIVE_TEST_NAME = 'nomi_core_official_creative_studio_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
+const IDMM_TEST_NAME = 'nomi_core_idmm_reaches_live_stepfun';
 const BEFORE_TOOL_STAGE_PHASES = ['before_tool.publish_select', 'before_tool.allow', 'before_tool.deny', 'before_tool.continuation'];
 const GLOBAL_TIMEOUT_MS = (process.argv.includes('--long-coding-smoke') ? 75 : 30) * 60 * 1000;
 const CARGO_OUTPUT_LIMIT_BYTES = 32 * 1024 * 1024;
@@ -87,6 +90,11 @@ const generalDesktopSmoke = process.argv.includes('--general-desktop-smoke');
 const companionSmoke = process.argv.includes('--companion-smoke');
 const creativeSmoke = process.argv.includes('--creative-smoke');
 const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
+const idmmSmoke = process.argv.includes('--idmm-smoke');
+const reportIndex = process.argv.indexOf('--report');
+const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
+const selectedSmokeTest = idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
@@ -151,7 +159,7 @@ function terminateProcessTree(child, environment) {
 function runCaptured(
   command,
   args,
-  { environment, input = null, outputLimitBytes, onStdoutLine = null },
+  { environment, input = null, outputLimitBytes, onStdoutLine = null, onStderrLine = null },
 ) {
   const remainingMs = globalDeadline - Date.now();
   if (remainingMs <= 0) {
@@ -172,6 +180,7 @@ function runCaptured(
     const stdout = [];
     const stderr = [];
     let pendingLine = '';
+    let pendingErrorLine = '';
     const child = spawn(command, args, {
       cwd: ROOT,
       env: environmentWithoutCredential(environment),
@@ -224,7 +233,16 @@ function runCaptured(
         for (const line of lines) if (line.length < 16000) onStdoutLine(line);
       }
     });
-    child.stderr.on('data', collect(stderr));
+    child.stderr.on('data', chunk => {
+      collect(stderr)(chunk);
+      if (onStderrLine && !settled) {
+        pendingErrorLine += chunk.toString('utf8');
+        const lines = pendingErrorLine.split(/\r?\n/);
+        pendingErrorLine = lines.pop() ?? '';
+        if (pendingErrorLine.length > 24000) pendingErrorLine = '';
+        for (const line of lines) if (line.length < 24000) onStderrLine(line);
+      }
+    });
     child.once('error', () => finish({ status: null, spawnError: true }));
     child.once('close', (status, signal) => finish({ status, signal }));
 
@@ -414,17 +432,20 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
   if (userArgs.some((arg, index) => {
+    if (arg === '--report') return !idmmSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
+    if (index > 0 && userArgs[index - 1] === '--report') return false;
     if (arg === '--data-dir') return !browserGui || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--data-dir') return false;
     return !allowedFlags.includes(arg);
-  }) || userArgs.filter(arg => arg === '--data-dir').length > 1) {
+  }) || userArgs.filter(arg => arg === '--data-dir').length > 1 || userArgs.filter(arg => arg === '--report').length > 1 ||
+      (reportPath && (!reportPath.endsWith('.json') || !existsSync(dirname(reportPath))))) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_ARGUMENT_INVALID', 400);
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -577,11 +598,11 @@ async function main() {
 
   let test;
   try {
-    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
+    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : selectedSmokeMode} model=${model}`);
     test = await runCaptured(
       executable,
       browserGui ? [guiDataDir, '--live-frontend'] : browser ? ['--live-agent-only'] : [
-        beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME,
+        selectedSmokeTest,
         '--exact',
         '--ignored',
         '--test-threads=1',
@@ -591,6 +612,12 @@ async function main() {
         environment,
         input: credentialInput,
         outputLimitBytes: TEST_OUTPUT_LIMIT_BYTES,
+        onStderrLine: idmmSmoke ? line => {
+          const active = line.match(/^NOMIFUN_IDMM_DEMO_ACTIVE case=([a-z_]+)$/);
+          if (active && IDMM_DEMO_CASES.includes(active[1])) console.log(`idmm_demo_case=${active[1]} status=running`);
+          const item = parseIdmmDemoCase(line);
+          if (item) console.log(`idmm_demo_case=${item.case} status=${item.status} elapsed_ms=${item.elapsed_ms} idmm_turns=${item.idmm_turns} sidecar_calls=${item.sidecar_calls}`);
+        } : null,
         onStdoutLine: browserGui ? line => {
           const prefix = 'BROWSER_GUI_FIXTURE_READY ';
           if (!line.startsWith(prefix)) return;
@@ -676,7 +703,7 @@ async function main() {
       return;
     }
     // libtest exits successfully even when an exact filter matches zero tests.
-    const selected = beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+    const selected = selectedSmokeTest;
     if (!selectedTestPassed(test.stdout, selected)) {
       emitFailure('live_smoke_status=not_run', 'SELECTED_TEST_DID_NOT_PASS', 503);
       process.exitCode = 2;
@@ -687,6 +714,20 @@ async function main() {
       emitFailure('live_smoke_status=fail', 'BEFORE_TOOL_STAGE_EVIDENCE_INCOMPLETE', 503);
       process.exitCode = 2;
       return;
+    }
+    if (idmmSmoke) {
+      try {
+        const evidence = parseIdmmDemoEvidence(test.stderr);
+        console.log('idmm_demo_limitation=provider_pause_requires_explicit_native_resume');
+        if (reportPath) {
+          writeFileSync(reportPath, JSON.stringify({...evidence, completed_at:new Date().toISOString()}, null, 2) + '\n', {mode:0o600});
+          console.log(`idmm_demo_report=${JSON.stringify(reportPath)}`);
+        }
+      } catch {
+        emitFailure('live_smoke_status=fail', 'IDMM_DEMO_EVIDENCE_OR_REPORT_INVALID', 503);
+        process.exitCode = 2;
+        return;
+      }
     }
     if (retainNativeFixture) {
       try {
@@ -704,13 +745,22 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    console.log(`live_smoke_mode=${beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
+    console.log(`live_smoke_mode=${selectedSmokeMode} model=${model}`);
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;
     return;
   }
 
   const typed = typedFailureFromOutput(`${test.stdout}\n${test.stderr}`);
+  if (idmmSmoke && reportPath) {
+    try {
+      const cases = test.stderr.split(/\r?\n/).map(parseIdmmDemoCase).filter(Boolean);
+      writeFileSync(reportPath, JSON.stringify({schema_version:1,provider:'stepfun-plan',model,
+        status:'fail',completed_at:new Date().toISOString(),cases,
+        failure:typed ?? {code:'TEST_EXECUTION_FAILED'}},null,2)+'\n',{mode:0o600});
+      console.log(`idmm_demo_report=${JSON.stringify(reportPath)}`);
+    } catch { /* The exit failure remains authoritative if report writing fails. */ }
+  }
   if (!typed) {
     const panicLine = `${test.stdout}\n${test.stderr}`.split(/\r?\n/)
       .find(line => line.includes('panicked at '));

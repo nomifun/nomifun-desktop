@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use nomifun_common::{CompanionId, DelegationPolicy, UserId};
 use serde::{Deserialize, Serialize};
 
-use crate::{GatewayMcpConfig, KnowledgeMountInfo, McpServerId};
+use crate::{GatewayMcpConfig, KnowledgeMountInfo};
 
 macro_rules! optional_id_deserializer {
     ($name:ident, $id:ty) => {
@@ -25,41 +23,6 @@ macro_rules! optional_id_deserializer {
 
 optional_id_deserializer!(deserialize_companion_id, CompanionId);
 optional_id_deserializer!(deserialize_user_id, UserId);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SessionMcpTransport {
-    Stdio {
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: HashMap<String, String>,
-    },
-    Http {
-        url: String,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
-    Sse {
-        url: String,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
-    StreamableHttp {
-        url: String,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionMcpServer {
-    pub mcp_server_id: McpServerId,
-    pub name: String,
-    pub transport: SessionMcpTransport,
-}
 
 /// Opt-in goal-driven continuation for a session. When present, the engine
 /// keeps working toward `objective` across turns (with a completion audit)
@@ -118,10 +81,6 @@ pub struct NomiBuildExtra {
     /// Opt-in goal-driven continuation (see [`NomiGoalSpec`]).
     #[serde(default)]
     pub goal: Option<NomiGoalSpec>,
-    /// Stable MCP server business IDs.
-    pub mcp_server_ids: Option<Vec<McpServerId>>,
-    #[serde(default)]
-    pub session_mcp_servers: Vec<SessionMcpServer>,
     #[serde(default, deserialize_with = "deserialize_user_id")]
     pub user_id: Option<String>,
     /// Marks a companion conversation: the factory registers its memory tools
@@ -261,7 +220,6 @@ pub struct SlashCommandItem {
 mod tests {
     use super::*;
 
-    const MCP_SERVER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000123";
 
     #[test]
     fn nomi_build_extra_deserializes_delegation_policy() {
@@ -374,47 +332,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn session_mcp_server_id_accepts_canonical_uuidv7() {
-        let value = serde_json::json!({
-            "mcp_server_id": MCP_SERVER_ID,
-            "name": "temporary",
-            "transport": { "type": "stdio", "command": "server" }
-        });
-        let parsed: SessionMcpServer = serde_json::from_value(value).unwrap();
-        assert_eq!(parsed.mcp_server_id.as_str(), MCP_SERVER_ID);
-    }
 
-    #[test]
-    fn session_mcp_server_rejects_legacy_id() {
-        let value = serde_json::json!({
-            "id": 42,
-            "name": "temporary",
-            "transport": { "type": "stdio", "command": "server" }
-        });
-        assert!(serde_json::from_value::<SessionMcpServer>(value).is_err());
-    }
-
-    #[test]
-    fn catalog_mcp_ids_require_canonical_uuidv7_strings() {
-        let id = McpServerId::parse(MCP_SERVER_ID).unwrap();
-        let parsed: NomiBuildExtra =
-            serde_json::from_value(serde_json::json!({ "mcp_server_ids": [id.clone()] })).unwrap();
-        assert_eq!(parsed.mcp_server_ids, Some(vec![id]));
-
-        for invalid in [
-            serde_json::json!([42]),
-            serde_json::json!(["42"]),
-            serde_json::json!(["550e8400-e29b-41d4-a716-446655440000"]),
-            serde_json::json!([format!("mcp_{MCP_SERVER_ID}")]),
-            serde_json::json!([true]),
-        ] {
-            assert!(
-                serde_json::from_value::<NomiBuildExtra>(
-                    serde_json::json!({ "mcp_server_ids": invalid })
-                )
-                .is_err()
-            );
-        }
-    }
 }

@@ -11,8 +11,6 @@ use axum::http::StatusCode;
 use nomifun_ai_agent::{
     AgentRouterState, AgentRuntimeSessions, AgentService,
     NomiPlatformBuiltinContextAdmission,
-    NomiPlatformBuiltinLifecycleAdmission,
-    NomiPlatformBuiltinToolAdmission,
 };
 use nomifun_agent_contracts::{
     CapabilityConsumer, CanonicalErrorCode, platform_feature_inventory_payload,
@@ -75,7 +73,7 @@ use crate::services::{AppServices, BackgroundTaskRegistry};
 use super::nomi_core_control_plane::NomiCoreControlPlaneStore;
 use super::nomi_core_chat_route::NomiCoreDefaultChatRouteResolver;
 use super::nomi_core_session::{
-    NomiCoreAgentApiState, NomiCorePluginToolSessionProvider,
+    NomiCoreAgentApiState,
     NomiCoreSessionOwner,
 };
 use super::idmm::IdmmRouterState;
@@ -517,27 +515,11 @@ async fn build_nomi_core_agent_api_state(
         })
         .map(|capability| capability.manifest.id.clone())
         .collect::<BTreeSet<_>>();
-    let platform_builtin_tool_admission = Arc::new(
-        NomiPlatformBuiltinToolAdmission::from_registry(
-            &materialized,
-            builtin_plan.tool_capability_ids.clone(),
-            native_capability_ids.clone(),
-            Arc::clone(&builtin_plan.schema_resolver),
-        )?,
-    );
     let platform_builtin_context_admission = Arc::new(
         NomiPlatformBuiltinContextAdmission::from_registry(
             &materialized,
             builtin_plan.context_capability_ids.clone(),
             native_capability_ids.clone(),
-        )?,
-    );
-    let platform_builtin_lifecycle_admission = Arc::new(
-        NomiPlatformBuiltinLifecycleAdmission::from_registry(
-            &materialized,
-            builtin_plan.lifecycle_capability_ids.clone(),
-            native_capability_ids,
-            Arc::clone(&builtin_plan.lifecycle_invoker),
         )?,
     );
     let unavailable_capabilities = materialized
@@ -647,7 +629,12 @@ async fn build_nomi_core_agent_api_state(
     ))
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
-    )));
+    ))
+    .with_session_capabilities_resolver(Arc::new(super::session_capabilities::GlobalSessionCapabilities {
+        owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
+        skills: Arc::clone(&services.skill_paths),
+        mcp: Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
+    })));
     let resource_bindings = super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry::product(services)
         .map_err(|error| {
             anyhow::anyhow!("{}: {}", error.code(), error.message())
@@ -666,10 +653,6 @@ async fn build_nomi_core_agent_api_state(
     services
         .cs_dialogue_engine
         .with_agent_policy_resolver(product_agent_resolver.clone());
-    let mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository> =
-        Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-            services.database.pool().clone(),
-        ));
     let engine_sessions = Arc::new(super::engine_session_host::EngineSessionHost::new(
         &conversation_owner, Arc::clone(&control_plane), &services.official_runtime, services.database.pool().clone(), services.encryption_key,
         super::engine_kernel_session::EngineKernelAssembly {
@@ -703,19 +686,6 @@ async fn build_nomi_core_agent_api_state(
             "scheduled orphaned AgentSession recovery before route publication"
         );
     }
-    let plugin_tool_sessions = Arc::new(NomiCorePluginToolSessionProvider::new(
-        Arc::clone(&conversation_owner),
-        Arc::clone(&control_plane),
-        Arc::clone(&kernel),
-        environment,
-        schema_resolver,
-        platform_builtin_tool_admission,
-        platform_builtin_context_admission,
-        platform_builtin_lifecycle_admission,
-        robot_owner,
-        Arc::clone(&builtin_plan.wave2_owner),
-        services.database.pool().clone(),
-    ));
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
         SqliteRemoteBindingRepository::new(services.database.pool().clone()),
     );
@@ -730,11 +700,9 @@ async fn build_nomi_core_agent_api_state(
             remote_repository,
             services.nomi_core_remote_runtime.clone(),
             resource_bindings,
-            mcp_server_repository,
             Arc::clone(&wave4_owners),
             wave5_owner,
             product_agent_resolver,
-            plugin_tool_sessions,
             services.ssh_pool.clone(),
             #[cfg(feature = "browser-use")]
             services.browser_resources.clone(),

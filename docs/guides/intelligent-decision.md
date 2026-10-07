@@ -27,6 +27,26 @@ private keys are best-effort redacted before context leaves the primary Session.
 
 ## Failover and safety
 
+Automatic replies have a separate bubble treatment and an explanation below the
+bubble: **Intelligent Decision · rule guard**, **Intelligent Decision · actual
+bypass model**, or **Intelligent Decision · recovery**. Human replies keep their
+usual appearance. The model name is recorded when the decision is made; changing
+the current configuration does not rewrite historical explanations.
+
+The short decision basis is kept with each decision (at most 40 Unicode
+characters). Rules provide fixed wording, while the bypass model returns a short
+basis in the existing decision call. Expanding it makes no additional model call.
+It is collapsed by default; **Settings → System → Show intelligent decision basis
+by default** changes only presentation. Each message also has its own toggle and
+a link to the original question. Uncalibrated confidence percentages are omitted.
+
+Copying an automatic reply copies only its answer. Automatic replies are excluded
+from human input editing and input history. Cases requiring human input or failing
+to produce an automatic answer appear as notices at the relevant point in the
+conversation. The settings capsule keeps runtime policy controls and no longer
+lists recent interventions. Old messages without canonical decision metadata are
+not retroactively classified from their text or from audit logs.
+
 The global Model Failover queue is frozen into each new AgentSession's immutable
 chat route. The Broker retries/switches routes inside a model call; IDMM wakes the
 task after a whole turn still fails. Existing Sessions are never silently rebound

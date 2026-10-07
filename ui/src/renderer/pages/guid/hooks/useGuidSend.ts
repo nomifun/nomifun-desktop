@@ -33,10 +33,8 @@ import type {
   CreateAgentSessionRequest,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
-import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
 import type { GuidCollaborationConfig } from './useGuidCollaboration';
-import { creationDraftStorageKey, emptyCreationDraft } from '@/renderer/creation/useCreationDraft';
 import {
   WorkspaceDirectoryUnavailableError,
   validateExistingWorkspaceDirectory,
@@ -72,6 +70,7 @@ export type GuidSendDeps = {
   resourceSelections: AgentResourceSelection[];
   /** Session-scoped behavior for the exact selected Knowledge resources. */
   knowledgePolicy?: NonNullable<CreateAgentSessionRequest['knowledge_policy']>;
+  sessionCapabilities?: CreateAgentSessionRequest['session_capabilities'];
   collaboration?: GuidCollaborationConfig;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
@@ -176,6 +175,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     knowledgePolicy,
+    sessionCapabilities,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -216,7 +216,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       try {
         launchPreset = await prepareOfficialAgent(
           selectedTemplate,
-          t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`),
           current_model,
         );
       } catch (error) {
@@ -240,6 +239,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
       ...(knowledgePolicy ? { knowledge_policy: knowledgePolicy } : {}),
+      ...(sessionCapabilities ? { session_capabilities: sessionCapabilities } : {}),
       ...(canonicalWorkspace ? { workspace: canonicalWorkspace } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
@@ -297,18 +297,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         );
       }
 
-      // Retain template identity for the next submit; an internal official
-      // preset ID alone is indistinguishable from a personal Agent in the UI.
-      if (selection.kind === 'template' && !conversation.extra?.companion_session) {
-        try {
-          const draftKey = creationDraftStorageKey(conversationId);
-          if (sessionStorage.getItem(draftKey) === null) {
-            sessionStorage.setItem(draftKey, JSON.stringify({
-              ...emptyCreationDraft(), selectedAgent: selection, presetId: launchPreset.preset_id,
-            }));
-          }
-        } catch { /* A created session remains usable when browser storage is unavailable. */ }
-      }
     } catch (error) {
       await discardFailedGuidSession(conversationId);
       throw error;
@@ -332,6 +320,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     knowledgePolicy,
+    sessionCapabilities,
     workspaceEnabled,
     t,
     requiredModules,

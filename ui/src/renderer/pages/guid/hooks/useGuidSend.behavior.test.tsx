@@ -501,6 +501,21 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls[0].body).not.toHaveProperty('runtime_build');
   });
 
+  test('creates the session with an explicit global capability selection, including none', async () => {
+    for (const selection of [{ skill_names: ['user-skill'], mcp_server_ids: ['019b0000-0000-7000-8000-000000000003'] }, { skill_names: [], mcp_server_ids: [] }]) {
+      resetBrowserStorage();
+      const calls = installFetchRecorder();
+      const hook = renderHook(() => useGuidSend({
+        ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+        sessionCapabilities: selection,
+      }));
+      await act(async () => { await hook.result.current.handleSend(); });
+      expect(calls[0].body).toMatchObject({ session_capabilities: selection });
+      expect(calls[0].body).not.toHaveProperty('extra');
+      hook.unmount();
+    }
+  });
+
   test('persists the selected reasoning effort on the new session', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
@@ -529,7 +544,7 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls[0]).toEqual({
       method: 'POST', url: '/api/agent-presets/from-template/chat.minimal',
       body: {
-        display_name: 'agentSettings.template.chat.minimal.name',
+        display_name: 'chat.minimal',
         reuse_existing: true,
         model_route_refs: {},
         chat_route_records: {},
@@ -549,23 +564,23 @@ describe('useGuidSend HTTP behavior', () => {
     expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
     const nextTurn = renderHook(() => useCreationDraft(PRESET_CONVERSATION_ID));
-    expect(nextTurn.result.current.draft.selectedAgent).toEqual({ kind: 'template', templateKey: 'chat.minimal' });
-    expect(nextTurn.result.current.draft.presetId).toBe(PRESET_ID);
+    expect(nextTurn.result.current.draft).not.toHaveProperty('selectedAgent');
+    expect(nextTurn.result.current.draft).not.toHaveProperty('presetId');
     expect(nextTurn.result.current.draft.mode).toBeNull();
   });
 
   test('official launch does not overwrite a draft already edited in the created conversation', async () => {
     resetBrowserStorage();
     installFetchRecorder();
-    const existing = { ...emptyCreationDraft(), selectedAgent: { kind: 'preset', presetId: PRESET_ID }, pendingPrompt: 'Keep my newer draft', parameters: { image: { count: 2 }, video: {}, music: { instrumental: true } } };
+    const existing = { ...emptyCreationDraft(), pendingPrompt: 'Keep my newer draft', parameters: { image: { count: 2 }, video: {}, music: { instrumental: true } } };
     const key = creationDraftStorageKey(PRESET_CONVERSATION_ID);
     const hook = renderHook(() => useGuidSend({
       ...createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' }, workspaceEnabled: false }),
       selectedTemplate: TEMPLATE,
-      applyAdvancedConfig: async () => { sessionStorage.setItem(key, JSON.stringify(existing)); },
+      applyAdvancedConfig: async () => { localStorage.setItem(key, JSON.stringify(existing)); },
     }));
     await act(async () => { await hook.result.current.handleSend(); });
-    expect(JSON.parse(sessionStorage.getItem(key)!)).toEqual(existing);
+    expect(JSON.parse(localStorage.getItem(key)!)).toEqual(existing);
   });
 
   test('failed official preparation does not create a session or navigate away', async () => {

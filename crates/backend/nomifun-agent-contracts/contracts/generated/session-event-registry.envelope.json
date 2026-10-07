@@ -275,6 +275,33 @@
         "replay_rule": "rebuild_projection"
       },
       {
+        "kind": "idmm/notice-recorded",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/idmm-notice-recorded/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "message/completed",
+            "message/assistant-projected"
+          ]
+        },
+        "correlation": "message",
+        "idempotency": "producer_scoped_required",
+        "projector": {
+          "required": true,
+          "reducers": [
+            "message-projection"
+          ]
+        },
+        "replay_rule": "rebuild_projection"
+      },
+      {
         "kind": "message/user-accepted",
         "version": 1,
         "persistence": "persistent",
@@ -1105,5 +1132,5 @@
       }
     ]
   },
-  "payload_digest": "fc2945d29cd3a3ff02d648cf904212cc204ae319627b4704fd695d1e8c3dafc6"
+  "payload_digest": "db152ee7b650513c4ff7654f279495ce0f5d0628a9e5b388ce206841772eadba"
 }

@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use nomifun_net::provider_capability::{
     ProviderTechnicalCapability, classify_unsupported_technical_capability,
 };
+use nomifun_net::provider_gateway_error::{GatewayBusinessError, classify_gateway_business_error};
 
 use crate::{ChatModelError, ChatModelErrorCode, ChatProtocol, ChatRetryDirective};
 use crate::ChatModelFeature;
@@ -15,6 +16,10 @@ fn malformed() -> ChatModelError {
 }
 
 fn has_output(value: &Value) -> bool {
+    value.as_object().is_some_and(has_output_object)
+}
+
+fn has_output_object(value: &Map<String, Value>) -> bool {
     [
         "output",
         "choices",
@@ -85,6 +90,17 @@ fn classify(code: &str) -> Option<(ChatModelErrorCode, ChatRetryDirective, &'sta
         ),
         _ => return None,
     })
+}
+
+pub(crate) fn gateway_error(business: GatewayBusinessError) -> ChatModelError {
+    let (code, retry) = match business {
+        GatewayBusinessError::InsufficientBalance
+        | GatewayBusinessError::SubscriptionExpired
+        | GatewayBusinessError::ModelNotInPlan => (ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+        GatewayBusinessError::KeyExpired => (ChatModelErrorCode::AuthenticationFailed, ChatRetryDirective::Never),
+        GatewayBusinessError::RateLimited => (ChatModelErrorCode::RateLimited, ChatRetryDirective::RetrySameRoute),
+    };
+    ChatModelError::new(code, business.action_message(), retry)
 }
 
 /// None means this is not a recognized error envelope: normal protocol
@@ -203,12 +219,21 @@ pub(crate) fn decode(protocol: ChatProtocol, event: &str, data: &Value) -> Optio
         // Responses error events may carry code/message at the frame root.
         data.as_object().expect("object checked above")
     };
+    if has_output_object(error) {
+        return Some(malformed());
+    }
     for field in ["code", "type", "status"] {
         if error.get(field).is_some_and(|value| {
             !value.is_null() && !value.is_string() && !(field == "code" && value.is_number())
         }) {
             return Some(malformed());
         }
+    }
+    if protocol != ChatProtocol::Bedrock
+        && (protocol != ChatProtocol::Gemini || error.get("code").is_some_and(Value::is_number))
+        && let Some(business) = classify_gateway_business_error(error)
+    {
+        return Some(gateway_error(business));
     }
     if let Some(feature) = classify_unsupported_technical_capability(error).map(|capability| {
         match capability {
@@ -301,6 +326,66 @@ mod tests {
             )
             .unwrap();
             assert_eq!(error.unsupported_feature, None, "code {code}");
+        }
+    }
+
+    #[test]
+    fn gateway_business_errors_keep_safe_actions_and_never_downgrade_features() {
+        for (business, expected_code, expected_retry) in [
+            (GatewayBusinessError::InsufficientBalance, ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+            (GatewayBusinessError::SubscriptionExpired, ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+            (GatewayBusinessError::ModelNotInPlan, ChatModelErrorCode::ProviderUnavailable, ChatRetryDirective::Never),
+            (GatewayBusinessError::KeyExpired, ChatModelErrorCode::AuthenticationFailed, ChatRetryDirective::Never),
+            (GatewayBusinessError::RateLimited, ChatModelErrorCode::RateLimited, ChatRetryDirective::RetrySameRoute),
+        ] {
+            for protocol in [ChatProtocol::OpenaiChat, ChatProtocol::OpenaiResponses, ChatProtocol::Anthropic] {
+                let data = serde_json::json!({"error": {"code": business.code(),
+                    "type": "unsupported_parameter", "param": "tools",
+                    "message": "private https://upstream.invalid/?key=secret",
+                    "purchase_url": "https://untrusted.invalid/buy"}});
+                let error = decode(protocol, "error", &data).unwrap();
+                assert_eq!(error.code, expected_code);
+                assert_eq!(error.retry, expected_retry);
+                assert_eq!(error.message, business.action_message());
+                assert_eq!(error.unsupported_feature, None);
+                assert!(!error.message.contains("secret"));
+                assert!(!error.message.contains("untrusted"));
+            }
+            let data = serde_json::json!({"error": {"code": business.http_status(), "details": [{
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo", "domain": "nomifun-model-gateway",
+                "reason": business.code().to_ascii_uppercase(), "metadata": {"nomifun_code": business.code()}
+            }]}});
+            let error = decode(ChatProtocol::Gemini, "json", &data).unwrap();
+            assert_eq!(error.code, expected_code);
+            assert_eq!(error.retry, expected_retry);
+            assert_eq!(error.message, business.action_message());
+        }
+    }
+
+    #[test]
+    fn gateway_error_diagnostics_and_foreign_errorinfo_are_not_billing_evidence() {
+        for data in [
+            serde_json::json!({"error":{"type":"permission_error", "message":"subscription_expired insufficient_balance"}}),
+            serde_json::json!({"error":{"code":402, "message":"insufficient_balance", "details":[{
+                "@type":"type.googleapis.com/google.rpc.ErrorInfo", "domain":"googleapis.com",
+                "reason":"INSUFFICIENT_BALANCE", "metadata":{"nomifun_code":"insufficient_balance"}
+            }]}}),
+        ] {
+            let error = decode(ChatProtocol::Gemini, "json", &data).unwrap();
+            assert!(!error.message.contains("model gateway"));
+        }
+        assert!(decode(ChatProtocol::OpenaiChat, "message", &serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{"function": {"arguments": "{\"error\":{\"code\":\"insufficient_balance\"}}"}}]}}]
+        })).is_none());
+        let error = decode(ChatProtocol::OpenaiChat, "json", &serde_json::json!({
+            "error":{"code":"insufficient_balance"}, "choices":[{"delta":{"content":"output"}}]
+        })).unwrap();
+        assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation);
+        for field in ["content", "tool_calls", "usage"] {
+            let mut data = serde_json::json!({"error":{"code":"insufficient_balance"}});
+            data["error"][field] = serde_json::json!({"undispatched":"output"});
+            let error = decode(ChatProtocol::OpenaiChat, "error", &data).unwrap();
+            assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation, "inner output {field}");
         }
     }
 }

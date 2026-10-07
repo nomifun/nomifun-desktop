@@ -166,7 +166,7 @@ describe('buildToolReceiptSummaryParts', () => {
         action: 'generic',
         count: 1,
         state: 'completed',
-        target: 'update_plan',
+        target: 'Update plan',
       },
     ]);
   });
@@ -185,7 +185,7 @@ describe('buildToolReceiptSummaryParts', () => {
         action: 'generic',
         count: 2,
         state: 'failed',
-        target: 'nomi_knowledge_update_base, knowledge_search',
+        target: 'Nomi knowledge update base, Search knowledge',
       },
     ]);
   });
@@ -205,14 +205,14 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
 
     expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
-      { title: 'read_file', action: 'read_files' },
-      { title: 'write_file', action: 'edit_files' },
-      { title: 'list_directory', action: 'list_files' },
-      { title: 'server/read_file', action: 'read_files' },
-      { title: 'server/write_file', action: 'edit_files' },
-      { title: 'server/list_directory', action: 'list_files' },
+      { title: 'Read file', action: 'read_files' },
+      { title: 'Write file', action: 'edit_files' },
+      { title: 'List directory', action: 'list_files' },
+      { title: 'Read file', action: 'read_files' },
+      { title: 'Write file', action: 'edit_files' },
+      { title: 'List directory', action: 'list_files' },
       {
-        title: 'server/read_file',
+        title: 'Read file',
         action: 'read_files',
       },
     ]);
@@ -228,7 +228,7 @@ describe('buildToolReceiptSummaryParts', () => {
 
     expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
       {
-        title: 'gateway/nomi_knowledge_update_base',
+        title: 'Nomi knowledge update base',
         action: 'generic',
       },
     ]);
@@ -243,10 +243,10 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
 
     expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
-      { title: 'web/search', action: 'generic' },
-      { title: 'knowledge/read', action: 'generic' },
-      { title: 'workflow/run', action: 'generic' },
-      { title: 'domain/list', action: 'generic' },
+      { title: 'Search', action: 'generic' },
+      { title: 'Read', action: 'generic' },
+      { title: 'Run', action: 'generic' },
+      { title: 'List', action: 'generic' },
     ]);
   });
 
@@ -434,14 +434,14 @@ describe('buildToolReceiptSummaryParts', () => {
         action: 'generic',
         count: 1,
         state: 'completed',
-        target: 'nomifun-desktop/nomi_delegate',
+        target: 'Nomi delegate',
         notExecutedReason: 'invalid_arguments',
       },
       {
         action: 'generic',
         count: 1,
         state: 'completed',
-        target: 'nomifun-desktop/nomi_delegate',
+        target: 'Nomi delegate',
       },
     ]);
   });
@@ -484,7 +484,7 @@ describe('buildToolReceiptSummaryParts', () => {
       'completed'
     );
 
-    expect(parts[0]?.target).toBe('nomifun-desktop/nomi_delegate');
+    expect(parts[0]?.target).toBe('Nomi delegate');
     expect(parts[0]?.target?.includes('anxmvqfkcuzfi4mq')).toBe(false);
   });
 });
@@ -545,7 +545,7 @@ describe('buildToolSummaryDescriptor', () => {
       'completed'
     );
 
-    expect(descriptor?.target).toBe('Edit MessageList.tsx');
+    expect(descriptor?.target).toBe('Edit · MessageList.tsx');
   });
 });
 
@@ -691,8 +691,9 @@ describe('buildToolReceiptDetailRows', () => {
         key: 'delegate-invalid',
         action: 'generic',
         state: 'completed',
-        title: 'nomifun-desktop/nomi_delegate',
-        target: 'nomifun-desktop/nomi_delegate',
+        title: 'Nomi delegate',
+        diagnostics: 'MCP · nomifun-desktop\nmcp__nomifun-desktop__nomi_delegate__anxmvqfkcuzfi4mq',
+        target: 'Nomi delegate',
         output,
         notExecutedReason: 'invalid_arguments',
       },

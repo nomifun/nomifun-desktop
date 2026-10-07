@@ -1,5 +1,5 @@
 //! Companion chat threads: real `type='nomi'` conversations driven by the
-//! full agent engine (plan mode / skills / slash commands / MCP), flavored
+//! canonical Agent Runtime with globally available Skills and MCP, flavored
 //! with the owning companion's persona system prompt and the companion memory
 //! tools.
 //!
@@ -288,12 +288,12 @@ pub struct CompanionThreads {
 /// Resolve the authoritative effective skill set for one companion profile.
 ///
 /// Fails closed: reconciliation callers must never treat a resolver failure
-/// as "no skills" — that empty set would strip every managed workspace link,
-/// wipe the frozen `extra.skills` snapshot and kill the live runtime. Three
+/// as "no skills" — a failed library read must not erase the profile
+/// selection used to create the canonical Session. Three
 /// failure signals are distinguished from a genuinely empty configuration:
 /// - the builtin corpus dir is missing/unreadable (startup materialization
 ///   failed, e.g. macOS packaging), so the resolver cannot see real skills;
-/// - `materialize_skills_for_agent` itself errors;
+/// - `resolve_skill_sources` itself errors;
 /// - a non-empty configuration resolves to nothing (source tree transiently
 ///   unreadable — resolve failures are silently skipped per name upstream).
 pub(crate) async fn effective_skill_names(
@@ -306,13 +306,16 @@ pub(crate) async fn effective_skill_names(
             skill_paths.builtin_skills_dir.display()
         )));
     }
+    let inventory = nomifun_skill_library::frozen::capture_inventory(skill_paths).await?;
+    let available = inventory.skills.iter().map(|skill| skill.name.as_str()).collect::<std::collections::BTreeSet<_>>();
     let auto_names: Vec<String> = nomifun_skill_library::list_builtin_auto_skills(skill_paths)
         .await?
         .into_iter()
         .map(|skill| skill.name)
+        .filter(|name| available.contains(name.as_str()))
         .collect();
     let configured = normalized_effective_skill_names(auto_names, &profile.skills);
-    let resolved = nomifun_skill_library::materialize_skills_for_agent(
+    let resolved = nomifun_skill_library::resolve_skill_sources(
         skill_paths,
         &profile.companion_id,
         &configured,
@@ -332,16 +335,6 @@ pub(crate) async fn effective_skill_names(
 }
 
 impl CompanionThreads {
-    async fn builtin_auto_skill_names(&self) -> Vec<String> {
-        match nomifun_skill_library::list_builtin_auto_skills(&self.skill_paths).await {
-            Ok(skills) => skills.into_iter().map(|skill| skill.name).collect(),
-            Err(error) => {
-                tracing::warn!(error = %error, "list builtin auto skills for companion failed");
-                Vec::new()
-            }
-        }
-    }
-
     /// `NotFound` unless `conversation_id` is a registered thread owned by
     /// `companion_id`.
     async fn assert_owned(&self, companion_id: &str, conversation_id: &str) -> Result<(), AppError> {
@@ -412,22 +405,9 @@ impl CompanionThreads {
             tracing::warn!(error = %e, dir = %workspace_dir.display(), "create companion workspace dir failed");
         }
         let workspace = workspace_dir.to_string_lossy().into_owned();
-        let auto_skill_names = self.builtin_auto_skill_names().await;
-        // Minting must not hard-fail on a transient resolver error: a brand-new
-        // conversation has nothing to destroy, and the follow-up reconcile (and
-        // every later get_or_create) repairs the frozen snapshot once the
-        // resolver recovers.
-        let effective_skill_names = match effective_skill_names(&self.skill_paths, &profile).await {
-            Ok(names) => names,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    companion_id = %profile.companion_id,
-                    "resolve companion skills failed; creating thread without preset skills"
-                );
-                Vec::new()
-            }
-        };
+        // A profile selection must be resolved before the host can freeze its
+        // canonical Session. Resolver failure is not an empty selection.
+        let effective_skill_names = effective_skill_names(&self.skill_paths, &profile).await?;
 
         let req = CreateConversationRequest {
             r#type: nomifun_common::AgentType::Nomi,
@@ -444,17 +424,8 @@ impl CompanionThreads {
                 let extra = serde_json::json!({
                 "companion_session": true,
                 "companion_id": companion_id,
-                "selected_mcp_server_ids": [],
                 "system_prompt": system_prompt,
-                // The conversation service freezes this into `extra.skills`.
-                // Supplying the configured set also filters configured names that
-                // are not installed; the follow-up reconciliation repairs the
-                // snapshot against the authoritative resolver.
-                "companion_skills": effective_skill_names,
-                "exclude_auto_inject_skills": auto_skill_names,
-                // Fixed private work folder (locked, browsable in the chat tab's file
-                // sidebar). Marks the conversation as a custom (non-temp) workspace, so
-                // no skill symlinks are wired — the companion uses gateway tools, not skills.
+                // Fixed private work folder, browsable in the companion chat.
                 "workspace": workspace,
                 });
                 extra
@@ -465,6 +436,7 @@ impl CompanionThreads {
             .create(
                 self.authoritative_user_id.as_ref(),
                 req,
+                effective_skill_names,
             )
             .await?;
         let created_id = created.conversation_id;
@@ -765,7 +737,7 @@ mod skill_resolution_tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut profile = profile_with_enabled(&["alpha"]);
         // Non-canonical id (only reachable through a hand-built profile)
-        // drives materialize_skills_for_agent's validate_filename Err arm.
+        // drives resolve_skill_sources's validate_filename Err arm.
         profile.companion_id = "../escape".into();
         let result = effective_skill_names(&skill_paths(tmp.path()), &profile).await;
         assert!(result.is_err(), "materialize error must propagate, got {result:?}");

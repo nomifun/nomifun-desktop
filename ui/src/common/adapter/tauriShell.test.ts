@@ -14,6 +14,11 @@ import {
 } from './tauriShell';
 
 describe('deep-link parsing', () => {
+  test('opens the gateway preset with public suggestions and never imports a key', () => {
+    expect(parseDeepLink('nomifun://add-provider?platform=nomifun-model-gateway&base_url=https%3A%2F%2Fgateway.example&name=Community&key=synthetic&api_key=synthetic')).toEqual({
+      action: 'add-provider', params: { platform: 'nomifun-model-gateway', base_url: 'https://gateway.example', name: 'Community' },
+    });
+  });
   test('keeps only non-sensitive provider and model suggestions', () => {
     const query = new URLSearchParams({
       base_url: 'https://api.example.com/v1',

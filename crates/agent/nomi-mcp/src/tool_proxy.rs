@@ -455,8 +455,13 @@ pub fn canonical_mcp_display_name(server_name: &str, original_name: &str) -> Str
     let digest = Sha256::digest(identity.as_bytes());
     let digest = base32_no_pad(&digest);
     let digest = &digest[..MCP_DISPLAY_HASH_LEN];
-    let mut slug = sanitize_display_slug(&format!("{server_name}__{original_name}"));
-    slug.truncate(MCP_DISPLAY_SLUG_LEN);
+    let mut origin = sanitize_display_slug(server_name);
+    let mut action = sanitize_display_slug(original_name);
+    // Reserve the action's space so a long server name cannot hide it.
+    let origin_budget = origin.len().min(20).min(MCP_DISPLAY_SLUG_LEN - 10);
+    origin.truncate(origin_budget);
+    action.truncate(MCP_DISPLAY_SLUG_LEN - origin_budget - 2);
+    let slug = format!("{}__{}", origin.trim_end_matches('_'), action.trim_end_matches('_'));
     let display_name =
         format!("{MCP_PROVIDER_NAME_PREFIX}{slug}{MCP_DISPLAY_SEPARATOR}{digest}");
     debug_assert!(display_name.len() <= MAX_PROVIDER_TOOL_NAME_LEN);
@@ -467,7 +472,7 @@ fn sanitize_display_slug(value: &str) -> String {
     let mut slug = String::new();
     let mut last_was_separator = false;
     for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
+        if byte.is_ascii_alphanumeric() || byte == b'-' {
             slug.push(char::from(byte));
             last_was_separator = false;
         } else if !last_was_separator {
@@ -910,8 +915,8 @@ mod tests {
 
         let a_alias = canonical_mcp_display_name("a", "b__c");
         let ab_alias = canonical_mcp_display_name("a__b", "c");
-        assert!(a_alias.starts_with("mcp__a__b__c__"));
-        assert!(ab_alias.starts_with("mcp__a__b__c__"));
+        assert!(a_alias.starts_with("mcp__a__b_c__"));
+        assert!(ab_alias.starts_with("mcp__a_b__c__"));
         assert_ne!(a_alias, ab_alias);
         assert_eq!(
             registry.tool_names(),
@@ -981,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_identity_retains_tool_suffix_hidden_by_bounded_provider_name() {
+    fn readable_alias_retains_action_and_artifact_identity_retains_full_origin() {
         let server_name = "server-with-an-extremely-long-origin-name-that-consumes-the-readable-provider-slug";
         for tool_name in ["export_pdf", "render_video"] {
             let manager = manager_with_tool_response(server_name, tool_name, "done");
@@ -995,8 +1000,8 @@ mod tests {
                 None,
             );
 
-            assert_eq!(proxy.name().len(), MAX_PROVIDER_TOOL_NAME_LEN);
-            assert!(!proxy.name().contains(tool_name));
+            assert!(proxy.name().len() <= MAX_PROVIDER_TOOL_NAME_LEN);
+            assert!(proxy.name().contains(tool_name));
             assert_eq!(
                 proxy.artifact_identity(),
                 format!("{server_name}__{tool_name}")

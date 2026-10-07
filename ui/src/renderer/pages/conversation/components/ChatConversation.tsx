@@ -7,7 +7,7 @@
 import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import type { IConversationMcpStatus, IProvider, TChatConversation } from '@/common/config/storage';
+import type { IProvider, TChatConversation } from '@/common/config/storage';
 import { parseError } from '@/common/utils';
 import { uuidv7 } from '@/common/utils';
 import type {
@@ -58,12 +58,6 @@ import {
   reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
-
-/** Check whether a specific skill is mounted on the conversation. */
-const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: string): boolean => {
-  const skills = (conversation?.extra as { skills?: string[] } | undefined)?.skills;
-  return skills?.includes(skillName) ?? false;
-};
 
 /** Host id of an SSH-bound session, or undefined for every other conversation. */
 const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | undefined =>
@@ -143,10 +137,6 @@ const NomiConversationLayout: React.FC<{
         modelSelection={modelSelection}
         agentSelectorNode={agentSelectorNode}
         cron_job_id={conversation.cron_job_id}
-        loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-        loadedMcpStatuses={
-          (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
-        }
         agent_name={currentAgentLabel}
         currentAgent={conversation.preset_id
           ? { presetId: conversation.preset_id, label: currentAgentLabel }
@@ -192,12 +182,10 @@ const NomiConversationPanel: React.FC<{
   const frozenAgentSelection = useMemo<GuidAgentSelection>(() =>
     officialTemplateKey
       ? { kind: 'template', templateKey: officialTemplateKey }
-      : creation.draft.presetId === conversation.preset_id && creation.draft.selectedAgent
-      ? creation.draft.selectedAgent
       : conversation.preset_id
       ? { kind: 'preset', presetId: conversation.preset_id }
       : { kind: 'template', templateKey: 'chat.minimal' },
-    [conversation.preset_id, creation.draft.presetId, creation.draft.selectedAgent, officialTemplateKey],
+    [conversation.preset_id, officialTemplateKey],
   );
   const { t } = useTranslation();
   const [modelSwitching, setModelSwitching] = useState(false);
@@ -385,9 +373,7 @@ const NomiConversationPanel: React.FC<{
     if (!frozenPresetId) throw new Error(t('conversation.chat.frozenAgentUnavailable'));
     return frozenPresetId;
   }, [frozenPresetId, t]);
-  const frozenCreativeAgent = frozenAgentSelection.kind === 'template'
-    && frozenAgentSelection.templateKey === 'creative-studio.default'
-    && creation.draft.presetId === frozenPresetId;
+  const frozenCreativeAgent = officialTemplateKey === 'creative-studio.default';
   const selectCreationMode = (mode: CreationMode) => {
     if (frozenCreativeAgent) {
       creation.setMode(mode);
@@ -404,8 +390,7 @@ const NomiConversationPanel: React.FC<{
   const exitCreation = () => creation.setMode(null);
   const currentAgentLabel = officialTemplateKey
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[officialTemplateKey]}.name`)
-    : (creation.draft.presetId === conversation.preset_id ? creation.draft.agentLabel : undefined)
-      ?? presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent';
+    : presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent';
   const agentSelectorNode = (
     <GuidAgentSelector
       presets={executableAgentPresets}
@@ -457,7 +442,7 @@ const NomiConversationPanel: React.FC<{
         {!hideAdvancedControls && <CronJobManager
           conversation_id={conversation.id}
           cron_job_id={conversation.cron_job_id}
-          hasCronSkill={hasLoadedSkill(conversation, 'cron')}
+          hasCronSkill={conversation.agent_snapshot?.enabled_capabilities.includes('automation.schedule') === true}
         />}
       </div>
     ),

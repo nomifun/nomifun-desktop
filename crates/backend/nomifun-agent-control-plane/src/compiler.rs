@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::catalog::{availability_code, CatalogSnapshot};
 use crate::error::ControlPlaneError;
-use crate::wire::wire_cast;
+use crate::wire::{document_payload, payload_document, wire_cast};
 
 /// Supplies the exact materialized registry used by the Kernel execution path.
 ///
@@ -156,8 +156,19 @@ impl PresetRevisionCompiler {
         current_snapshot: Option<&ResolvedSnapshotEnvelope>,
         catalog: &CatalogSnapshot,
     ) -> Result<PresetCompilation, ControlPlaneError> {
+        self.compile_payload(owner, draft, document_payload(&draft.document)?, current_revision, current_snapshot, catalog)
+    }
+
+    pub(crate) fn compile_payload(
+        &self,
+        owner: &UserId,
+        draft: &AgentPresetDraftDto,
+        payload: AgentPresetRevisionPayload,
+        current_revision: Option<&AgentPresetRevision>,
+        current_snapshot: Option<&ResolvedSnapshotEnvelope>,
+        catalog: &CatalogSnapshot,
+    ) -> Result<PresetCompilation, ControlPlaneError> {
         catalog.validate()?;
-        let payload: AgentPresetRevisionPayload = wire_cast(&draft.document)?;
         let payload_unchanged = current_revision.is_some_and(|current| current.payload == payload);
         let current_canonical_inputs = if payload_unchanged && current_snapshot.is_some() {
             self.canonical_inputs_if_configured()?
@@ -409,7 +420,7 @@ pub(crate) fn validate_direct_catalog_availability(
         }
     }
 
-    for reference in &payload.skill_bindings {
+    for reference in payload.skill_bindings.iter().filter_map(|binding| binding.package_ref()) {
         if catalog.find_skill(reference).is_none() {
             diagnostics.push(error_diagnostic(
                 CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
@@ -503,7 +514,7 @@ fn contribution_locks_for_payload(
         }
     }
 
-    for skill in &payload.skill_bindings {
+    for skill in payload.skill_bindings.iter().filter_map(|binding| binding.package_ref()) {
         let Some(catalog_skill) = catalog.materialized_skill(skill) else {
             continue;
         };
@@ -598,7 +609,7 @@ pub fn revision_api(
 ) -> Result<AgentPresetRevisionDto, ControlPlaneError> {
     Ok(AgentPresetRevisionDto {
         reference: wire_cast(&revision.reference)?,
-        document: wire_cast(&revision.payload)?,
+        document: payload_document(&revision.payload)?,
         contribution_locks: wire_cast(&revision.contribution_locks)?,
         created_by: revision.created_by.as_ref().to_owned(),
         created_at_ms: revision.created_at_ms,
@@ -818,10 +829,10 @@ mod tests {
                 action_allowlist: BTreeSet::new(),
             }],
 
-            skill_bindings: vec![SkillRef {
+            skill_bindings: vec![nomifun_agent_contracts::AgentSkillBinding::package(SkillRef {
                 id: skill_definition.id,
                 version: skill_definition.version,
-            }],
+            })],
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Managed fixture".to_owned(),
             instructions: "Use exact managed contributions.".to_owned(),

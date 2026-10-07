@@ -47,6 +47,43 @@ const baseWire = (overrides: Record<string, unknown>) =>
     ...overrides,
   }) as any;
 
+describe('transient typed gateway account System notices', () => {
+  const cases = [
+    ['USER_LLM_PROVIDER_BILLING_REQUIRED', 'The model gateway balance is insufficient. Top up the account to continue.'],
+    ['USER_LLM_PROVIDER_BILLING_REQUIRED', 'The model gateway subscription has expired. Renew the subscription to continue.'],
+    ['USER_LLM_PROVIDER_BILLING_REQUIRED', 'The selected model is not included in your gateway plan. Choose an included model or change the plan.'],
+    ['USER_LLM_PROVIDER_AUTH_FAILED', 'The model gateway key has expired. Create a new key and update provider credentials.'],
+    ['USER_LLM_PROVIDER_RATE_LIMITED', 'The model gateway rate limited the request. Wait and retry the same model.'],
+  ];
+  test.each(cases)('renders %s as a transient error preserving wire correlation', (code, message) => {
+    const notice = transformMessage(baseWire({ type: 'system', turn_id: SECOND_MESSAGE_ID, created_at: 1234,
+      data: { kind: 'model_gateway_account_action', error: { code, message, ownership: 'user_llm_provider', retryable: code === 'USER_LLM_PROVIDER_RATE_LIMITED' } },
+    }));
+    expect(notice?.type).toBe('tips');
+    if (notice?.type !== 'tips') throw new Error('expected presentation notice');
+    expect(notice.msg_id).toBe(MESSAGE_ID); expect(notice.turn_id).toBe(SECOND_MESSAGE_ID);
+    expect(notice.created_at).toBe(1234);
+    expect(notice.content).toEqual({ type: 'error', content: message,
+      error: { code, message, ownership: 'user_llm_provider', retryable: code === 'USER_LLM_PROVIDER_RATE_LIMITED' },
+    });
+    expect(notice.message_id).toBeUndefined();
+  });
+  test('keeps cron and unknown System payloads invisible without classifying prose', () => {
+    for (const data of [
+      { kind: 'cron_response', message: cases[0][1] },
+      { kind: 'unknown', error: { code: cases[0][0], message: cases[0][1], ownership: 'user_llm_provider' } },
+      { kind: 'model_gateway_account_action', error: cases[0][1] },
+      { kind: 'model_gateway_account_action', error: { message: cases[0][1], ownership: 'user_llm_provider' } },
+      { kind: 'model_gateway_account_action', error: { code: 'insufficient_balance', message: cases[0][1], ownership: 'user_llm_provider' } },
+      { kind: 'model_gateway_account_action', error: { code: cases[0][0], message: cases[0][1] } },
+      { kind: 'model_gateway_account_action', error: { code: cases[0][0], message: cases[0][1], ownership: 'invalid_owner' } },
+      { kind: 'model_gateway_account_action', error: { code: cases[0][0], message: cases[0][1], ownership: 'nomifun' } },
+      { kind: 'model_gateway_account_action', error: { code: cases[0][0], message: ' ', ownership: 'user_llm_provider' } },
+      null, [], cases[0][1],
+    ]) expect(transformMessage(baseWire({ type: 'system', data }))).toBeUndefined();
+  });
+});
+
 test('explicit thinking deltas can reopen a completed contiguous phase', () => {
   const completed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Inspect. ', status: 'done' } }));
   const resumed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Verify.', status: 'thinking' } }));

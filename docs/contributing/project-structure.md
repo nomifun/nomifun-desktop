@@ -115,7 +115,6 @@ from silently tying themselves to engine internals.
 | [`nomi-providers`](../../crates/agent/nomi-providers) | LLM provider clients: Anthropic, Bedrock, OpenAI, Vertex; shared retry / streaming. |
 | [`nomi-tools`](../../crates/agent/nomi-tools) | Built-in tools registry: bash, edit, glob, grep, read, tool-search, file-cache. |
 | [`nomi-mcp`](../../crates/agent/nomi-mcp) | MCP client used by the agent: config, manager, protocol, tool-proxy, transports. |
-| [`nomi-skills`](../../crates/agent/nomi-skills) | Skills system: discovery, frontmatter, loader, executor, hooks, conditional / context modifiers, bundled. |
 | [`nomi-memory`](../../crates/agent/nomi-memory) | Long-term cross-session memory — preferences, feedback, project context, external references. |
 | [`nomi-agent`](../../crates/agent/nomi-agent) | Core engine: turn execution, bootstrap, commands, compaction, confirmation, delegation, output sinks. |
 | [`nomi-cli`](../../crates/agent/nomi-cli) | Standalone `nomi` binary that drives the engine without a host process. |

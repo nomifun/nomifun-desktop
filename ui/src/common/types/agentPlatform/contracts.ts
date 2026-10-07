@@ -539,7 +539,20 @@ export interface RuntimeBuildBinding {
   profile: string;
 }
 
+export interface AgentSessionCapabilitySelection {
+  skill_names: string[];
+  mcp_server_ids: string[];
+}
+
+export interface AgentSessionCapabilitySelectionState {
+  selection: AgentSessionCapabilitySelection;
+  binding_version: number;
+  editable: boolean;
+}
+
 export interface CreateAgentSessionRequest {
+  /** Explicit session selection; omission uses the global available defaults. */
+  session_capabilities?: AgentSessionCapabilitySelection;
   /** Required launch features; the server verifies actual saved authority. */
   required_modules?: string[];
   model?: { provider_id: string; model: string };

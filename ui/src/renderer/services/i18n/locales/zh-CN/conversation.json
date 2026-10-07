@@ -622,6 +622,7 @@
     }
   },
   "capabilityPicker": {
+    "unavailable": "已移除或不可用",
     "ariaLabel": "会话能力",
     "createApplyNote": "新会话 · 创建时应用",
     "nextSendApplyNote": "本会话 · 下次发送时应用",

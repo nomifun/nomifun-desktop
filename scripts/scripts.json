@@ -36,11 +36,11 @@
     },
     "check:creative-studio-retirement": {
       "group": "check",
-      "desc": "扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流"
+      "desc": "扫描 tracked 源码，阻止旧创作页面、路由、API、翻译与 Gateway 标记回流"
     },
     "check:creative-studio-retirement:dist": {
       "group": "check",
-      "desc": "在 UI production build 后扫描 ui/dist，阻止旧创意工坊标记进入发布产物"
+      "desc": "在 UI production build 后扫描 ui/dist，阻止旧创作标记进入发布产物"
     },
     "check:process-runtime-boundary": {
       "group": "check",
@@ -177,6 +177,10 @@
     "test:nomi-core-live-provider": {
       "group": "test",
       "desc": "Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan."
+    },
+    "demo:idmm": {
+      "group": "test",
+      "desc": "用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告"
     },
     "test:agent-reliability-report": {
       "group": "test",

@@ -84,7 +84,7 @@ export const useNomiQuickStart = () => {
           (candidate) => candidate.template_key === 'assistant.general'
         );
         if (!template) throw new Error('AGENT_PRESET_REQUIRED');
-        const preset = await prepareOfficialAgent(template, name, effectiveModel);
+        const preset = await prepareOfficialAgent(template, effectiveModel);
         const resourceSelections = template.seed.required_resource_kinds.flatMap((resource_kind) => {
           const resource_id = FIXED_RESOURCE_IDS[resource_kind];
           return resource_id ? [{ resource_kind, resource_id }] : [];

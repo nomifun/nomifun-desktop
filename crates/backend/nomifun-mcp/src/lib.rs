@@ -21,7 +21,7 @@ pub use error::McpError;
 pub use identity::{
     MCP_TOOL_CAPABILITY_PREFIX, MCP_TOOL_MATERIALIZATION_REVISION,
     RETIRED_MCP_AUTHORING_CAPABILITY_IDS, McpToolIdentityError,
-    canonical_mcp_tool_action_id, canonical_mcp_tool_capability_id,
+    canonical_mcp_connection_config_ref, canonical_mcp_tool_action_id, canonical_mcp_tool_capability_id,
     is_namespaced_mcp_tool_capability, is_retired_mcp_authoring_capability,
 };
 pub use oauth_service::McpOAuthService;

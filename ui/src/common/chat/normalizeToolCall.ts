@@ -16,6 +16,8 @@ interface NormalizedToolRetry {
 export interface NormalizedToolCall {
   key: string;
   name: string;
+  capabilityId?: string;
+  actionId?: string;
   status: NormalizedToolStatus;
   /** Explicit protocol/tool semantic kind when the source provides one. */
   kind?: string;
@@ -44,7 +46,7 @@ export interface NormalizedToolCall {
 
 const formatValue = (value: unknown): string => toDisplayText(value);
 
-const canonicalMcpOriginHash = /^[a-z2-7]{16}$/;
+const canonicalMcpOriginHash = /^(?:[a-z2-7]{16}|[a-f0-9]{20})$/;
 
 /**
  * Turn provider-facing MCP routing aliases back into a stable receipt label.
@@ -312,7 +314,7 @@ const isInvalidArgumentsNotExecuted = (name: unknown, status: unknown, output: u
 };
 
 export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall | undefined {
-  const { call_id, name, status, input, output, args, description, artifacts, retry } = message.content;
+  const { call_id, name, capability_id, action_id, status, input, output, args, description, artifacts, retry } = message.content;
   if (!call_id) return undefined;
   const normalizedRetry =
     retry &&
@@ -352,6 +354,8 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     name: toDisplayText(name, 'Tool'),
     status: skipped || invalidArgumentsNotExecuted || runtimePreflightNotExecuted || processReferenceNotExecuted
       ? 'canceled' : normalizeToolCallStatus(status),
+    ...(typeof capability_id === 'string' && capability_id ? { capabilityId: capability_id } : {}),
+    ...(typeof action_id === 'string' && action_id ? { actionId: action_id } : {}),
     ...(skipped ? { skipped: true } : {}),
     ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
     ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),

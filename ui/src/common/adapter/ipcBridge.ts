@@ -63,7 +63,6 @@ import {
 } from './tauriUpdater';
 import type {
   IMcpServer,
-  ISessionMcpServer,
   TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
@@ -100,6 +99,11 @@ import type {
   ProviderConnectionResponse,
   SaveProviderConnectionRequest,
 } from '../types/provider/providerConnection';
+import type {
+  ModelGatewayMetaResponse, ModelGatewayCatalogResponse, ModelGatewayAccountResponse,
+  ModelGatewaySyncResponse, ModelGatewayMetaRequest, ModelGatewayCatalogRequest,
+  ModelGatewayCreateRequest, ModelGatewayConnectionRequest,
+} from '../types/provider/modelGateway';
 import type { KnowledgeRetrievalConfig as ApiKnowledgeRetrievalConfig } from '../protocolBindings/KnowledgeRetrievalConfig';
 import type { RelocateKnowledgeEntryRequest as ApiRelocateKnowledgeEntryRequest } from '../protocolBindings/RelocateKnowledgeEntryRequest';
 import type { RelocateKnowledgeEntryResponse as ApiRelocateKnowledgeEntryResponse } from '../protocolBindings/RelocateKnowledgeEntryResponse';
@@ -150,6 +154,8 @@ import type {
   AgentSessionId,
   ApplyAgentSessionSwitchRequest,
   ApplyAgentSessionSwitchResponse,
+  AgentSessionCapabilitySelection,
+  AgentSessionCapabilitySelectionState,
   CapabilityCatalogItem,
   CreateAgentPresetFromTemplateRequest,
   CreateAgentPresetRequest,
@@ -193,7 +199,9 @@ import type { SessionReasoningEffort } from '../types/reasoningEffort';
 import type {
   IIdmmConfig,
   IIdmmState,
+  IdmmDecisionExplanation,
 } from '../types/idmm';
+import { normalizeIdmmDecisionExplanation } from '../types/idmm';
 export type {
   IdmmInterventionKind,
   IdmmInterventionStatus,
@@ -705,6 +713,17 @@ export const agentPlatform = {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
     ),
+    getCapabilitySelection: httpGet<AgentSessionCapabilitySelectionState, { agent_session_id: string }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capability-selection`
+    ),
+    putCapabilitySelection: httpPut<AgentSessionCapabilitySelectionState, {
+      agent_session_id: string;
+      selection: AgentSessionCapabilitySelection;
+      expected_binding_version: number;
+    }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capability-selection`,
+      (params) => ({ selection: params.selection, expected_binding_version: params.expected_binding_version })
+    ),
     updateReasoning: httpPut<
       UpdateAgentSessionReasoningResponse,
       { agent_session_id: string; reasoning_effort?: SessionReasoningEffort }
@@ -752,13 +771,6 @@ export const agentPlatform = {
           `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capabilities`
       ),
       fromApiAgentSessionCapabilities
-    ),
-    getSlashCommands: httpGet<
-      Array<{ command: string; description: string }>,
-      { agent_session_id: string }
-    >(
-      (params) =>
-        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/slash-commands`
     ),
     createTurn: httpPost<
       CreateAgentSessionTurnResponse,
@@ -849,6 +861,15 @@ export const agentPlatform = {
       ...value,
       agent_session_id: value.agent_session_id as AgentSessionId,
     })),
+    onCapabilitiesChanged: wsMappedEmitter<{
+      agent_session_id: AgentSessionId;
+      selection: AgentSessionCapabilitySelection;
+      binding_version: number;
+      editable?: boolean;
+    }>('agentSession.capabilitiesChanged', (value) => ({
+      ...value,
+      agent_session_id: value.agent_session_id as AgentSessionId,
+    })),
   },
   installationToken: {
     status: withResponseMap(
@@ -906,6 +927,7 @@ const fromApiUserMessageCreatedEvent = (
   event: IUserMessageCreatedEvent
 ): IUserMessageCreatedEvent => ({
   ...event,
+  idmm_decision: normalizeIdmmDecisionExplanation(event.idmm_decision),
   conversation_id: parseConversationId(event.conversation_id),
   msg_id: parseMessageId(event.msg_id),
   companion_id:
@@ -1105,9 +1127,6 @@ export const conversation = {
       });
     },
   },
-  getSlashCommands: httpGet<Array<{ command: string; description: string }>, { conversation_id: ConversationId }>(
-    (p) => `/api/agent-sessions/${p.conversation_id}/slash-commands`
-  ),
   askSideQuestion: httpPost<ConversationSideQuestionResult, { conversation_id: ConversationId; question: string }>(
     (p) => `/api/agent-sessions/${p.conversation_id}/side-question`,
     (p) => ({ question: p.question })
@@ -1473,17 +1492,15 @@ export const fs = {
       source: 'builtin' | 'custom' | 'extension';
       audience_tags?: string[];
       scenario_tags?: string[];
+      session_available?: boolean;
+      session_error?: string | null;
     }>,
     void
   >('/api/skills'),
   listBuiltinAutoSkills: httpGet<
-    Array<{ name: string; description: string; name_i18n?: Record<string, string>; description_i18n?: Record<string, string>; location: string }>,
+    Array<{ name: string; description: string; name_i18n?: Record<string, string>; description_i18n?: Record<string, string>; location: string; session_available?: boolean; session_error?: string | null }>,
     void
   >('/api/skills/builtin-auto'),
-  materializeSkillsForAgent: httpPost<
-    { skills: Array<{ name: string; source_path: string }> },
-    { conversation_id: ConversationId; skills: string[] }
-  >('/api/skills/materialize-for-agent'),
   readSkillInfo: httpPost<{ name: string; description: string }, { skill_path: string }>('/api/skills/info'),
   importSkill: httpPost<{ skill_name: string }, { skill_path: string }>('/api/skills/import'),
   scanForSkills: httpPost<Array<{ name: string; description: string; path: string }>, { folder_path: string }>(
@@ -1648,6 +1665,32 @@ export const mode = {
   /** The same test for a proposed connection, before the provider is saved. */
   probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
     '/api/providers/probe-connection'
+  ),
+};
+
+/** Optional, runtime-configured community model gateways. Credentials stay in request bodies. */
+export const modelGateway = {
+  meta: httpPost<ModelGatewayMetaResponse, ModelGatewayMetaRequest>('/api/providers/model-gateway/meta'),
+  catalog: httpPost<ModelGatewayCatalogResponse, ModelGatewayCatalogRequest>('/api/providers/model-gateway/catalog'),
+  create: withResponseMap(
+    httpPost<ProviderResponse, ModelGatewayCreateRequest>('/api/providers/model-gateway/create'),
+    fromProviderResponse
+  ),
+  providerMeta: httpGet<ModelGatewayMetaResponse, { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/model-gateway/meta`
+  ),
+  account: httpGet<ModelGatewayAccountResponse, { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/model-gateway/account`
+  ),
+  sync: httpPost<ModelGatewaySyncResponse, { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/model-gateway/sync`, () => ({})
+  ),
+  updateConnection: withResponseMap(
+    httpPut<ProviderResponse, { provider_id: ProviderId } & ModelGatewayConnectionRequest>(
+      (p) => `/api/providers/${p.provider_id}/model-gateway/connection`,
+      ({ base_url, api_key, name }) => ({ base_url, api_key, name })
+    ),
+    fromProviderResponse
   ),
 };
 
@@ -3182,18 +3225,6 @@ export interface ICreateConversationParams {
     agent_id?: string;
     context?: string;
     context_file_name?: string;
-    /** Transient: preset opt-in skills. Consumed by backend create handler
-     *  and stripped before persistence. */
-    agent_enabled_skills?: string[];
-    /** Transient: auto-inject skills the user opted out of on the Guid page.
-     *  Consumed by backend create handler and stripped before persistence. */
-    exclude_auto_inject_skills?: string[];
-    /** Transient: MCP server ids selected on the Guid page. Consumed by the
-     *  backend create handler and snapshotted into conversation.extra. */
-    selected_mcp_server_ids?: McpServerId[];
-    /** Transient: session-scoped MCP server configs that are not stored in the
-     *  backend catalog (currently built-in MCP servers). */
-    selected_session_mcp_servers?: ISessionMcpServer[];
     codex_model?: string;
     current_model_id?: string;
     pending_config_options?: Record<string, string>;
@@ -3211,7 +3242,6 @@ export interface ICreateConversationParams {
      *  starting directory (defaults to the remote $HOME). */
     ssh_host_id?: import('../types/ids').SshHostId;
     ssh_remote_cwd?: string;
-    extra_skill_paths?: string[];
   };
 }
 
@@ -3275,6 +3305,7 @@ export interface IResponseMessage {
  *  channel inbound messages — the companion window renders those as incoming
  *  bubble headers). Same companion wire markers as IResponseMessage. */
 export interface IUserMessageCreatedEvent {
+  idmm_decision?: IdmmDecisionExplanation;
   interaction?: import('../chat/chatLib').IMessageText['content']['interaction'];
   conversation_id: ConversationId;
   msg_id: MessageId;

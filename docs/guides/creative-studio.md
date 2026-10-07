@@ -1,6 +1,6 @@
-# Creative Studio
+# Creation
 
-Creative Studio is NomiFun Desktop's focused, local-first creation product.
+Creation is NomiFun Desktop's focused, local-first creation product.
 It has three independent creation surfaces:
 
 - **Canvas**: a persistent infinite canvas with media nodes, auditable
@@ -8,7 +8,7 @@ It has three independent creation surfaces:
 - **Image Workbench**: a standalone image-generation workbench.
 - **Video Workbench**: a standalone video-generation workbench.
 
-Creative Studio has no Project product object. A Canvas is a Canvas. Image and
+Creation has no Project product object. A Canvas is a Canvas. Image and
 Video Workbenches do not require, infer, select, or create a Canvas. They use
 NomiFun's existing provider and model catalog; they do not maintain a second
 model configuration system.
@@ -17,14 +17,14 @@ model configuration system.
 
 ## Open the product
 
-Open **Creative Studio** from the application sidebar. The page reuses
+Open **Creation** from the application sidebar. The page reuses
 NomiFun's default titlebar controls for the sidebar, history, and system
-window. Like Settings, the primary rail switches to Creative Studio
+window. Like Settings, the primary rail switches to Creation
 navigation and can be collapsed to recover working space. The primary
-Creative Studio entry resumes the last valid product location in the current
+Creation entry resumes the last valid product location in the current
 app session, including its full query string and in-page hash. Invalid,
 unknown, external, or overlong saved locations fail closed to
-`/workshop/canvases`. There is no separate Creative Studio home item; prompt-led
+`/workshop/canvases`. There is no separate Creation home item; prompt-led
 creation is available from the **Canvas Assistant** inside an opened Canvas.
 **Back to Workbench** stays pinned to the bottom of that rail and returns to
 `/guid` after any pending Canvas save has been resolved.
@@ -93,7 +93,7 @@ Canvas edits use a short debounced compare-and-swap (CAS) save. Every write
 sends the last authoritative revision. A conflict stops automatic saving; it
 never force-writes or silently retries over a newer document. Resolve the
 visible conflict by loading the authoritative remote version, then reapply the
-intended change. Navigation out of Creative Studio flushes pending Canvas
+intended change. Navigation out of Creation flushes pending Canvas
 writes and remains blocked if their result is not safe.
 
 Canvas Agent changes are proposals, not background mutations. The supported
@@ -113,7 +113,7 @@ The canonical HTTP resource is:
 
 The old `/api/creative-studio/projects` routes remain only as deprecated
 compatibility aliases. Their legacy `project/projectId` names describe old
-wire compatibility, not a current Creative Studio domain object.
+wire compatibility, not a current Creation domain object.
 
 The in-process Gateway exposes the Canvas-first capabilities
 `nomi_creative_studio_list_canvases` and
@@ -129,13 +129,13 @@ The UI/API contract version for this wire transition is **21**.
 
 ## Exact model and task routing
 
-A model selection is the exact pair `{ providerId, model }`. Creative Studio
+A model selection is the exact pair `{ providerId, model }`. Creation
 queries NomiFun's managed catalog for the required task and excludes disabled
 providers, disabled models, and models that only advertise a neighbouring
 task. It does not infer capability from a model name or silently substitute a
 different task.
 
-| Operation | Required NomiFun task | Creative Studio capability |
+| Operation | Required NomiFun task | Creation capability |
 | --- | --- | --- |
 | Canvas Assistant | `chat` | Canvas-scoped assistant turn; strict graph proposals still require manual approval. |
 | Template AI draft/planning | `chat` | One tool-less, bounded completion. |
@@ -199,7 +199,7 @@ required task; a same-named model from another Provider is never substituted.
 - an attributed, offline-first catalog synchronized from a fixed allow-list of
   upstream prompt repositories;
 - enabled NomiFun presets that contain conversation instructions;
-- user-owned text assets already stored in the Creative Studio asset library.
+- user-owned text assets already stored in the Creation asset library.
 
 The library supports text search, exact category filters, intersected tag
 filters, detail inspection, and clipboard copy. A catalog or preset item can be
@@ -304,7 +304,7 @@ public-visibility control.
 - Provider protocols differ. Controls appear only when their exact typed
   protocol profile supports them; unknown protocols use the smaller safe
   subset.
-- The default titlebar and Creative Studio rail follow the application locale,
+- The default titlebar and Creation rail follow the application locale,
   but much of the launch Canvas and editor body remains Simplified Chinese.
 - A configured model is not evidence that its remote provider is reachable or
   that a paid request was executed. Keep provider billing and data policies in
@@ -313,7 +313,7 @@ public-visibility control.
 
 ## Reading verification claims
 
-Creative Studio validation is reported in layers so one result is not mistaken
+Creation validation is reported in layers so one result is not mistaken
 for another:
 
 1. **Contract checks** — TypeScript/Rust tests, schema checks, type checking,

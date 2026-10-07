@@ -11,6 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use nomifun_agent_contracts::{AgentSessionId, PrincipalRef};
+use nomifun_agent_contracts::{IdmmDecisionExplanation, IdmmDecisionNotice};
 use nomifun_auth::CurrentUser;
 use nomifun_api_types::{
     ApiResponse, IdmmBypassModelRef, IdmmConfig, IdmmScanScope, IdmmState,
@@ -211,9 +212,9 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
             .map_err(|error| AppError::Internal(format!("read IDMM Session head: {error}")))?;
         let turn: Option<(String, String, Option<String>, Option<String>)> =
             nomifun_db::sqlx::query_as(
-                "SELECT turn.operation_id, turn.state, turn.error_json, event.inline_json \
+                "SELECT turn.operation_id, turn.state, turn.error_json, input.inline_json \
                  FROM agent_turns turn \
-                 LEFT JOIN agent_events event ON event.event_id = turn.started_event_id \
+                 LEFT JOIN agent_events input ON input.event_id = turn.source_message_id \
                  WHERE turn.session_id = ? ORDER BY turn.accepted_at DESC LIMIT 1",
             )
             .bind(session_id)
@@ -259,8 +260,8 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
             IdmmScanScope::LastMessages => i64::from(max_messages.clamp(1, 100)),
             IdmmScanScope::FullSession => 500_i64,
         };
-        let rows: Vec<(i64, String, String)> = nomifun_db::sqlx::query_as(
-            "SELECT last_seq, semantic_digest, projection_json FROM agent_messages \
+        let rows: Vec<(String, i64, String, String)> = nomifun_db::sqlx::query_as(
+            "SELECT projection_id, last_seq, semantic_digest, projection_json FROM agent_messages \
              WHERE session_id = ? AND presentation_intent = 'message' \
              ORDER BY last_seq DESC LIMIT ?",
         )
@@ -272,7 +273,7 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
         let mut messages = Vec::new();
         let mut used_chars = 0_usize;
         let max_chars = max_chars as usize;
-        for (sequence, fingerprint, projection_json) in rows {
+        for (projection_id, sequence, fingerprint, projection_json) in rows {
             let Ok(projection) = serde_json::from_str::<Value>(&projection_json) else {
                 continue;
             };
@@ -297,6 +298,7 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
             let bounded = take_chars(content, remaining);
             used_chars = used_chars.saturating_add(bounded.chars().count());
             messages.push(ObservedMessage {
+                message_id: projection_id.strip_prefix("message:").unwrap_or(&projection_id).to_owned(),
                 fingerprint,
                 sequence: u64::try_from(sequence).unwrap_or_default(),
                 role: if state == "accepted" {
@@ -322,10 +324,11 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
         session_id: &str,
         idempotency_key: &str,
         content: &str,
+        explanation: &IdmmDecisionExplanation,
     ) -> Result<(), AppError> {
         let delivery = self
             .owner()?
-            .send_session_message_idempotent(
+            .send_session_idmm_message_idempotent(
                 owner_id,
                 session_id,
                 idempotency_key,
@@ -338,6 +341,7 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
                     origin: Some("idmm".into()),
                     channel_platform: None,
                 },
+                explanation.clone(),
             )
             .await?;
         if delivery.completed && delivery.result_ok == Some(false) {
@@ -356,6 +360,7 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
         session_id: &str,
         idempotency_key: &str,
         content: &str,
+        explanation: &IdmmDecisionExplanation,
     ) -> Result<(), AppError> {
         let owner = self.owner()?;
         owner
@@ -376,8 +381,18 @@ impl IdmmSessionPort for CanonicalIdmmSessionPort {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        self.deliver(owner_id, session_id, idempotency_key, content)
+        self.deliver(owner_id, session_id, idempotency_key, content, explanation)
             .await
+    }
+
+    async fn append_notice(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+        notice: &IdmmDecisionNotice,
+    ) -> Result<(), AppError> {
+        self.owner()?.append_session_idmm_notice(owner_id, session_id, idempotency_key, notice.clone()).await
     }
 }
 

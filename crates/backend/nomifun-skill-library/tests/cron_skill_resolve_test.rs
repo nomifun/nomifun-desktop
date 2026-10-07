@@ -38,7 +38,7 @@ async fn materialize_resolves_saved_cron_skill() {
 
     let paths = resolve_skill_paths(&base, &base);
     let conversation_id = ConversationId::new().into_string();
-    let resolved = skill_service::materialize_skills_for_agent(
+    let resolved = skill_service::resolve_skill_sources(
         &paths,
         &conversation_id,
         &[CRON_JOB_ID.to_owned()],

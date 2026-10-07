@@ -50,5 +50,5 @@ search/read；只要选择中含只读库，当前会话就不能开启回血。
 只响应用户明确要求；自动型在最终回答完成、Turn 尚未结束前调用正式的 turn write-back
 执行器，高标准筛选并直接写入可编辑知识库。终端的 workpath 知识挂载继续属于独立产品契约。
 
-创意工坊任务只在已冻结为 Creative Studio Agent 的会话内继续复用该 Preset；从其他
-会话选择图像、视频或音乐模式会进入 Guid 创建新的 Creative Studio Session。
+创作任务只在已冻结为 Creation Agent 的会话内继续复用该 Preset；从其他
+会话选择图像、视频或音乐模式会进入 Guid 创建新的 Creation Session。

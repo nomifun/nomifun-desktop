@@ -51,11 +51,42 @@ creation fail closed while canonical running precedes a proven gate. User profil
 profile even when no Agent Browser binding exists; there is no second active Agent authority ledger.
 See the [browser architecture](browser-platform.md).
 
+## Global extensions and composer selection
+
+Skills and MCP are shared installation capabilities without a preset master gate. Creation or an explicit
+idle update captures the global Skill inventory and compiles selected MCP tools into the same
+Session-only Revision/Snapshot. Variants use the existing Agent Store, with no second binding or
+permission ledger. Library locks freeze bodies, supporting resources, sources, and digests; `selected`
+controls default input injection. Current Package locks retain their exact JSON contract.
+
+The composer uses typed `session_capabilities` and versioned capability-selection commands instead of
+Skill or MCP `extra` mirrors. Idle updates reuse canonical binding transitions, preserve non-MCP
+resources, prove Runtime teardown and settled effects, then commit binding, resource definitions, and
+active set atomically. Active or paused Turns, Remote Sessions, and Attempts cannot update selection.
+Bodies and resources use the same native frozen context reader; Skill hooks, shell, and forks do not
+execute or grant tools. Tool search is a built-in Runtime facility.
+
 ## Consumers and deletion
 
 UI consumes current stream and Message projections directly. It has no marker-dependent local terminal-processing state machine or prose-based reclassification of old errors. Channel binds through its current owner; orphan rows without an authority binding produce a conflict instead of being automatically rebound.
 
 Cron, Companion, Requirements, AutoWork, IDMM and AgentExecution retain their own business configuration and supervision state. Session input, admission, cancellation and completion use canonical Turn receipts.
+
+IDMM explanations are typed metadata on canonical accepted input. Only the
+trusted IDMM command can supply `idmm_decision`; public input cannot claim the
+IDMM source or supply reserved annotation fields. The immutable explanation
+records the actual source, bypass model when used, short basis and exact original
+question reference. Live UI events and historical Message projections use this
+same committed fact. Neither a configured model nor an old origin field or audit
+entry can supply missing explanations.
+
+Automatic answers require a transactionally verified current question and ready
+Session. A waiting-for-human or failed decision is recorded as
+`idmm/notice-recorded`, validated against the exact question and projected as a
+conversation notice. It creates no Turn and does not enter Runtime context.
+Decision explanations also remain outside model message bodies. The UI display
+preference controls expansion only; it invokes no model and carries no confidence
+percentage.
 
 AgentExecution settlement, restart recovery and manual adoption use one Session output query for the exact Turn's terminal receipt, assistant content and settled tool effects. The query resolves only that Turn's event window in one transaction rather than scanning the whole Session history. Content cannot come from UI projections, reasoning or later turns. File outputs require successful file-operation or publication receipts and verification of workspace identity, path, byte count and digest. Directory scans, model claims and retired display markers are not delivery evidence. Later writes, patches and deletes determine the final output state in event order.
 

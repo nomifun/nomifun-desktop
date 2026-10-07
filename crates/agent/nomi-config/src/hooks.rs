@@ -184,7 +184,6 @@ impl HookEngine {
     }
 
     /// Merge additional hooks into the engine's config, skipping duplicates by name.
-    /// Used by SkillTool to register skill-specific hooks at invocation time (idempotent).
     pub fn merge_hooks(&mut self, additional: HooksConfig) {
         merge_vec(&mut self.config.pre_tool_use, additional.pre_tool_use);
         merge_vec(&mut self.config.post_tool_use, additional.post_tool_use);

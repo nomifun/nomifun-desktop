@@ -443,8 +443,6 @@ impl EngineTurnJournal {
         self.0.sequence.load(Ordering::Acquire)
     }
 
-    pub(super) fn matches_generation(&self, generation: u64) -> bool { self.generation() == generation }
-
     pub(super) async fn refresh_budget(&self) -> Result<(), AppError> {
         let budget = self.0.store.native_execution_budget(&self.0.lease).await.map_err(failure)?;
         self.0.cursor.lock().await.budget = budget;

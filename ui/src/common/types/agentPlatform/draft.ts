@@ -5,8 +5,6 @@ AgentPresetDraft,
 CapabilityId,
 CapabilityRef,
 CapabilitySelection,
-ExactCatalogRef,
-SkillCatalogItem
 } from './contracts';
 
 function canonicalizeDraftValue(value: unknown): unknown {
@@ -86,37 +84,4 @@ export function placeCapability(
     if (!next.middleware_order.length) delete next.middleware_order;
   }
   return next;
-}
-
-export function toggleSkill(
-  document: AgentPresetDocument,
-  skill: ExactCatalogRef<'skill'>
-): AgentPresetDocument {
-  const selected = document.skill_bindings.some((item) => item.id === skill.id);
-  return {
-    ...document,
-    skill_bindings: selected
-      ? document.skill_bindings.filter((item) => item.id !== skill.id)
-      : [...document.skill_bindings, skill].sort((left, right) =>
-          left.id.localeCompare(right.id)
-        ),
-  };
-}
-
-function selectedCapabilityIds(document: AgentPresetDocument): Set<CapabilityId> {
-  return new Set(
-    document.enabled_capabilities.map(
-      (item) => item.capability.id
-    )
-  );
-}
-
-export function missingSkillCapabilities(
-  skill: SkillCatalogItem,
-  document: AgentPresetDocument
-): CapabilityId[] {
-  const selected = selectedCapabilityIds(document);
-  return skill.required_capabilities
-    .map((item) => item.id)
-    .filter((id) => !selected.has(id));
 }

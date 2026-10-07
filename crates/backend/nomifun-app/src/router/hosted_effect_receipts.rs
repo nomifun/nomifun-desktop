@@ -3,12 +3,11 @@
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, CapabilityId, CorrelationId, DigestHex, EventId,
-    EventProducerId, IdempotencyKey, OperationId, PrincipalRef, SemanticSessionEventDraft,
-    SessionEventAppend, SessionEventKind, SessionEventPayloadRef, StrictJsonValue,
+    EventProducerId, IdempotencyKey, OperationId, PrincipalRef, SessionEventPayloadRef, StrictJsonValue,
 };
 use nomifun_agent_session::{
-    AgentEffectState, AgentSessionStore, EffectEventRequest, EffectStrategy,
-    EffectTerminalState, TurnReceiptStatus,
+    AgentSessionStore, EffectEventRequest, EffectStrategy,
+    EffectTerminalState,
 };
 use nomifun_common::AppError;
 use nomifun_db::SqlitePool;
@@ -23,15 +22,6 @@ pub(crate) struct HostedEffectReceipts {
 
 pub(crate) struct Receipt {
     request: EffectEventRequest,
-    hidden_action: Option<HiddenActionReceipt>,
-}
-
-struct HiddenActionReceipt {
-    session_id: AgentSessionId,
-    event_id: EventId,
-    correlation_id: CorrelationId,
-    operation_id: OperationId,
-    call_id: String,
 }
 
 #[derive(Clone, Copy)]
@@ -125,55 +115,6 @@ impl HostedEffectReceipts {
         .await
     }
 
-    /// A source-integrated Engine already carries immutable turn authority on
-    /// every invocation. Use it directly instead of re-reading a mutable head.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn begin_for_turn(
-        &self,
-        user: &str,
-        session: &str,
-        turn: &OperationId,
-        operation: &str,
-        capability: &str,
-        action: &str,
-        input: &Value,
-        domain: Domain,
-    ) -> Result<Receipt, AppError> {
-        if [
-            user,
-            session,
-            turn.as_ref(),
-            operation,
-            capability,
-            action,
-        ]
-        .iter()
-        .any(|value| value.is_empty() || value.len() > 1024)
-        {
-            return Err(failure());
-        }
-        let store = self.store().await?;
-        let session_id = self.owned_session(&store, user, session).await?;
-        let receipt = store
-            .read_turn_receipt(&session_id, turn)
-            .await
-            .map_err(|_| failure())?;
-        if receipt.status != TurnReceiptStatus::Running {
-            return Err(failure());
-        }
-        self.begin_exact(
-            store,
-            session_id,
-            turn.clone(),
-            operation,
-            capability,
-            action,
-            input,
-            domain,
-        )
-        .await
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn begin_exact(
         &self,
@@ -227,106 +168,7 @@ impl HostedEffectReceipts {
             .map_err(|_| failure())?;
         Ok(Receipt {
             request,
-            hidden_action: None,
         })
-    }
-
-    /// Admit a host-owned middleware Action that is deliberately absent from
-    /// the model tool surface. It still receives the same canonical Action ->
-    /// Effect causality chain as a visible tool, rather than inventing a
-    /// receipt-only side channel.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn begin_hidden_action(
-        &self,
-        user: &str,
-        session: &str,
-        turn: &OperationId,
-        operation: &OperationId,
-        capability: &str,
-        action: &str,
-        input: &Value,
-        domain: Domain,
-    ) -> Result<Receipt, AppError> {
-        if [user, session, turn.as_ref(), operation.as_ref(), capability, action]
-            .iter()
-            .any(|value| value.is_empty() || value.len() > 1024)
-        {
-            return Err(failure());
-        }
-        let store = self.store().await?;
-        let session_id = self.owned_session(&store, user, session).await?;
-        let turn_receipt = store
-            .read_turn_receipt(&session_id, turn)
-            .await
-            .map_err(|_| failure())?;
-        if turn_receipt.status != TurnReceiptStatus::Running {
-            return Err(failure());
-        }
-        let turn_event_id = turn_receipt
-            .started_event
-            .map(|event| event.event_id)
-            .ok_or_else(failure)?;
-        let identity_digest = format!(
-            "{:x}",
-            Sha256::digest(
-                format!(
-                    "{}\0{}\0{}\0{}\0{}",
-                    session,
-                    turn.as_ref(),
-                    operation.as_ref(),
-                    capability,
-                    action
-                )
-                .as_bytes()
-            )
-        );
-        let call_identity = format!("hidden-action:{identity_digest}");
-        let call_id = format!("hidden:{identity_digest}");
-        let correlation_id = CorrelationId::from(call_identity.clone());
-        let event_id = EventId::from(format!("{call_identity}:started"));
-        store
-            .append_event(&SessionEventAppend {
-                agent_session_id: session_id.clone(),
-                event_id: event_id.clone(),
-                producer_id: EventProducerId::from("capability_host"),
-                idempotency_key: IdempotencyKey::from(call_identity),
-                semantic_event: SemanticSessionEventDraft {
-                    kind: SessionEventKind("tool/call-started".to_owned()),
-                    kind_version: 1,
-                    correlation_id: correlation_id.clone(),
-                    causation_event_id: Some(turn_event_id),
-                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                        "operation_id": operation,
-                        "call_id": call_id,
-                        "capability_id": capability,
-                        "action_id": action,
-                        "name": action,
-                        "hidden": true,
-                    }))),
-                },
-            })
-            .await
-            .map_err(|_| failure())?;
-        let mut receipt = self
-            .begin_for_turn(
-                user,
-                session,
-                turn,
-                operation.as_ref(),
-                capability,
-                action,
-                input,
-                domain,
-            )
-            .await?;
-        receipt.hidden_action = Some(HiddenActionReceipt {
-            session_id,
-            event_id,
-            correlation_id,
-            operation_id: operation.clone(),
-            call_id,
-        });
-        Ok(receipt)
     }
 
     pub(crate) async fn returned(
@@ -336,24 +178,6 @@ impl HostedEffectReceipts {
     ) -> Result<(), AppError> {
         self.finish(receipt, EffectTerminalState::Succeeded, bounded(result)?)
             .await
-    }
-
-    pub(crate) async fn returned_digest(
-        &self,
-        receipt: Receipt,
-        result: &Value,
-    ) -> Result<(), AppError> {
-        let summary = summarize(result)?;
-        self.finish(
-            receipt,
-            EffectTerminalState::Succeeded,
-            json!({
-                "content_omitted": true,
-                "serialized_bytes": summary.bytes,
-                "sha256": summary.digest(),
-            }),
-        )
-        .await
     }
 
     pub(crate) async fn rejected(
@@ -379,10 +203,7 @@ impl HostedEffectReceipts {
             return Err(failure());
         }
         let store = self.store().await?;
-        let Receipt {
-            request,
-            hidden_action,
-        } = receipt;
+        let Receipt { request } = receipt;
         let mut terminal = request;
         terminal.recorded_at = nomifun_common::now_ms();
         terminal.event_id = EventId::from(format!(
@@ -399,31 +220,6 @@ impl HostedEffectReceipts {
             .record_effect_terminal(terminal, state)
             .await
             .map_err(|_| failure())?;
-        if let Some(hidden) = hidden_action {
-            let result_identity = format!("{}:result", hidden.event_id.as_ref());
-            store
-                .append_event(&SessionEventAppend {
-                    agent_session_id: hidden.session_id,
-                    event_id: EventId::from(result_identity.clone()),
-                    producer_id: EventProducerId::from("capability_host"),
-                    idempotency_key: IdempotencyKey::from(result_identity),
-                    semantic_event: SemanticSessionEventDraft {
-                        kind: SessionEventKind("tool/result-recorded".to_owned()),
-                        kind_version: 1,
-                        correlation_id: hidden.correlation_id,
-                        causation_event_id: Some(hidden.event_id),
-                        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                            "operation_id": hidden.operation_id,
-                            "call_id": hidden.call_id,
-                            "output": Value::Null,
-                            "error": Value::Null,
-                            "hidden": true,
-                        }))),
-                    },
-                })
-                .await
-                .map_err(|_| failure())?;
-        }
         Ok(())
     }
 
@@ -432,52 +228,6 @@ impl HostedEffectReceipts {
         let session_id = self.owned_session(&store, user, session).await?;
         if store.has_unsettled_effects(&session_id).await.map_err(|_| failure())? {
             return Err(failure());
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn replay_safe(
-        &self,
-        user: &str,
-        session: &str,
-        source: &str,
-    ) -> Result<(), AppError> {
-        if source.is_empty() || source.len() > 1024 {
-            return Err(failure());
-        }
-        let store = self.store().await?;
-        let session_id = self.owned_session(&store, user, session).await?;
-        if store.has_unsettled_effects(&session_id).await.map_err(|_| failure())? {
-            return Err(failure());
-        }
-        let effects = store.list_effects(&session_id).await.map_err(|_| failure())?;
-        let mut after = None;
-        let mut source_turns = Vec::new();
-        loop {
-            let page = store
-                .read_events(&session_id, after.as_ref(), nomifun_agent_session::MAX_EVENT_PAGE_SIZE)
-                .await
-                .map_err(|_| failure())?;
-            for event in &page.events {
-                if event.kind.0 == "turn/started"
-                    && event.causation_event_id.as_ref().map(EventId::as_ref) == Some(source)
-                {
-                    source_turns.push(OperationId::from(event.correlation_id.as_ref().to_owned()));
-                }
-            }
-            if page.events.len() < nomifun_agent_session::MAX_EVENT_PAGE_SIZE as usize {
-                break;
-            }
-            after = Some(page.next_cursor);
-        }
-        if effects.iter().any(|effect| {
-            source_turns.contains(&effect.turn_id)
-                && effect.state != AgentEffectState::Rejected
-        }) {
-            return Err(AppError::Conflict(
-                "The source already dispatched a hosted Robot call. Automatic replay is not safe; inspect state and send a new instruction."
-                    .into(),
-            ));
         }
         Ok(())
     }
@@ -534,13 +284,7 @@ impl HostedEffectReceipts {
         )))
     }
 
-    pub(crate) fn witness(&self, user: String, session: String) -> Arc<SessionEffects> {
-        Arc::new(SessionEffects {
-            receipts: self.clone(),
-            user,
-            session,
-        })
-    }
+
 }
 
 fn bounded(value: &Value) -> Result<Value, AppError> {
@@ -593,53 +337,6 @@ fn summarize(value: &Value) -> Result<JsonSummary, AppError> {
     };
     serde_json::to_writer(&mut summary, value).map_err(|_| failure())?;
     Ok(summary)
-}
-
-pub(crate) struct SessionEffects {
-    receipts: HostedEffectReceipts,
-    user: String,
-    session: String,
-}
-
-#[async_trait]
-impl nomifun_ai_agent::engine_effect_scope::EngineEffectSettlement for SessionEffects {
-    async fn ensure_settled(&self) -> Result<(), AppError> {
-        self.receipts.ensure_settled(&self.user, &self.session).await
-    }
-
-    async fn ensure_source_replay_safe(&self, source: &str) -> Result<(), AppError> {
-        self.receipts
-            .replay_safe(&self.user, &self.session, source)
-            .await
-    }
-}
-
-#[async_trait]
-impl nomifun_ai_agent::ContextContributor for SessionEffects {
-    async fn pre_turn_context(&self) -> Option<String> {
-        self.receipts
-            .context(&self.user, &self.session)
-            .await
-            .ok()
-            .flatten()
-    }
-
-    async fn pre_turn_context_for_turn_result(
-        &self,
-        _: &nomifun_ai_agent::TurnContext,
-    ) -> Result<Option<String>, String> {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.receipts.context(&self.user, &self.session),
-        )
-        .await
-        .map_err(|_| "HOSTED_EFFECT_CONTEXT_TIMEOUT".to_owned())?
-        .map_err(|_| "HOSTED_EFFECT_CONTEXT_UNAVAILABLE".to_owned())
-    }
-
-    fn label(&self) -> &str {
-        "platform_hosted_effect_history"
-    }
 }
 
 pub(crate) struct RobotReceiptInvoker {

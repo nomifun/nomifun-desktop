@@ -48,15 +48,29 @@ struct ConstrainedTools {
     git_root: Option<std::path::PathBuf>,
 }
 
+/// Schema visibility is a model-presentation choice, not execution authority.
+/// Media hints and ToolSearch may reveal an already frozen deferred Tool. All
+/// names, schemas, digests, actions, resources and effect labels must still be
+/// byte-for-byte equal to the admitted binding.
+fn frozen_invocation_binding<'a>(
+    plan: &'a EngineToolPlan,
+    invocation: &nomifun_engine_core::EngineToolInvocation,
+) -> Option<&'a nomifun_engine_core::EngineToolBinding> {
+    let frozen = plan.binding(&invocation.call.name)?;
+    let mut presented = frozen.clone();
+    presented.definition.deferred = invocation.binding.definition.deferred;
+    (presented == invocation.binding).then_some(frozen)
+}
+
 #[async_trait::async_trait]
 impl nomifun_engine_core::EngineToolInvoker for ConstrainedTools {
     async fn invoke(
         &self,
-        invocation: nomifun_engine_core::EngineToolInvocation,
+        mut invocation: nomifun_engine_core::EngineToolInvocation,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<nomifun_engine_core::EngineToolResult, nomifun_engine_core::EngineToolError> {
-        if self.plan.binding(&invocation.call.name) != Some(&invocation.binding)
-            || !constraints_allow_action(
+        let frozen = frozen_invocation_binding(&self.plan, &invocation);
+        if frozen.is_none() || !constraints_allow_action(
                 self.constraints,
                 invocation.binding.capability_id.as_ref(),
                 invocation.binding.action_id.as_ref(),
@@ -66,6 +80,10 @@ impl nomifun_engine_core::EngineToolInvoker for ConstrainedTools {
                 "Tool is outside the frozen Session execution ceiling".into(),
             ));
         }
+        // Downstream Kernel, Plugin and Robot owners retain their exact frozen
+        // binding checks. Restore that binding after validating the sole
+        // permitted presentation difference, before any host adapter runs.
+        invocation.binding = frozen.expect("binding checked above").clone();
         if let Some(root) = &self.git_root {
             self.wave2
                 .ensure_workspace_git_evidence(root)
@@ -105,9 +123,6 @@ fn constraints_allow_action(
 
 #[path = "engine_mcp_resources.rs"]
 mod mcp_resources;
-pub(crate) use mcp_resources::{page as project_resource_page, validate_page as validate_resource_page, resource_operation as mcp_resource_operation};
-pub(crate) use mcp_resources::{resource_server_ids, select_resource_server};
-pub(crate) use mcp_resources::validate_owner_result as validate_resource_owner_result;
 
 struct Turn {
     operation: String,
@@ -1427,6 +1442,76 @@ impl EngineKernelSession {
 mod workspace_module_tests {
     use super::*;
     use nomifun_common::AgentToolPolicy;
+
+    fn media_invocation(action: &str) -> nomifun_engine_core::EngineToolInvocation {
+        use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
+        use nomifun_chat_model_broker::{ChatToolCall, ChatToolDefinition};
+        use nomifun_engine_core::{EngineEffectClass, EngineToolBinding, EngineToolInvocation};
+        let schema = StrictJsonValue(serde_json::json!({"type":"object","additionalProperties":false,"properties":{"prompt":{"type":"string"}},"required":["prompt"]}));
+        EngineToolInvocation {
+            agent_session_id: "0190f5fe-7c00-7a00-8000-000000000002".into(),
+            principal: nomifun_agent_contracts::PrincipalRef { principal_kind: "user".into(), principal_id: "owner".into() },
+            resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "a".repeat(64).into() },
+            active_set_generation: 0, turn_operation_id: "turn".into(), operation_id: "tool".into(),
+            idempotency_key: "key".into(), correlation_id: "call".into(),
+            call: ChatToolCall { call_id: "call".into(), name: "media".into(), arguments: StrictJsonValue(serde_json::json!({"prompt":"cat"})), provider_metadata: Default::default() },
+            binding: EngineToolBinding {
+                model_name: "media".into(),
+                definition: ChatToolDefinition { name: "media".into(), description: "Create media".into(), input_schema: schema.clone(), deferred: true },
+                schema_digest: nomifun_engine_core::input_schema_digest(&schema).unwrap(),
+                canonical_input_schema_ref: format!("schema://{action}/input").into(),
+                capability_contract_digest: "b".repeat(64).into(), capability_id: CapabilityId::from("creation.media"), action_id: ActionId::from(action),
+                resource_binding_ids: Default::default(), effect_class: EngineEffectClass::ManagedEffect, parallel_safe: false,
+            },
+        }
+    }
+
+    #[test]
+    fn media_schema_visibility_keeps_the_exact_frozen_execution_mapping() {
+        for action in nomifun_agent_domain_wave3::CREATION_MEDIA_ACTION_IDS {
+            let frozen = media_invocation(action);
+            let plan = EngineToolPlan::new([frozen.binding.clone()]).unwrap();
+            let mut visible = frozen.clone();
+            visible.binding.definition.deferred = false;
+            assert_ne!(visible.binding, frozen.binding, "presentation really changed");
+            assert_eq!(frozen_invocation_binding(&plan, &visible), Some(&frozen.binding));
+            assert!(plan.binding("media").unwrap().definition.deferred, "the admitted plan stays frozen");
+            for scope in [AgentToolPolicy::ReadOnly, AgentToolPolicy::ReadShell] {
+                assert!(!constraints_allow_action(constraints(scope), "creation.media", action));
+            }
+        }
+    }
+
+    #[test]
+    fn visible_tool_cannot_change_any_execution_authority_or_schema_field() {
+        use nomifun_engine_core::{EngineEffectClass, EngineToolBinding};
+        let frozen = media_invocation("creation.media/image");
+        let plan = EngineToolPlan::new([frozen.binding.clone()]).unwrap();
+        let forgeries: &[fn(&mut EngineToolBinding)] = &[
+            |binding| binding.model_name = "different-name".into(),
+            |binding| binding.definition.name = "different-name".into(),
+            |binding| binding.definition.description = "different-contract".into(),
+            |binding| binding.definition.input_schema.0["properties"]["extra"] = serde_json::json!({"type":"string"}),
+            |binding| binding.schema_digest = "c".repeat(64).into(),
+            |binding| binding.canonical_input_schema_ref = "schema://different/input".into(),
+            |binding| binding.capability_contract_digest = "c".repeat(64).into(),
+            |binding| binding.capability_id = "creative.workshop".into(),
+            |binding| binding.action_id = "creation.media/video".into(),
+            |binding| { binding.resource_binding_ids.insert("ungranted-resource".into()); },
+            |binding| binding.effect_class = EngineEffectClass::ReadOnly,
+            |binding| binding.parallel_safe = true,
+        ];
+        for change in forgeries {
+            let mut forged = frozen.clone();
+            forged.binding.definition.deferred = false;
+            change(&mut forged.binding);
+            assert!(frozen_invocation_binding(&plan, &forged).is_none());
+        }
+        let mut renamed = frozen;
+        renamed.call.name = "not-admitted".into();
+        assert!(frozen_invocation_binding(&plan, &renamed).is_none());
+        assert!(frozen_invocation_binding(&EngineToolPlan::default(), &renamed).is_none());
+    }
 
     #[tokio::test]
     async fn completed_cleanup_failure_can_retry_but_pending_and_success_stay_shared() {

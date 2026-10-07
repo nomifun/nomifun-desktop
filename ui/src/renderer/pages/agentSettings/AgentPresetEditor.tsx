@@ -3,28 +3,22 @@ import type {
   AgentPresetDraft,
   AgentPresetEditorResponse,
   AgentPresetSummary,
-  CapabilityPlacement,
   ChatRouteCandidate,
   ChatRouteRecord,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 import {
   AGENT_CHAT_MODEL_TASK,
-  missingSkillCapabilities,
-  toggleSkill,
 } from '@/common/types/agentPlatform';
 import {
   Alert,
   Button,
-  Checkbox,
-  Collapse,
   Input,
   Select,
   Tag,
 } from '@arco-design/web-react';
 import {
   Edit,
-  LinkCloud,
   MessageOne,
   Save,
 } from '@icon-park/react';
@@ -39,8 +33,6 @@ import AgentContributionOrder from './AgentContributionOrder';
 import { unavailableModuleReferences } from './capabilityGroups';
 import {
   TEMPLATE_I18N_PATH,
-  capabilityPlacement,
-  capabilityReferenceKey,
   chatRouteCandidateKey,
   selectChatRouteCandidate,
   updateDocument,
@@ -161,23 +153,18 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const metadataOnlyChange = Boolean(editor.preset.current_stable_revision) && savedDocumentUnchanged;
   const needsChatModel = !taskOnlyCreation && !chatRouteRecord;
   const modelBlocksSave = needsChatModel && !metadataOnlyChange;
-  const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
-  const catalogByReference = useMemo(() => new Map(catalog.capabilities.map((item) => [capabilityReferenceKey(item.capability), item])), [catalog.capabilities]);
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) => onDraftChange(updateDocument(draft, transform));
   const applyChatRouteRecord = (record: ChatRouteRecord) => patchDocument((document) => ({
     ...document,
     model_route_refs: { ...document.model_route_refs, [AGENT_CHAT_MODEL_TASK]: record.primary.model_route_id },
     chat_route_records: { ...document.chat_route_records, [AGENT_CHAT_MODEL_TASK]: record },
   }));
-  const placementLabel = (placement: CapabilityPlacement): string => t(
-    placement === 'enabled' ? 'agentSettings.capabilities.enabled' : 'agentSettings.capabilities.notSelected'
-  );
   const tabs = [
     { key: 'capabilities', label: t('agentSettings.workbench.capabilityTab') },
     { key: 'providers', label: t('agentSettings.providers.title') },
     { key: 'settings', label: t('agentSettings.workbench.settingsTab') },
     { key: 'runtime', label: t('agentSettings.workbench.runtimeTab') },
-    { key: 'extensions', label: t('agentSettings.workbench.skillsTab') },
+    { key: 'extensions', label: t('agentSettings.workbench.extensionsTab') },
   ];
   const editIdentity = () => setActiveTab('settings');
 
@@ -304,92 +291,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'>
         <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onOpenAuthor={onOpenAuthor} onChange={(document) => onDraftChange({ ...draft, document })} />
         <AgentContributionOrder document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
-        <section className={styles.section} id='agent-settings-skills-mcp'>
-        <Collapse defaultActiveKey={[]} className={styles.advancedCollapse}>
-          <Collapse.Item name='skills-mcp' header={t('agentSettings.sections.skillsMcp')}>
-            <p className={styles.collapseHint}>{t('agentSettings.sections.skillsMcpHint')}</p>
-            <div className={styles.dualGrid}>
-              <div className={styles.selectionColumn}>
-                <div className={styles.selectionHeader}>
-                  <span>{t('agentSettings.sections.skills')}</span>
-                  <span>{draft.document.skill_bindings.length}</span>
-                </div>
-                <div className={styles.selectionList}>
-                  {catalog.skills.map((skill) => {
-                    const missing = missingSkillCapabilities(skill, draft.document);
-                    return (
-                      <label key={skill.skill.id} className={styles.skillRow}>
-                        <Checkbox
-                          checked={selectedSkills.has(skill.skill.id)}
-                          disabled={busy}
-                          onChange={() =>
-                            patchDocument((document) => toggleSkill(document, skill.skill))
-                          }
-                        />
-                        <div>
-                          <strong>{skill.display_name}</strong>
-                          <span>{skill.description}</span>
-                          {missing.length > 0 && (
-                            <small>
-                              {t('agentSettings.skills.missingCapabilities', {
-                                capabilities: missing.join(', '),
-                              })}
-                            </small>
-                          )}
-                        </div>
-                      </label>
-                    );
-                  })}
-                  {catalog.skills.length === 0 && (
-                    <div className={styles.inlineEmpty}>{t('agentSettings.skills.empty')}</div>
-                  )}
-                </div>
-              </div>
-
-              <div className={styles.selectionColumn}>
-                <div className={styles.selectionHeader}>
-                  <span>{t('agentSettings.sections.mcp')}</span>
-                  <span>{catalog.mcp_tools.length}</span>
-                </div>
-                <div className={styles.selectionList}>
-                  {catalog.mcp_tools.map((mapping) => {
-                    const capability = catalogByReference.get(
-                      capabilityReferenceKey(mapping.capability)
-                    );
-                    const placement = capabilityPlacement(
-                      draft.document,
-                      mapping.capability
-                    );
-                    return (
-                      <div
-                        key={`${mapping.server_id}:${mapping.canonical_tool_key}`}
-                        className={styles.mcpRow}
-                      >
-                        <LinkCloud theme='outline' size='15' />
-                        <div>
-                          <strong>{mapping.canonical_tool_key}</strong>
-                          <span>
-                            {capability?.display_name ?? mapping.capability.id}
-                          </span>
-                        </div>
-                        <Tag
-                          size='small'
-                          color={placement === 'none' ? 'gray' : 'blue'}
-                        >
-                          {placementLabel(placement)}
-                        </Tag>
-                      </div>
-                    );
-                  })}
-                  {catalog.mcp_tools.length === 0 && (
-                    <div className={styles.inlineEmpty}>{t('agentSettings.mcp.empty')}</div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </Collapse.Item>
-        </Collapse>
-      </section></div>}
+      </div>}
     </div>
     <AgentEditorActionBar>
       <div className={styles.saveStatus}><span className={dirty || unavailableCount || idmmPolicyBlocksSave ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : idmmPolicyBlocksSave ? 'agentSettings.workbench.runtimePolicyNeeded' : modelBlocksSave ? 'agentSettings.workbench.modelNeeded' : dirty ? 'agentSettings.workbench.previewCompileHint' : 'agentSettings.workbench.saveHint')}</span></div></div>

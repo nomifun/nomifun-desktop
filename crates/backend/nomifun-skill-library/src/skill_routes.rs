@@ -9,8 +9,7 @@ use axum::routing::{delete, get, post, put};
 
 use nomifun_api_types::{
     AddExternalPathRequest, ApiResponse, BuiltinAutoSkillResponse, ExportSkillRequest, ExternalSkillSourceResponse,
-    ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest, MaterializeSkillsResponse, MaterializedSkillRef,
-    NamedPathResponse, ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
+    ImportSkillRequest, ImportSkillResponse, NamedPathResponse, ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse,
     ScannedSkillResponse, SetSkillTagsRequest, SkillListItemResponse, SkillMarketMcpConfigRequest,
     SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse, SkillPathsResponse, SkillSourceResponse,
@@ -70,8 +69,6 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
         // Built-in resources
         .route("/api/skills/builtin-rule", post(read_builtin_rule))
         .route("/api/skills/builtin-skill", post(read_builtin_skill))
-        // Per-agent skill resolution (for agent CLI symlink layout).
-        .route("/api/skills/materialize-for-agent", post(materialize_for_agent))
         // External path management
         .route(
             "/api/skills/external-paths",
@@ -102,6 +99,8 @@ async fn list_skills(
     State(state): State<SkillRouterState>,
 ) -> Result<Json<ApiResponse<Vec<SkillListItemResponse>>>, AppError> {
     let items = skill_service::list_available_skills(&state.skill_paths).await?;
+    let inventory = crate::frozen::capture_listed_inventory(&state.skill_paths, items.clone()).await?;
+    let session_errors = inventory.unavailable.into_iter().map(|item| (item.name, item.reason)).collect::<HashMap<_, _>>();
     let builtin_display = skill_service::load_builtin_skill_display_metadata();
     // user sidecar assignments (decode JSON arrays), keyed by skill name
     let user_rows = state.skill_tag_repo.get_all().await.map_err(AppError::from)?;
@@ -124,7 +123,10 @@ async fn list_skills(
                 .cloned()
                 .or_else(|| state.builtin_skill_tags.get(&s.name).cloned())
                 .unwrap_or_default();
+            let session_error = session_errors.get(&s.name).cloned();
             SkillListItemResponse {
+                session_available: session_error.is_none(),
+                session_error,
                 name: s.name,
                 description: s.description,
                 name_i18n: display.name_i18n,
@@ -348,28 +350,6 @@ async fn read_builtin_skill(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let content = skill_service::read_builtin_skill(&state.skill_paths, &req.file_name).await?;
     Ok(Json(ApiResponse::ok(content)))
-}
-
-/// `POST /api/skills/materialize-for-agent` — resolve each requested skill
-/// name to its on-disk source directory. The frontend symlinks each
-/// returned `source_path` into the agent CLI's native skills dir. The
-/// backend no longer copies any files per-conversation.
-async fn materialize_for_agent(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<MaterializeSkillsRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<MaterializeSkillsResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let conversation_id = req.conversation_id.into_string();
-    let resolved =
-        skill_service::materialize_skills_for_agent(&state.skill_paths, &conversation_id, &req.skills).await?;
-    let skills: Vec<MaterializedSkillRef> = resolved
-        .into_iter()
-        .map(|s| MaterializedSkillRef {
-            name: s.name,
-            source_path: s.source_path.to_string_lossy().into_owned(),
-        })
-        .collect();
-    Ok(Json(ApiResponse::ok(MaterializeSkillsResponse { skills })))
 }
 
 // ---------------------------------------------------------------------------

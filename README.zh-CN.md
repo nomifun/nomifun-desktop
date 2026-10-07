@@ -50,7 +50,7 @@
 
 ---
 
-**NomiFun** 满足你对 AI 工作站的全部想象 —— 而且一切由你做主。一套 React 前端 + 一套 Rust 后端，为你带来会成长的桌面伙伴、无人值守的自动化平台、统一知识库、原生的 computer / browser use，以及任何智能体都能驱动的开放能力总线。无需云账号、无遥测、无订阅。除了**你自己配置**的大模型调用，你的数据绝不离开本机。
+**NomiFun** 满足你对 AI 工作站的全部想象 —— 而且一切由你做主。一套 React 前端 + 一套 Rust 后端，为你带来会成长的桌面伙伴、无人值守的自动化平台、统一知识库、原生的 computer / browser use，以及任何智能体都能驱动的开放能力总线。无需 NomiFun 云账号、无遥测、无订阅。工作空间数据保存在本机；发往你自己配置的模型服务的请求（包括模型调用、模型目录和额度查询）由你选择的服务处理。
 
 > 产品名是 **NomiFun**；小写 `nomifun` 仅用于代码标识符、crate 名、环境变量与仓库路径。
 
@@ -116,10 +116,10 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 
 在 NomiFun 里，数据安全不是一个开关，而是架构本身。
 
-- **数据全在本地。** NomiFun 绝不主动向外发送任何数据。**唯一**的出站网络请求，是你自己明确配置、调用所选模型厂商的大模型请求；除此之外，没有任何第三方服务的网络对接。
+- **数据全在本地。** NomiFun 绝不主动向外发送任何数据。发往你自己配置的模型服务的请求（包括模型调用、模型目录和额度查询）由你选择的服务处理。其他可主动使用的联网功能见 [FAQ](docs/reference/faq.md#is-nomifun-really-local-only)。
 - **关注数据安全的个体与企业都可放心使用。** 代码**完全开源、接受审计**。
 - **为了这个承诺，我们砍掉了不少功能。** 为了保障你的数据安全，我们刻意舍弃了很多先进、有趣的功能设计 —— 一切都是为了让用户、也让开发者更放心。
-- **无广告、无商业化、无会员制。** 我们承诺：永远不对本项目的任何功能收费。唯一花钱的地方是模型供应商的 token，这是我们无法替你解决的客观成本。（如果你在寻找 / 搭建模型上遇到困难，欢迎[联系我们](#-联系我们--社区)，我们很乐意帮忙搭建统一的模型网关。）
+- 无广告、无会员制，官方不做任何商业化运营；永远不对本项目的任何功能收费，官方也不运营任何付费服务；唯一的花费是模型 token，由你直接支付给自己选择的模型服务方。
 
 部署威胁模型与漏洞披露策略见 [`SECURITY.md`](SECURITY.md)。
 
@@ -627,6 +627,7 @@ SDK 限制和签名建议见 [macOS 签名说明](apps/desktop/signing/README.md
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
 | `bun run test:plugin-sdk` | 验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同 |
 | `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
+| `bun run demo:idmm` | 用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告 |
 | `bun run test:agent-reliability-report` | 验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查 |
 | `bun run test:voice-smoke-runner` | 测试有界Mobile语音无头观测脚本，不作为真机体验证据 |
 | `bun run test:mobile-voice-live` | 显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI |

@@ -146,7 +146,7 @@ describe('Guid workbench Agent launch behavior', () => {
     // Official preparation now needs the selected model for validation, but
     // still prepares a stable preset for the same AgentSession launch path.
     expect(compactWhitespace(send)).toContain(
-      'launchPreset = await prepareOfficialAgent( selectedTemplate, t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`), current_model, );'
+      'launchPreset = await prepareOfficialAgent( selectedTemplate, current_model, );'
     );
     expect(officialLaunch).toContain(
       "model?: Pick<TProviderWithModel, 'id' | 'use_model'>,"
@@ -168,7 +168,7 @@ describe('Guid workbench Agent launch behavior', () => {
     ).toBe(compactWhitespace(`
       template_id: template.template_key,
       request: {
-        display_name: displayName,
+        display_name: template.template_key,
         model_route_refs: {},
         chat_route_records: {},
         reuse_existing: true,

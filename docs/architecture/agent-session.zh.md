@@ -80,9 +80,51 @@ Runtime SDK 对同一已发表终态的重试，只能在原 root、delivery、S
 
 Session 只持久化一个 native `reasoning_effort`，取值由共享 `ReasoningEffort` 合同定义。写入与读取使用同一字段，不维护有损镜像，不从旧字段回退。数据库 schema 更新不得从已退役的 Agent 字段重建会话内容。
 
+### 全局扩展与输入框选择
+
+MCP 与 Skill 是所有 Agent 共用的全局能力，预设不持有扩展总开关。创建或空闲时明确更新会话选择，
+host 捕获全局技能库，并把选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
+现有 Agent Store，不创建另一份绑定或权限台账。Library Skill 冻结正文、辅助资源、来源与摘要，
+`selected` 控制默认输入注入；Package Skill 保留现役精确锁与原 JSON 合同。
+
+输入框使用 typed `session_capabilities` 和带版本 CAS 的 capability-selection API，不读写 `extra.skills`
+或 MCP 镜像。空闲更新复用 canonical binding transition，保留非 MCP 资源，完成 Runtime teardown
+与效果结算后原子提交 binding、资源定义与 active set。活动或暂停 Turn、Remote 和 Attempt 禁止更新。
+技能正文只从 Session 冻结内容读取，大正文和辅助资源由同一个 native context reader 按需读取，
+不执行 Skill hooks、shell 或 fork，不增加工具权限。工具搜索由 Runtime 自动提供。
+
 ## 消费端边界
 
+### 智能决策的消息来源与依据
+
+IDMM 自动输入在正式 `message/user-accepted` 内容中保存服务端作者的
+`idmm_decision` 合同，记录实际规则、旁路模型或恢复路径、当次模型身份、简短依据
+及精确的问题消息引用。普通输入接口拒绝此保留字段和 `origin=idmm`；UI 不通过
+正文、当前配置或有限的介入日志补造来源，也不从旧 origin 回填模型与依据。
+
+首次自动投递与问题身份、完成序列和摘要的复核在同一 Store 写事务内进行；已被
+回答、清空上下文或切换 Agent 的问题不能继续自动回答。已提交输入的重放仍使用
+原 exact-input 幂等规则。来源与依据随 canonical 投影进入历史和实时查询，显示开关
+只控制气泡外说明的展开，不改变模型调用、输入正文或 Runtime 上下文。
+
+等待人工与决策失败使用 `idmm/notice-recorded` 正式事件，关联原问题并通过同一
+事务投影成独立历史提示。提示不创建 Turn，不修改原问题，不形成 assistant 完成
+回执，也不授权暂停恢复或重放效果。重复提示保留首次事实；问题已经被回答时不
+追加过期提示。首版不持久化或显示模型自报的置信度。
+
 UI 直接消费当前 stream 与 Message projection，不保留缺少旧协议 marker 时启动的本地终态加工状态机。错误使用明确的当前 error code；不以旧错误文字猜测其含义。
+
+内置 Agent 的界面名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏的内部会话配置只保存稳定模板 key，并按完整官方 seed 核验后修正显示元数据。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；新旧会话使用同一个名称来源。个人 Agent 仍使用其冻结身份，名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
+
+已有会话的创作模式、模型选择、参数与素材草稿按会话 ID 保存到持久浏览器存储；完整 key 同时隔离 backend dataset 与 Agent data generation。重启恢复用户最后选择的模式，包括明确选择的“日常对话”，不从最近生成任务反推或覆盖选择。欢迎页草稿及待提交准入状态仍使用会话级临时存储。新建创作会话的状态移交与后续编辑使用同一 writer，权威会话删除通知同时清理其草稿；这些界面编辑偏好不授予 Agent 权限，也不改变 canonical 事实链。
+
+语言模型可以通过冻结预设中已授权的 `creation.media` 操作调用对应生成服务；生成路由按操作独立选择，产物入库不要求额外的画布或素材管理授权。大型工具目录中的 `deferred` 只控制 schema 展示，媒体提示或工具搜索展开 schema 时不改变权限；执行前校验所有其他 binding 字段并恢复冻结 binding，Kernel、Plugin 与资源 owner 继续执行原有精确检查。媒体专用配置可以不设 Chat，但明确选择的文本模型必须形成经过验证的 Session-local Chat 路由；没有 Chat 路由的历史 Session 不通过模型切换补造路由。文本创作按原生 Chat 配置校验并使用既有文本 executor，不经过单次媒体协议探测。
+
+生成任务与产物读取由冻结的媒体模块授权控制，独立于是否存在直接创作输入框。普通会话、伙伴及只读 Attempt 都可呈现已授权任务；只读视图不提供取消、再创作或编辑转换等效果入口。工具返回任务已准入不是产物完成证明，界面继续读取对应 canonical Turn 的生成任务终态与实际资产。
+
+工具的 canonical `capability_id` / `action_id`、模型调用名称和用户标题分别承担身份、调用和展示职责。第一方工具从共享 `contracts/tool-presentation.json` 选择简短调用名和中英文动作标题；MCP 与插件调用名保留可读的来源和动作，并用完整身份的摘要消除碰撞。展示目录不参与授权、效果判断、重试分组或 checkpoint 恢复。
+
+实时工具消息从已准入的 typed `ToolStarted` 投影完整身份，历史消息沿用 canonical tool event 中的身份；两者使用同一展示规则呈现动作与查询词、路径或域名，原始名称和身份保留在展开详情中。既有日志的调用名保持原值，UI 不从被截断的路由名称补造动作身份。
 
 思考的实时展示按 canonical Turn 与 model step 使用独立于正文的稳定消息标识，历史投影使用同一标识。已记录的正文、工具或下一 model step 事件由 Runtime 展示适配器发出该思考条目的 `done` 通知；UI 直接消费它，不能因为整个任务仍在执行而继续显示已完成条目的加载状态。Turn 终态回执关闭该 Turn 的剩余思考展示，不依赖会话级处理中标志。
 

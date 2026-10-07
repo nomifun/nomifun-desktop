@@ -13,6 +13,7 @@ serde_json.workspace = true
 sha2.workspace = true
 semver.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true

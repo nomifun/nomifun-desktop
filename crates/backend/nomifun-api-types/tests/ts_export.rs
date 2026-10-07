@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use ts_rs::{Config, TS};
+use nomifun_api_types::model_gateway::*;
 
 use nomifun_api_types::{
     AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
@@ -55,6 +56,23 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
 
 #[test]
 fn export_provider_domain_bindings() {
+    export_binding_if_changed::<ModelGatewayOperator>("ModelGatewayOperator.ts");
+    export_binding_if_changed::<ModelGatewayMetaResponse>("ModelGatewayMetaResponse.ts");
+    export_binding_if_changed::<ModelGatewayTaskEndpoints>("ModelGatewayTaskEndpoints.ts");
+    export_binding_if_changed::<ModelGatewayPrice>("ModelGatewayPrice.ts");
+    export_binding_if_changed::<ModelGatewayCatalogModel>("ModelGatewayCatalogModel.ts");
+    export_binding_if_changed::<ModelGatewayCatalogResponse>("ModelGatewayCatalogResponse.ts");
+    export_binding_if_changed::<ModelGatewayQuota>("ModelGatewayQuota.ts");
+    export_binding_if_changed::<ModelGatewayPlan>("ModelGatewayPlan.ts");
+    export_binding_if_changed::<ModelGatewayBalance>("ModelGatewayBalance.ts");
+    export_binding_if_changed::<ModelGatewayKey>("ModelGatewayKey.ts");
+    export_binding_if_changed::<ModelGatewayRateLimits>("ModelGatewayRateLimits.ts");
+    export_binding_if_changed::<ModelGatewayAccountResponse>("ModelGatewayAccountResponse.ts");
+    export_binding_if_changed::<ModelGatewayMetaRequest>("ModelGatewayMetaRequest.ts");
+    export_binding_if_changed::<ModelGatewayCatalogRequest>("ModelGatewayCatalogRequest.ts");
+    export_binding_if_changed::<CreateModelGatewayRequest>("CreateModelGatewayRequest.ts");
+    export_binding_if_changed::<UpdateModelGatewayConnectionRequest>("UpdateModelGatewayConnectionRequest.ts");
+    export_binding_if_changed::<SyncModelGatewayResponse>("SyncModelGatewayResponse.ts");
     export_binding_if_changed::<KnowledgeEntryKind>("KnowledgeEntryKind.ts");
     export_binding_if_changed::<KnowledgeEntryOrigin>("KnowledgeEntryOrigin.ts");
     export_binding_if_changed::<KnowledgeEntrySourceRelationship>(
@@ -128,6 +146,21 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProtocolRecommendation>("ProtocolRecommendation.ts");
     export_binding_if_changed::<AuthSchemeDescriptor>("AuthSchemeDescriptor.ts");
     export_binding_if_changed::<ModelProtocolManifestResponse>("ModelProtocolManifestResponse.ts");
+}
+
+#[test]
+fn gateway_integer_response_types_are_lossless_and_scoped() {
+    let cfg=Config::default();
+    for declaration in [ModelGatewayBalance::decl(&cfg),ModelGatewayPrice::decl(&cfg),ModelGatewayQuota::decl(&cfg),ModelGatewayKey::decl(&cfg),ModelGatewayRateLimits::decl(&cfg)] {
+        assert!(!declaration.contains("number"),"financial/quota/rate integers must not become JS numbers: {declaration}");
+        assert!(declaration.contains("string"));
+    }
+    assert!(ModelGatewayBalance::decl(&cfg).contains("amount: string"));
+    assert!(ModelGatewayQuota::decl(&cfg).contains("total: string | null"));
+    assert!(ModelGatewayKey::decl(&cfg).contains("remaining_quota: string | null"));
+    // Physical token limits still use the existing editor's number contract;
+    // gateway import validates these are within Number.MAX_SAFE_INTEGER.
+    assert!(ModelGatewayCatalogModel::decl(&cfg).contains("context_window: number | null"));
 }
 
 #[test]

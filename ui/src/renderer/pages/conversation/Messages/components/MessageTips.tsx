@@ -21,6 +21,8 @@ import { useMessageList } from '../hooks';
 import { parseMessageFileMarker } from './messageFileMarker';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
+import { IdmmDecisionNotice } from './IdmmDecisionNotice';
+import GatewayBillingAction, { gatewayActionError } from './GatewayBillingAction';
 
 const icon = {
   success: <CheckOne theme='filled' size='16' fill={theme.Color.FunctionalColor.success} className='m-t-2px' />,
@@ -70,6 +72,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
   const messageList = useMessageList();
   return useMemo(() => {
     if (message.content.type !== 'error') return null;
+    if (message.content.idmm_notice) return null;
     if (message.content.recovery) return null;
     if (message.content.error?.retryable === false) return null;
     if (conversationContext?.type !== 'nomi') return null;
@@ -77,6 +80,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
     if (conversationContext.isProcessing === true) return null;
     const lastRight = messageList.findLast((entry) => entry.type === 'text' && entry.position === 'right');
     if (!lastRight || lastRight.type !== 'text') return null;
+    if (lastRight.content.idmm_decision) return null;
     const retryMessageId = lastRight.message_id ?? lastRight.msg_id;
     const retryCreatedAt = lastRight.created_at;
     if (!retryMessageId || retryCreatedAt == null) return null;
@@ -90,7 +94,8 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
 
 const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const { t } = useTranslation();
-  const currentAgent = useConversationContextSafe()?.currentAgent;
+  const conversationContext = useConversationContextSafe();
+  const currentAgent = conversationContext?.currentAgent;
   const { type } = message.content;
   const transition = message.content.agent_transition;
   const content = transition
@@ -122,6 +127,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const recoveryButton = retryButton;
 
   const displayContent = json ? '' : content;
+  if (message.content.idmm_notice) return <IdmmDecisionNotice message={message} />;
   if (transition) {
     return (
       <div className='agent-transition-boundary' role='note' aria-label={content}>
@@ -134,6 +140,7 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   if (type !== 'error' && !content.trim()) return null;
   if (type === 'error') {
     const code = structuredError?.code;
+    const gatewayFailure = conversationContext?.currentModel?.platform === 'nomifun-model-gateway' && gatewayActionError(code);
     const ownership = structuredError?.ownership;
     const title = code
       ? t(`conversation.agentError.codes.${code}.title`, {
@@ -195,6 +202,10 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
             {recoveryButton && <div className='message-error-note__recovery'>{recoveryButton}</div>}
           </div>
         </div>
+        {gatewayFailure && <>
+          {structuredError?.message && <div className='message-error-note__body'>{structuredError.message}</div>}
+        </>}
+        {gatewayActionError(code) && <GatewayBillingAction code={code} model={conversationContext?.currentModel} />}
         <div id={detailsId} className='message-error-note__details' hidden={!detailsExpanded}>
           {body && <div className='message-error-note__body'>{body}</div>}
           {resolutionText && (

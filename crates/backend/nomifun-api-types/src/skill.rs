@@ -1,4 +1,3 @@
-use nomifun_common::ConversationId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -29,6 +28,11 @@ pub enum SkillSourceResponse {
 pub struct SkillListItemResponse {
     pub name: String,
     pub description: String,
+    /// Native Session availability is separate from library management.
+    #[serde(default = "default_session_available")]
+    pub session_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_error: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub name_i18n: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -43,6 +47,8 @@ pub struct SkillListItemResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scenario_tags: Vec<String>,
 }
+
+fn default_session_available() -> bool { true }
 
 /// Request body for `PUT /api/skills/{name}/tags`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -172,44 +178,6 @@ pub struct ReadBuiltinResourceRequest {
     pub file_name: String,
 }
 
-/// Request body for `POST /api/skills/materialize-for-agent`.
-///
-/// Callers pass the resolved skill snapshot (see
-/// `conversation.extra.skills`).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaterializeSkillsRequest {
-    pub conversation_id: ConversationId,
-    #[serde(default)]
-    pub skills: Vec<String>,
-}
-
-/// One entry in the `MaterializeSkillsResponse::skills` list.
-///
-/// Each entry tells the frontend the absolute on-disk directory of a
-/// resolved skill. The frontend is expected to symlink that directory
-/// into the agent CLI's native skills dir — the backend no longer
-/// copies files per-conversation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MaterializedSkillRef {
-    pub name: String,
-    /// Absolute path on disk to the skill's source directory. May live
-    /// under `{data_dir}/builtin-skills/` (top-level or `auto-inject/`)
-    /// or `{data_dir}/skills/` (user-created skills).
-    pub source_path: String,
-}
-
-/// Response for `POST /api/skills/materialize-for-agent`.
-///
-/// Returns a list of resolved skill references rather than a copied
-/// directory; the frontend symlinks each `source_path` into the CLI's
-/// native skills dir. Unknown names from the request are silently
-/// omitted from the list.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MaterializeSkillsResponse {
-    pub skills: Vec<MaterializedSkillRef>,
-}
-
 // ---------------------------------------------------------------------------
 // E. External path management
 // ---------------------------------------------------------------------------
@@ -297,8 +265,20 @@ mod tests {
     // -- Skill list --
 
     #[test]
+    fn native_unavailable_skill_status_is_distinct_from_management_presence() {
+        let raw = json!({ "name":"binary-guide", "description":"Manage this package", "location":"/library/binary-guide",
+            "is_custom":true, "source":"custom", "session_available":false, "session_error":"Unsupported binary resource" });
+        let item: SkillListItemResponse = serde_json::from_value(raw).unwrap();
+        assert!(!item.session_available); assert_eq!(item.session_error.as_deref(),Some("Unsupported binary resource"));
+        let encoded = serde_json::to_value(&item).unwrap(); assert_eq!(encoded["name"],"binary-guide");
+        assert_eq!(encoded["session_available"],false);
+    }
+
+    #[test]
     fn test_skill_list_item_serde() {
         let item = SkillListItemResponse {
+            session_available: true,
+            session_error: None,
             name: "my-skill".into(),
             description: "Does things".into(),
             name_i18n: HashMap::new(),
@@ -324,6 +304,8 @@ mod tests {
     #[test]
     fn test_skill_list_item_builtin_with_relative_location() {
         let item = SkillListItemResponse {
+            session_available: true,
+            session_error: None,
             name: "cron".into(),
             description: "Schedule recurring tasks".into(),
             name_i18n: HashMap::new(),
@@ -365,6 +347,8 @@ mod tests {
     #[test]
     fn test_skill_tags_default_and_skip_empty() {
         let item = SkillListItemResponse {
+            session_available: true,
+            session_error: None,
             name: "x".into(),
             description: "d".into(),
             name_i18n: HashMap::new(),
@@ -379,86 +363,6 @@ mod tests {
         let j = serde_json::to_value(&item).unwrap();
         assert!(j.get("audience_tags").is_none()); // empty skipped
         assert_eq!(j["scenario_tags"], serde_json::json!(["document"]));
-    }
-
-    #[test]
-    fn test_materialize_request_roundtrip() {
-        let conversation_id = "0190f5fe-7c00-7a00-8abc-012345678901";
-        let raw = json!({
-            "conversation_id": conversation_id,
-            "skills": ["planning-with-files", "pdf"],
-        });
-        let req: MaterializeSkillsRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.conversation_id.as_str(), conversation_id);
-        assert_eq!(req.skills, vec!["planning-with-files", "pdf"]);
-    }
-
-    #[test]
-    fn test_materialize_request_rejects_unknown_retired_field() {
-        let raw = json!({
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "enabled_skills": ["pdf"],
-        });
-        assert!(serde_json::from_value::<MaterializeSkillsRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn test_materialize_request_rejects_numeric_conversation_id() {
-        let raw = json!({
-            "conversation_id": 42,
-            "skills": [],
-        });
-        assert!(serde_json::from_value::<MaterializeSkillsRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn test_materialize_request_default_enabled() {
-        let raw = json!({"conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901"});
-        let req: MaterializeSkillsRequest = serde_json::from_value(raw).unwrap();
-        assert!(req.skills.is_empty());
-    }
-
-    #[test]
-    fn test_materialize_response_serializes_snake() {
-        let resp = MaterializeSkillsResponse {
-            skills: vec![
-                MaterializedSkillRef {
-                    name: "cron".into(),
-                    source_path: "/tmp/builtin-skills/auto-inject/cron".into(),
-                },
-                MaterializedSkillRef {
-                    name: "planning-with-files".into(),
-                    source_path: "/tmp/builtin-skills/planning-with-files".into(),
-                },
-            ],
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        let skills = json["skills"].as_array().unwrap();
-        assert_eq!(skills.len(), 2);
-        // Project-wide wire contract: snake_case fields on the wire.
-        assert_eq!(skills[0]["name"], "cron");
-        assert_eq!(
-            skills[0]["source_path"],
-            "/tmp/builtin-skills/auto-inject/cron"
-        );
-        assert!(skills[0].get("sourcePath").is_none());
-    }
-
-    #[test]
-    fn test_materialize_response_roundtrip() {
-        let raw = json!({
-            "skills": [
-                {"name": "cron", "source_path": "/tmp/builtin-skills/auto-inject/cron"}
-            ]
-        });
-        let resp: MaterializeSkillsResponse = serde_json::from_value(raw.clone()).unwrap();
-        assert_eq!(resp.skills.len(), 1);
-        assert_eq!(resp.skills[0].name, "cron");
-        assert_eq!(
-            resp.skills[0].source_path,
-            "/tmp/builtin-skills/auto-inject/cron"
-        );
-        assert_eq!(serde_json::to_value(&resp).unwrap(), raw);
     }
 
     #[test]

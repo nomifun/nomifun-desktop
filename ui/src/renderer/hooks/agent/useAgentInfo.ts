@@ -11,6 +11,9 @@ import type {
 } from '@/common/types/agentPlatform';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { officialConversationTemplateKey } from '@/renderer/pages/conversation/components/conversationAgentIdentity';
+import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 
 export interface AgentInfo {
   preset_id: AgentPresetId;
@@ -46,22 +49,26 @@ function resolveAgentDisplayName(
 }
 
 /**
- * Historical conversation identity is snapshot-only. There is intentionally
- * no live AgentPreset lookup: editing an Agent must never rewrite history.
+ * Personal identity is snapshot-only. Official product names use the stable
+ * host-verified template identity and current locale, without a catalog lookup.
  */
 export function useAgentInfo(conversation: TChatConversation | undefined): {
   info: AgentInfo | null;
   isLoading: false;
 } {
+  const { t } = useTranslation();
   return useMemo(() => {
     if (!conversation) return { info: null, isLoading: false as const };
     const presetId = resolveAgentPresetId(conversation);
     const snapshot = resolveAgentSnapshot(conversation);
     if (!presetId || !snapshot) return { info: null, isLoading: false as const };
+    const templateKey = officialConversationTemplateKey(conversation.extra);
     return {
       info: {
         preset_id: presetId,
-        name: resolveAgentDisplayName(conversation, snapshot),
+        name: templateKey
+          ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[templateKey]}.name`)
+          : resolveAgentDisplayName(conversation, snapshot),
         logo:
           getAgentLogo(snapshot.resolved_agent_backend || conversation.type) ??
           undefined,
@@ -70,5 +77,5 @@ export function useAgentInfo(conversation: TChatConversation | undefined): {
       },
       isLoading: false as const,
     };
-  }, [conversation]);
+  }, [conversation, t]);
 }
