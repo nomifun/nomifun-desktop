@@ -26,6 +26,7 @@ import { ExecutionPauseNotice } from './ExecutionPauseNotice';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import { ConversationCreationTasksProvider } from '@/renderer/creation/ConversationCreationTasks';
 import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
+import { currentModelProviderTarget } from './currentModelProviderTarget';
 
 const NomiChat: React.FC<{
   conversation_id: ConversationId;
@@ -94,6 +95,10 @@ const NomiChat: React.FC<{
   const resolvedIsProcessing = turnActivity.hasHydratedRunningState
     ? turnActivity.running
     : isProcessing === true || turnActivity.running;
+  const currentModel = useMemo(
+    () => currentModelProviderTarget(modelSelection.current_model, modelSelection.providers),
+    [modelSelection.current_model?.id, modelSelection.current_model?.use_model, modelSelection.providers]
+  );
   const conversationValue = useMemo<ConversationContextValue>(() => {
     return {
       conversation_id: conversation_id,
@@ -107,6 +112,7 @@ const NomiChat: React.FC<{
       loadedSkills,
       loadedMcpStatuses,
       currentAgent,
+      currentModel,
     };
   }, [
     conversation_id,
@@ -119,6 +125,7 @@ const NomiChat: React.FC<{
     loadedSkills,
     loadedMcpStatuses,
     currentAgent,
+    currentModel,
   ]);
 
   return (

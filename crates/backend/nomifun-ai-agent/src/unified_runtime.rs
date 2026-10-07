@@ -397,6 +397,9 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 // No proposed tool batch is executed before a valid model
                 // terminal. Preserve progress for an explicit owner retry;
                 // the SDK must still prove cleanup before publishing pause.
+                if let AgentEngineError::Model { code, message } = &error {
+                    projection.output.record_model_gateway_failure(*code, message);
+                }
                 Ok(EngineTurnOutcome { model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
                     terminal:EngineTurnTerminal::Paused { reason:model_pause_reason(&error) } })
             }
@@ -828,6 +831,53 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gateway_model_failure_reaches_transient_notice_and_preserves_typed_pause() {
+        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+        use nomifun_chat_model_broker::{ChatModelErrorCode, ChatRetryDirective};
+        struct GatewayFailureModel { code: ChatModelErrorCode, business: GatewayBusinessError }
+        #[async_trait]
+        impl AgentModelPort for GatewayFailureModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                let mut error = ChatModelError::new(self.code, self.business.action_message(), ChatRetryDirective::Never);
+                error.provider_status = Some(self.business.http_status());
+                Err(error)
+            }
+        }
+        for (business, code, agent_code) in [
+            (GatewayBusinessError::InsufficientBalance, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (GatewayBusinessError::SubscriptionExpired, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (GatewayBusinessError::ModelNotInPlan, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (GatewayBusinessError::KeyExpired, ChatModelErrorCode::AuthenticationFailed, "USER_LLM_PROVIDER_AUTH_FAILED"),
+            (GatewayBusinessError::RateLimited, ChatModelErrorCode::RateLimited, "USER_LLM_PROVIDER_RATE_LIMITED"),
+        ] {
+            let host = Host::new();
+            let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(),
+                Arc::new(GatewayFailureModel { code, business }), Arc::new(NoTools), host.clone()).unwrap();
+            let mut events = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            let notice = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match events.recv().await.unwrap() {
+                        AgentStreamEvent::System(notice) => break notice,
+                        AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_) => panic!("gateway notice must precede pause finish"),
+                        _ => {},
+                    }
+                }
+            }).await.unwrap();
+            assert_eq!(notice["kind"], "model_gateway_account_action");
+            assert_eq!(notice["error"]["code"], agent_code);
+            assert_eq!(notice["error"]["message"], business.action_message());
+            assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1, "notice follows cleanup");
+            let expected_reason = format!("EXECUTION_MODEL_{}", serde_json::to_value(code).unwrap().as_str().unwrap());
+            assert!(host.events.lock().unwrap().iter().any(|event|
+                matches!(event, AgentEngineEvent::TurnPaused { reason, .. } if reason == &expected_reason)));
+            assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
+            assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Paused)));
+            runtime.kill_and_wait(None).await.unwrap();
+        }
     }
 
     #[tokio::test]
