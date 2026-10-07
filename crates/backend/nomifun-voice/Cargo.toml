@@ -1,0 +1,26 @@
+[package]
+name = "nomifun-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomifun-agent-contracts.workspace = true
+nomifun-voice-contracts.workspace = true
+nomifun-voice-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
+uuid.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

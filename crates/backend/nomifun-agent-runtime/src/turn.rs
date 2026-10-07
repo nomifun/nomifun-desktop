@@ -45,6 +45,8 @@ pub struct AgentTurnRequest {
     /// declared action. Such calls cannot preserve unrelated file evidence.
     pub unscoped_tool_hooks: bool,
     pub input_port: Option<Arc<dyn crate::AgentInputPort>>,
+    /// Strict opt-in, supplied only for an explicitly voice-started Turn.
+    pub voice_immediate: Option<Arc<dyn crate::AgentImmediateCorrectionPort>>,
     pub live_context_port: Option<Arc<dyn crate::AgentLiveContextPort>>,
     pub resource_port: Option<Arc<dyn nomifun_engine_core::EngineResourcePort>>,
     pub tool_discovery_port: Option<Arc<dyn crate::AgentToolDiscoveryPort>>,
@@ -81,6 +83,7 @@ impl AgentTurnRequest {
             context_image_input: false,
             unscoped_tool_hooks: false,
             input_port: None,
+            voice_immediate: None,
             live_context_port: None,
             resource_port: None,
             tool_discovery_port: None,
@@ -108,6 +111,11 @@ impl AgentTurnRequest {
 
     pub fn with_input_port(mut self, port: Arc<dyn crate::AgentInputPort>) -> Self {
         self.input_port = Some(port);
+        self
+    }
+
+    pub fn with_voice_immediate_correction(mut self, port: Arc<dyn crate::AgentImmediateCorrectionPort>) -> Self {
+        self.voice_immediate = Some(port);
         self
     }
 
@@ -238,6 +246,10 @@ pub(crate) async fn run_turn(
     cancellation: CancellationToken,
 ) -> Result<AgentTurnResult, AgentEngineError> {
     request.validate_for(&binding)?;
+    if request.voice_immediate.is_some() && request.input_port.is_none() {
+        return Err(AgentEngineError::InvalidContract("voice immediate correction requires the original receipt-backed input port".into()));
+    }
+    let model = request.voice_immediate.as_ref().map(|port| port.model_port()).unwrap_or(model);
     let recovery = request.recovery.take();
     let interrupted_delivery_review = recovery.as_ref().is_some_and(|state|
         state.checkpoint.delivery_review.pending && state.last_model_step > state.checkpoint.model_steps);
@@ -711,6 +723,9 @@ pub(crate) async fn run_turn(
         // The preceding batch and context updates have settled. Persist only
         // quiescent progress; live process handles are never checkpointed as
         // if they could survive a process restart.
+        if let Some(port)=&request.voice_immediate {
+            port.quiesce_all(tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+        }
         persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
             request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
             &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(), &control_rejections).await?;
@@ -727,12 +742,64 @@ pub(crate) async fn run_turn(
         event_sink
             .emit(AgentEngineEvent::ModelStepStarted {
                 step: model_steps,
-                operation_id: model_operation_id,
+                operation_id: model_operation_id.clone(),
             })
             .await?;
 
-        let open_stream = model.open_stream(model_request.clone(), cancellation.clone());
-        let mut stream = match tokio::select! {
+        let output_before_step = output_text.len();
+        let reasoning_before_step = reasoning_text.len();
+        let messages_before_step = model_request.input.messages.len();
+        let tool_calls_before_step = tool_call_count;
+        let mut step = StepState::default();
+        macro_rules! voice_supersede {
+            ($receipts:expr) => {{
+                let receipts = $receipts;
+                let port = request.voice_immediate.as_ref().ok_or_else(|| AgentEngineError::InvalidContract("voice correction has no opted-in owner".into()))?;
+                let cleanup = port.quiesce_model(&model_operation_id, tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+                if cleanup.operation_id != model_operation_id || cleanup.task_id.is_empty() || receipts.is_empty() || receipts.len()>16 {
+                    return Err(AgentEngineError::InvalidContract("voice correction lacks exact owned attempt closure and receipts".into()));
+                }
+                let discarded_tool_call_ids = step.call_order.clone();
+                crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+                event_sink.emit(AgentEngineEvent::VoiceModelStepSuperseded {
+                    step:model_steps,model_operation_id:model_operation_id.clone(),steering_receipt_ids:receipts.clone(),discarded_tool_call_ids:discarded_tool_call_ids.clone(),cleanup,
+                }).await?;
+                admitted_call_ids.extend(discarded_tool_call_ids);
+                output_text.truncate(output_before_step);
+                reasoning_text.truncate(reasoning_before_step);
+                model_request.input.messages.truncate(messages_before_step);
+                tool_call_count = tool_calls_before_step;
+                provider_round_id = None;
+                model_request.input.provider_round_parent = None;
+                let inputs = request.input_port.as_ref().expect("validated voice input port").take(&model_request.causality,false).await?;
+                if !receipts.iter().all(|id|inputs.iter().any(|input|&input.receipt_operation_id==id)) {
+                    return Err(AgentEngineError::InvalidContract("superseded model correction lost its exact accepted input".into()));
+                }
+                crate::steering::incorporate(inputs,&mut model_request,&mut retained_inputs,&mut steering_receipts,&mut steering_receipt_order)?;
+                completion_review_used = false;
+                protocol_recovery.observe_new_input();
+                control_rejections.reset();
+                adaptive.activate(crate::adaptive::LEDGER_MODULES,crate::AgentRuntimeActivationReason::Steering,event_sink.as_ref()).await?;
+                let state=long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan=true;
+                state.completion.invalidate();
+                continue 'model_steps;
+            }};
+        }
+        let step_cancellation = if request.voice_immediate.is_some(){cancellation.child_token()}else{cancellation.clone()};
+        let open_stream = model.open_stream(model_request.clone(), step_cancellation.clone());
+        tokio::pin!(open_stream);
+        let opened = if let Some(port)=&request.voice_immediate {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return cancelled_turn(&event_sink,&agent_session_id,&turn_operation_id,model_steps,&output_text,&reasoning_text,tool_call_count,provider_round_id.clone()).await,
+                result = &mut open_stream => result,
+                receipts = port.wait(&model_request.causality) => {
+                    let receipts=receipts?;step_cancellation.cancel();
+                    voice_supersede!(receipts);
+                }
+            }
+        }else{tokio::select! {
             _ = cancellation.cancelled() => {
                 return cancelled_turn(
                     &event_sink,
@@ -746,8 +813,9 @@ pub(crate) async fn run_turn(
                 )
                 .await;
             }
-            result = open_stream => result,
-        } {
+            result = &mut open_stream => result,
+        }};
+        let mut stream = match opened {
             Ok(stream) => stream,
             Err(error)
                 if cancellation.is_cancelled()
@@ -769,6 +837,9 @@ pub(crate) async fn run_turn(
                 if model_steps < total_model_limit
                     && context_lifecycle.request_overflow_recovery(&error, false, &model_request.input)?
                 {
+                    if let Some(port)=&request.voice_immediate {
+                        port.quiesce_model(&model_operation_id,tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+                    }
                     event_sink.emit(AgentEngineEvent::ContextLimitRecoveryStarted {
                         rejected_step: model_steps,
                     }).await?;
@@ -778,7 +849,6 @@ pub(crate) async fn run_turn(
                 return Err(AgentEngineError::from_model_error(error));
             }
         };
-        let mut step = StepState::default();
         let mut public_output = crate::public_output::PublicOutputGuard::default();
         let mut saw_terminal = false;
         let mut protocol_violation = false;
@@ -786,7 +856,17 @@ pub(crate) async fn run_turn(
         let mut semantic_output_seen = false;
 
         loop {
-            let next = tokio::select! {
+            let next = if let Some(port)=&request.voice_immediate {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return cancelled_turn(&event_sink,&agent_session_id,&turn_operation_id,model_steps,&output_text,&reasoning_text,tool_call_count,provider_round_id.clone()).await,
+                    receipts = port.wait(&model_request.causality) => {
+                        let receipts=receipts?;step_cancellation.cancel();drop(stream);
+                        voice_supersede!(receipts);
+                    }
+                    item = stream.next() => item,
+                }
+            }else{tokio::select! {
                 _ = cancellation.cancelled() => {
                     return cancelled_turn(
                         &event_sink,
@@ -801,7 +881,7 @@ pub(crate) async fn run_turn(
                     .await;
                 }
                 item = stream.next() => item,
-            };
+            }};
 
             let Some(item) = next else {
                 break;
@@ -831,6 +911,9 @@ pub(crate) async fn run_turn(
                         // Release the failed stream before a new model claim.
                         // No tool from this rejected step has been admitted.
                         drop(stream);
+                        if let Some(port)=&request.voice_immediate {
+                            port.quiesce_model(&model_operation_id,tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+                        }
                         event_sink.emit(AgentEngineEvent::ContextLimitRecoveryStarted {
                             rejected_step: model_steps,
                         }).await?;
@@ -1023,6 +1106,16 @@ pub(crate) async fn run_turn(
                     .await;
                 }
             }
+        }
+
+        if let Some(port)=&request.voice_immediate {
+            // Completed/EOS is a provider observation, not proof that its
+            // owned producer finished. Close it before tool admission or a
+            // further model claim; ordinary streams keep the original path.
+            step_cancellation.cancel();
+            port.quiesce_model(&model_operation_id,tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await?;
+            let receipts=port.pending(&model_request.causality).await?;
+            if !receipts.is_empty(){drop(stream);voice_supersede!(receipts);}
         }
 
         // User input accepted during the publication review wins even when
@@ -1336,6 +1429,7 @@ pub(crate) async fn run_turn(
                 &request.context_resources,
                 &request.context_image_input,
                 request.input_port.as_deref(),
+                request.voice_immediate.as_deref(),
                 request.prior_task.as_ref(),
                 request.resource_port.as_deref(),
                 request.tool_discovery_port.as_deref(),
@@ -1347,6 +1441,12 @@ pub(crate) async fn run_turn(
             .await
             {
                 Ok(results) => results,
+                Err(AgentEngineError::VoiceCorrectionBoundary) if request.voice_immediate.is_some()=>{
+                    let port=request.voice_immediate.as_ref().expect("guarded voice owner");
+                    let receipts=port.pending(&model_request.causality).await?;
+                    if receipts.is_empty()||port.has_admitted_tools(&model_request.causality,model_steps).await? {return Err(AgentEngineError::InvalidContract("voice boundary cannot discard an admitted effect or absent receipt".into()));}
+                    voice_supersede!(receipts);
+                }
                 Err(AgentEngineError::Cancelled) => {
                     return cancelled_turn(
                         &event_sink,
@@ -2382,6 +2482,12 @@ async fn cancelled_turn(
     })
 }
 
+async fn voice_boundary_ready(port:Option<&dyn crate::AgentImmediateCorrectionPort>,causality:&nomifun_chat_model_broker::ChatCausality,step:u16)->Result<bool,AgentEngineError> {
+    let Some(port)=port else{return Ok(false);};
+    if port.pending(causality).await?.is_empty(){return Ok(false);}
+    Ok(!port.has_admitted_tools(causality,step).await?)
+}
+
 async fn invoke_tool_calls(
     agent_session_id: &AgentSessionId,
     principal: &PrincipalRef,
@@ -2404,6 +2510,7 @@ async fn invoke_tool_calls(
     context_resources: &BTreeMap<String, crate::AgentContextResource>,
     context_image_input: &bool,
     input_port: Option<&dyn crate::AgentInputPort>,
+    voice_immediate: Option<&dyn crate::AgentImmediateCorrectionPort>,
     prior_task: Option<&crate::AgentPriorTask>,
     resource_port: Option<&dyn nomifun_engine_core::EngineResourcePort>,
     tool_discovery_port: Option<&dyn crate::AgentToolDiscoveryPort>,
@@ -2708,10 +2815,12 @@ async fn invoke_tool_calls(
                 }
                 if let Some(port) = input_port {
                     if port.has_pending(&model_request.causality).await? {
+                        if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
                         return Ok(steering_deferred(call_id.clone()));
                     }
                 }
                 if !record_tool_admission(event_sink, model_step, &invocation).await? {
+                    if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
                     return Ok(steering_deferred(call_id.clone()));
                 }
                 invoker.invoke(invocation, cancellation.clone()).await
@@ -2740,6 +2849,7 @@ async fn invoke_tool_calls(
                     result.validate_for(&call_id)?;
                     Ok(scoped_instructions.after_call(call, result, invoker, event_sink, cancellation.clone()).await?.0)
                 }
+                Err(AgentEngineError::VoiceCorrectionBoundary)=>return Err(AgentEngineError::VoiceCorrectionBoundary),
                 Err(error) => Err(error),
             };
             ordered[index] = Some(record_tool_result(call_id, result, event_sink, model_step).await?);
@@ -2780,6 +2890,7 @@ async fn invoke_tool_calls(
         }
         if let Some(port) = input_port {
             if port.has_pending(&model_request.causality).await? {
+                if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
                 let reason = "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.".to_owned();
                 defer_remaining = Some(reason.clone());
                 let result = AgentToolResult::text(call_id.clone(), reason, true);
@@ -2797,6 +2908,7 @@ async fn invoke_tool_calls(
         if !record_tool_admission(event_sink, model_step, &invocation).await? {
             let result = steering_deferred(call_id.clone());
             if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
+            if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
             defer_remaining = Some(result.output_text());
             results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
             continue;
@@ -8343,4 +8455,6 @@ mod tests {
         ));
         assert_eq!(model.steps.lock().unwrap().len(), 1);
     }
+
+    include!("turn_voice_tests.rs");
 }

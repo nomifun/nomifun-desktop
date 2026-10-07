@@ -1,0 +1,6529 @@
+{
+  "playback_receipt": {
+    "$defs": {
+      "DeliveryState": {
+        "enum": [
+          "generated",
+          "queued",
+          "played",
+          "interrupted",
+          "revoked"
+        ],
+        "type": "string"
+      },
+      "PlaybackPrecision": {
+        "enum": [
+          "exact",
+          "estimated",
+          "unknown"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "activation_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "consumed_us": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "output_generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "precision": {
+        "$ref": "#/$defs/PlaybackPrecision"
+      },
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "segment_id": {
+        "type": "string"
+      },
+      "state": {
+        "$ref": "#/$defs/DeliveryState"
+      },
+      "uncertain_tail_us": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "activation_epoch",
+      "segment_id",
+      "revision",
+      "output_generation",
+      "state",
+      "consumed_us",
+      "uncertain_tail_us",
+      "precision"
+    ],
+    "title": "PlaybackReceipt",
+    "type": "object"
+  },
+  "verified_voice_fact": {
+    "$defs": {
+      "VoiceSpeechSourceRef": {
+        "additionalProperties": false,
+        "description": "Canonical source identity; it is independent of a model's audio segment ID.",
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "through_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "revision",
+          "through_seq"
+        ],
+        "type": "object"
+      },
+      "VoiceWorkContextFact": {
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execution_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "turn_operation_id",
+          "execution_generation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "canonical_receipt_id": {
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      },
+      "correlation_id": {
+        "type": "string"
+      },
+      "output_generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "speak": {
+        "type": "boolean"
+      },
+      "speech_source": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/VoiceSpeechSourceRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "upstream_trigger_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "work_context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/VoiceWorkContextFact"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "correlation_id",
+      "canonical_receipt_id",
+      "content",
+      "speak"
+    ],
+    "title": "VerifiedVoiceFact",
+    "type": "object"
+  },
+  "voice_activation_request": {
+    "$defs": {
+      "VoiceTransportPreference": {
+        "enum": [
+          "relay",
+          "native_webrtc"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "endpoint_id": {
+        "type": "string"
+      },
+      "native_offer": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "profile_id": {
+        "type": "string"
+      },
+      "profile_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "takeover": {
+        "default": false,
+        "type": "boolean"
+      },
+      "transport": {
+        "$ref": "#/$defs/VoiceTransportPreference"
+      }
+    },
+    "required": [
+      "agent_session_id",
+      "binding_version",
+      "profile_id",
+      "profile_revision",
+      "endpoint_id",
+      "transport"
+    ],
+    "title": "VoiceActivationRequest",
+    "type": "object"
+  },
+  "voice_activation_response": {
+    "$defs": {
+      "AudioEncoding": {
+        "enum": [
+          "pcm",
+          "opus",
+          "wav",
+          "mp3",
+          "aac",
+          "flac",
+          "g711_mu_law",
+          "g711_a_law"
+        ],
+        "type": "string"
+      },
+      "AudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding": {
+            "$ref": "#/$defs/AudioEncoding"
+          },
+          "sample_format": {
+            "$ref": "#/$defs/AudioSampleFormat"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "encoding",
+          "sample_rate",
+          "channels",
+          "sample_format"
+        ],
+        "type": "object"
+      },
+      "AudioSampleFormat": {
+        "enum": [
+          "signed16_le",
+          "float32_le",
+          "encoded"
+        ],
+        "type": "string"
+      },
+      "CapabilitySupport": {
+        "enum": [
+          "supported",
+          "unsupported",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "MediaSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "max_buffer_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_age_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timebase": {
+            "description": "Timestamp units per second; duration is always explicitly in microseconds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "timebase",
+          "min_frame_duration_us",
+          "max_frame_duration_us",
+          "max_frame_bytes",
+          "max_buffer_duration_us",
+          "max_frame_age_us"
+        ],
+        "type": "object"
+      },
+      "VoiceCapabilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "support": {
+            "$ref": "#/$defs/CapabilitySupport"
+          }
+        },
+        "required": [
+          "support",
+          "source"
+        ],
+        "type": "object"
+      },
+      "VoiceCaptureState": {
+        "enum": [
+          "idle",
+          "capturing",
+          "paused",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "VoiceConnectionState": {
+        "enum": [
+          "opening",
+          "ready",
+          "recovering",
+          "closing",
+          "closed",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "VoiceNativeAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_sdp": {
+            "type": "string"
+          },
+          "attachment_id": {
+            "type": "string"
+          },
+          "safe_output_boundary": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "answer_sdp",
+          "safe_output_boundary"
+        ],
+        "type": "object"
+      },
+      "VoiceNegotiation": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "additionalProperties": false,
+            "properties": {
+              "continuous_input": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "controlled_output_boundary": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "delegation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "exact_output_truncation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "fact_injection": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "input_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "interrupt_generation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "native_media": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "output_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "semantic_turn_taking": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "typed_tools": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "understand_input_during_output": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              }
+            },
+            "type": "object"
+          },
+          "input_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "native_attachment": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceNativeAttachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "VoicePlaybackState": {
+        "enum": [
+          "idle",
+          "playing",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "VoiceState": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "capture": {
+            "$ref": "#/$defs/VoiceCaptureState"
+          },
+          "connection": {
+            "$ref": "#/$defs/VoiceConnectionState"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "playback": {
+            "$ref": "#/$defs/VoicePlaybackState"
+          },
+          "voice_session_id": {
+            "type": "string"
+          },
+          "work_running": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "voice_session_id",
+          "agent_session_id",
+          "binding_version",
+          "activation_epoch",
+          "output_generation",
+          "connection",
+          "capture",
+          "playback",
+          "work_running"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "activation_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "attachment_token": {
+        "description": "Short-lived, single-use product media capability. Never a vendor key.",
+        "type": "string"
+      },
+      "negotiation": {
+        "$ref": "#/$defs/VoiceNegotiation"
+      },
+      "state": {
+        "$ref": "#/$defs/VoiceState"
+      },
+      "voice_session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "voice_session_id",
+      "activation_epoch",
+      "attachment_token",
+      "state",
+      "negotiation"
+    ],
+    "title": "VoiceActivationResponse",
+    "type": "object"
+  },
+  "voice_adapter_descriptor": {
+    "$defs": {
+      "AudioEncoding": {
+        "enum": [
+          "pcm",
+          "opus",
+          "wav",
+          "mp3",
+          "aac",
+          "flac",
+          "g711_mu_law",
+          "g711_a_law"
+        ],
+        "type": "string"
+      },
+      "AudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding": {
+            "$ref": "#/$defs/AudioEncoding"
+          },
+          "sample_format": {
+            "$ref": "#/$defs/AudioSampleFormat"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "encoding",
+          "sample_rate",
+          "channels",
+          "sample_format"
+        ],
+        "type": "object"
+      },
+      "AudioSampleFormat": {
+        "enum": [
+          "signed16_le",
+          "float32_le",
+          "encoded"
+        ],
+        "type": "string"
+      },
+      "CapabilitySupport": {
+        "enum": [
+          "supported",
+          "unsupported",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "MediaSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "max_buffer_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_age_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timebase": {
+            "description": "Timestamp units per second; duration is always explicitly in microseconds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "timebase",
+          "min_frame_duration_us",
+          "max_frame_duration_us",
+          "max_frame_bytes",
+          "max_buffer_duration_us",
+          "max_frame_age_us"
+        ],
+        "type": "object"
+      },
+      "VoiceCapabilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "support": {
+            "$ref": "#/$defs/CapabilitySupport"
+          }
+        },
+        "required": [
+          "support",
+          "source"
+        ],
+        "type": "object"
+      },
+      "VoiceNativeRequirements": {
+        "additionalProperties": false,
+        "properties": {
+          "data_channel_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "VoiceTransportPreference": {
+        "enum": [
+          "relay",
+          "native_webrtc"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "adapter_id": {
+        "type": "string"
+      },
+      "api_version": {
+        "type": "string"
+      },
+      "capabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "continuous_input": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "controlled_output_boundary": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "delegation": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "exact_output_truncation": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "fact_injection": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "input_transcript": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "interrupt_generation": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "native_media": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "output_transcript": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "semantic_turn_taking": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "typed_tools": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "understand_input_during_output": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          }
+        },
+        "type": "object"
+      },
+      "config_schema_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "contract_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "input_specs": {
+        "items": {
+          "$ref": "#/$defs/MediaSpec"
+        },
+        "type": "array"
+      },
+      "label": {
+        "type": "string"
+      },
+      "native_requirements": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/VoiceNativeRequirements"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "output_specs": {
+        "items": {
+          "$ref": "#/$defs/MediaSpec"
+        },
+        "type": "array"
+      },
+      "transports": {
+        "items": {
+          "$ref": "#/$defs/VoiceTransportPreference"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "adapter_id",
+      "contract_version",
+      "api_version",
+      "config_schema_version",
+      "label",
+      "capabilities",
+      "transports",
+      "input_specs",
+      "output_specs"
+    ],
+    "title": "VoiceAdapterDescriptor",
+    "type": "object"
+  },
+  "voice_control": {
+    "$defs": {
+      "DeliveryState": {
+        "enum": [
+          "generated",
+          "queued",
+          "played",
+          "interrupted",
+          "revoked"
+        ],
+        "type": "string"
+      },
+      "MediaRange": {
+        "additionalProperties": false,
+        "properties": {
+          "end_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_us",
+          "end_us"
+        ],
+        "type": "object"
+      },
+      "PlaybackPrecision": {
+        "enum": [
+          "exact",
+          "estimated",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "PlaybackReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "consumed_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "precision": {
+            "$ref": "#/$defs/PlaybackPrecision"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/DeliveryState"
+          },
+          "uncertain_tail_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_epoch",
+          "segment_id",
+          "revision",
+          "output_generation",
+          "state",
+          "consumed_us",
+          "uncertain_tail_us",
+          "precision"
+        ],
+        "type": "object"
+      },
+      "TranscriptCommit": {
+        "enum": [
+          "tentative",
+          "committed"
+        ],
+        "type": "string"
+      },
+      "TranscriptFragment": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptCommit"
+          },
+          "fragment_id": {
+            "type": "string"
+          },
+          "media_range": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "speaker": {
+            "$ref": "#/$defs/VoiceSpeaker"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "speaker",
+          "fragment_id",
+          "revision",
+          "commit",
+          "text"
+        ],
+        "type": "object"
+      },
+      "VerifiedVoiceFact": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_receipt_id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "speak": {
+            "type": "boolean"
+          },
+          "speech_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceSpeechSourceRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upstream_trigger_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "work_context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceWorkContextFact"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "correlation_id",
+          "canonical_receipt_id",
+          "content",
+          "speak"
+        ],
+        "type": "object"
+      },
+      "VoiceCloseReason": {
+        "enum": [
+          "user_ended",
+          "lease_revoked",
+          "binding_changed",
+          "device_unavailable",
+          "permission_revoked",
+          "network_lost",
+          "backlog",
+          "journal_unavailable",
+          "app_shutdown",
+          "model_limit",
+          "provider_failed"
+        ],
+        "type": "string"
+      },
+      "VoiceConfigurationPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "instructions": {
+            "$ref": "#/$defs/VoicePatch"
+          },
+          "tools": {
+            "$ref": "#/$defs/VoicePatch2"
+          }
+        },
+        "required": [
+          "instructions",
+          "tools"
+        ],
+        "type": "object"
+      },
+      "VoicePatch": {
+        "oneOf": [
+          {
+            "properties": {
+              "op": {
+                "const": "keep",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VoicePatch2": {
+        "oneOf": [
+          {
+            "properties": {
+              "op": {
+                "const": "keep",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/VoiceToolDefinition"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "op",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VoiceSpeaker": {
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "type": "string"
+      },
+      "VoiceSpeechSourceRef": {
+        "additionalProperties": false,
+        "description": "Canonical source identity; it is independent of a model's audio segment ID.",
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "through_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "revision",
+          "through_seq"
+        ],
+        "type": "object"
+      },
+      "VoiceToolDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": true
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters"
+        ],
+        "type": "object"
+      },
+      "VoiceWorkContextFact": {
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execution_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "turn_operation_id",
+          "execution_generation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "mute_input",
+            "type": "string"
+          },
+          "muted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "muted"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Application-owned, correlated provider/local-input acceptance. Client\nrequests stay MuteInput and cannot select this correlation identity.",
+        "properties": {
+          "kind": {
+            "const": "set_input_muted",
+            "type": "string"
+          },
+          "muted": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "muted",
+          "request_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Data-only committed local input identity, never a canonical receipt or\npermission grant. A typed work tool must cite this explicit reference.",
+        "properties": {
+          "fragment": {
+            "$ref": "#/$defs/TranscriptFragment"
+          },
+          "kind": {
+            "const": "present_input_source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "fragment"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "interrupt_output",
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "played": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PlaybackReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "update_configuration",
+            "type": "string"
+          },
+          "patch": {
+            "$ref": "#/$defs/VoiceConfigurationPatch"
+          }
+        },
+        "required": [
+          "kind",
+          "patch"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "fact": {
+            "$ref": "#/$defs/VerifiedVoiceFact"
+          },
+          "kind": {
+            "const": "inject_fact",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "fact"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Application-owned revocation; must precede any rebuild that could replay facts.",
+        "properties": {
+          "kind": {
+            "const": "revoke_speech",
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/$defs/VoiceSpeechSourceRef"
+          }
+        },
+        "required": [
+          "kind",
+          "source",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "reject_work_trigger",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "upstream_trigger_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "upstream_trigger_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "playback",
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/$defs/PlaybackReceipt"
+          }
+        },
+        "required": [
+          "kind",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "close",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/VoiceCloseReason"
+          }
+        },
+        "required": [
+          "kind",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "VoiceControl"
+  },
+  "voice_local_fact_ref": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "activation_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "journal_sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "voice_session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "voice_session_id",
+      "activation_epoch",
+      "journal_sequence"
+    ],
+    "title": "VoiceLocalFactRef",
+    "type": "object"
+  },
+  "voice_local_replay": {
+    "$defs": {
+      "DeliveryState": {
+        "enum": [
+          "generated",
+          "queued",
+          "played",
+          "interrupted",
+          "revoked"
+        ],
+        "type": "string"
+      },
+      "MediaRange": {
+        "additionalProperties": false,
+        "properties": {
+          "end_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_us",
+          "end_us"
+        ],
+        "type": "object"
+      },
+      "PlaybackPrecision": {
+        "enum": [
+          "exact",
+          "estimated",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "PlaybackReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "consumed_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "precision": {
+            "$ref": "#/$defs/PlaybackPrecision"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/DeliveryState"
+          },
+          "uncertain_tail_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_epoch",
+          "segment_id",
+          "revision",
+          "output_generation",
+          "state",
+          "consumed_us",
+          "uncertain_tail_us",
+          "precision"
+        ],
+        "type": "object"
+      },
+      "TranscriptCommit": {
+        "enum": [
+          "tentative",
+          "committed"
+        ],
+        "type": "string"
+      },
+      "TranscriptFragment": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptCommit"
+          },
+          "fragment_id": {
+            "type": "string"
+          },
+          "media_range": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "speaker": {
+            "$ref": "#/$defs/VoiceSpeaker"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "speaker",
+          "fragment_id",
+          "revision",
+          "commit",
+          "text"
+        ],
+        "type": "object"
+      },
+      "VoiceLocalFactRef": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "journal_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "voice_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "voice_session_id",
+          "activation_epoch",
+          "journal_sequence"
+        ],
+        "type": "object"
+      },
+      "VoiceLocalReplayEntry": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "fragment": {
+                "$ref": "#/$defs/TranscriptFragment"
+              },
+              "kind": {
+                "const": "user_committed",
+                "type": "string"
+              },
+              "origin": {
+                "$ref": "#/$defs/VoiceLocalFactRef"
+              }
+            },
+            "required": [
+              "kind",
+              "origin",
+              "fragment"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "playback",
+                "type": "string"
+              },
+              "origin": {
+                "$ref": "#/$defs/VoiceLocalFactRef"
+              },
+              "receipt": {
+                "$ref": "#/$defs/PlaybackReceipt"
+              }
+            },
+            "required": [
+              "kind",
+              "origin",
+              "receipt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VoiceReplayScope": {
+        "additionalProperties": false,
+        "description": "Canonical reset/binding boundary referenced by voice-local restoration.\nThis is not a second Agent checkpoint or an execution permission.",
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "context_floor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "context_floor"
+        ],
+        "type": "object"
+      },
+      "VoiceSpeaker": {
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "entries": {
+        "items": {
+          "$ref": "#/$defs/VoiceLocalReplayEntry"
+        },
+        "type": "array"
+      },
+      "scope": {
+        "$ref": "#/$defs/VoiceReplayScope"
+      }
+    },
+    "required": [
+      "scope",
+      "entries"
+    ],
+    "title": "VoiceLocalReplay",
+    "type": "object"
+  },
+  "voice_local_replay_entry": {
+    "$defs": {
+      "DeliveryState": {
+        "enum": [
+          "generated",
+          "queued",
+          "played",
+          "interrupted",
+          "revoked"
+        ],
+        "type": "string"
+      },
+      "MediaRange": {
+        "additionalProperties": false,
+        "properties": {
+          "end_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_us",
+          "end_us"
+        ],
+        "type": "object"
+      },
+      "PlaybackPrecision": {
+        "enum": [
+          "exact",
+          "estimated",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "PlaybackReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "consumed_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "precision": {
+            "$ref": "#/$defs/PlaybackPrecision"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/DeliveryState"
+          },
+          "uncertain_tail_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_epoch",
+          "segment_id",
+          "revision",
+          "output_generation",
+          "state",
+          "consumed_us",
+          "uncertain_tail_us",
+          "precision"
+        ],
+        "type": "object"
+      },
+      "TranscriptCommit": {
+        "enum": [
+          "tentative",
+          "committed"
+        ],
+        "type": "string"
+      },
+      "TranscriptFragment": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptCommit"
+          },
+          "fragment_id": {
+            "type": "string"
+          },
+          "media_range": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "speaker": {
+            "$ref": "#/$defs/VoiceSpeaker"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "speaker",
+          "fragment_id",
+          "revision",
+          "commit",
+          "text"
+        ],
+        "type": "object"
+      },
+      "VoiceLocalFactRef": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "journal_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "voice_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "voice_session_id",
+          "activation_epoch",
+          "journal_sequence"
+        ],
+        "type": "object"
+      },
+      "VoiceSpeaker": {
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "fragment": {
+            "$ref": "#/$defs/TranscriptFragment"
+          },
+          "kind": {
+            "const": "user_committed",
+            "type": "string"
+          },
+          "origin": {
+            "$ref": "#/$defs/VoiceLocalFactRef"
+          }
+        },
+        "required": [
+          "kind",
+          "origin",
+          "fragment"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "playback",
+            "type": "string"
+          },
+          "origin": {
+            "$ref": "#/$defs/VoiceLocalFactRef"
+          },
+          "receipt": {
+            "$ref": "#/$defs/PlaybackReceipt"
+          }
+        },
+        "required": [
+          "kind",
+          "origin",
+          "receipt"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "VoiceLocalReplayEntry"
+  },
+  "voice_model_event": {
+    "$defs": {
+      "AudioEncoding": {
+        "enum": [
+          "pcm",
+          "opus",
+          "wav",
+          "mp3",
+          "aac",
+          "flac",
+          "g711_mu_law",
+          "g711_a_law"
+        ],
+        "type": "string"
+      },
+      "AudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding": {
+            "$ref": "#/$defs/AudioEncoding"
+          },
+          "sample_format": {
+            "$ref": "#/$defs/AudioSampleFormat"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "encoding",
+          "sample_rate",
+          "channels",
+          "sample_format"
+        ],
+        "type": "object"
+      },
+      "AudioFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "payload": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timestamp": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_epoch",
+          "output_generation",
+          "sequence",
+          "timestamp",
+          "duration_us",
+          "format",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "AudioSampleFormat": {
+        "enum": [
+          "signed16_le",
+          "float32_le",
+          "encoded"
+        ],
+        "type": "string"
+      },
+      "CapabilitySupport": {
+        "enum": [
+          "supported",
+          "unsupported",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "MediaRange": {
+        "additionalProperties": false,
+        "properties": {
+          "end_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_us",
+          "end_us"
+        ],
+        "type": "object"
+      },
+      "MediaSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "max_buffer_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_age_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timebase": {
+            "description": "Timestamp units per second; duration is always explicitly in microseconds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "timebase",
+          "min_frame_duration_us",
+          "max_frame_duration_us",
+          "max_frame_bytes",
+          "max_buffer_duration_us",
+          "max_frame_age_us"
+        ],
+        "type": "object"
+      },
+      "OutputSegment": {
+        "additionalProperties": false,
+        "properties": {
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "response_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "response_id",
+          "segment_id",
+          "revision",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      "TranscriptCommit": {
+        "enum": [
+          "tentative",
+          "committed"
+        ],
+        "type": "string"
+      },
+      "TranscriptFragment": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptCommit"
+          },
+          "fragment_id": {
+            "type": "string"
+          },
+          "media_range": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "speaker": {
+            "$ref": "#/$defs/VoiceSpeaker"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "speaker",
+          "fragment_id",
+          "revision",
+          "commit",
+          "text"
+        ],
+        "type": "object"
+      },
+      "VoiceCapabilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "support": {
+            "$ref": "#/$defs/CapabilitySupport"
+          }
+        },
+        "required": [
+          "support",
+          "source"
+        ],
+        "type": "object"
+      },
+      "VoiceCloseReason": {
+        "enum": [
+          "user_ended",
+          "lease_revoked",
+          "binding_changed",
+          "device_unavailable",
+          "permission_revoked",
+          "network_lost",
+          "backlog",
+          "journal_unavailable",
+          "app_shutdown",
+          "model_limit",
+          "provider_failed"
+        ],
+        "type": "string"
+      },
+      "VoiceError": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/VoiceErrorKind"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "VoiceErrorKind": {
+        "enum": [
+          "configuration",
+          "unsupported",
+          "authentication",
+          "quota",
+          "network",
+          "deadline",
+          "backlog",
+          "stale_epoch",
+          "stale_binding",
+          "source_context_required",
+          "journal_unavailable",
+          "closed",
+          "provider"
+        ],
+        "type": "string"
+      },
+      "VoiceNativeAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_sdp": {
+            "type": "string"
+          },
+          "attachment_id": {
+            "type": "string"
+          },
+          "safe_output_boundary": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "answer_sdp",
+          "safe_output_boundary"
+        ],
+        "type": "object"
+      },
+      "VoiceNegotiation": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "additionalProperties": false,
+            "properties": {
+              "continuous_input": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "controlled_output_boundary": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "delegation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "exact_output_truncation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "fact_injection": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "input_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "interrupt_generation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "native_media": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "output_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "semantic_turn_taking": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "typed_tools": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "understand_input_during_output": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              }
+            },
+            "type": "object"
+          },
+          "input_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "native_attachment": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceNativeAttachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "VoiceSpeaker": {
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "type": "string"
+      },
+      "VoiceTermination": {
+        "additionalProperties": false,
+        "properties": {
+          "finalization_confirmed": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "$ref": "#/$defs/VoiceCloseReason"
+          }
+        },
+        "required": [
+          "reason",
+          "finalization_confirmed"
+        ],
+        "type": "object"
+      },
+      "VoiceWorkContextFact": {
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execution_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "turn_operation_id",
+          "execution_generation"
+        ],
+        "type": "object"
+      },
+      "WorkTrigger": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": true,
+              "kind": {
+                "const": "typed_tool_call",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "transcript_window_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "upstream_trigger_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "upstream_trigger_id",
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "context_window_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "delegation_trigger",
+                "type": "string"
+              },
+              "offset_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "target": {
+                "type": "string"
+              },
+              "upstream_trigger_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "upstream_trigger_id",
+              "target",
+              "offset_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "ready",
+            "type": "string"
+          },
+          "negotiation": {
+            "$ref": "#/$defs/VoiceNegotiation"
+          }
+        },
+        "required": [
+          "kind",
+          "negotiation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "context_window_ref": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "context_opened",
+            "type": "string"
+          },
+          "work_context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceWorkContextFact"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "context_window_ref"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_receipt_id": {
+            "type": "string"
+          },
+          "context_window_ref": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "work_context_checkpoint",
+            "type": "string"
+          },
+          "media_range": {
+            "$ref": "#/$defs/MediaRange"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "context_window_ref",
+          "media_range",
+          "canonical_receipt_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "fragment": {
+            "$ref": "#/$defs/TranscriptFragment"
+          },
+          "kind": {
+            "const": "transcript",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "fragment"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "output_started",
+            "type": "string"
+          },
+          "segment": {
+            "$ref": "#/$defs/OutputSegment"
+          }
+        },
+        "required": [
+          "kind",
+          "segment"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "frame": {
+            "$ref": "#/$defs/AudioFrame"
+          },
+          "kind": {
+            "const": "audio",
+            "type": "string"
+          },
+          "segment_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "segment_id",
+          "frame"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "output_finished",
+            "type": "string"
+          },
+          "response_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "response_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "output_interrupted",
+            "type": "string"
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "work_trigger",
+            "type": "string"
+          },
+          "trigger": {
+            "$ref": "#/$defs/WorkTrigger"
+          }
+        },
+        "required": [
+          "kind",
+          "trigger"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "configuration_applied",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "input_mute_applied",
+            "type": "string"
+          },
+          "muted": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "muted",
+          "request_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "relay_recovering",
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "relay_recovered",
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Acknowledging a control alone is not proof of a safe native media boundary.",
+        "properties": {
+          "attachment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "output_boundary",
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "native_attachment_required",
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/VoiceError"
+          },
+          "kind": {
+            "const": "control_rejected",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "error"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/VoiceError"
+          },
+          "kind": {
+            "const": "error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "error"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "closed",
+            "type": "string"
+          },
+          "termination": {
+            "$ref": "#/$defs/VoiceTermination"
+          }
+        },
+        "required": [
+          "kind",
+          "termination"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "VoiceModelEvent"
+  },
+  "voice_negotiation": {
+    "$defs": {
+      "AudioEncoding": {
+        "enum": [
+          "pcm",
+          "opus",
+          "wav",
+          "mp3",
+          "aac",
+          "flac",
+          "g711_mu_law",
+          "g711_a_law"
+        ],
+        "type": "string"
+      },
+      "AudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding": {
+            "$ref": "#/$defs/AudioEncoding"
+          },
+          "sample_format": {
+            "$ref": "#/$defs/AudioSampleFormat"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "encoding",
+          "sample_rate",
+          "channels",
+          "sample_format"
+        ],
+        "type": "object"
+      },
+      "AudioSampleFormat": {
+        "enum": [
+          "signed16_le",
+          "float32_le",
+          "encoded"
+        ],
+        "type": "string"
+      },
+      "CapabilitySupport": {
+        "enum": [
+          "supported",
+          "unsupported",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "MediaSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "max_buffer_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_age_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timebase": {
+            "description": "Timestamp units per second; duration is always explicitly in microseconds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "timebase",
+          "min_frame_duration_us",
+          "max_frame_duration_us",
+          "max_frame_bytes",
+          "max_buffer_duration_us",
+          "max_frame_age_us"
+        ],
+        "type": "object"
+      },
+      "VoiceCapabilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "support": {
+            "$ref": "#/$defs/CapabilitySupport"
+          }
+        },
+        "required": [
+          "support",
+          "source"
+        ],
+        "type": "object"
+      },
+      "VoiceNativeAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_sdp": {
+            "type": "string"
+          },
+          "attachment_id": {
+            "type": "string"
+          },
+          "safe_output_boundary": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "answer_sdp",
+          "safe_output_boundary"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "capabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "continuous_input": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "controlled_output_boundary": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "delegation": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "exact_output_truncation": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "fact_injection": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "input_transcript": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "interrupt_generation": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "native_media": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "output_transcript": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "semantic_turn_taking": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "typed_tools": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          },
+          "understand_input_during_output": {
+            "$ref": "#/$defs/VoiceCapabilityEvidence"
+          }
+        },
+        "type": "object"
+      },
+      "input_spec": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MediaSpec"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "native_attachment": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/VoiceNativeAttachment"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "output_spec": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MediaSpec"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "capabilities"
+    ],
+    "title": "VoiceNegotiation",
+    "type": "object"
+  },
+  "voice_product_event": {
+    "$defs": {
+      "ApprovalInteractionMode": {
+        "enum": [
+          "voice_allowed",
+          "explicit_click"
+        ],
+        "type": "string"
+      },
+      "ApprovalTarget": {
+        "additionalProperties": false,
+        "description": "Immutable presentation of an already-pending canonical user decision.\nIt cannot grant Actions absent from the Agent's existing authorization.",
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "expected_attempt_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_execution_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_step_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "interaction_agent_session_id": {
+            "type": "string"
+          },
+          "interaction_binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "interaction_mode": {
+            "$ref": "#/$defs/ApprovalInteractionMode"
+          },
+          "presentation_digest": {
+            "type": "string"
+          },
+          "presentation_id": {
+            "type": "string"
+          },
+          "question_digest": {
+            "type": "string"
+          },
+          "request_event_sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "work_target": {
+            "$ref": "#/$defs/WorkTarget"
+          }
+        },
+        "required": [
+          "work_target",
+          "interaction_agent_session_id",
+          "interaction_binding_version",
+          "execution_id",
+          "step_id",
+          "attempt_id",
+          "expected_execution_version",
+          "expected_step_version",
+          "expected_attempt_version",
+          "request_event_sequence",
+          "action_id",
+          "question_digest",
+          "presentation_id",
+          "presentation_digest",
+          "interaction_mode"
+        ],
+        "type": "object"
+      },
+      "AudioEncoding": {
+        "enum": [
+          "pcm",
+          "opus",
+          "wav",
+          "mp3",
+          "aac",
+          "flac",
+          "g711_mu_law",
+          "g711_a_law"
+        ],
+        "type": "string"
+      },
+      "AudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding": {
+            "$ref": "#/$defs/AudioEncoding"
+          },
+          "sample_format": {
+            "$ref": "#/$defs/AudioSampleFormat"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "encoding",
+          "sample_rate",
+          "channels",
+          "sample_format"
+        ],
+        "type": "object"
+      },
+      "AudioFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "payload": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timestamp": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_epoch",
+          "output_generation",
+          "sequence",
+          "timestamp",
+          "duration_us",
+          "format",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "AudioSampleFormat": {
+        "enum": [
+          "signed16_le",
+          "float32_le",
+          "encoded"
+        ],
+        "type": "string"
+      },
+      "CapabilitySupport": {
+        "enum": [
+          "supported",
+          "unsupported",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "DeliveryState": {
+        "enum": [
+          "generated",
+          "queued",
+          "played",
+          "interrupted",
+          "revoked"
+        ],
+        "type": "string"
+      },
+      "MediaRange": {
+        "additionalProperties": false,
+        "properties": {
+          "end_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_us",
+          "end_us"
+        ],
+        "type": "object"
+      },
+      "MediaSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "max_buffer_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_age_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timebase": {
+            "description": "Timestamp units per second; duration is always explicitly in microseconds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "timebase",
+          "min_frame_duration_us",
+          "max_frame_duration_us",
+          "max_frame_bytes",
+          "max_buffer_duration_us",
+          "max_frame_age_us"
+        ],
+        "type": "object"
+      },
+      "OutputSegment": {
+        "additionalProperties": false,
+        "properties": {
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "response_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "response_id",
+          "segment_id",
+          "revision",
+          "output_generation"
+        ],
+        "type": "object"
+      },
+      "PlaybackPrecision": {
+        "enum": [
+          "exact",
+          "estimated",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "PlaybackReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "consumed_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "precision": {
+            "$ref": "#/$defs/PlaybackPrecision"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/DeliveryState"
+          },
+          "uncertain_tail_us": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "activation_epoch",
+          "segment_id",
+          "revision",
+          "output_generation",
+          "state",
+          "consumed_us",
+          "uncertain_tail_us",
+          "precision"
+        ],
+        "type": "object"
+      },
+      "TranscriptCommit": {
+        "enum": [
+          "tentative",
+          "committed"
+        ],
+        "type": "string"
+      },
+      "TranscriptFragment": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "$ref": "#/$defs/TranscriptCommit"
+          },
+          "fragment_id": {
+            "type": "string"
+          },
+          "media_range": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "speaker": {
+            "$ref": "#/$defs/VoiceSpeaker"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "speaker",
+          "fragment_id",
+          "revision",
+          "commit",
+          "text"
+        ],
+        "type": "object"
+      },
+      "VerifiedVoiceFact": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_receipt_id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "speak": {
+            "type": "boolean"
+          },
+          "speech_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceSpeechSourceRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upstream_trigger_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "work_context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceWorkContextFact"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "correlation_id",
+          "canonical_receipt_id",
+          "content",
+          "speak"
+        ],
+        "type": "object"
+      },
+      "VoiceApprovalPresentation": {
+        "additionalProperties": false,
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/$defs/ApprovalTarget"
+          }
+        },
+        "required": [
+          "target",
+          "question"
+        ],
+        "type": "object"
+      },
+      "VoiceCapabilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "support": {
+            "$ref": "#/$defs/CapabilitySupport"
+          }
+        },
+        "required": [
+          "support",
+          "source"
+        ],
+        "type": "object"
+      },
+      "VoiceCaptureState": {
+        "enum": [
+          "idle",
+          "capturing",
+          "paused",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "VoiceCloseReason": {
+        "enum": [
+          "user_ended",
+          "lease_revoked",
+          "binding_changed",
+          "device_unavailable",
+          "permission_revoked",
+          "network_lost",
+          "backlog",
+          "journal_unavailable",
+          "app_shutdown",
+          "model_limit",
+          "provider_failed"
+        ],
+        "type": "string"
+      },
+      "VoiceConfigurationPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "instructions": {
+            "$ref": "#/$defs/VoicePatch"
+          },
+          "tools": {
+            "$ref": "#/$defs/VoicePatch2"
+          }
+        },
+        "required": [
+          "instructions",
+          "tools"
+        ],
+        "type": "object"
+      },
+      "VoiceConnectionState": {
+        "enum": [
+          "opening",
+          "ready",
+          "recovering",
+          "closing",
+          "closed",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "VoiceContextPresentation": {
+        "additionalProperties": false,
+        "properties": {
+          "context_key": {
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "context_key"
+        ],
+        "type": "object"
+      },
+      "VoiceControl": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "mute_input",
+                "type": "string"
+              },
+              "muted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "muted"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Application-owned, correlated provider/local-input acceptance. Client\nrequests stay MuteInput and cannot select this correlation identity.",
+            "properties": {
+              "kind": {
+                "const": "set_input_muted",
+                "type": "string"
+              },
+              "muted": {
+                "type": "boolean"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "muted",
+              "request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Data-only committed local input identity, never a canonical receipt or\npermission grant. A typed work tool must cite this explicit reference.",
+            "properties": {
+              "fragment": {
+                "$ref": "#/$defs/TranscriptFragment"
+              },
+              "kind": {
+                "const": "present_input_source",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "fragment"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "interrupt_output",
+                "type": "string"
+              },
+              "output_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "played": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlaybackReceipt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "output_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "update_configuration",
+                "type": "string"
+              },
+              "patch": {
+                "$ref": "#/$defs/VoiceConfigurationPatch"
+              }
+            },
+            "required": [
+              "kind",
+              "patch"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "fact": {
+                "$ref": "#/$defs/VerifiedVoiceFact"
+              },
+              "kind": {
+                "const": "inject_fact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "fact"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Application-owned revocation; must precede any rebuild that could replay facts.",
+            "properties": {
+              "kind": {
+                "const": "revoke_speech",
+                "type": "string"
+              },
+              "output_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "source": {
+                "$ref": "#/$defs/VoiceSpeechSourceRef"
+              }
+            },
+            "required": [
+              "kind",
+              "source",
+              "output_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "reject_work_trigger",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "upstream_trigger_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "upstream_trigger_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "playback",
+                "type": "string"
+              },
+              "receipt": {
+                "$ref": "#/$defs/PlaybackReceipt"
+              }
+            },
+            "required": [
+              "kind",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "close",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/VoiceCloseReason"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VoiceError": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/VoiceErrorKind"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "VoiceErrorKind": {
+        "enum": [
+          "configuration",
+          "unsupported",
+          "authentication",
+          "quota",
+          "network",
+          "deadline",
+          "backlog",
+          "stale_epoch",
+          "stale_binding",
+          "source_context_required",
+          "journal_unavailable",
+          "closed",
+          "provider"
+        ],
+        "type": "string"
+      },
+      "VoiceInputSourceRef": {
+        "additionalProperties": false,
+        "description": "Identity of an actual committed local utterance, separate from a model call.",
+        "properties": {
+          "fragment_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "fragment_id",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "VoiceModelEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "ready",
+                "type": "string"
+              },
+              "negotiation": {
+                "$ref": "#/$defs/VoiceNegotiation"
+              }
+            },
+            "required": [
+              "kind",
+              "negotiation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "context_window_ref": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "context_opened",
+                "type": "string"
+              },
+              "work_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/VoiceWorkContextFact"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "context_window_ref"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "canonical_receipt_id": {
+                "type": "string"
+              },
+              "context_window_ref": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "work_context_checkpoint",
+                "type": "string"
+              },
+              "media_range": {
+                "$ref": "#/$defs/MediaRange"
+              },
+              "target": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "context_window_ref",
+              "media_range",
+              "canonical_receipt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "fragment": {
+                "$ref": "#/$defs/TranscriptFragment"
+              },
+              "kind": {
+                "const": "transcript",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "fragment"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "output_started",
+                "type": "string"
+              },
+              "segment": {
+                "$ref": "#/$defs/OutputSegment"
+              }
+            },
+            "required": [
+              "kind",
+              "segment"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "frame": {
+                "$ref": "#/$defs/AudioFrame"
+              },
+              "kind": {
+                "const": "audio",
+                "type": "string"
+              },
+              "segment_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "segment_id",
+              "frame"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "output_finished",
+                "type": "string"
+              },
+              "response_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "output_interrupted",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "work_trigger",
+                "type": "string"
+              },
+              "trigger": {
+                "$ref": "#/$defs/WorkTrigger"
+              }
+            },
+            "required": [
+              "kind",
+              "trigger"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "configuration_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "input_mute_applied",
+                "type": "string"
+              },
+              "muted": {
+                "type": "boolean"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "muted",
+              "request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "relay_recovering",
+                "type": "string"
+              },
+              "output_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "output_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "relay_recovered",
+                "type": "string"
+              },
+              "output_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "output_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Acknowledging a control alone is not proof of a safe native media boundary.",
+            "properties": {
+              "attachment_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "output_boundary",
+                "type": "string"
+              },
+              "output_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "output_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "native_attachment_required",
+                "type": "string"
+              },
+              "output_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "output_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/VoiceError"
+              },
+              "kind": {
+                "const": "control_rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/VoiceError"
+              },
+              "kind": {
+                "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "closed",
+                "type": "string"
+              },
+              "termination": {
+                "$ref": "#/$defs/VoiceTermination"
+              }
+            },
+            "required": [
+              "kind",
+              "termination"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VoiceNativeAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_sdp": {
+            "type": "string"
+          },
+          "attachment_id": {
+            "type": "string"
+          },
+          "safe_output_boundary": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "answer_sdp",
+          "safe_output_boundary"
+        ],
+        "type": "object"
+      },
+      "VoiceNegotiation": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "additionalProperties": false,
+            "properties": {
+              "continuous_input": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "controlled_output_boundary": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "delegation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "exact_output_truncation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "fact_injection": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "input_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "interrupt_generation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "native_media": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "output_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "semantic_turn_taking": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "typed_tools": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "understand_input_during_output": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              }
+            },
+            "type": "object"
+          },
+          "input_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "native_attachment": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceNativeAttachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "VoicePatch": {
+        "oneOf": [
+          {
+            "properties": {
+              "op": {
+                "const": "keep",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VoicePatch2": {
+        "oneOf": [
+          {
+            "properties": {
+              "op": {
+                "const": "keep",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/VoiceToolDefinition"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "op",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VoicePlaybackState": {
+        "enum": [
+          "idle",
+          "playing",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "VoiceSourceContextRequirement": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "$ref": "#/$defs/VoiceContextPresentation"
+          },
+          "source_ref": {
+            "$ref": "#/$defs/VoiceInputSourceRef"
+          }
+        },
+        "required": [
+          "source_ref",
+          "context"
+        ],
+        "type": "object"
+      },
+      "VoiceSpeaker": {
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "type": "string"
+      },
+      "VoiceSpeechProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          },
+          "through_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "revision",
+          "through_seq",
+          "text"
+        ],
+        "type": "object"
+      },
+      "VoiceSpeechSourceRef": {
+        "additionalProperties": false,
+        "description": "Canonical source identity; it is independent of a model's audio segment ID.",
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "through_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "revision",
+          "through_seq"
+        ],
+        "type": "object"
+      },
+      "VoiceState": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "capture": {
+            "$ref": "#/$defs/VoiceCaptureState"
+          },
+          "connection": {
+            "$ref": "#/$defs/VoiceConnectionState"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "playback": {
+            "$ref": "#/$defs/VoicePlaybackState"
+          },
+          "voice_session_id": {
+            "type": "string"
+          },
+          "work_running": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "voice_session_id",
+          "agent_session_id",
+          "binding_version",
+          "activation_epoch",
+          "output_generation",
+          "connection",
+          "capture",
+          "playback",
+          "work_running"
+        ],
+        "type": "object"
+      },
+      "VoiceTermination": {
+        "additionalProperties": false,
+        "properties": {
+          "finalization_confirmed": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "$ref": "#/$defs/VoiceCloseReason"
+          }
+        },
+        "required": [
+          "reason",
+          "finalization_confirmed"
+        ],
+        "type": "object"
+      },
+      "VoiceToolDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": true
+        },
+        "required": [
+          "name",
+          "description",
+          "parameters"
+        ],
+        "type": "object"
+      },
+      "VoiceWorkContextFact": {
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "VoiceWorkReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "duplicate": {
+            "type": "boolean"
+          },
+          "first_claim_generation": {
+            "description": "The first same-operation native claim, read from canonical typed facts.\nA current generation alone cannot prove a safe opening-zero upgrade.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operation_key": {
+            "type": "string"
+          },
+          "pending_input_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pending_input_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "speech": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceSpeechProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/VoiceWorkStatus"
+          },
+          "summary": {
+            "description": "A filtered canonical presentation, never a raw tool result or reasoning.",
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "receipt_id",
+          "operation_key",
+          "status",
+          "summary",
+          "duplicate"
+        ],
+        "type": "object"
+      },
+      "VoiceWorkRequestKind": {
+        "description": "The application's originating request classification. This telemetry is\nneither supplier tool arguments nor a work/permission/completion proof.",
+        "enum": [
+          "start",
+          "steer",
+          "observe",
+          "cancel",
+          "cancel_queued",
+          "revise_queued",
+          "answer_approval"
+        ],
+        "type": "string"
+      },
+      "VoiceWorkStatus": {
+        "enum": [
+          "accepted",
+          "applied",
+          "pending_boundary",
+          "rejected",
+          "deferred",
+          "queued",
+          "terminal"
+        ],
+        "type": "string"
+      },
+      "WorkTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execution_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "turn_operation_id",
+          "execution_generation"
+        ],
+        "type": "object"
+      },
+      "WorkTrigger": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": true,
+              "kind": {
+                "const": "typed_tool_call",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "transcript_window_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "upstream_trigger_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "upstream_trigger_id",
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "context_window_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "delegation_trigger",
+                "type": "string"
+              },
+              "offset_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "target": {
+                "type": "string"
+              },
+              "upstream_trigger_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "upstream_trigger_id",
+              "target",
+              "offset_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Media admission credit, never a canonical work receipt or proof of hearing.",
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "const": "input_admitted",
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "activation_epoch",
+          "sequence",
+          "duration_us"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Returns bounded media credit for a valid frame dropped while input is\npaused. It proves neither model admission nor hearing.",
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "const": "input_released",
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "activation_epoch",
+          "sequence",
+          "duration_us"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "activation_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "control": {
+            "$ref": "#/$defs/VoiceControl"
+          },
+          "kind": {
+            "const": "endpoint_control",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "activation_epoch",
+          "control"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "state",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/VoiceState"
+          }
+        },
+        "required": [
+          "kind",
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/$defs/VoiceModelEvent"
+          },
+          "kind": {
+            "const": "model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "event"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "work_receipt",
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/$defs/VoiceWorkReceipt"
+          },
+          "request_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceWorkRequestKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upstream_trigger_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "approval_presented",
+            "type": "string"
+          },
+          "presentation": {
+            "$ref": "#/$defs/VoiceApprovalPresentation"
+          }
+        },
+        "required": [
+          "kind",
+          "presentation"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "source_context_changed",
+            "type": "string"
+          },
+          "requirement": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceSourceContextRequirement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "speech_revoked",
+            "type": "string"
+          },
+          "output_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_message_id": {
+            "type": "string"
+          },
+          "source_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "source_message_id",
+          "source_revision",
+          "output_generation"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "VoiceProductEvent"
+  },
+  "voice_profile": {
+    "$defs": {
+      "VoiceFeature": {
+        "enum": [
+          "continuous_input",
+          "understand_input_during_output",
+          "semantic_turn_taking",
+          "fact_injection",
+          "typed_tools",
+          "delegation",
+          "input_transcript",
+          "output_transcript",
+          "interrupt_generation",
+          "exact_output_truncation",
+          "controlled_output_boundary",
+          "native_media"
+        ],
+        "type": "string"
+      },
+      "VoiceRouteRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter_config": {
+            "description": "Validated adapter-private configuration, never interpreted by the core."
+          },
+          "adapter_config_digest": {
+            "type": "string"
+          },
+          "adapter_contract_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "adapter_id": {
+            "type": "string"
+          },
+          "connection_config_digest": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": "string"
+          },
+          "credential_ref": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "model_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "required_features": {
+            "items": {
+              "$ref": "#/$defs/VoiceFeature"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route_id": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "transport": {
+            "$ref": "#/$defs/VoiceTransportPreference"
+          }
+        },
+        "required": [
+          "schema",
+          "route_id",
+          "revision",
+          "provider_id",
+          "model",
+          "model_revision",
+          "connection_config_ref",
+          "credential_ref",
+          "adapter_id",
+          "adapter_contract_version",
+          "adapter_config",
+          "adapter_config_digest",
+          "connection_config_digest",
+          "required_features",
+          "transport"
+        ],
+        "type": "object"
+      },
+      "VoiceTransportPreference": {
+        "enum": [
+          "relay",
+          "native_webrtc"
+        ],
+        "type": "string"
+      },
+      "WorkSteeringPolicy": {
+        "enum": [
+          "safe_boundary",
+          "supersede_model_step"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Voice selection is a separate overlay; it never edits the work Snapshot.",
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "label": {
+        "type": "string"
+      },
+      "profile_id": {
+        "type": "string"
+      },
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "route": {
+        "$ref": "#/$defs/VoiceRouteRecord"
+      },
+      "work_steering_policy": {
+        "$ref": "#/$defs/WorkSteeringPolicy",
+        "default": "safe_boundary"
+      }
+    },
+    "required": [
+      "profile_id",
+      "revision",
+      "agent_session_id",
+      "binding_version",
+      "enabled",
+      "label",
+      "route"
+    ],
+    "title": "VoiceProfile",
+    "type": "object"
+  },
+  "voice_profile_probe_request": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "native_offer": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "profile_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "agent_session_id",
+      "binding_version",
+      "profile_revision"
+    ],
+    "title": "VoiceProfileProbeRequest",
+    "type": "object"
+  },
+  "voice_profile_probe_result": {
+    "$defs": {
+      "AudioEncoding": {
+        "enum": [
+          "pcm",
+          "opus",
+          "wav",
+          "mp3",
+          "aac",
+          "flac",
+          "g711_mu_law",
+          "g711_a_law"
+        ],
+        "type": "string"
+      },
+      "AudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding": {
+            "$ref": "#/$defs/AudioEncoding"
+          },
+          "sample_format": {
+            "$ref": "#/$defs/AudioSampleFormat"
+          },
+          "sample_rate": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "encoding",
+          "sample_rate",
+          "channels",
+          "sample_format"
+        ],
+        "type": "object"
+      },
+      "AudioSampleFormat": {
+        "enum": [
+          "signed16_le",
+          "float32_le",
+          "encoded"
+        ],
+        "type": "string"
+      },
+      "CapabilitySupport": {
+        "enum": [
+          "supported",
+          "unsupported",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "MediaSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/AudioFormat"
+          },
+          "max_buffer_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_age_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_frame_duration_us": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timebase": {
+            "description": "Timestamp units per second; duration is always explicitly in microseconds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "timebase",
+          "min_frame_duration_us",
+          "max_frame_duration_us",
+          "max_frame_bytes",
+          "max_buffer_duration_us",
+          "max_frame_age_us"
+        ],
+        "type": "object"
+      },
+      "VoiceCapabilityEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "support": {
+            "$ref": "#/$defs/CapabilitySupport"
+          }
+        },
+        "required": [
+          "support",
+          "source"
+        ],
+        "type": "object"
+      },
+      "VoiceCloseReason": {
+        "enum": [
+          "user_ended",
+          "lease_revoked",
+          "binding_changed",
+          "device_unavailable",
+          "permission_revoked",
+          "network_lost",
+          "backlog",
+          "journal_unavailable",
+          "app_shutdown",
+          "model_limit",
+          "provider_failed"
+        ],
+        "type": "string"
+      },
+      "VoiceNativeAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_sdp": {
+            "type": "string"
+          },
+          "attachment_id": {
+            "type": "string"
+          },
+          "safe_output_boundary": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "answer_sdp",
+          "safe_output_boundary"
+        ],
+        "type": "object"
+      },
+      "VoiceNegotiation": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "additionalProperties": false,
+            "properties": {
+              "continuous_input": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "controlled_output_boundary": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "delegation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "exact_output_truncation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "fact_injection": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "input_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "interrupt_generation": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "native_media": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "output_transcript": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "semantic_turn_taking": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "typed_tools": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              },
+              "understand_input_during_output": {
+                "$ref": "#/$defs/VoiceCapabilityEvidence"
+              }
+            },
+            "type": "object"
+          },
+          "input_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "native_attachment": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VoiceNativeAttachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_spec": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MediaSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "VoiceTermination": {
+        "additionalProperties": false,
+        "properties": {
+          "finalization_confirmed": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "$ref": "#/$defs/VoiceCloseReason"
+          }
+        },
+        "required": [
+          "reason",
+          "finalization_confirmed"
+        ],
+        "type": "object"
+      },
+      "VoiceTransportPreference": {
+        "enum": [
+          "relay",
+          "native_webrtc"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "connection_verified": {
+        "description": "True only for actual connection/open/ACK and local shutdown. It is not\na device, playback, latency, duplex semantics, or account-wide claim.",
+        "type": "boolean"
+      },
+      "negotiation": {
+        "$ref": "#/$defs/VoiceNegotiation"
+      },
+      "profile_id": {
+        "type": "string"
+      },
+      "profile_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "termination": {
+        "$ref": "#/$defs/VoiceTermination"
+      },
+      "transport": {
+        "$ref": "#/$defs/VoiceTransportPreference"
+      }
+    },
+    "required": [
+      "profile_id",
+      "profile_revision",
+      "transport",
+      "negotiation",
+      "termination",
+      "connection_verified"
+    ],
+    "title": "VoiceProfileProbeResult",
+    "type": "object"
+  },
+  "voice_profile_update": {
+    "$defs": {
+      "VoiceTransportPreference": {
+        "enum": [
+          "relay",
+          "native_webrtc"
+        ],
+        "type": "string"
+      },
+      "WorkSteeringPolicy": {
+        "enum": [
+          "safe_boundary",
+          "supersede_model_step"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "adapter_config": true,
+      "adapter_id": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "agent_session_id": {
+        "type": "string"
+      },
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "connection_role": {
+        "default": "default",
+        "type": "string"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "model": {
+        "type": "string"
+      },
+      "provider_id": {
+        "type": "string"
+      },
+      "transport": {
+        "$ref": "#/$defs/VoiceTransportPreference"
+      },
+      "work_steering_policy": {
+        "$ref": "#/$defs/WorkSteeringPolicy",
+        "default": "safe_boundary"
+      }
+    },
+    "required": [
+      "expected_revision",
+      "agent_session_id",
+      "binding_version",
+      "enabled",
+      "provider_id",
+      "model",
+      "transport",
+      "adapter_config"
+    ],
+    "title": "VoiceProfileUpdate",
+    "type": "object"
+  },
+  "voice_replay_scope": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Canonical reset/binding boundary referenced by voice-local restoration.\nThis is not a second Agent checkpoint or an execution permission.",
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "context_floor": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "agent_session_id",
+      "binding_version",
+      "context_floor"
+    ],
+    "title": "VoiceReplayScope",
+    "type": "object"
+  },
+  "voice_route_identity": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "adapter_contract_ref": {
+        "type": "string"
+      },
+      "record_digest": {
+        "type": "string"
+      },
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "route_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "route_id",
+      "revision",
+      "record_digest",
+      "adapter_contract_ref"
+    ],
+    "title": "VoiceRouteIdentity",
+    "type": "object"
+  },
+  "voice_route_record": {
+    "$defs": {
+      "VoiceFeature": {
+        "enum": [
+          "continuous_input",
+          "understand_input_during_output",
+          "semantic_turn_taking",
+          "fact_injection",
+          "typed_tools",
+          "delegation",
+          "input_transcript",
+          "output_transcript",
+          "interrupt_generation",
+          "exact_output_truncation",
+          "controlled_output_boundary",
+          "native_media"
+        ],
+        "type": "string"
+      },
+      "VoiceTransportPreference": {
+        "enum": [
+          "relay",
+          "native_webrtc"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "adapter_config": {
+        "description": "Validated adapter-private configuration, never interpreted by the core."
+      },
+      "adapter_config_digest": {
+        "type": "string"
+      },
+      "adapter_contract_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "adapter_id": {
+        "type": "string"
+      },
+      "connection_config_digest": {
+        "type": "string"
+      },
+      "connection_config_ref": {
+        "type": "string"
+      },
+      "credential_ref": {
+        "type": "string"
+      },
+      "model": {
+        "type": "string"
+      },
+      "model_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "provider_id": {
+        "type": "string"
+      },
+      "required_features": {
+        "items": {
+          "$ref": "#/$defs/VoiceFeature"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "route_id": {
+        "type": "string"
+      },
+      "schema": {
+        "type": "string"
+      },
+      "transport": {
+        "$ref": "#/$defs/VoiceTransportPreference"
+      }
+    },
+    "required": [
+      "schema",
+      "route_id",
+      "revision",
+      "provider_id",
+      "model",
+      "model_revision",
+      "connection_config_ref",
+      "credential_ref",
+      "adapter_id",
+      "adapter_contract_version",
+      "adapter_config",
+      "adapter_config_digest",
+      "connection_config_digest",
+      "required_features",
+      "transport"
+    ],
+    "title": "VoiceRouteRecord",
+    "type": "object"
+  },
+  "voice_source_context_confirmation": {
+    "$defs": {
+      "VoiceInputSourceRef": {
+        "additionalProperties": false,
+        "description": "Identity of an actual committed local utterance, separate from a model call.",
+        "properties": {
+          "fragment_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "fragment_id",
+          "revision"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Only the authenticated human-facing route may supply this confirmation.",
+    "properties": {
+      "activation_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "context_key": {
+        "type": "string"
+      },
+      "source_ref": {
+        "$ref": "#/$defs/VoiceInputSourceRef"
+      }
+    },
+    "required": [
+      "activation_epoch",
+      "source_ref",
+      "context_key"
+    ],
+    "title": "VoiceSourceContextConfirmation",
+    "type": "object"
+  },
+  "voice_source_context_requirement": {
+    "$defs": {
+      "VoiceContextPresentation": {
+        "additionalProperties": false,
+        "properties": {
+          "context_key": {
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "context_key"
+        ],
+        "type": "object"
+      },
+      "VoiceInputSourceRef": {
+        "additionalProperties": false,
+        "description": "Identity of an actual committed local utterance, separate from a model call.",
+        "properties": {
+          "fragment_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "fragment_id",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execution_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "turn_operation_id",
+          "execution_generation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "context": {
+        "$ref": "#/$defs/VoiceContextPresentation"
+      },
+      "source_ref": {
+        "$ref": "#/$defs/VoiceInputSourceRef"
+      }
+    },
+    "required": [
+      "source_ref",
+      "context"
+    ],
+    "title": "VoiceSourceContextRequirement",
+    "type": "object"
+  },
+  "voice_state": {
+    "$defs": {
+      "VoiceCaptureState": {
+        "enum": [
+          "idle",
+          "capturing",
+          "paused",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "VoiceConnectionState": {
+        "enum": [
+          "opening",
+          "ready",
+          "recovering",
+          "closing",
+          "closed",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "VoicePlaybackState": {
+        "enum": [
+          "idle",
+          "playing",
+          "interrupted"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "activation_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "agent_session_id": {
+        "type": "string"
+      },
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "capture": {
+        "$ref": "#/$defs/VoiceCaptureState"
+      },
+      "connection": {
+        "$ref": "#/$defs/VoiceConnectionState"
+      },
+      "output_generation": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "playback": {
+        "$ref": "#/$defs/VoicePlaybackState"
+      },
+      "voice_session_id": {
+        "type": "string"
+      },
+      "work_running": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "voice_session_id",
+      "agent_session_id",
+      "binding_version",
+      "activation_epoch",
+      "output_generation",
+      "connection",
+      "capture",
+      "playback",
+      "work_running"
+    ],
+    "title": "VoiceState",
+    "type": "object"
+  },
+  "voice_work_command": {
+    "$defs": {
+      "ApprovalInteractionMode": {
+        "enum": [
+          "voice_allowed",
+          "explicit_click"
+        ],
+        "type": "string"
+      },
+      "ApprovalTarget": {
+        "additionalProperties": false,
+        "description": "Immutable presentation of an already-pending canonical user decision.\nIt cannot grant Actions absent from the Agent's existing authorization.",
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "expected_attempt_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_execution_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_step_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "interaction_agent_session_id": {
+            "type": "string"
+          },
+          "interaction_binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "interaction_mode": {
+            "$ref": "#/$defs/ApprovalInteractionMode"
+          },
+          "presentation_digest": {
+            "type": "string"
+          },
+          "presentation_id": {
+            "type": "string"
+          },
+          "question_digest": {
+            "type": "string"
+          },
+          "request_event_sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "work_target": {
+            "$ref": "#/$defs/WorkTarget"
+          }
+        },
+        "required": [
+          "work_target",
+          "interaction_agent_session_id",
+          "interaction_binding_version",
+          "execution_id",
+          "step_id",
+          "attempt_id",
+          "expected_execution_version",
+          "expected_step_version",
+          "expected_attempt_version",
+          "request_event_sequence",
+          "action_id",
+          "question_digest",
+          "presentation_id",
+          "presentation_digest",
+          "interaction_mode"
+        ],
+        "type": "object"
+      },
+      "VoiceApprovalAnswer": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "presented_context_id": {
+            "description": "Application-proven presentation context; never guessed from \"yes\".",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/$defs/ApprovalTarget"
+          }
+        },
+        "required": [
+          "target",
+          "answer",
+          "presented_context_id"
+        ],
+        "type": "object"
+      },
+      "VoiceWorkRequest": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "start",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "steer",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/WorkTarget"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "target",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "observe",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/WorkTarget"
+              }
+            },
+            "required": [
+              "action",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "cancel",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/WorkTarget"
+              }
+            },
+            "required": [
+              "action",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "cancel_queued",
+                "type": "string"
+              },
+              "pending_input_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "pending_input_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "revise_queued",
+                "type": "string"
+              },
+              "expected_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "pending_input_id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "pending_input_id",
+              "text",
+              "expected_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "answer_approval",
+                "type": "string"
+              },
+              "answer": {
+                "$ref": "#/$defs/VoiceApprovalAnswer"
+              }
+            },
+            "required": [
+              "action",
+              "answer"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execution_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "turn_operation_id",
+          "execution_generation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "activation_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "operation_key": {
+        "type": "string"
+      },
+      "request": {
+        "$ref": "#/$defs/VoiceWorkRequest"
+      }
+    },
+    "required": [
+      "activation_epoch",
+      "operation_key",
+      "request"
+    ],
+    "title": "VoiceWorkCommand",
+    "type": "object"
+  },
+  "voice_work_receipt": {
+    "$defs": {
+      "VoiceSpeechProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          },
+          "through_seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "revision",
+          "through_seq",
+          "text"
+        ],
+        "type": "object"
+      },
+      "VoiceWorkStatus": {
+        "enum": [
+          "accepted",
+          "applied",
+          "pending_boundary",
+          "rejected",
+          "deferred",
+          "queued",
+          "terminal"
+        ],
+        "type": "string"
+      },
+      "WorkTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "binding_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "execution_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "binding_version",
+          "turn_operation_id",
+          "execution_generation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "duplicate": {
+        "type": "boolean"
+      },
+      "first_claim_generation": {
+        "description": "The first same-operation native claim, read from canonical typed facts.\nA current generation alone cannot prove a safe opening-zero upgrade.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "operation_key": {
+        "type": "string"
+      },
+      "pending_input_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pending_input_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "receipt_id": {
+        "type": "string"
+      },
+      "speech": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/VoiceSpeechProjection"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "status": {
+        "$ref": "#/$defs/VoiceWorkStatus"
+      },
+      "summary": {
+        "description": "A filtered canonical presentation, never a raw tool result or reasoning.",
+        "type": "string"
+      },
+      "target": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WorkTarget"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "receipt_id",
+      "operation_key",
+      "status",
+      "summary",
+      "duplicate"
+    ],
+    "title": "VoiceWorkReceipt",
+    "type": "object"
+  }
+}

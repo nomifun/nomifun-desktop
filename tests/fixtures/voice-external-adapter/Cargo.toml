@@ -1,0 +1,16 @@
+[package]
+name = "nomifun-voice-external-contract-harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nomifun-voice-core = { path = "../../../crates/backend/nomifun-voice-core" }
+nomifun-agent-contracts = { path = "../../../crates/backend/nomifun-agent-contracts" }
+nomifun-voice-contracts = { path = "../../../crates/backend/nomifun-voice-contracts" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+serde_json = "1"

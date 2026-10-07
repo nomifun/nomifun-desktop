@@ -55,7 +55,7 @@ pub(super) async fn hydrate_thinking_lifecycle(
                            json_extract(CAST(payload.body AS TEXT), '$.value.event.event')) IN ( \
                          'reasoning_delta', 'model_step_started', 'execution_resumed', 'output_text_delta', \
                          'completion_delivered', 'tool_call_delta', 'tool_call_completed', 'tool_started', \
-                         'model_output_truncated', 'model_response_rejected', 'delivery_review_superseded', \
+                         'model_output_truncated', 'model_response_rejected', 'delivery_review_superseded', 'voice_model_step_superseded', \
                          'turn_completed', 'turn_cancelled', 'turn_paused', 'turn_failed') \
                      ORDER BY event.seq DESC LIMIT 1",
                 )
@@ -174,6 +174,38 @@ mod tests {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap();
         hydrate_thinking_lifecycle(&pool, &session, &mut history).await.unwrap();
         assert_eq!(count, sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_voice_model_step_closes_cold_history_reasoning_without_finishing_the_turn() {
+        let (journal, pool) = test_fixture().await;
+        let session = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        journal.append(json!({"event":"reasoning_delta","step":1,"text":"Original input."}).to_string(),
+            None, EngineJournalWrite::Progress).await.unwrap();
+        let task = tokio::spawn(async {});
+        let task_id = task.id().to_string();
+        task.await.unwrap();
+        let operation = nomifun_agent_contracts::OperationId::from("turn:model:1");
+        let withdrawn = AgentEngineEvent::VoiceModelStepSuperseded {
+            step: 1,
+            model_operation_id: operation.clone(),
+            steering_receipt_ids: vec!["voice-steer".into()],
+            discarded_tool_call_ids: vec![],
+            cleanup: nomifun_chat_model_broker::OwnedModelCleanupReceipt {
+                operation_id: operation,
+                task_id,
+                stage: nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,
+                outcome: nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined,
+            },
+        };
+        journal.append(serde_json::to_string(&withdrawn).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
+        let (mut history, _, _) = store.message_history_before(&session, None, 50).await.unwrap();
+        hydrate_thinking_lifecycle(&pool, &session, &mut history).await.unwrap();
+        let thinking = history.iter().find(|item| item.presentation_intent == "thinking").unwrap();
+        assert_eq!(thinking.projection["content"], "Original input.");
+        assert_eq!(thinking.projection["state"], "recorded");
+        assert_eq!(store.head(&session).await.unwrap().active_turn_id.as_deref(), Some("turn"));
     }
 
     #[tokio::test]
