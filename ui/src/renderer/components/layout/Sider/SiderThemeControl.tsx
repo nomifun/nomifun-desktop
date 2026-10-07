@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Message, Modal, Popover, Tooltip } from '@arco-design/web-react';
-import { CheckOne, EditTwo, Plus, Theme } from '@icon-park/react';
+import { Check, EditTwo, Plus, Theme } from '@icon-park/react';
 import classNames from 'classnames';
 import { ThemeSwitcher } from '@renderer/components/settings/ThemeSwitcher';
 import FontSizeControl from '@renderer/components/settings/FontSizeControl';
@@ -16,6 +16,7 @@ import { getCssThemeDisplayName } from '@renderer/pages/settings/DisplaySettings
 import { useCssTheme } from '@renderer/hooks/ui/useCssTheme';
 import type { ICssTheme } from '@/common/config/storage';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
+import './SiderThemeControl.css';
 
 interface SiderThemeControlProps {
   collapsed: boolean;
@@ -34,31 +35,45 @@ const pickAccent = (css: string): string | null => {
 
 const footerButtonClass = (collapsed: boolean, active: boolean) =>
   classNames(
-    'h-28px shrink-0 flex items-center justify-center cursor-pointer rd-0.5rem transition-colors',
+    'sider-theme-trigger h-28px shrink-0 flex items-center justify-center cursor-pointer rd-0.5rem transition-colors',
     collapsed ? 'w-full' : 'w-36px',
     active ? '!bg-primary-1 !text-primary-6' : 'text-t-secondary hover:bg-fill-2 hover:text-t-primary active:bg-fill-3'
   );
 
-/**
- * SiderThemeControl — the footer theme entry that lives right next to 设置.
- *
- * Now the complete home for everything the former Display settings page covered:
- * a single always-visible button opens a popover with the light/dark axis
- * (ThemeSwitcher), interface scaling (FontSizeControl), and the CSS preset/skin
- * list (via the shared `useCssTheme` hook). Each preset gets a hover edit
- * affordance and a trailing "add CSS" entry, both opening the self-contained
- * `CssThemeModal` — so the dedicated Display page can be dissolved entirely.
- */
+/** Desktop appearance popover: compact mode/zoom controls and a two-column theme grid. */
 const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ collapsed, siderTooltipProps }) => {
   const { t } = useTranslation();
   const { themes, activeThemeId, selectTheme, saveUserTheme, deleteUserTheme } = useCssTheme();
   const [popupVisible, setPopupVisible] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [editingTheme, setEditingTheme] = useState<ICssTheme | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const returnThemeId = useRef<string | null>(null);
+  const restoreEditorFocus = useRef(false);
+
+  useEffect(() => {
+    if (!popupVisible) return;
+    const frame = requestAnimationFrame(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const returning = restoreEditorFocus.current;
+      const target = returning
+        ? Array.from(panel.querySelectorAll<HTMLButtonElement>('[data-theme-choice]')).find(
+            (button) => button.dataset.themeChoice === returnThemeId.current
+          ) ?? panel.querySelector<HTMLButtonElement>('.sider-theme-add')
+        : panel.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]');
+      target?.focus({ preventScroll: true });
+      if (returning) target?.scrollIntoView({ block: 'nearest' });
+      restoreEditorFocus.current = false;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [popupVisible]);
 
   // Opening the editor always closes the popover first so the modal isn't
   // anchored inside a popup that vanishes when focus moves.
   const openModal = (theme: ICssTheme | null) => {
+    returnThemeId.current = theme?.id ?? null;
     setPopupVisible(false);
     setEditingTheme(theme);
     setModalVisible(true);
@@ -67,6 +82,8 @@ const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ collapsed, siderT
   const closeModal = () => {
     setModalVisible(false);
     setEditingTheme(null);
+    restoreEditorFocus.current = true;
+    setPopupVisible(true);
   };
 
   const handleSave = async (data: Omit<ICssTheme, 'id' | 'created_at' | 'updated_at' | 'is_preset'>) => {
@@ -92,79 +109,108 @@ const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ collapsed, siderT
     });
   };
 
+  const activeTheme = themes.find((theme) => theme.id === activeThemeId);
+  const activeThemeLabel = activeTheme
+    ? t('settings.cssTheme.currentTheme', { name: getCssThemeDisplayName(activeTheme, t) })
+    : '';
+
   const popoverContent = (
-    <div className='w-320px flex flex-col gap-12px py-4px'>
-      {/* 明暗 / Light–dark */}
-      <div className='flex flex-col gap-6px'>
-        <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.theme')}</div>
+    <div
+      ref={panelRef}
+      className='sider-theme-panel'
+      role='dialog'
+      aria-label={t('settings.appearance')}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || event.defaultPrevented) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setPopupVisible(false);
+        triggerRef.current?.focus({ preventScroll: true });
+      }}
+    >
+      <div className='sider-theme-header'>
+        <span className='sider-theme-title'>
+          <Theme theme='outline' size='15' fill='currentColor' aria-hidden='true' />
+          {t('settings.appearance')}
+        </span>
         <ThemeSwitcher />
       </div>
 
-      {/* 界面缩放 / Interface scaling */}
-      <div className='flex flex-col gap-6px'>
-        <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.fontSize')}</div>
-        <FontSizeControl />
-      </div>
+      <FontSizeControl />
 
-      {/* CSS 预设主题 / CSS preset themes */}
-      <div className='flex flex-col gap-6px'>
-        <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.cssTheme.selectOrCustomize')}</div>
-        <div className='flex flex-col gap-2px max-h-300px overflow-y-auto -mx-4px px-4px'>
+      <div className='sider-theme-presets'>
+        <div className='sider-theme-section-label'>{t('settings.cssTheme.styleLabel')}</div>
+        <div
+          className='sider-theme-grid'
+          aria-label={t('settings.cssTheme.selectOrCustomize')}
+          onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[data-theme-choice]'));
+            const index = buttons.indexOf(event.target as HTMLButtonElement);
+            if (index < 0) return;
+            event.preventDefault();
+            const offset = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -2 : 2;
+            const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : index + offset;
+            buttons[Math.min(buttons.length - 1, Math.max(0, nextIndex))]?.focus();
+          }}
+        >
           {themes.map((theme) => {
             const active = activeThemeId === theme.id;
             const accent = pickAccent(theme.css || '');
             const displayName = getCssThemeDisplayName(theme, t);
             return (
-              <div
-                key={theme.id}
-                className={classNames(
-                  'group flex items-center gap-8px h-32px px-8px rd-8px text-left transition-colors',
-                  active ? '!bg-primary-1' : 'hover:bg-fill-2'
-                )}
-              >
+              <div key={theme.id} className={classNames('sider-theme-entry', { 'is-active': active })}>
                 <button
                   type='button'
+                  data-theme-choice={theme.id}
+                  aria-pressed={active}
+                  title={displayName}
                   onClick={() => void selectTheme(theme)}
-                  className='flex-1 min-w-0 flex items-center gap-8px cursor-pointer border-none bg-transparent p-0 text-left'
+                  className='sider-theme-choice'
                 >
                   <span
-                    className='size-14px rd-full shrink-0 border border-solid border-[var(--color-border-2)]'
-                    style={accent ? { background: accent } : { background: 'var(--color-fill-3)' }}
+                    className='sider-theme-swatch'
+                    aria-hidden='true'
+                    style={{ background: accent ?? 'var(--color-fill-3)' }}
                   />
-                  <span
-                    className={classNames(
-                      'flex-1 min-w-0 truncate text-13px',
-                      active ? 'text-primary-6 font-500' : 'text-t-primary'
-                    )}
-                  >
-                    {displayName}
-                  </span>
+                  <span className='sider-theme-name'>{displayName}</span>
                 </button>
-                {active && <CheckOne theme='filled' size='15' fill='rgb(var(--primary-6))' className='shrink-0' />}
+                {active && (
+                  <span className='sider-theme-check' aria-hidden='true'>
+                    <Check theme='outline' size='13' fill='currentColor' />
+                  </span>
+                )}
                 <button
                   type='button'
                   onClick={() => openModal(theme)}
-                  aria-label={t('settings.cssTheme.editTheme')}
-                  className='shrink-0 opacity-0 group-hover:opacity-100 size-22px flex items-center justify-center rd-6px text-t-tertiary hover:text-primary-6 hover:bg-fill-3 cursor-pointer border-none bg-transparent transition-opacity'
+                  aria-label={t('settings.cssTheme.editTheme') + ': ' + displayName}
+                  title={t('settings.cssTheme.editTheme')}
+                  className='sider-theme-edit'
                 >
-                  <EditTwo theme='outline' size='13' fill='currentColor' />
+                  <EditTwo theme='outline' size='12' fill='currentColor' />
                 </button>
               </div>
             );
           })}
-
-          {/* 手动添加 CSS 样式 / Manually add a CSS theme */}
           <button
             type='button'
             onClick={() => openModal(null)}
-            className='flex items-center gap-8px h-32px px-8px rd-8px text-13px text-t-secondary hover:text-primary-6 hover:bg-fill-2 cursor-pointer border-none bg-transparent transition-colors'
+            className='sider-theme-add'
+            aria-label={t('settings.cssTheme.addToPreset')}
+            title={t('settings.cssTheme.addToPreset')}
           >
-            <span className='size-14px shrink-0 flex items-center justify-center'>
-              <Plus theme='outline' size='14' fill='currentColor' />
-            </span>
-            <span className='flex-1 min-w-0 truncate text-left'>{t('settings.cssTheme.addManually')}</span>
+            <Plus theme='outline' size='13' fill='currentColor' aria-hidden='true' />
+            <span>{t('settings.cssTheme.addCustom')}</span>
           </button>
         </div>
+      </div>
+
+      <div className='sider-theme-status'>
+        <span className='sider-theme-applied' title={activeThemeLabel}>
+          {activeTheme && <Check theme='outline' size='11' fill='currentColor' aria-hidden='true' />}
+          <span>{activeThemeLabel}</span>
+        </span>
+        <span className='sider-theme-escape'><kbd>Esc</kbd>{t('common.close')}</span>
       </div>
     </div>
   );
@@ -182,9 +228,16 @@ const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ collapsed, siderT
         unmountOnExit
       >
         <Tooltip {...siderTooltipProps} content={t('settings.theme')} position='right'>
-          <div className={footerButtonClass(collapsed, popupVisible)} aria-label={t('settings.theme')}>
+          <button
+            ref={triggerRef}
+            type='button'
+            className={footerButtonClass(collapsed, popupVisible)}
+            aria-label={t('settings.theme')}
+            aria-haspopup='dialog'
+            aria-expanded={popupVisible}
+          >
             <Theme theme='outline' size='18' fill='currentColor' className='block leading-none' style={{ lineHeight: 0 }} />
-          </div>
+          </button>
         </Tooltip>
       </Popover>
 
