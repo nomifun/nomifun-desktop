@@ -249,17 +249,25 @@ const getProcessedItemProcessEndedAt = (item: IRenderableItem): number => {
 
 const getProcessedItemTurnStartedAt = (item: IRenderableItem): number | undefined => {
   if (item.type === 'agent_status' && item.content.turn_summary) {
-    return item.content.started_at_ms;
+    const value = item.content.started_at_ms;
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
   }
-  if (item.type === 'tips') return item.content.started_at_ms;
+  if (item.type === 'tips') {
+    const value = item.content.started_at_ms;
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  }
   return undefined;
 };
 
 const getProcessedItemTurnEndedAt = (item: IRenderableItem): number | undefined => {
   if (item.type === 'agent_status' && item.content.turn_summary) {
-    return item.content.finished_at_ms;
+    const value = item.content.finished_at_ms;
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
   }
-  if (item.type === 'tips') return item.content.finished_at_ms;
+  if (item.type === 'tips') {
+    const value = item.content.finished_at_ms;
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  }
   return undefined;
 };
 
@@ -907,8 +915,12 @@ const MessageList: React.FC<{
     }
 
     const disclosureItems = buildTurnDisclosureItems(modelInput, {
-      tailClosed: conversationContext?.isProcessing !== true,
+      // Initial false is not idle authority while the runtime query is pending.
+      tailClosed: conversationContext?.isTurnStateHydrated === false
+        ? undefined
+        : conversationContext?.isProcessing !== true,
       activeTurnId: conversationContext?.activeTurnId,
+      activeTurnStartedAt: conversationContext?.activeTurnStartedAt,
       stopNotice: conversationContext?.stopNotice ?? undefined,
     })
       .map<IProcessedItem | undefined>((entry: TurnDisclosureOutputItem) => {
@@ -1069,6 +1081,8 @@ const MessageList: React.FC<{
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
+    conversationContext?.activeTurnStartedAt,
+    conversationContext?.isTurnStateHydrated,
     conversationContext?.isProcessing,
     conversationContext?.stopNotice,
     creationTaskOwnerMessageIds,

@@ -911,7 +911,7 @@ export const normalizeToolCallContent = (
   } as IMessageToolCall['content'];
 };
 
-const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['content'] => {
+export const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['content'] => {
   const data = isObject(value) ? value : {};
   const status =
     data.status === 'connecting' ||

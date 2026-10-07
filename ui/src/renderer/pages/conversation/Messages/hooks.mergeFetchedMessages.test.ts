@@ -1277,6 +1277,30 @@ describe('composeMessageForTest', () => {
 });
 
 describe('normalizeDbMessage', () => {
+  test.each([null, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'a REST running Turn receipt with finished_at_ms=%p has the same clock contract as a live receipt',
+    finishedAt => {
+      const mapper = createStoredMessageMapper(() => 'running-receipt');
+      const turnId = messageId('running-turn');
+      const stored = mapper({
+        message_id: messageId('running-summary'), msg_id: messageId('running-summary'),
+        conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000099'),
+        type: 'agent_status', position: 'center', hidden: false, created_at: 4000,
+        content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'running',
+          turn_id: turnId, started_seq: 3, finished_seq: null, started_at_ms: 4000,
+          finished_at_ms: finishedAt, agent_name: 'Frozen Agent', session_id: 'exact-session',
+          is_connected: true, has_active_session: true },
+      });
+      const normalized = normalizeDbMessage(stored);
+      expect(normalized.turn_id).toBe(turnId);
+      expect(normalized.type).toBe('agent_status');
+      expect(normalized.content).toEqual({ backend: 'nomi', status: 'prepared', turn_summary: true,
+        turn_state: 'running', started_seq: 3, finished_seq: null, started_at_ms: 4000,
+        agent_name: 'Frozen Agent', session_id: 'exact-session', is_connected: true, has_active_session: true });
+      expect(normalized.content).not.toHaveProperty('finished_at_ms');
+    }
+  );
+
   const persistedArtifact = {
     id: '019b0000-0000-7000-8000-000000000002',
     kind: 'image',

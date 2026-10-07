@@ -113,7 +113,7 @@ describe('replayed process trace', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
-  test('returned thinking has an open Markdown body that remains readable after completion', () => {
+  test('a live phase opens Markdown and completion collapses it until manually expanded', () => {
     const item: IMessageThinking = {
       id: 'thinking', type: 'thinking', conversation_id: conversationId,
       position: 'left', created_at: 1,
@@ -130,6 +130,8 @@ describe('replayed process trace', () => {
     expect(container.querySelector('[data-thinking-process-header]')?.textContent).toBe('Thinking...');
     rerender(view(true));
     expect(text()).toContain('Earlier result');
+    expect(container.querySelector('[data-thinking-process-header]')?.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(container.querySelector<HTMLButtonElement>('[data-thinking-process-header]')!);
     expect(container.querySelector('[data-thinking-process-header]')?.getAttribute('aria-expanded')).toBe('true');
   });
 
