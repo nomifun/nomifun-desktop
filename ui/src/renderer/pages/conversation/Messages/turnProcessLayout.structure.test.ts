@@ -86,14 +86,14 @@ describe('turn process continuous work journal layout', () => {
 
   test('uses an unbounded document flow with compact muted receipt rows', () => {
     const bodyRule = cssRuleFor('.turn-process-disclosure__body');
-    expect(bodyRule.includes('gap: 16px')).toBe(true);
-    expect(bodyRule.includes('padding: 16px 0 8px')).toBe(true);
+    expect(bodyRule.includes('gap: var(--conversation-process-gap, 6px)')).toBe(true);
+    expect(bodyRule.includes('padding: 8px 0 4px')).toBe(true);
     expect(bodyRule.includes('overflow: visible')).toBe(true);
     expect(bodyRule.includes('max-height')).toBe(false);
     expect(bodyRule.includes('overflow-y: auto')).toBe(false);
     expect(bodyRule.includes('border-bottom')).toBe(false);
     expect(
-      cssRuleFor('.turn-process-disclosure__body .turn-process-trace__row').includes(
+      cssRuleFor('\n.turn-process-trace__row {').includes(
         'color: var(--color-text-2'
       )
     ).toBe(true);
@@ -118,7 +118,7 @@ describe('turn process continuous work journal layout', () => {
     expect(cssSource.includes('.turn-process-disclosure--live .turn-process-disclosure__label')).toBe(false);
     expect(cssSource.includes('@keyframes turn-process-shimmer')).toBe(false);
     expect(cssSource.includes('@keyframes turn-process-current-fade')).toBe(true);
-    expect(cssSource.includes('.turn-process-trace__thinking-last-line')).toBe(true);
+    expect(cssSource.includes('.turn-process-trace__thinking-last-line')).toBe(false);
     expect(cssSource.includes('.turn-process-disclosure__item--current .turn-process-trace__row--running')).toBe(false);
     expect(cssSource.includes('.turn-process-trace__row--current-activity .turn-process-trace__text')).toBe(true);
     expect(cssSource.includes('prefers-reduced-motion: reduce')).toBe(true);
