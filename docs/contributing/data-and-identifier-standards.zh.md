@@ -12,9 +12,9 @@
 2. [`architecture/id-system.zh.md`](../architecture/id-system.zh.md) 与
    [`architecture/data-and-storage.zh.md`](../architecture/data-and-storage.zh.md)
    —— 架构契约与存储行为；
-3. 本文 —— 贡献者执行流程和 review 清单；
-4. `docs/continuity/` —— 历史背景、决策、交接与审计证据，不能覆盖当前
-   架构契约。
+3. 本文 —— 贡献者执行流程和 review 清单。
+
+历史决策与审计证据保存在 Git 历史中，不能覆盖当前架构契约。
 
 如果实现和文档不一致，不得自行增加兼容例外。应同步修正实现与权威文档，
 或者暂停并请求架构决策。
@@ -104,8 +104,14 @@ credential_id
 
 ## 4. 用逻辑关联替代物理外键
 
-非 Agent 产品 DDL 禁止出现以下内容。Canonical Agent Store 表可按冻结的 Agent
-Store schema 使用物理外键和 guard 约束；该例外不得扩散到其他领域。
+非 Agent 产品 DDL 禁止出现以下内容。基线冻结了两组明确例外：canonical Agent
+Store 表，以及 Unified Plugin 表（`plugins`、`plugin_drafts`、
+`plugin_credential_bindings`、`plugin_grants`、`plugin_mutations`、
+`plugin_artifacts` 及相关 plugin 自有表）可按基线声明使用物理外键和
+`ON DELETE`/`ON UPDATE` 动作。基线还在少数领域（channel、requirements、
+terminal、creation、plugin、Agent mutation guard）携带已注册的
+guard/validator trigger。这些例外不得扩散到其他领域；新增领域不得在
+未更新 schema 契约的情况下加入物理约束、级联或 trigger。
 
 ```text
 FOREIGN KEY

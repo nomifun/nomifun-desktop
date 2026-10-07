@@ -67,55 +67,49 @@ The source of truth is
 | `/terminal-new` | Terminal creation. |
 | `/terminal/:id` | Terminal runtime. |
 | `/models` | Model and agent management. |
-| `/presets` | Reusable preset library. |
+| `/agent` | Agent settings and Agent Presets. |
+| `/agent-sessions/:agentSessionId` | Single Agent session page. |
 | `/skills` | Skills capability library. |
 | `/mcp` | MCP server management. |
 | `/open-capabilities` | Remote/public capability exposure. |
-| `/scheduled`, `/scheduled/:job_id` | Scheduled tasks. |
+| `/scheduled`, `/scheduled/:cron_job_id` | Scheduled tasks. |
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
 | `/nomi` | Companion configuration. |
+| `/customer-service`, `/customer-service/:cs_agent_id` | Customer-service roster/detail. |
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
-| `/workshop` | Creation compatibility entry; redirects to the Canvas library. |
-| `/workshop/canvases` | Canonical Canvas library. |
-| `/workshop/canvas/:canvasId` | Canvas infinite editor. |
-| `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
-| `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Prompt and asset libraries plus the private Template Studio. |
-| `/plugins` | Unified Plugin Library for installed Plugins and editable Drafts. |
-| `/plugins/new` | Start Chat authoring or import a Package/Backup. |
-| `/plugins/create/:draftId` | Edit, preview, and save one canonical Plugin package Draft. |
-| `/plugins/run/:id` | Unified Plugin detail and App Surface with configuration, restore, export, trash, and deletion actions. |
-| `/settings/system` and related settings subroutes | System settings page and sub-sections. |
+| `/nomi/canvases` | Canonical Canvas library. |
+| `/nomi/canvases/:canvasId` | Canvas editor. |
+| `/asset-library` | Redirects to `/asset-library/materials`. |
+| `/asset-library/materials`, `/asset-library/prompts`, `/asset-library/templates` | Asset library: materials, prompt catalog, private Template Studio. |
+| `/plugins`, `/plugins/run/:id` | Unified Plugin Library and Plugin App Surface (feature-gated). |
+| `/settings/system`, `/settings/execution-engines`, `/settings/ssh-hosts`, `/settings/permissions`, `/settings/about` | Settings surfaces. |
 
-Legacy settings paths such as `/settings/model`, `/settings/agent`,
-`/settings/capabilities`, `/settings/skills-hub`, `/settings/tools`,
-`/settings/webui` and `/settings/webhook` are
-redirects. Do not document them as primary navigation.
+Legacy settings paths such as `/settings/model`, `/settings/capabilities`,
+`/settings/skills-hub`, `/settings/tools`, `/settings/display`,
+`/settings/webui`, `/settings/computer-use`, `/settings/voice-input` and
+`/settings/webhook` are redirects, as are `/requirements/kanban`,
+`/requirements/new`, `/requirements/tag-sessions`, `/autowork` and `/other`.
+Do not document them as primary navigation.
 
 Creation reuses the normal app titlebar and swaps the primary rail to a
 Settings-style product navigation surface, with **Back to Workbench** pinned at
 the bottom. During an app session, the main rail entry resumes the last complete
 Creation location that passes the product's exact route matcher; invalid
-or unknown stored locations fall back to `/workshop/canvases`. The product rail
+or unknown stored locations fall back to `/nomi/canvases`. The product rail
 has no separate home item because prompt-led creation lives in the Canvas
 Assistant. Its route constants and exact-match rules live in
-[`pages/creativeStudio/app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts).
+[`pages/creativeStudio/app/resourceRoutes.ts`](../../ui/src/renderer/pages/creativeStudio/app/resourceRoutes.ts).
+Stored `/workshop/*` resume locations are rewritten by
+`migratedCreativeRoute` there; the legacy paths are not mounted as routes.
 
-`/workshop/projects` is a deprecated compatibility redirect to
-`/workshop/canvases`, not a product surface. Creation has Canvases only:
+Creation has Canvases only:
 the canonical HTTP resource is `/api/creative-studio/canvases`, while
-`/api/creative-studio/projects` is a deprecated alias. Image and Video
-Workbenches have no Canvas selector or parent-load gate. Their task owner,
-history, and retirement scope is only `workbenchKind`; legacy standalone
-`project_id` values are inert provenance. The Gateway's current Canvas
-capabilities are `nomi_creative_studio_list_canvases` and
+`/api/creative-studio/projects` is a deprecated alias. The Gateway's current
+Canvas capabilities are `nomi_creative_studio_list_canvases` and
 `nomi_creative_studio_get_canvas`; old project-named capabilities are deprecated
-aliases. The UI/API contract version is 23.
+aliases.
 
-Canvas exports use an archive v2 writer and retain an archive v1 reader. Image
-and Video restore versioned per-workbench session drafts from browser session
-storage; draft keys contain neither `projectId` nor `canvasId`.
-`/workshop/audio` is retired; audio creation is available through canvas audio
-nodes, not a standalone route.
+Canvas exports use an archive v3 writer and retain v1/v2 readers.
 
 Agent collaboration has no standalone route or separate page. Its
 AgentExecution projection is rendered inside the owning Conversation, so

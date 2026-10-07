@@ -46,6 +46,7 @@ describe('ThinkingProcessDisplay', () => {
     );
 
     expect(html.includes('data-thinking-process-state="completed"')).toBe(true);
+    expect(html.includes('data-thinking-process-identity="thinking-1"')).toBe(true);
     expect(html.includes('data-thinking-process-disclosure="true"')).toBe(true);
     expect(html.includes('思考完成')).toBe(true);
     expect(html.includes('data-thinking-process-body')).toBe(true);
@@ -85,19 +86,55 @@ describe('ThinkingProcessDisplay', () => {
     expect(html.includes('完整思考内容')).toBe(true);
   });
 
-  test('preserves manual thinking expansion across streaming completion and resets for a new identity', () => {
-    const view = (state: 'running' | 'completed', identityKey = 'step-1') =>
-      <ThinkingProcessDisplay state={state} identityKey={identityKey} variant='process' content='Full reasoning' />;
+  test('automatically opens live phases and collapses completion while preserving manual completed expansion', () => {
+    const view = (state: 'running' | 'completed', identityKey = 'step-1', content = 'Full reasoning') =>
+      <ThinkingProcessDisplay state={state} identityKey={identityKey} variant='process' content={content} bodyLength='compact' />;
     const page = render(view('running'));
     const toggle = page.getByRole('button');
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
     page.rerender(view('completed'));
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    page.rerender(view('completed', 'step-1', 'Durable complete reasoning'));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(toggle.getAttribute('aria-controls')).toBe(page.container.querySelector('[data-thinking-process-body]')?.id);
     page.rerender(view('completed', 'step-2'));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    page.rerender(view('running', 'step-2'));
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(page.container.textContent).toContain('Full reasoning');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    page.rerender(view('running', 'step-2', 'Live suffix'));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    page.rerender(view('completed', 'step-2'));
+    page.rerender(view('running', 'step-2'));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  test('cold and remounted completed phases are collapsed while active phases start expanded', () => {
+    const view = (state: 'running' | 'completed') =>
+      <ThinkingProcessDisplay state={state} identityKey='restored-step' content='Stored reasoning' bodyLength='compact' />;
+    const history = render(view('completed'));
+    const toggle = history.getByRole('button');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    history.unmount();
+    const returned = render(view('completed'));
+    expect(returned.getByRole('button').getAttribute('aria-expanded')).toBe('false');
+    returned.rerender(view('running'));
+    expect(returned.getByRole('button').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  test('a controlled disclosure keeps its explicit owner value through completion', () => {
+    const changed = mock(() => {});
+    const page = render(<ThinkingProcessDisplay state='running' expanded onExpandedChange={changed} />);
+    page.rerender(<ThinkingProcessDisplay state='completed' expanded onExpandedChange={changed} />);
+    expect(page.getByRole('button').getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(page.getByRole('button'));
+    expect(changed).toHaveBeenCalledWith(false);
+    expect(page.getByRole('button').getAttribute('aria-expanded')).toBe('true');
   });
 });

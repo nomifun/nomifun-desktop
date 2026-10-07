@@ -17,7 +17,7 @@ describe('MessageList turn completion disclosure structure', () => {
   test('routes message content through the turn disclosure model before rendering', () => {
     expect(source.includes('buildTurnDisclosureItems')).toBe(true);
     expect(source.includes('assignTurnIdsFromUserRequests')).toBe(true);
-    expect(source.includes('tailClosed: conversationContext?.isProcessing !== true')).toBe(true);
+    expect(source.includes('tailClosed: conversationContext?.isTurnStateHydrated === false')).toBe(true);
     expect(source.includes('activeTurnId: conversationContext?.activeTurnId')).toBe(true);
     expect(source.includes("type: 'turn_process_disclosure'")).toBe(true);
     expect(source.includes('renderTurnDisclosure')).toBe(true);

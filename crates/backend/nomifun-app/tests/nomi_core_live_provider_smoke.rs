@@ -2293,6 +2293,21 @@ async fn run_live_workspace_file_chain(
     official_coding: bool,
     snake_game: bool,
 ) -> Result<(), SmokeFailure> {
+    run_live_workspace_file_chain_observed(
+        router, api_key, model, work_dir, official_coding, snake_game, None, true,
+    ).await
+}
+
+async fn run_live_workspace_file_chain_observed(
+    router: &Router,
+    api_key: &str,
+    model: &str,
+    work_dir: &Path,
+    official_coding: bool,
+    snake_game: bool,
+    navigation: Option<&live_reasoning_lifecycle::Navigation>,
+    require_reply_marker: bool,
+) -> Result<(), SmokeFailure> {
     let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
     let preset_id = if official_coding {
         let created = successful_json(
@@ -2331,6 +2346,9 @@ async fn run_live_workspace_file_chain(
         selections,
         Some(work_dir),
     ).await?;
+    if let Some(navigation) = navigation {
+        navigation.before_turn(&session_id).await?;
+    }
     let file_name = if snake_game { "snake_game.html" } else { "session-smoke.txt" };
     let prompt = if snake_game {
         "写一个贪吃蛇的游戏。在项目根目录用 write_file 创建独立可运行的 snake_game.html，内含 HTML、CSS 和 JavaScript，并实现键盘方向控制、计分以及开始或重新开始。完成后检查文件并简要回复。".to_owned()
@@ -2420,7 +2438,7 @@ async fn run_live_workspace_file_chain(
             // here we require a real terminal reply and verified file effect.
             if !messages.iter().filter_map(assistant_text_projection).any(|text|
                 text.get("content").and_then(Value::as_str).is_some_and(|content|
-                    !content.trim().is_empty() && (snake_game || content.trim().ends_with(WORKSPACE_FILE_MARKER)))
+                    !content.trim().is_empty() && (snake_game || !require_reply_marker || content.trim().ends_with(WORKSPACE_FILE_MARKER)))
             ) {
                 return Err(SmokeFailure::new("file.messages", "WORKSPACE_FINAL_REPLY_MISSING", 422));
             }

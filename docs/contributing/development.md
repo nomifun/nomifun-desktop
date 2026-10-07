@@ -48,8 +48,8 @@ CDN at all fails at build time rather than at runtime.
 ## Install
 
 ```bash
-git clone <repo-url> nomifun-tauri
-cd nomifun-tauri
+git clone <repo-url> nomifun-desktop
+cd nomifun-desktop
 bun install
 cargo check --workspace
 ```
@@ -62,7 +62,7 @@ the root `Cargo.toml`.
 | Command | Use when | What runs |
 | --- | --- | --- |
 | `bun run dev:ui` | UI-only work that can tolerate missing API calls | Vite on `http://localhost:5173`; no backend. |
-| `bun run dev:web` | Browser + backend iteration with auth disabled | `NOMI_CHANNEL=dev` `nomifun-web --port 8787 --dist ui/dist --insecure-no-auth` plus Vite dev server. |
+| `bun run dev:web` | Browser + backend iteration with auth disabled | `NOMI_CHANNEL=dev` `nomifun-web --port 8787 --api-only --insecure-no-auth` plus Vite dev server. |
 | `bun run serve:web` | Running the production-style web host from source | `nomifun-web` on `http://127.0.0.1:8787`; serves built `ui/dist`; auth on by default. |
 | `bun run dev` | Desktop/Tauri work | `NOMI_CHANNEL=dev` Tauri shell, Vite, and embedded backend under the desktop local-trust policy. |
 
@@ -129,9 +129,9 @@ Current subcommands:
 - `mcp-open-stdio`
 - `terminal-hook --event <kind>`
 - `doctor`
-- `tools`
-- `call <name> [json-args]`
-- `agent "<goal>"`
+- `remote open|turn|observe|cancel` — canonical Remote API client
+- `backup --output <dir>`
+- `restore --bundle <dir> --destination-data-dir <dir>`
 
 When agents fail to launch, start with:
 

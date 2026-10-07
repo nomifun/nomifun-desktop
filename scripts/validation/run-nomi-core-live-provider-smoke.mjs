@@ -19,6 +19,9 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --file-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --reasoning-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --reasoning-smoke --reasoning-navigation
+ * Navigation also requires NOMIFUN_LIVE_PLAYWRIGHT_MODULE pointing at an existing
+ * Playwright ESM entry, and optionally NOMIFUN_LIVE_BROWSER_NODE for its Node host.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
@@ -73,7 +76,7 @@ const LONG_CODING_TEST_NAME = 'nomi_core_long_coding_reaches_live_stepfun';
 const GAME_TEST_NAME = 'nomi_core_snake_game_reaches_live_stepfun';
 const GENERAL_DESKTOP_TEST_NAME = 'nomi_core_general_desktop_reaches_live_stepfun';
 const PLUGIN_TEST_NAME = 'nomi_core_general_plugin_creation_reaches_live_stepfun';
-const PLUGIN_SUMMARY_FIELDS = ['steps', 'relays', 'protocol_rejections', 'tool_errors', 'pauses', 'approvals', 'task_continues', 'current_continues', 'plugin_tool_calls', 'list', 'open', 'read', 'plan', 'apply', 'check', 'preview', 'test_action', 'test_ui', 'install', 'inspect'];
+const PLUGIN_SUMMARY_FIELDS = ['steps', 'relays', 'protocol_rejections', 'tool_errors', 'pauses', 'task_continues', 'current_continues', 'plugin_tool_calls', 'list', 'open', 'read', 'plan', 'apply', 'check', 'preview', 'test_action', 'test_ui', 'install', 'inspect'];
 const COMPANION_TEST_NAME = 'nomi_core_official_companion_reaches_live_stepfun';
 const CREATIVE_TEST_NAME = 'nomi_core_official_creative_studio_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
@@ -89,6 +92,7 @@ const selfTest = process.argv.includes('--self-test');
 const modelSmoke = process.argv.includes('--model-smoke');
 const fileSmoke = process.argv.includes('--file-smoke');
 const reasoningSmoke = process.argv.includes('--reasoning-smoke');
+const reasoningNavigation = process.argv.includes('--reasoning-navigation');
 const codingSmoke = process.argv.includes('--coding-smoke');
 const longCodingSmoke = process.argv.includes('--long-coding-smoke');
 const gameSmoke = process.argv.includes('--game-smoke');
@@ -166,9 +170,9 @@ function terminateProcessTree(child, environment) {
 function runCaptured(
   command,
   args,
-  { environment, input = null, outputLimitBytes, onStdoutLine = null, onStderrLine = null },
+  { environment, input = null, outputLimitBytes, onStdoutLine = null, onStderrLine = null, timeoutMs = null },
 ) {
-  const remainingMs = globalDeadline - Date.now();
+  const remainingMs = Math.min(globalDeadline - Date.now(), timeoutMs ?? Infinity);
   if (remainingMs <= 0) {
     return Promise.resolve({
       status: null,
@@ -459,7 +463,7 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--plugin-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--plugin-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--report') return !idmmSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
@@ -472,7 +476,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, pluginSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, pluginSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -514,12 +518,13 @@ async function main() {
   // Only the explicit CLI mode can request retention; inherited test variables
   // must not silently change the normal cleanup contract.
   for (const name of Object.keys(environment)) {
-    if ([RETAIN_FIXTURE_ENVIRONMENT_NAME, FIXTURE_PARENT_ENVIRONMENT_NAME].includes(name.toUpperCase())) delete environment[name];
+    if ([RETAIN_FIXTURE_ENVIRONMENT_NAME, FIXTURE_PARENT_ENVIRONMENT_NAME, 'NOMIFUN_LIVE_REASONING_NAVIGATION'].includes(name.toUpperCase())) delete environment[name];
   }
   if (retainNativeFixture) {
     environment[RETAIN_FIXTURE_ENVIRONMENT_NAME] = '1';
     environment[FIXTURE_PARENT_ENVIRONMENT_NAME] = fixtureParent;
   }
+  if (reasoningNavigation) environment.NOMIFUN_LIVE_REASONING_NAVIGATION = '1';
 
   environment.CARGO_TERM_COLOR = 'never';
   environment.RUST_BACKTRACE = '0';
@@ -626,6 +631,15 @@ async function main() {
   credential = '';
 
   let test;
+  let navigationRun = null;
+  const navigationReady = line => {
+    const ready = navigationFixtureReady(line);
+    if (!ready || navigationRun) return;
+    console.log('live_smoke_navigation_phase=browser');
+    navigationRun = runCaptured(environment.NOMIFUN_LIVE_BROWSER_NODE || process.execPath,
+      [resolve(ROOT, 'scripts/validation/reasoning-navigation-browser.mjs'), ready.port, ready.session],
+      { environment, outputLimitBytes: 1024 * 1024, timeoutMs: 240_000 });
+  };
   try {
     console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : selectedSmokeMode} model=${model}`);
     test = await runCaptured(
@@ -641,7 +655,7 @@ async function main() {
         environment,
         input: credentialInput,
         outputLimitBytes: TEST_OUTPUT_LIMIT_BYTES,
-        onStderrLine: idmmSmoke ? line => {
+        onStderrLine: reasoningNavigation ? navigationReady : idmmSmoke ? line => {
           const active = line.match(/^NOMIFUN_IDMM_DEMO_ACTIVE case=([a-z_]+)$/);
           if (active && IDMM_DEMO_CASES.includes(active[1])) console.log(`idmm_demo_case=${active[1]} status=running`);
           const item = parseIdmmDemoCase(line);
@@ -665,6 +679,19 @@ async function main() {
   } finally {
     credentialInput.fill(0);
   }
+  if (reasoningNavigation) {
+    const navigation = navigationRun ? await navigationRun : null;
+    const proof = navigation?.stdout.split(/\r?\n/).find(line =>
+      /^NOMIFUN_LIVE_REASONING_NAVIGATION leaves=2 returns=2 returned_thinking=[0-9]{1,5} returned_done=[0-9]{1,5} clock_advances=true returned_expanded=true completed_collapsed=true terminal=true$/.test(line));
+    if (proof) console.log('live_smoke_navigation_evidence=' + proof.slice('NOMIFUN_LIVE_REASONING_NAVIGATION '.length));
+    if (!navigation || navigation.status !== 0 || !proof) {
+      const failure = navigation?.stderr.split(/\r?\n/).find(line =>
+        /^NOMIFUN_LIVE_REASONING_NAVIGATION_FAILURE code=NAVIGATION_[A-Z_]+_FAILED$/.test(line));
+      if (failure) console.error(failure);
+      emitFailure('live_smoke_navigation_status=fail', 'REASONING_NAVIGATION_FAILED', 422);
+      if (test.status === 0) test.status = 1;
+    }
+  }
 
   if (test.timedOut) {
     emitFailure('live_smoke_status=fail', 'RUNNER_GLOBAL_TIMEOUT', 504);
@@ -686,6 +713,8 @@ async function main() {
   for (const line of test.stderr.split(/\r?\n/)) {
     const reasoning = line.match(/^NOMIFUN_LIVE_REASONING_EVIDENCE messages=([0-9]{1,5}) deltas=([0-9]{1,6}) done=([0-9]{1,5}) reopened=([0-9]{1,5}) tools_started=([0-9]{1,5}) tools_completed=([0-9]{1,5}) active_samples=([0-9]{1,5}) elapsed_ms=([0-9]{1,8}) all_closed=(true|false) terminal=(true|false)$/);
     if (reasoning) console.log(`live_smoke_reasoning_evidence=${reasoning[0].slice('NOMIFUN_LIVE_REASONING_EVIDENCE '.length)}`);
+    const reasoningRecovery = line.match(/^NOMIFUN_LIVE_REASONING_RECOVERY reconnects=([0-9]{1,3}) recovered_frames=([0-9]{1,6}) active_reads=([0-9]{1,5}) history_active=([0-9]{1,5}) history_done=([0-9]{1,5}) stable_anchor=(true|false) terminal_history_closed=(true|false)$/);
+    if (reasoningRecovery) console.log('live_smoke_reasoning_recovery=' + reasoningRecovery[0].slice('NOMIFUN_LIVE_REASONING_RECOVERY '.length));
     const build = line.match(/^NOMIFUN_LIVE_SMOKE_BUILD digest=([a-f0-9]{64})$/);
     if (build) console.log(`live_smoke_build_digest=${build[1]}`);
     const codingTrace = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_TRACE phase=(file|coding|snake_game|long_first|long_repair|long_second) read=([0-9]{1,4}) write=([0-9]{1,4}) patch=([0-9]{1,4}) exec=([0-9]{1,4}) plan=([0-9]{1,4}) completion=([0-9]{1,4}) tool_errors=([0-9]{1,4}) final_replies=([0-9]{1,4}) file_exists=(true|false) file_bytes=([0-9]{1,8}) html=(true|false) script=(true|false) canvas=(true|false) keydown=(true|false)$/);
@@ -832,6 +861,13 @@ async function main() {
   process.exitCode = test.status ?? 1;
 }
 
+function navigationFixtureReady(line) {
+  if (/[\r\n]/.test(line)) return null;
+  const ready = line.match(/^NOMIFUN_LIVE_REASONING_UI_READY port=([0-9]{1,5}) session=([a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$/);
+  return ready && Number(ready[1]) >= 1 && Number(ready[1]) <= 65535
+    ? { port: ready[1], session: ready[2] } : null;
+}
+
 function runSelfTest() {
   if (cargoFailureCode("rust-lld: error: failed to write output 'test.exe': permission denied") !== 'CARGO_LINK_OUTPUT_UNAVAILABLE' ||
       cargoFailureCode('error[E0308]: mismatched types') !== 'CARGO_BUILD_FAILED') {
@@ -875,17 +911,27 @@ function runSelfTest() {
       selectedTestPassed(`test ${BEFORE_TOOL_TEST_NAME} ... ok`, MODEL_TEST_NAME)) {
     throw new Error('exact test execution proof self-test failed');
   }
+  const readyLine = 'NOMIFUN_LIVE_REASONING_UI_READY port=41234 session=0190f5fe-7c00-7a00-8abc-012345678911';
+  if (!navigationFixtureReady(readyLine) ||
+      [readyLine.replace('41234', '0'), readyLine.replace('41234', '65536'),
+        `test ${REASONING_TEST_NAME} ... ${readyLine}`, `${readyLine}\n`, `${readyLine} extra`]
+        .some(line => navigationFixtureReady(line)) ||
+      !selectedTestPassed(`test ${REASONING_TEST_NAME} ... ok\r\n`, REASONING_TEST_NAME) ||
+      selectedTestPassed(`test ${REASONING_TEST_NAME} ... \n${readyLine}\nok`, REASONING_TEST_NAME)) {
+    throw new Error('reasoning navigation signal and selected-test receipt self-test failed');
+  }
   if (!ALLOWED_MODELS.has('step-3.7-flash') || !ALLOWED_MODELS.has('step-5-preview') ||
       ['step-3.77-flash', 'step-3.7-flash\n', 'step-3.7-flash ', 'step-5-preview\n', 'step-5-preview ', '', 'https://example.invalid/v1', 'arbitrary-model'].some((model) => ALLOWED_MODELS.has(model))) {
     throw new Error('model allowlist self-test failed');
   }
   if (!ALLOWED_MODELS.has('step-5-preview')) throw new Error('model allowlist self-test failed');
-  const pluginSummary = PLUGIN_SUMMARY_FIELDS.map((name, index) => `${name}=${index}`).join(' ');
+  const pluginSummary = 'steps=7 relays=1 protocol_rejections=0 tool_errors=0 pauses=0 task_continues=0 current_continues=1 plugin_tool_calls=1 list=1 open=1 read=1 plan=1 apply=1 check=1 preview=0 test_action=1 test_ui=0 install=1 inspect=1';
   const pluginLine = `NOMIFUN_LIVE_PLUGIN_SUMMARY ${pluginSummary}`;
   if (pluginSummaryFromLine(pluginLine) !== pluginSummary ||
       pluginSummaryFromLine(`${pluginLine} secret=1`) !== null ||
-      pluginSummaryFromLine(pluginLine.replace('steps=0', 'steps=SECRET')) !== null ||
-      pluginSummaryFromLine(pluginLine.replace('steps=0', 'secret=0')) !== null ||
+      pluginSummaryFromLine(`${pluginLine} approvals=0`) !== null ||
+      pluginSummaryFromLine(pluginLine.replace('steps=7', 'steps=SECRET')) !== null ||
+      pluginSummaryFromLine(pluginLine.replace('steps=7', 'secret=7')) !== null ||
       !selectedTestPassed(`test ${PLUGIN_TEST_NAME} ... ok`, PLUGIN_TEST_NAME)) {
     throw new Error('plugin summary forwarding self-test failed');
   }

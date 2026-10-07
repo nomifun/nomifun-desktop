@@ -35,6 +35,43 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
+  test.each([null, Number.NaN, Number.POSITIVE_INFINITY, '3000'])('ignores invalid canonical finish %p on a running Turn', (finish) => {
+    const result = buildTurnDisclosureItems([
+      item('summary', 'metadata', {
+        turnId: TURN_1,
+        createdAt: 1000,
+        turnStartedAt: 2000,
+        turnEndedAt: finish as unknown as number,
+        processState: 'running',
+      }),
+      item('phase', 'process_content', { turnId: TURN_1, createdAt: 3000, processState: 'running' }),
+    ], { activeTurnId: TURN_1 });
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure');
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.startAt).toBe(2000);
+    expect(disclosure.running).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.processItemStates.phase).toBe('running');
+    expect(Number.isFinite(disclosure.endAt)).toBe(true);
+  });
+
+  test('restores the exact active Turn clock when its start is outside the history window', () => {
+    const result = buildTurnDisclosureItems([
+      item('phase', 'process_content', { turnId: TURN_1, createdAt: 8000, processState: 'running' }),
+      item('old-phase', 'process_content', { turnId: TURN_2, createdAt: 2000, processState: 'completed' }),
+    ], { activeTurnId: TURN_1, activeTurnStartedAt: 1000 });
+    const active = result.find(entry => entry.type === 'turn_disclosure' && entry.turnId === TURN_1);
+    expect(active?.type).toBe('turn_disclosure');
+    if (active?.type !== 'turn_disclosure') return;
+    expect(active.startAt).toBe(1000);
+    expect(active.running).toBe(true);
+    const old = result.find(entry => entry.type === 'turn_disclosure' && entry.turnId === TURN_2);
+    if (old?.type !== 'turn_disclosure') throw new Error('old Turn disclosure missing');
+    expect(old.startAt).toBe(2000);
+    expect(old.running).toBe(false);
+  });
+
   test('typed output continuation keeps every linked public part outside the process disclosure', () => {
     const first=item('first','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
     const tail=item('tail','assistant',{createdAt:3000,sourceMessageIds:[SOURCE_2],publicText:true,continuationOfMessageId:SOURCE_1});

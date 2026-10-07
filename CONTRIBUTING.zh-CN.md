@@ -65,8 +65,8 @@ NomiFun 是一个 Rust + Tauri + React monorepo，也是一套本地优先的高
 安装与基础检查：
 
 ```bash
-git clone <repo-url> nomifun-tauri
-cd nomifun-tauri
+git clone <repo-url> nomifun-desktop
+cd nomifun-desktop
 bun install
 cargo check --workspace
 ```

@@ -7,14 +7,14 @@
 ## 顶层布局
 
 ```text
-nomifun-tauri/
+nomifun-desktop/
 ├── apps/
 │   ├── web/                      nomifun-web：独立 Web/API host
 │   └── desktop/                  nomifun-desktop：Tauri 桌面壳
 ├── crates/
-│   ├── agent/                    15 个 nomi-* crate，AI agent 引擎
-│   ├── backend/                  29 个 nomifun-* crate，HTTP/WS 后端
-│   └── shared/                   2 个真正跨层共享 crate
+│   ├── agent/                    11 个 nomi-* crate，AI agent 引擎
+│   ├── backend/                  54 个 nomifun-* crate，HTTP/WS 后端
+│   └── shared/                   5 个跨层共享 crate
 ├── ui/                           React SPA，Vite + UnoCSS，唯一 Bun workspace
 ├── docs/                         当前文档、专项历史决策、外部 skill 与图片资源
 ├── packaging/linux/              nomifun-web systemd unit 与部署说明
@@ -48,9 +48,9 @@ binary 存在，用于诊断、stdio MCP bridge、canonical Remote 调用和无�
 
 | 目录 | 前缀 | 数量 | 职责 |
 | --- | --- | --- | --- |
-| [`crates/agent/`](../../crates/agent) | `nomi-*` | 15 | AI agent 引擎，尽量保持独立。 |
-| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 32 | HTTP/WS 后端、数据层、认证、会话、cron、knowledge、terminal、companion、public gateway 等。 |
-| [`crates/shared/`](../../crates/shared) | mixed | 2 | 真正跨 agent/backend 使用的共享工具。 |
+| [`crates/agent/`](../../crates/agent) | `nomi-*` | 11 | AI agent 引擎，尽量保持独立。 |
+| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 54 | HTTP/WS 后端、数据层、认证、Agent Store、Unified Plugin、cron、knowledge、terminal、companion、public gateway 等。 |
+| [`crates/shared/`](../../crates/shared) | mixed | 5 | 真正跨 agent/backend 使用的共享工具。 |
 
 ## Agent 层接缝
 
@@ -70,7 +70,6 @@ crate。新增后端 crate 时不要随手添加 `nomi-*` 依赖；若确实是 
 | [`ui/src/common/`](../../ui/src/common) | 跨 host 的 API client、类型、adapter、工具函数。 |
 | [`ui/src/platform/`](../../ui/src/platform) | host bridge：storage、logger、theme、平台能力。 |
 | [`ui/src/renderer/`](../../ui/src/renderer) | 页面、组件、hooks、服务、样式和 renderer 入口。 |
-| [`ui/src/common/utils/shims/`](../../ui/src/common/utils/shims) | renderer-safe 兼容 shim 与构建别名目标。 |
 | [`docs/getting-started/`](../getting-started) | 安装与首次运行。 |
 | [`docs/guides/`](../guides) | 用户任务指南。 |
 | [`docs/architecture/`](../architecture) | 当前架构说明。 |

@@ -8,7 +8,7 @@ import { Spin } from '@arco-design/web-react';
 import { Brain, Right } from '@icon-park/react';
 import type { ThinkingContentDisplayLength } from '@/common/config/thinkingDisplay';
 import classNames from 'classnames';
-import React, { useEffect, useId, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 
 import styles from './ThinkingProcessDisplay.module.css';
 
@@ -72,7 +72,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
 }) => {
   const isDone = state === 'completed';
   const isProcessVariant = variant === 'process';
-  const defaultExpanded = expanded ?? true;
+  const defaultExpanded = expanded ?? !isDone;
   const [internalExpanded, setInternalExpanded] = useState(() => defaultExpanded);
   const resolvedExpanded = expanded ?? internalExpanded;
   const [elapsedTime, setElapsedTime] = useState(() => {
@@ -84,7 +84,9 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   const bodyId = useId();
   const Header = disclosure ? 'button' : 'div';
 
-  useEffect(() => {
+  // A phase transition owns the automatic disclosure default. Repeated body
+  // updates within that phase keep the user's manual choice.
+  useLayoutEffect(() => {
     if (expanded !== undefined) return;
     setInternalExpanded(defaultExpanded);
   }, [defaultExpanded, expanded, identityKey]);
@@ -129,6 +131,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
         className
       )}
       data-thinking-process-state={state}
+      data-thinking-process-identity={identityKey}
       data-thinking-process-disclosure={disclosure}
       data-thinking-body-length={bodyLength}
       role={role}

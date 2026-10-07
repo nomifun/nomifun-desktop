@@ -110,11 +110,13 @@ export const useNomiMessage = (
   const activeMsgIdRef = useRef<MessageId | null>(null);
   const rootTurnIdRef = useRef<MessageId | null>(null);
   const [activeTurnId, setActiveTurnId] = useState<MessageId | null>(null);
+  const [activeTurnStartedAt, setActiveTurnStartedAt] = useState<number | undefined>();
   const [activeRequestMessageId, setActiveRequestMessageId] = useState<MessageId | null>(null);
   // Publish the same verified identity used by stream fencing to the renderer.
   // Ref-only identity cannot notify the timeline when hydration/start replaces
   // its provisional request boundary or a delayed row splits the active Turn.
   const setRootTurnId = useCallback((turnId: MessageId | null) => {
+    if (turnId === null || turnId !== rootTurnIdRef.current) setActiveTurnStartedAt(undefined);
     rootTurnIdRef.current = turnId;
     setActiveTurnId(turnId);
   }, []);
@@ -268,6 +270,8 @@ export const useNomiMessage = (
       if (rootTurnIdRef.current !== null) setActiveMsgId(null);
     }
     setRootTurnId(activeTurnId);
+    const startedAt = conversation.runtime?.processing_started_at;
+    if (typeof startedAt === 'number' && Number.isFinite(startedAt)) setActiveTurnStartedAt(startedAt);
     awaitingBackendTurnRef.current = false;
     turnClosedRef.current = false;
     rejectUnannouncedStartRef.current = false;
@@ -555,6 +559,8 @@ export const useNomiMessage = (
         turnLifecycleGenerationRef.current += 1;
         if (rootTurnIdRef.current && rootTurnIdRef.current !== event.turn_id) setActiveMsgId(null);
         setRootTurnId(event.turn_id);
+        const startedAt = event.runtime?.processing_started_at;
+        if (typeof startedAt === 'number' && Number.isFinite(startedAt)) setActiveTurnStartedAt(startedAt);
         awaitingBackendTurnRef.current = false;
         turnClosedRef.current = false;
         rejectUnannouncedStartRef.current = false;
@@ -832,6 +838,7 @@ export const useNomiMessage = (
     setThought,
     running,
     activeTurnId: running ? activeTurnId ?? undefined : undefined,
+    activeTurnStartedAt: running ? activeTurnStartedAt : undefined,
     activeRequestMessageId: running ? activeRequestMessageId ?? undefined : undefined,
     hasHydratedRunningState,
     stopNotice,

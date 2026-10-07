@@ -41,8 +41,8 @@ Optional but recommended on the host that runs Nomi (not for building):
 ### Clone the repo
 
 ```bash
-git clone <your-fork-or-mirror>/nomifun-tauri.git
-cd nomifun-tauri
+git clone <your-fork-or-mirror>/nomifun-desktop.git
+cd nomifun-desktop
 ```
 
 The rest of this page assumes the repository root is your working directory.
@@ -206,7 +206,7 @@ notes — see
 The official Docker Hub image is
 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
 It is a **headless** (no GUI) image: SPA + `nomifun-web` + `bun` on
-`debian:bookworm-slim`. The repository also ships a multi-stage `Dockerfile`
+`debian:trixie-slim`. The repository also ships a multi-stage `Dockerfile`
 and a `docker-compose.yml` for local source builds. The examples below use
 `latest`, the stable rolling tag published on Docker Hub. For reproducible
 deployments, pin an explicit version or image digest.
@@ -301,8 +301,9 @@ docker compose up -d --build
 If the error occurs at `load metadata for docker.io/...`, the build has not
 reached apt or Cargo yet. Configure a Docker daemon registry mirror, or point
 `BUN_IMAGE`, `RUST_IMAGE`, and `RUNTIME_IMAGE` at trusted compatible images.
-The default Rust build stage now uses the smaller `rust:1-slim-bookworm`, and
-apt/Cargo downloads have retries and extended timeouts.
+The default Rust build stage uses `rust:1-slim-trixie` and the runtime stage
+uses `debian:trixie-slim`; apt/Cargo downloads have retries and extended
+timeouts.
 
 For the long-form deployment guide (TLS, reverse-proxy patterns, systemd
 unit, security caveats) see

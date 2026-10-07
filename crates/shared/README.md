@@ -9,6 +9,8 @@ Current crates:
 | `nomifun-net` | Shared outbound HTTP client/proxy behavior. |
 | `nomi-redact` | Shared redaction helpers for sensitive text. |
 | `nomi-process-runtime` | Backend-neutral child-process contracts and supervision. |
+| `nomifun-audio` | Shared explicit-format PCM helpers for voice/media adapters. |
+| `nomi-ssh` | Pure russh SSH transport adapter shared by agent and backend SSH surfaces. |
 
 `crates/shared/*` is part of the workspace membership in the root
 `Cargo.toml`. Add a crate here only when it genuinely belongs on both sides of

@@ -1,70 +1,72 @@
 # Creation
 
-Creation is NomiFun Desktop's focused, local-first creation product.
-It has three independent creation surfaces:
+Creation is NomiFun Desktop's focused, local-first creation product,
+centered on:
 
 - **Canvas**: a persistent infinite canvas with media nodes, auditable
-  generation operations, reusable assets, and private templates.
-- **Image Workbench**: a standalone image-generation workbench.
-- **Video Workbench**: a standalone video-generation workbench.
+  generation operations, reusable assets, and private templates;
+- **Asset Library resources**: materials, the prompt library, and private
+  templates, each reachable directly from the main sidebar.
 
-Creation has no Project product object. A Canvas is a Canvas. Image and
-Video Workbenches do not require, infer, select, or create a Canvas. They use
-NomiFun's existing provider and model catalog; they do not maintain a second
-model configuration system.
+Creation has no Project product object. A Canvas is a Canvas. Generation uses
+NomiFun's existing provider and model catalog; Creation does not maintain a
+second model configuration system. The former standalone Image and Video
+Workbench pages are retired — generation tasks run through Canvas nodes and
+template steps.
 
 > Simplified Chinese: [creative-studio.zh.md](creative-studio.zh.md)
 
 ## Open the product
 
-Open **Creation** from the application sidebar. The page reuses
-NomiFun's default titlebar controls for the sidebar, history, and system
-window. Like Settings, the primary rail switches to Creation
-navigation and can be collapsed to recover working space. The primary
-Creation entry resumes the last valid product location in the current
+The main sidebar exposes Creation resources directly: **My Canvases**
+(`creativeStudio.navigation.canvases`, `/nomi/canvases`), **Asset Library**
+(`/asset-library/materials`), **Prompt Library** (`/asset-library/prompts`),
+and **Template Studio** (`/asset-library/templates`) under the data section.
+The My Canvases entry resumes the last valid product location in the current
 app session, including its full query string and in-page hash. Invalid,
 unknown, external, or overlong saved locations fail closed to
-`/workshop/canvases`. There is no separate Creation home item; prompt-led
-creation is available from the **Canvas Assistant** inside an opened Canvas.
-**Back to Workbench** stays pinned to the bottom of that rail and returns to
-`/guid` after any pending Canvas save has been resolved.
+`/nomi/canvases`. Prompt-led creation is available from the **Canvas
+Assistant** inside an opened Canvas.
 
 The canonical route surface is:
 
 | Route | Purpose |
 | --- | --- |
-| `/workshop` | Compatibility entry that redirects to `/workshop/canvases`. |
-| `/workshop/canvases` | Create, rename, open, import, export, and delete Canvases. |
-| `/workshop/canvas/:canvasId` | Edit one Canvas's canonical infinite document. |
-| `/workshop/image` | Use the standalone Image Workbench. It is fully usable with zero Canvases. |
-| `/workshop/video` | Use the standalone Video Workbench. It is fully usable with zero Canvases. |
-| `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Manage prompts, reusable assets, and private templates in Template Studio. |
+| `/nomi/canvases` | Create, rename, open, import, export, and delete Canvases. |
+| `/nomi/canvases/:canvasId` | Edit one Canvas's canonical infinite document. |
+| `/asset-library/materials` | Manage reusable assets in My Assets. |
+| `/asset-library/prompts` | Manage prompts in the Prompt Library. |
+| `/asset-library/templates` | Manage private templates in Template Studio. |
 
-`/workshop/projects` is a deprecated compatibility route that redirects to
-`/workshop/canvases`. It is not a product surface or a second name for a
-Canvas. `/workshop/audio` is retired; audio creation remains available through
-audio nodes on a Canvas.
+The retired `/workshop/*` paths are no longer mounted as routes. A stored
+resume location under `/workshop`, `/workshop/canvases`, `/workshop/projects`,
+or `/workshop/canvas/:canvasId` is rewritten one-way by
+`migratedCreativeRoute()` in
+[`resourceRoutes.ts`](../../ui/src/renderer/pages/creativeStudio/app/resourceRoutes.ts)
+to the corresponding `/nomi/canvases` destination. The standalone Image and
+Video Workbench pages are retired; generation tasks run through Canvas nodes
+and templates instead.
 
 ## Domain boundaries
 
-The task owner union is intentionally small:
+The task owner union is intentionally small — the create-task API accepts
+exactly two owner kinds, and the service additionally supports a
+conversation-turn owner:
 
 | Owner | Identity | Used by |
 | --- | --- | --- |
 | `CanvasNode` | `{ canvasId, nodeId }` | Tasks started from a Canvas node. |
-| `StandaloneWorkbench` | `{ workbenchKind }` | Image, Video, or other standalone workbench tasks. |
-| `TemplateStep` | Existing template/run/step identity | Template execution. |
+| `TemplateStep` | `{ templateId, templateRunId, templateStepId }` | Template execution. |
+| `ConversationTurn` | `{ conversationId, messageId }` | Creation tasks bound to a conversation turn. |
 
-Only a task started by a Canvas node has a Canvas owner. A standalone task
-never gets a hidden, temporary, default, or automatically selected Canvas.
-Historical standalone rows may retain a legacy `project_id` value as inert
-provenance, but it does not participate in owner equality, history paging,
-retirement, asset origin matching, or Canvas deletion. New standalone tasks
-write no legacy project binding, and new standalone asset origins carry only
-`workbench_kind`.
+Only a task started by a Canvas node has a Canvas owner. The retired
+`standalone_workbench` owner kind is rejected by the wire contract; historical
+rows may retain a legacy `project_id` value as inert provenance, but it does
+not participate in owner equality, history paging, retirement, asset origin
+matching, or Canvas deletion.
 
 Deleting a Canvas is blocked only by live `CanvasNode` tasks owned by that
-Canvas. Live standalone tasks do not block deletion of any Canvas.
+Canvas.
 
 ## Canvas model
 
@@ -151,50 +153,26 @@ facts while reusing the same idempotency identity. Removing a provider or model
 also goes through coordinated checks so active tasks and other hard bindings
 cannot be orphaned silently.
 
-## Standalone Image and Video Workbenches
+## Retired standalone workbenches
 
-Image and Video are independent workbenches. Their routes have no Canvas query,
-selector, parent-load gate, or scope bar, and they remain fully usable when the
-Canvas list is empty. They never create or select a hidden Canvas.
+The standalone Image and Video Workbench pages are retired and no longer
+mounted. The create-task wire contract accepts only `canvas_node` and
+`template_step` owners; a `standalone_workbench` owner is rejected. Historical
+standalone rows remain readable as provenance but cannot be retried exactly.
+Image, video, and audio generation now run through Canvas node composers and
+template steps.
 
-Standalone task history is scoped only by `workbench_kind`:
-
-- `GET /api/creative-studio/tasks?workbench_kind=image|video`
-- `POST /api/creative-studio/tasks/retire` with
-  `{ workbench_kind, task_ids }`
-
-History pagination, active-task recovery, retry, retirement, and asset-origin
-matching ignore legacy standalone `project_id` provenance. The history model
-merges old provenance buckets by task identity and retains strict keyset
-pagination. Legacy rows whose ordered inputs cannot be proven remain visible but
-cannot be retried exactly.
-
-### Session draft continuity
-
-Image and Video keep one versioned `sessionStorage` draft per `workbenchKind`.
-The storage key contains neither `projectId` nor `canvasId`. A draft stores only:
-
-- prompt;
-- exact `{ providerId, model }` identity;
-- controlled generation parameters;
-- ordered reference asset IDs;
-- the workbench layout.
-
-Busy state, errors, open modals, current selections, task state, and complete
-asset objects are deliberately excluded. Corrupt, oversized, unknown-version,
-cross-workbench, or unavailable-storage values fail closed without preventing
-the route from loading.
-
-On route entry, reference IDs are hydrated individually through the canonical
-asset `get` API. Missing, unreadable, mismatched, duplicate, excess, or
-wrong-kind references are removed rather than represented by stale browser
-objects. Generation remains disabled until initial hydration finishes. A saved
+Canvas node composers keep durable drafts of prompt, exact
+`{ providerId, model }` identity, controlled generation parameters, and ordered
+reference asset IDs. On hydration, missing, unreadable, mismatched, duplicate,
+excess, or wrong-kind references are removed rather than represented by stale
+browser objects. Generation remains disabled until initial hydration finishes. A saved
 model survives only if that exact Provider/model pair still supports the
 required task; a same-named model from another Provider is never substituted.
 
 ## Prompt library and reusable inputs
 
-`/workshop/prompts` is a standalone prompt-management surface. It combines:
+`/asset-library/prompts` is a standalone prompt-management surface. It combines:
 
 - an attributed, offline-first catalog synchronized from a fixed allow-list of
   upstream prompt repositories;
@@ -212,10 +190,10 @@ be added again later. Independently authored text assets remain valid prompt
 sources. The catalog cache remains usable offline after a successful
 synchronization.
 
-The standalone route deliberately has no hidden Canvas insertion target.
+The prompt-library route deliberately has no hidden Canvas insertion target.
 Copying or saving a prompt does not create a Canvas or start generation. Pick
-the resulting text asset from a Canvas or workbench when it belongs in a
-specific creation flow.
+the resulting text asset from a Canvas when it belongs in a specific creation
+flow.
 
 ## Assets, persistence, and recovery
 
@@ -270,7 +248,7 @@ to a Canvas archive.
 
 ## Minimal Template AI
 
-**AI Create** on `/workshop/templates` intentionally implements a small launch
+**AI Create** on `/asset-library/templates` intentionally implements a small launch
 scope:
 
 1. Enter a simple requirement and select one exact enabled `chat` model.
@@ -336,7 +314,7 @@ packaging success alone.
 
 ## Implementation references
 
-- Product routes: [`app/routes.ts`](../../ui/src/renderer/pages/creativeStudio/app/routes.ts)
+- Product routes: [`app/resourceRoutes.ts`](../../ui/src/renderer/pages/creativeStudio/app/resourceRoutes.ts)
 - Canvas document: [`creative_studio.rs`](../../crates/backend/nomifun-workshop/src/creative_studio.rs)
 - Canvas, asset, and template routes: [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)
 - Generation task routes: [`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs)

@@ -10,28 +10,42 @@ The user and Agent see the same native web page. During an Agent run, user page 
 
 For a frontend project, start its development server, then ask the Agent to navigate to the localhost URL in the conversation browser, observe the page, interact, and verify the result. Navigation, clicks, keyboard input and standard HTML selections use the real browser. A screenshot stream is not the interactive surface.
 
-Windows native input has real smoke coverage. The full product acceptance matrix, including macOS, frames, dialogs, files, and packaging, is still in progress. See the [architecture](../architecture/browser-platform.md) and [implementation record](../specs/2026-09-13-browser-workspace-v2-progress.zh.md) for the current limits.
+Windows native input has real smoke coverage. The full product acceptance matrix, including macOS, frames, dialogs, files, and packaging, is still in progress. See the [architecture](../architecture/browser-platform.md) for the current limits.
 
-## Optional System Browser (Windows, implementation in progress)
+## Optional Attached Chrome (Windows, implementation in progress)
 
-Select `nomi_system_browser` in the Agent workbench's Web category, then use System Browser in the conversation header to connect to your running, signed-in Chrome 144+.
-Enable connections at `chrome://inspect/#remote-debugging`, approve Chrome's prompt, and choose the tabs this conversation may use.
-No Chrome restart, replacement profile, or import of cookies, passwords or history is required. Chrome's native permission covers the selected profile; NomiFun separately restricts Agent targets to your selected tabs.
+An Agent session's `browser` capability can be served by an attached,
+already-running Chrome instead of the embedded Browser Workspace. The provider
+is installation-level: connect once with
+`POST /api/browser-providers/attached-chrome` after enabling Chrome remote
+debugging (`chrome://inspect/#remote-debugging`), approve Chrome's prompt, then
+bind the session to the `attached-chrome` provider resource. `GET`/`DELETE` on
+the same route read and release the attachment.
 
-The initial driver supports main-document observation, navigation, clicks, text, keys and scrolling in the original Chrome window. There is no screenshot-stream surface, test panel or takeover mode.
-Authorization changes are disabled while the Agent runs. NomiFun cannot physically lock Chrome's address bar, window controls or permission-revocation UI.
-Disconnect releases automation and its connection, not your browser or tabs. A pending connection can be cancelled; uncertain requests are reconciled by reading state, never automatically reconnected or replayed.
+No Chrome restart, replacement profile, or import of cookies, passwords or
+history is required. Disconnect releases automation and its connection, not
+your browser or tabs. Mutable browser operations fail closed while the Agent
+owns the run.
 
-Trusted main-document input has been tested in an owned disposable Chrome. User-approved personal-login acceptance, the full iframe/file/dialog matrix, and release acceptance remain outstanding.
-Edge, macOS and Linux support is not yet claimed. This capability grants neither embedded-browser control nor local or provider-native web search.
+The frontend wiring and the full iframe/file/dialog acceptance matrix remain
+in progress; the provider and its REST surface are implemented in
+`nomifun-app` (`browser_workspace_provider/attached_provider.rs`). Edge, macOS
+and Linux support is not yet claimed. This capability grants neither
+embedded-browser control nor local or provider-native web search.
 
-## Optional Web Search
+## Optional Web Research
 
-In the Agent workbench's Web category, `nomi_local_websearch` is distinct from the model provider's `web.search`. Local search sends the query to a search engine through an isolated Headless runtime and does not use conversation login state. It does not require model-native search or grant browser automation.
+The `web.research` capability module covers public-web research independently
+of the model provider's native search. Queries run through an isolated
+background browser runtime and do not use session login state; enabling it does
+not grant Browser automation.
 
-Windows desktop detects installed Chrome 120+; without a suitable installation this capability cannot be enabled. Discovery does not launch a browser. A query starts an isolated runtime and verifies its live version.
-Queries go to Bing and engine domains are resolved through Google Public DNS over HTTPS, without conversation login state. Restart the app if a Chrome update invalidates the pinned release.
-Windows catalog integration and public queries are verified. Full main-application interaction and packaging acceptance remain in progress; macOS implementation awaits the later handoff.
+Windows desktop detects installed Chrome 120+; without a suitable installation
+this capability cannot be enabled. Discovery does not launch a browser. A query
+starts an isolated runtime and verifies its live version.
+Queries go to Bing and engine domains are resolved through Google Public DNS
+over HTTPS, without session login state. Restart the app if a Chrome update
+invalidates the pinned release.
 
 ## Computer Use
 

@@ -29,8 +29,7 @@ tabs, MCP servers, and local scripts. NomiFun pulls them into one workspace:
   diffs, terminals, and knowledge bindings instead of living as isolated chat
   transcripts.
 - **One creation system beyond chat.** Creation combines a persistent
-  infinite Canvas, independent Image/Video Workbenches, prompt and asset
-  libraries, and private templates.
+  infinite Canvas, prompt and asset libraries, and private templates.
 - **Backend-driven automation.** Scheduled tasks, AutoWork requirements,
   terminal sessions, channel integrations, and completion notifications are
   durable backend services, not foreground browser-tab state.
@@ -68,9 +67,11 @@ For implementation details, see [Architecture Overview](../architecture/overview
 - **Terminals**: PTY-backed agent or shell sessions inside the app.
 - **Models**: providers, extensible model catalog, task capabilities,
   context/output limits, and global IDMM/failover settings.
-- **Creation** (`/workshop/*`): infinite Canvases, independent Image and
-  Video Workbenches, prompts, reusable assets, and private templates.
-- **Presets & Skills**: reusable launch configurations and focused capability management.
+- **Agent workbench** (`/agent`): author Agents from seeds with capabilities,
+  skills, and model routing; sessions run at `/agent-sessions/:id`.
+- **Creation**: infinite Canvases (`/nomi/canvases`), plus materials, prompts,
+  and private templates in the asset library (`/asset-library/*`).
+- **Skills** (`/skills`): focused capability management.
 - **MCP**: local MCP server configuration.
 - **Open Capabilities**: WebUI remote access, remote MCP, and REST capability
   exposure.

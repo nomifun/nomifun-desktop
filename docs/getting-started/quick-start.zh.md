@@ -81,7 +81,7 @@ NomiFun 会创建新会话并进入 `/conversation/:id`，随后开始流式输�
 
 ## 6. 常用入口
 
-- `/presets`：管理设定；`/skills`：管理技能。
+- `/agent`：Agent 工作台，创建与管理 Agent；`/skills`：管理技能。
 - `/mcp`：管理 MCP server、连接测试、OAuth 和导入/同步。
 - `/open-capabilities`：管理 WebUI 远程访问和对外能力暴露。
 - `/scheduled`：创建 cron 会话任务；支持从会话带上下文创建。
@@ -91,7 +91,7 @@ NomiFun 会创建新会话并进入 `/conversation/:id`，随后开始流式输�
 接下来可以继续阅读：
 
 - [MCP 与技能](../guides/mcp-and-skills.zh.md)
-- [设定](../guides/presets.zh.md)
+- [Agent 工作台](../guides/presets.zh.md)
 - [终端](../guides/terminal.zh.md)
 - [WebUI 远程访问](../guides/webui-remote-access.zh.md)
 - [Web 服务部署](../guides/web-server-deployment.zh.md)

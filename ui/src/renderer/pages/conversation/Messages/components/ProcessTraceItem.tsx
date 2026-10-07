@@ -182,7 +182,7 @@ const formatToolReceiptDetailLabel = (
     });
   }
 
-  // Titles describe the action; the adjacent status owns its lifecycle wording.
+  // Generic titles describe the action; errors keep a diagnostic preview.
   // Preserve the explicit preflight and process outcomes handled above.
   if (row.commandExitCode === undefined && (row.action === 'generic' || row.diagnostics)) {
     return row.action === 'generic' ? row.target ?? row.title
@@ -516,13 +516,11 @@ const ToolTraceRow: React.FC<{
   currentActivity = false,
   presentationState,
 }) => {
-  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const detailId = useId();
   const hasDetail = shouldShowToolRowDetail(row, { fileRowCount });
   const visualState = presentationState ?? row.state;
   const errorPreview = getToolErrorPreview(row);
-  const statusKey = row.skipped ? 'skipped' : row.notExecutedReason || row.commandNotStarted ? 'notExecuted' : row.state;
   const Header = hasDetail ? 'button' : 'div';
   const rowClassName = classNames(
     'turn-process-trace__row',
@@ -545,7 +543,6 @@ const ToolTraceRow: React.FC<{
           <span className='turn-process-trace__text' title={row.target ?? label}>{label}</span>
           {errorPreview && <span className='turn-process-trace__diagnostic'>{errorPreview}</span>}
         </span>
-        <span className='turn-process-trace__status'>{t(`messages.toolState.${statusKey}`)}</span>
         {hasDetail && <Right
           theme='outline'
           size='12'
@@ -893,6 +890,7 @@ const ProcessTraceItem: React.FC<{
             {content && <div className='turn-process-trace__paragraph-row'>
               <div className='turn-process-trace__paragraph' data-testid='process-narration'>
                 <MarkdownView
+                  variant='process'
                   fontSize={MESSAGE_BODY_FONT_SIZE}
                   lineHeight={MESSAGE_BODY_LINE_HEIGHT}
                 >

@@ -4,6 +4,8 @@
 }
 
 .containerProcess {
+  display: flex;
+  flex-direction: column;
   margin: 0;
 }
 
@@ -36,6 +38,9 @@
 }
 
 .headerProcess {
+  box-sizing: border-box;
+  align-self: flex-start;
+  min-height: var(--conversation-process-row-height, 26px);
   font-size: var(--conversation-message-font-size, 14px);
   line-height: var(--conversation-message-line-height, 22px);
 }
@@ -93,7 +98,7 @@
 }
 
 .bodyProcess {
-  margin-top: 8px;
+  margin-top: var(--conversation-process-detail-gap, 4px);
   margin-left: 7px;
   padding: 2px 0 2px 16px;
   border: 0;

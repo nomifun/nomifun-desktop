@@ -33,8 +33,8 @@ NomiFun 中的一个定时任务是一个在你选择的时间触发的循环 (�
     "总结今天" 或任何延续性重要的任务。
 - 一个**忙碌守卫**防止同一个会话被并发进入。如果上一次运行
   在下一次触发到来时还在进行中，新的运行会被跳过 (记录为 `skipped`)。
-- 一个**漏触发处理器**会在启动时和操作系统从睡眠中醒来后运行
-  (`/api/cron/internal/system-resume`)。它会遍历每个 `next_run`
+- 一个**漏触发处理器**在后端内部于启动时和操作系统从睡眠中醒来后运行
+  （`CronService::handle_system_resume`；不存在对应的 HTTP 端点）。它会遍历每个 `next_run`
   在过去的已启用任务并发出一条系统消息，让你能看到漏掉一次
   触发 (例如笔记本休眠时)，然后为下一个 cron 节拍重新装定定时器。
 - 每次触发会以一个状态被记录 —— `ok` / `error` / `skipped` /
@@ -74,7 +74,9 @@ Cron 语法速查 (5 字段 —— 秒字段会自动添加)：
 
 - **Nomi (内置)** —— 使用 Nomi 自有引擎以及你选择的
   provider/model。它是唯一能运行计划会话的 agent。
-- **设定** —— 可复用的启动配置；任务记录设定 id、revision 与解析快照。
+- **Agent** —— 在 Agent 工作台（`/agent`）中创作的 Agent；任务记录
+  AgentPreset provenance（preset id + revision）与解析得到的
+  `agent_snapshot`，之后的修改不会悄悄改变已建任务。
 
 **Advanced** 部分让你覆盖 workspace (agent 的工作目录)、model
 以及任意的 `config_options` 键值对，它们会被转发给 agent 工厂。
@@ -185,9 +187,9 @@ NomiFun 附带一个名为 `cron` 的内置自动注入技能，任何 agent 都
 | 列出 / 创建任务                 | `GET /api/cron/jobs`，`POST /api/cron/jobs`                       |
 | 获取 / 更新 / 删除              | `GET|PUT|DELETE /api/cron/jobs/:id`                               |
 | 立即运行                        | `POST /api/cron/jobs/:id/run`                                     |
+| 列出某任务的运行记录            | `GET /api/cron/jobs/:id/runs`                                     |
 | 列出某任务的会话                | `GET /api/cron/jobs/:id/conversations`                            |
 | 每任务技能                      | `GET|POST|DELETE /api/cron/jobs/:id/skill`                        |
-| 系统恢复 (内部)                 | `POST /api/cron/internal/system-resume` (需要内部 header)         |
 
 UI 订阅的实时事件：`cron.job-created`、`cron.job-updated`、
 `cron.job-removed` 和 `cron.job-executed`。漏触发会作为一次

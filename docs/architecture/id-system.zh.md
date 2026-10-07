@@ -4,7 +4,7 @@
 HTTP/WebSocket/MCP 协议、运行时注册表、受管文件、备份与导入。面向贡献者的
 强制执行规范见
 [数据与标识符规范](../contributing/data-and-identifier-standards.zh.md)。
-`continuity/` 文档只提供历史/审计背景，不能覆盖本文契约。
+历史/审计背景见 Git 历史，不能覆盖本文契约。
 
 ## 核心规则
 
@@ -26,6 +26,9 @@ v3 明确区分五类概念：
    id INTEGER PRIMARY KEY AUTOINCREMENT
    ```
 
+   canonical Agent Store 表与 Unified Plugin 表是两组冻结例外，按基线
+   声明使用 TEXT/复合主键。
+
 2. 需要跨数据库、跨设备、跨文件、API、事件或受管 store 稳定定位的实体，
    增加 `user_id`、`conversation_id`、`message_id`、`mcp_server_id`、
    `webhook_id`、`credential_id`、`creation_task_id` 等具名裸 UUIDv7
@@ -33,8 +36,9 @@ v3 明确区分五类概念：
 3. 从不离开所属持久化子系统的关系、单例、缓存和事件行只使用整数 `id`
    作为内部技术身份，不为形式统一而额外生成 UUID，也不把该值升级为产品
    wire locator。
-4. 表间关系由 Repository/Service 维护为逻辑外键；产品 schema 不包含物理
-   外键、`REFERENCES`、trigger 或数据库级联。
+4. 表间关系由 Repository/Service 维护为逻辑外键；两组冻结例外之外的
+   产品 schema 不包含物理外键、`REFERENCES` 或数据库级联；除基线已注册
+   的 guard/validator trigger 外不存在数据库触发器。
 5. v3 是新的数据集代际。历史数据集整体重置，不迁移旧行和旧 ID 格式。
 
 ## 技术主键
@@ -45,6 +49,7 @@ v3 明确区分五类概念：
 id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
+canonical Agent Store 表与 Unified Plugin 表改用基线冻结的 TEXT/复合主键。
 SQLite 内部表、migration metadata 和临时表不属于产品持久表。
 
 技术 `id` 的语义是：
@@ -141,7 +146,11 @@ Session Window、Collected Event、Skill 与 Skill Pattern 同样使用
 
 ## 逻辑外键
 
-v3 全面移除产品 schema 中的物理外键。DDL 不得出现：
+v3 在两组冻结例外（canonical Agent Store 表与 Unified Plugin 表，基线中
+保留了物理 `FOREIGN KEY`/`ON DELETE` 声明）之外移除产品 schema 的物理
+外键。基线还在少数领域携带已注册的 guard/validator trigger；新增领域
+不得在未更新 schema 契约的情况下引入 trigger 或物理约束。其余产品 DDL
+不得出现：
 
 ```text
 FOREIGN KEY
@@ -192,9 +201,10 @@ CREATE INDEX idx_cron_job_runs_cron_job_id
     ON cron_job_runs(cron_job_id);
 ```
 
-`agent_messages.agent_session_id` 逻辑指向 `agent_sessions.agent_session_id`；
+`messages.conversation_id` 逻辑指向 `conversations.conversation_id`；
 `cron_job_runs.cron_job_id` 逻辑指向 `cron_jobs.cron_job_id`。两者都不向
-SQLite 声明物理关系。
+SQLite 声明物理关系。（Agent Store 例外组内 `agent_messages.session_id`
+是真实的 `FOREIGN KEY` —— 该物理图是有意冻结的。）
 
 同一关系禁止同时保存 `conversation_id` 与 `conversation_row_id`，也禁止任何
 等价的业务 ID/行 ID 双轨字段。

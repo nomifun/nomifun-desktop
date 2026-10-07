@@ -2,6 +2,7 @@
 
 /* Base styles (theme-independent) */
 @import './base.css';
+@import '../text-cursor.css';
 
 /* Color Schemes */
 @import './default-color-scheme.css';
