@@ -4221,6 +4221,7 @@ export type I18nKey =
   | 'messages.slash.empty'
   | 'messages.slash.hint'
   | 'messages.slash.title'
+  | 'messages.toolDetailIdentity'
   | 'messages.toolDetailInput'
   | 'messages.toolDetailLoadFailed'
   | 'messages.toolDetailLoading'

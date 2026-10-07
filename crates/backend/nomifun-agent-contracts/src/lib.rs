@@ -17,6 +17,7 @@ pub mod plugin;
 pub mod model_route;
 pub mod model_middleware;
 pub mod tool_middleware;
+pub mod tool_presentation;
 pub mod package;
 pub mod preset;
 pub mod primitives;
