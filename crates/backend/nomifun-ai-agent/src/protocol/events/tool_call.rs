@@ -79,8 +79,19 @@ pub struct ToolCallRetryData {
     pub retry_of_call_id: Option<String>,
 }
 
+/// Display projection of an admitted canonical action, never model-supplied authority.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolCallIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallEventData {
+    #[serde(flatten, default)]
+    pub identity: ToolCallIdentity,
     pub call_id: String,
     pub name: String,
     #[serde(default)]
@@ -146,6 +157,7 @@ mod tests {
 
     fn completed_images(artifacts: Vec<PersistedArtifact>) -> ToolCallEventData {
         ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-images".to_owned(),
             name: "image_gen".to_owned(),
             args: json!({"count": 2}),

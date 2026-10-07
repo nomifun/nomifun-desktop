@@ -129,7 +129,6 @@ const getToolTraceIconKind = (action: ToolReceiptAction): ProcessTraceIconKind =
 
 const getToolReceiptDetailDisplayTarget = (row: ToolReceiptDetailRow, workspaceRoots: string[]): string | undefined => {
   if (!row.target) return undefined;
-  if (row.action === 'generic' && row.target.startsWith(`${row.title} `)) return row.target.slice(row.title.length + 1);
   if (row.action !== 'read_files' && row.action !== 'edit_files') return row.target;
   return formatWorkspaceFileTarget(row.target, { workspaceRoots }).label;
 };
@@ -140,6 +139,7 @@ const formatToolReceiptDetailLabel = (
   workspaceRoots: string[]
 ): string => {
   const displayTarget = getToolReceiptDetailDisplayTarget(row, workspaceRoots);
+
 
   if (row.skipped) {
     return t('messages.toolSummary.skipped', {
@@ -180,6 +180,13 @@ const formatToolReceiptDetailLabel = (
       target: displayTarget ?? row.title,
       defaultValue: '{{target}} reached its time limit; process cleanup completed',
     });
+  }
+
+  // Titles describe the action; the adjacent status owns its lifecycle wording.
+  // Preserve the explicit preflight and process outcomes handled above.
+  if (row.commandExitCode === undefined && (row.action === 'generic' || row.diagnostics)) {
+    return row.action === 'generic' ? row.target ?? row.title
+      : [row.title, displayTarget && displayTarget !== row.title ? displayTarget : undefined].filter(Boolean).join(' · ');
   }
 
   if ((row.state === 'failed' || row.state === 'canceled') && displayTarget) {
@@ -253,8 +260,7 @@ const formatToolReceiptDetailLabel = (
     );
   }
 
-  return row.action === 'generic' ? displayTarget ?? row.title
-    : displayTarget && (displayTarget === row.title || displayTarget.startsWith(`${row.title} `))
+  return displayTarget && (displayTarget === row.title || displayTarget.startsWith(`${row.title} `))
     ? displayTarget
     : joinCompactText([row.title, displayTarget]);
 };
@@ -414,12 +420,14 @@ const ToolTraceDetailSection: React.FC<{ label: string; value?: string }> = ({ l
 
 const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: string[] }> = ({ row, workspaceRoots }) => {
   const { t } = useTranslation();
+  const diagnostics = <ToolTraceDetailSection label={t('messages.toolDetailIdentity')} value={row.diagnostics} />;
   const command = row.action === 'run_commands' ? row.target : undefined;
   const input = row.input && row.input !== command ? row.input : undefined;
 
   if (row.attempts?.length) {
     return (
       <div className='turn-process-trace-detail'>
+        {diagnostics}
         {row.attempts.map((attempt) => (
           <div key={attempt.key} className='turn-process-trace-detail__attempt'>
             <div className='turn-process-trace-detail__label'>
@@ -452,6 +460,7 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
   if (isFileReceiptRow(row) && row.state !== 'failed' && row.state !== 'canceled') {
     return (
       <div className='turn-process-trace-detail'>
+        {diagnostics}
         <ToolFileListDetail rows={[row]} workspaceRoots={workspaceRoots} />
         <ToolTraceDetailSection
           label={t('messages.toolDetailInput', { defaultValue: 'Input' })}
@@ -470,6 +479,7 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
 
   return (
     <div className='turn-process-trace-detail'>
+      {diagnostics}
       <ToolTraceDetailSection
         label={t('messages.command', { defaultValue: 'Command:' })}
         value={command}
@@ -655,12 +665,13 @@ const ToolProcessTraceRows: React.FC<{
   stateOverride,
   recoverFailures = false,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const tools = useMemo(() => normalizeToolMessages(messages), [messages]);
+  const language = i18n.resolvedLanguage ?? i18n.language;
   const rows = useMemo(
     () =>
       // Each call keeps its own position and details, including retry attempts.
-      tools.flatMap((tool) => buildToolReceiptDetailRows([tool]).map((row) => {
+      tools.flatMap((tool) => buildToolReceiptDetailRows([tool], language).map((row) => {
         // Closed turns settle only stale running rows. Completed results and
         // failures inside a mixed group retain their own lifecycle state.
         const effectiveRow = stateOverride && row.state === 'running' && !row.notExecutedReason
@@ -694,7 +705,7 @@ const ToolProcessTraceRows: React.FC<{
             : {}),
         };
       })),
-    [recoverFailures, stateOverride, t, tools, workspaceRoots]
+    [language, recoverFailures, stateOverride, t, tools, workspaceRoots]
   );
 
   const fileRows = rows.filter(({ row }) => isFileReceiptRow(row)).map(({ row }) => row);

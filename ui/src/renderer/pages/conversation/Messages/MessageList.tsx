@@ -473,11 +473,11 @@ const buildProcessReceiptSummary = (
   state: TurnDisclosureProcessState,
   t: TranslationFn,
   workspaceRoots: string[] = [],
-  options: { recovered?: boolean } = {}
+  options: { recovered?: boolean; language?: string } = {}
 ): ProcessReceiptSummary => {
   if ('type' in item && item.type === 'tool_summary') {
     const tools = normalizeToolMessages(item.messages);
-    const receiptParts = buildToolReceiptSummaryParts(tools, state);
+    const receiptParts = buildToolReceiptSummaryParts(tools, state, options.language);
     const summarySeparator = t('messages.processReceipt.summarySeparator', { defaultValue: ', ' });
     const boundedSearchCount = countBoundedSearchResults(tools);
     const recoveredFailureCount = options.recovered
@@ -748,8 +748,9 @@ const MessageList: React.FC<{
     () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
     [conversationContext?.workspace]
   );
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const location = useLocation();
+  const toolLanguage = i18n.resolvedLanguage ?? i18n.language;
   const locationState = (location.state || {}) as ConversationLocationState;
   const targetMessageId = locationState.targetMessageId;
   const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | undefined>();
@@ -908,7 +909,7 @@ const MessageList: React.FC<{
           const item = itemById.get(entry.itemId);
           if (!item) return undefined;
           const state = getProcessItemState(item);
-          const summary = buildProcessReceiptSummary(item, state, t, workspaceRoots);
+          const summary = buildProcessReceiptSummary(item, state, t, workspaceRoots, { language: toolLanguage });
           return {
             type: 'process_receipt',
             id: entry.id,
@@ -1062,6 +1063,7 @@ const MessageList: React.FC<{
     creationTaskOwnerMessageIds,
     processedList,
     t,
+    toolLanguage,
     workspaceRoots,
   ]);
 
@@ -1304,7 +1306,7 @@ const MessageList: React.FC<{
         processState,
         t,
         workspaceRoots,
-        { recovered: recoveredByTurn }
+        { recovered: recoveredByTurn, language: toolLanguage }
       );
       const recovered = recoveredByTurn || summary.recovered === true;
       return (

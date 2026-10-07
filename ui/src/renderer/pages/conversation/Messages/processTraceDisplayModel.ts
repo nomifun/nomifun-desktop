@@ -25,7 +25,7 @@ export const shouldShowToolRowDetail = (
     return true;
   }
 
-  return Boolean(row.input || row.output || row.truncated);
+  return Boolean(row.input || row.output || row.truncated || row.diagnostics);
 };
 
 /**

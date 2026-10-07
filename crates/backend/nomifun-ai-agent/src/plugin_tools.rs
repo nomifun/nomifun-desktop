@@ -36,7 +36,6 @@ use nomifun_agent_kernel::{
 use nomifun_common::AppError;
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::plugin_tool_error_projection::model_safe_tool_error;
@@ -45,10 +44,6 @@ use crate::plugin_tool_error_projection::model_safe_tool_error;
 mod context;
 pub use context::NomiTurnContextContributor;
 
-const PROVIDER_NAME_PREFIX: &str = "plugin__";
-const PROVIDER_NAME_SEPARATOR: &str = "__";
-const PROVIDER_NAME_MAX_BYTES: usize = 64;
-const PROVIDER_NAME_HASH_HEX_BYTES: usize = 20;
 const MAX_INITIAL_CAPABILITY_CONTEXT_BYTES: usize = 64 * 1024;
 
 fn gateway_delegate_provider_name() -> String {
@@ -3008,6 +3003,7 @@ fn build_action(
     let provider_name = provider_tool_name(
         identity.resolved_capability.capability.id.as_ref(),
         identity.action.action_id.as_ref(),
+        &display_name,
         &canonical_identity,
     );
     let artifact_identity = format!(
@@ -3153,58 +3149,14 @@ fn validate_canonical_input_schema(
 fn provider_tool_name(
     capability_id: &str,
     action_id: &str,
+    display_name: &str,
     canonical_identity: &[u8],
 ) -> String {
-    provider_tool_name_with_prefix(
-        PROVIDER_NAME_PREFIX,
-        capability_id,
-        action_id,
+    nomifun_agent_contracts::tool_presentation::namespaced_tool_name(
+        "plugin", display_name,
+        nomifun_agent_contracts::tool_presentation::relative_action(capability_id, action_id),
         canonical_identity,
     )
-}
-
-fn provider_tool_name_with_prefix(
-    prefix: &str,
-    capability_id: &str,
-    action_id: &str,
-    canonical_identity: &[u8],
-) -> String {
-    let mut slug = format!("{capability_id}_{action_id}")
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() {
-                byte.to_ascii_lowercase()
-            } else {
-                b'_'
-            }
-        })
-        .collect::<Vec<_>>();
-    while slug.last() == Some(&b'_') {
-        slug.pop();
-    }
-    if slug.is_empty() {
-        slug.extend_from_slice(b"tool");
-    }
-    let slug_bytes = PROVIDER_NAME_MAX_BYTES
-        .saturating_sub(prefix.len())
-        .saturating_sub(PROVIDER_NAME_SEPARATOR.len())
-        .saturating_sub(PROVIDER_NAME_HASH_HEX_BYTES);
-    slug.truncate(slug_bytes);
-    while slug.last() == Some(&b'_') {
-        slug.pop();
-    }
-    let hash = hex::encode(Sha256::digest(canonical_identity));
-    let slug = String::from_utf8(slug).expect("ASCII slug");
-    let name = format!(
-        "{prefix}{slug}{PROVIDER_NAME_SEPARATOR}{}",
-        &hash[..PROVIDER_NAME_HASH_HEX_BYTES]
-    );
-    debug_assert!(name.len() <= PROVIDER_NAME_MAX_BYTES);
-    debug_assert!(
-        name.bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    );
-    name
 }
 
 fn effect_category(effect: EffectClass) -> ToolCategory {

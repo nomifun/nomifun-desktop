@@ -12,7 +12,9 @@ use nomifun_agent_runtime::{
     AgentToolExposure, AgentToolPlan, compile_agent_tool_plan, standard_agent_tool_exposures,
 };
 use nomifun_common::AppError;
-use sha2::{Digest, Sha256};
+use nomifun_agent_contracts::tool_presentation::{
+    namespaced_tool_name, platform_tool_name, relative_action,
+};
 
 fn error(value: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Nomi tool surface: {value}"))
@@ -179,10 +181,12 @@ pub(super) async fn compile(
                 ));
             }
             let action = tool.action();
-            let suffix = Sha256::digest(selected.capability.id.as_ref().as_bytes());
+            let origin = tool.display_name.strip_suffix(&format!(" / {}", tool.remote_tool_name))
+                .unwrap_or(&tool.display_name);
             exposures.push(AgentToolExposure {
                 definition: ChatToolDefinition {
-                    name: format!("mcp_{suffix:x}")[..63].to_owned(),
+                    name: namespaced_tool_name("mcp", origin, &tool.remote_tool_name,
+                        selected.capability.id.as_ref().as_bytes()),
                     description: format!(
                         "{}: {}. Remote MCP tool; executes only through the frozen platform grant.",
                         tool.display_name, tool.description
@@ -223,17 +227,19 @@ pub(super) async fn compile(
                 .resolve(selected, &action.input_schema)
                 .await
                 .map_err(error)?;
-            // Fixed-length, provider-safe and collision-resistant. Mapping is
-            // still locked to the full canonical capability/action identity.
+            // Readable origin/action alias; authorization remains bound to the
+            // full canonical capability/action identity.
             let identity = format!(
                 "{}\0{}",
                 selected.capability.id.as_ref(),
                 action.action_id.as_ref()
             );
-            let name = format!("plugin_{:x}", Sha256::digest(identity.as_bytes()));
+            let name = namespaced_tool_name("plugin", &capability.manifest.display.name,
+                relative_action(selected.capability.id.as_ref(), action.action_id.as_ref()),
+                identity.as_bytes());
             exposures.push(AgentToolExposure {
                 definition: ChatToolDefinition {
-                    name: name[..63].to_owned(),
+                    name,
                     description: format!("{}: {}\nCapability {}, action {}. Executes through the Agent's frozen platform authority.", capability.manifest.display.name, capability.manifest.display.description, selected.capability.id.as_ref(), action.action_id.as_ref()),
                     input_schema: schema,
                     deferred: false,
@@ -333,33 +339,6 @@ fn action_resources_bound(
             })
         })
     }))
-}
-
-fn platform_tool_name(capability_id: &str, action_id: &str) -> String {
-    const PREFIX: &str = "platform__";
-    const HASH_BYTES: usize = 20;
-    let identity = format!("{capability_id}\0{action_id}");
-    let hash = format!("{:x}", Sha256::digest(identity.as_bytes()));
-    let mut slug = format!("{capability_id}_{action_id}")
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() {
-                byte.to_ascii_lowercase()
-            } else {
-                b'_'
-            }
-        })
-        .collect::<Vec<_>>();
-    let available = 64usize
-        .saturating_sub(PREFIX.len())
-        .saturating_sub(2)
-        .saturating_sub(HASH_BYTES);
-    slug.truncate(available);
-    while slug.last() == Some(&b'_') {
-        slug.pop();
-    }
-    let slug = String::from_utf8(slug).expect("platform Tool slug is ASCII");
-    format!("{PREFIX}{slug}__{}", &hash[..HASH_BYTES])
 }
 
 fn admitted_module_actions<'a>(
@@ -590,13 +569,39 @@ mod tests {
         let navigate = platform_tool_name("browser", "browser/navigate");
         assert_eq!(navigate, platform_tool_name("browser", "browser/navigate"));
         assert_ne!(navigate, platform_tool_name("browser", "browser/observe"));
-        assert!(navigate.starts_with("platform__browser_browser_navigate__"));
+        assert_eq!(navigate, "browser_navigate");
         assert!(navigate.len() <= 64);
         assert!(
             navigate
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         );
+    }
+
+    #[test]
+    fn presentation_catalogue_covers_every_builtin_function_action_and_keeps_native_names() {
+        let registrations = [
+            nomifun_agent_domain_wave1::registrations().unwrap(),
+            nomifun_agent_domain_wave2::registrations().unwrap(),
+            nomifun_agent_domain_wave3::registrations().unwrap(),
+            nomifun_agent_domain_wave4::registrations().unwrap(),
+            nomifun_agent_domain_wave5::registrations().unwrap(),
+        ];
+        for registration in registrations.into_iter().flatten() {
+            for capability in registration.metadata.manifest.payload.contributions.capabilities {
+                for action in capability.contributions.actions {
+                    if action.presentation == ToolPresentationKind::FunctionTool {
+                        assert!(nomifun_agent_contracts::tool_presentation::tool_presentation(
+                            capability.id.as_ref(), action.action_id.as_ref()).is_some(),
+                            "missing tool presentation: {} / {}", capability.id.as_ref(), action.action_id.as_ref());
+                    }
+                }
+            }
+        }
+        for exposure in standard_agent_tool_exposures() {
+            assert_eq!(platform_tool_name(exposure.capability_id.as_ref(), exposure.action_id.as_ref()),
+                exposure.definition.name);
+        }
     }
 
     #[test]
