@@ -7,7 +7,7 @@
 import type {
   PersistedToolArtifact,
 } from '@/common/types/platform/toolCallTypes';
-import type { OfficialPresetKey } from '@/common/types/agentPlatform';
+import { OFFICIAL_PRESET_KEYS, type OfficialPresetKey } from '@/common/types/agentPlatform';
 import { normalizeIdmmDecisionExplanation, normalizeIdmmDecisionNotice, type IdmmDecisionExplanation, type IdmmDecisionNotice } from '@/common/types/idmm';
 import type { IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import {
@@ -24,6 +24,7 @@ import {
 import { uuid } from '../utils';
 import { optionalDisplayText, toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
+import { normalizeModelFailureDiagnostic, type ModelFailureDiagnostic } from './providerDiagnostic';
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
@@ -183,12 +184,25 @@ type AgentErrorResolution = {
   target?: AgentErrorResolutionTarget;
 };
 
+export const AGENT_TASK_INCOMPLETE_REASONS = [
+  'blocked_work', 'step_limit', 'output_truncated', 'unresolved_plan',
+  'unverified_changes', 'running_processes', 'unverified_completion',
+  'rejected_control', 'no_progress', 'execution_guard', 'recovery_guard',
+] as const;
+export type AgentTaskIncompleteReason = (typeof AGENT_TASK_INCOMPLETE_REASONS)[number];
+
 export type AgentStreamErrorInfo = {
   message: string;
   code?: string;
   ownership?: AgentErrorOwnership;
   detail?: string;
   workspacePath?: string;
+  taskIncompleteReason?: AgentTaskIncompleteReason;
+  providerDiagnostic?: ModelFailureDiagnostic;
+  /** Frozen execution identity supplied by the host, never the current selection. */
+  agentLabel?: string;
+  agentTemplateKey?: OfficialPresetKey;
+  modelName?: string;
   retryable?: boolean;
   feedback_recommended?: boolean;
   resolution?: AgentErrorResolution;
@@ -208,6 +222,8 @@ export type IMessageTips = IMessage<
     content: string;
     type: 'error' | 'success' | 'warning';
     error?: AgentStreamErrorInfo;
+    /** Presentation of a verified active pause; never a terminal receipt. */
+    execution_pause?: { reason?: string; cleanupProven: boolean };
     recovery?: TruncatedTurnRecovery;
     idmm_notice?: IdmmDecisionNotice;
     agent_transition?: {
@@ -704,15 +720,28 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
       : undefined;
   const detail = typeof value.detail === 'string' ? value.detail : undefined;
   const workspacePath = typeof value.workspacePath === 'string' ? value.workspacePath : undefined;
+  const taskIncompleteReason = code === 'NOMIFUN_TASK_INCOMPLETE'
+    && AGENT_TASK_INCOMPLETE_REASONS.includes(value.taskIncompleteReason as AgentTaskIncompleteReason)
+    ? value.taskIncompleteReason as AgentTaskIncompleteReason : undefined;
+  const agentLabel = typeof value.agentLabel === 'string' ? value.agentLabel : undefined;
+  const agentTemplateKey = OFFICIAL_PRESET_KEYS.includes(value.agentTemplateKey as OfficialPresetKey)
+    ? value.agentTemplateKey as OfficialPresetKey : undefined;
+  const modelName = typeof value.modelName === 'string' ? value.modelName : undefined;
   const retryable = typeof value.retryable === 'boolean' ? value.retryable : undefined;
   const feedback_recommended = typeof value.feedback_recommended === 'boolean' ? value.feedback_recommended : undefined;
   const resolution = normalizeAgentErrorResolution(value.resolution);
+  const providerDiagnostic = normalizeModelFailureDiagnostic(value.providerDiagnostic);
 
   if (
     !code &&
     !ownership &&
     !detail &&
     !workspacePath &&
+    !taskIncompleteReason &&
+    !providerDiagnostic &&
+    !agentLabel &&
+    !agentTemplateKey &&
+    !modelName &&
     retryable === undefined &&
     feedback_recommended === undefined &&
     !resolution
@@ -726,25 +755,15 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
     ...(ownership ? { ownership } : {}),
     ...(detail ? { detail } : {}),
     ...(workspacePath ? { workspacePath } : {}),
+    ...(taskIncompleteReason ? { taskIncompleteReason } : {}),
+    ...(providerDiagnostic ? { providerDiagnostic } : {}),
+    ...(agentLabel ? { agentLabel } : {}),
+    ...(agentTemplateKey ? { agentTemplateKey } : {}),
+    ...(modelName ? { modelName } : {}),
     ...(retryable !== undefined ? { retryable } : {}),
     ...(feedback_recommended !== undefined ? { feedback_recommended } : {}),
     ...(resolution ? { resolution } : {}),
   };
-};
-
-const GATEWAY_ACCOUNT_ACTION_CODES = new Set([
-  'USER_LLM_PROVIDER_BILLING_REQUIRED',
-  'USER_LLM_PROVIDER_AUTH_FAILED',
-  'USER_LLM_PROVIDER_RATE_LIMITED',
-]);
-
-/** Only this typed live System notice carries a gateway action; ordinary System output stays invisible. */
-const normalizeGatewayAccountAction = (value: unknown): AgentStreamErrorInfo | undefined => {
-  if (!isObject(value) || value.kind !== 'model_gateway_account_action') return undefined;
-  const error = normalizeAgentStreamError(value.error);
-  if (!error || !error.message.trim() || error.ownership !== 'user_llm_provider'
-    || !error.code || !GATEWAY_ACCOUNT_ACTION_CODES.has(error.code)) return undefined;
-  return error;
 };
 
 export const normalizeTruncatedTurnRecovery = (value: unknown): TruncatedTurnRecovery | undefined => {
@@ -1090,16 +1109,8 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'info': // Stream retry notifications and similar transient agent updates
     case 'request_trace': // Transient request traces are not persisted or rendered.
       return undefined;
-    case 'system': {
-      const error = normalizeGatewayAccountAction(message.data);
-      if (!error) return undefined;
-      // A presentation-only notice following canonical pause cleanup. No Session or history write.
-      return {
-        id: uuid(), type: 'tips', msg_id: message.msg_id, ...turnIdentity,
-        position: 'center', conversation_id: message.conversation_id, created_at,
-        content: { content: error.message, type: 'error', error },
-      };
-    }
+    case 'system':
+      return undefined;
     default: {
       console.warn(
         `[transformMessage] Unsupported message type '${message.type}'. All non-standard message types should be pre-processed by respective AgentManagers.`

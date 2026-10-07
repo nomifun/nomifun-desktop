@@ -156,11 +156,14 @@ pub struct CreationError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub http_status: Option<u16>,
+    /// Approved provider evidence uses the same contract as conversation errors.
+    #[serde(default, rename = "providerDiagnostic", skip_serializing_if = "Option::is_none")]
+    pub provider_diagnostic: Option<nomifun_api_types::ModelFailureDiagnostic>,
 }
 
 impl CreationError {
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { kind: kind.into(), message: message.into(), http_status: None }
+        Self { kind: kind.into(), message: message.into(), http_status: None, provider_diagnostic: None }
     }
 
     /// Attach an HTTP status (for `provider_error`s carrying a remote status).
@@ -204,7 +207,8 @@ impl CreationError {
 ///   `ParseError`/`RateLimited`/`QuotaExhausted`/`ContentPolicy`/`NotPollable`)
 ///   → `provider_error`.
 ///
-/// `http_status` is transferred verbatim so 4xx/5xx classification survives.
+/// `http_status` and approved typed diagnostics are transferred verbatim. The
+/// human message is never parsed into diagnostic evidence.
 impl From<nomifun_model_invoke::InvokeError> for CreationError {
     fn from(e: nomifun_model_invoke::InvokeError) -> Self {
         use nomifun_model_invoke::InvokeErrorKind as K;
@@ -227,6 +231,72 @@ impl From<nomifun_model_invoke::InvokeError> for CreationError {
             | K::ContentPolicy
             | K::NotPollable => "provider_error",
         };
-        Self { kind: kind.to_string(), message: e.message, http_status: e.http_status }
+        Self {
+            kind: kind.to_string(), message: e.message, http_status: e.http_status,
+            provider_diagnostic: e.diagnostic,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nomifun_api_types::{ModelFailureDiagnostic, ModelFailureReason};
+    use nomifun_model_invoke::{InvokeError, InvokeErrorKind};
+
+    #[test]
+    fn invoke_error_conversion_preserves_approved_diagnostic_and_existing_error_semantics() {
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::InvalidKey);
+        diagnostic.http_status = Some(401);
+        diagnostic.provider_code = Some("invalid_api_key".into());
+        diagnostic.provider_param = Some("headers.authorization".into());
+        diagnostic.provider_id = Some("actual-provider".into());
+        diagnostic.model_name = Some("actual-media-model".into());
+        diagnostic.request_id = Some("safe-request-id".into());
+        for (invoke_kind, creation_kind) in [
+            (InvokeErrorKind::UnsupportedTask, "unsupported_capability"),
+            (InvokeErrorKind::InvalidParams, "invalid_params"),
+            (InvokeErrorKind::Timeout, "timeout"),
+            (InvokeErrorKind::Config, "config"),
+            (InvokeErrorKind::MissingConnection, "config"),
+            (InvokeErrorKind::NonApiResponse, "config"),
+            (InvokeErrorKind::NoAdapter, "adapter_unavailable"),
+            (InvokeErrorKind::Auth, "provider_error"),
+            (InvokeErrorKind::ProviderError, "provider_error"),
+            (InvokeErrorKind::JobFailed, "provider_error"),
+            (InvokeErrorKind::Network, "provider_error"),
+            (InvokeErrorKind::ParseError, "provider_error"),
+            (InvokeErrorKind::RateLimited, "provider_error"),
+            (InvokeErrorKind::QuotaExhausted, "provider_error"),
+            (InvokeErrorKind::ContentPolicy, "provider_error"),
+            (InvokeErrorKind::NotPollable, "provider_error"),
+        ] {
+            let mut source = InvokeError::new(invoke_kind, "Safe fixed model failure").with_http_status(401);
+            source.diagnostic = Some(diagnostic.clone());
+            let error = CreationError::from(source);
+            assert_eq!(error.kind, creation_kind);
+            assert_eq!(error.message, "Safe fixed model failure");
+            assert_eq!(error.http_status, Some(401));
+            assert_eq!(error.provider_diagnostic.as_ref(), Some(&diagnostic));
+            let value = serde_json::to_value(&error).unwrap();
+            assert_eq!(value["providerDiagnostic"], serde_json::to_value(&diagnostic).unwrap());
+            assert!(value.get("provider_diagnostic").is_none());
+            assert_eq!(serde_json::from_value::<CreationError>(value).unwrap().provider_diagnostic, Some(diagnostic.clone()));
+        }
+    }
+
+    #[test]
+    fn creation_error_without_typed_evidence_does_not_guess_from_message_or_status() {
+        let old: CreationError = serde_json::from_value(serde_json::json!({
+            "kind":"provider_error", "message":"existing diagnostic", "http_status":503,
+        })).unwrap();
+        assert!(old.provider_diagnostic.is_none());
+        let source = InvokeError::provider(401, "balance insufficient; subscription expired; invalid api key");
+        let error = CreationError::from(source);
+        assert_eq!(error.kind, "provider_error");
+        assert_eq!(error.http_status, Some(401));
+        assert!(error.provider_diagnostic.is_none());
+        assert!(serde_json::to_value(error).unwrap().get("providerDiagnostic").is_none());
+        assert!(CreationError::new("timeout", "Safe local deadline").provider_diagnostic.is_none());
     }
 }

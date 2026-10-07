@@ -11,16 +11,18 @@ import { ipcBridge } from '@/common';
 import { parseProviderId } from '@/common/types/ids';
 import type { ModelGatewayMetaResponse } from '@/common/types/provider/modelGateway';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
+import conversationLocale from '@/renderer/services/i18n/locales/en-US/conversation.json';
+import type { ModelFailureReason } from '@/common/chat/providerDiagnostic';
 import { fromApiConversation } from '@/common/adapter/apiModelMapper';
 import { currentModelProviderTarget } from '../../platforms/nomi/currentModelProviderTarget';
 import GatewayBillingAction from './GatewayBillingAction';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { settings } } } });
+await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { settings, conversation: conversationLocale } } } });
 const model = { id: parseProviderId('0190f5fe-7c00-7a00-8000-000000000096'), platform: 'nomifun-model-gateway', use_model: 'gpt' };
 const meta: ModelGatewayMetaResponse = { contract_version: '1.0', operator: { name: 'Partner', homepage_url: null, console_url: 'https://operator.example/keys', purchase_url: 'https://operator.example/buy', terms_url: null, privacy_url: null }, capabilities: [], optional_endpoints: [] };
-function mount(code = 'USER_LLM_PROVIDER_BILLING_REQUIRED', selected = model) {
-  const result = render(<I18nextProvider i18n={i18n}><GatewayBillingAction code={code} model={selected} /></I18nextProvider>);
+function mount(code = 'USER_LLM_PROVIDER_BILLING_REQUIRED', selected = model, reason: ModelFailureReason = 'insufficient_balance', providerId: string | undefined = model.id) {
+  const result = render(<I18nextProvider i18n={i18n}><GatewayBillingAction code={code} reason={reason} providerId={providerId} model={selected} /></I18nextProvider>);
   return { ...result, page: within(result.container) };
 }
 afterEach(() => { cleanup(); mock.restore(); });
@@ -33,7 +35,7 @@ describe('gateway account action', () => {
     expect(conversation.model.platform).toBe('');
     spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockResolvedValue(meta);
     const target = currentModelProviderTarget(conversation.model, [model]);
-    const result = render(<I18nextProvider i18n={i18n}><GatewayBillingAction code='USER_LLM_PROVIDER_BILLING_REQUIRED' model={target} /></I18nextProvider>);
+    const result = render(<I18nextProvider i18n={i18n}><GatewayBillingAction code='USER_LLM_PROVIDER_BILLING_REQUIRED' reason='insufficient_balance' providerId={model.id} model={target} /></I18nextProvider>);
     const page = within(result.container);
     await waitFor(() => expect(page.getByRole('button', { name: settings.modelGateway.recharge })).toBeDefined());
     expect(page.getByRole('link', { name: settings.modelGateway.openSettings })).toBeDefined();
@@ -59,6 +61,26 @@ describe('gateway account action', () => {
     await Promise.resolve();
     expect(page.queryByRole('button')).toBeNull();
     expect(page.getByRole('link', { name: settings.modelGateway.openSettings }).getAttribute('href')).toBe('#/settings/model');
+  });
+  test.each(['insufficient_quota', 'billing_required', 'model_not_in_plan'] as const)('%s opens the console without assuming a top-up fixes it', async reason => {
+    spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockResolvedValue(meta);
+    const { page } = mount('USER_LLM_PROVIDER_BILLING_REQUIRED', model, reason);
+    await waitFor(() => expect(page.getByRole('button', { name: settings.modelGateway.links.console })).toBeDefined());
+    expect(page.queryByRole('button', { name: settings.modelGateway.recharge })).toBeNull();
+  });
+  test('subscription expiration offers a renewal action', async () => {
+    spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockResolvedValue(meta);
+    const { page } = mount('USER_LLM_PROVIDER_BILLING_REQUIRED', model, 'subscription_expired');
+    await waitFor(() => expect(page.getByRole('button', { name: conversationLocale.agentError.renewSubscription })).toBeDefined());
+    expect(page.queryByRole('button', { name: settings.modelGateway.recharge })).toBeNull();
+  });
+  test.each([undefined, '0190f5fe-7c00-7a00-8000-000000000098'])('does not link a historical or unrecorded account to the current provider: %s', providerId => {
+    const query = spyOn(ipcBridge.modelGateway.providerMeta, 'invoke');
+    const result = render(<I18nextProvider i18n={i18n}><GatewayBillingAction code='USER_LLM_PROVIDER_BILLING_REQUIRED' reason='insufficient_balance' providerId={providerId} model={model} /></I18nextProvider>);
+    const page = within(result.container);
+    expect(page.queryByRole('button')).toBeNull();
+    expect(page.getByRole('link', { name: settings.modelGateway.openSettings })).toBeDefined();
+    expect(query).not.toHaveBeenCalled();
   });
   test('does not infer gateway actions for another provider or untyped failure prose', () => {
     const query = spyOn(ipcBridge.modelGateway.providerMeta, 'invoke');

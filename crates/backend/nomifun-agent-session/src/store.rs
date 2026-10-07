@@ -790,6 +790,12 @@ impl AgentSessionStore {
                 turn_operation_id,
             )
             .await?;
+            if lease.is_some() && turn.semantic_event.kind.0 == "turn/failed" {
+                let unsettled: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state IN ('pending','unknown'))")
+                    .bind(message.agent_session_id.as_ref()).fetch_one(&mut *tx).await?;
+                if unsettled { return Err(SessionStoreError::RecoveryRequiresReconciliation); }
+            }
         }
         let message_result = self.append_event_tx(&mut tx, message, None).await?;
         let turn_result = self.append_event_tx(&mut tx, turn, None).await?;

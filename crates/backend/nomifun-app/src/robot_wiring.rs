@@ -1053,11 +1053,16 @@ mod tests {
     fn only_explicitly_retryable_upstream_faults_are_worth_a_fallback_retry() {
         let error = |ownership, retryable| {
             AgentStreamEvent::Error(nomifun_api_types::AgentStreamErrorData {
+                provider_diagnostic: None,
                 message: "boom".to_owned(),
                 code: None,
                 ownership,
                 detail: None,
                 workspace_path: None,
+                agent_label: None,
+                agent_template_key: None,
+                model_name: None,
+                task_incomplete_reason: None,
                 retryable,
                 feedback_recommended: None,
                 resolution: None,

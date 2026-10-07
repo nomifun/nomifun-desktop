@@ -18,6 +18,7 @@ pub mod auth;
 pub mod call;
 pub mod chat_executor;
 pub mod error;
+mod provider_diagnostic;
 pub mod default_model;
 pub mod manifest;
 pub mod realtime;

@@ -10,6 +10,21 @@ use std::{borrow::Cow, ops::Range, sync::Arc};
 
 const REDACTED: &str = "[REDACTED]";
 
+/// A diagnostic URL contains address/path only. Authentication material and
+/// untrusted query/fragment values are never part of endpoint presentation.
+pub fn sanitized_endpoint(input: &str) -> Option<String> {
+    let mut endpoint = url::Url::parse(input.trim()).ok()?;
+    if !matches!(endpoint.scheme(), "http" | "https" | "ws" | "wss") || endpoint.host_str().is_none() {
+        return None;
+    }
+    endpoint.set_username("").ok()?;
+    endpoint.set_password(None).ok()?;
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    let value = endpoint.to_string();
+    (value.len() <= 2048).then_some(value)
+}
+
 /// An immutable set of exact secret representations.
 ///
 /// Deliberately does not implement `Debug`: its replacement table contains

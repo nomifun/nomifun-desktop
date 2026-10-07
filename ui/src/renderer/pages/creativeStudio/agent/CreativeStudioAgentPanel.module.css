@@ -27,8 +27,7 @@
 .headerActions,
 .agentIdentity,
 .composerFooter,
-.modelTrigger,
-.messageError {
+.modelTrigger {
   display: flex;
   align-items: center;
 }
@@ -257,56 +256,14 @@
   font-size: 11px;
 }
 
-.messageError {
-  max-width: 270px;
-  gap: 8px;
-  padding: 9px 11px;
-  border: 1px solid var(--color-border-2);
-  border-radius: 14px;
-  background: var(--color-bg-2);
-  color: var(--color-text-2);
-  font-size: 12px;
-}
-
 .thinkingStatus {
   max-width: 100%;
   margin: 0;
 }
 
-.messageError {
-  border-color: color-mix(in srgb, rgb(var(--danger-6)) 30%, var(--color-border-2));
-  background: color-mix(in srgb, rgb(var(--danger-6)) 7%, var(--color-bg-2));
-  color: rgb(var(--danger-6));
-}
-
-.inlineError {
-  display: flex;
-  min-width: 0;
-  flex: 0 0 auto;
-  align-items: flex-start;
-  gap: 7px;
-  margin: 0 8px 8px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, rgb(var(--danger-6)) 30%, var(--color-border-2));
-  border-radius: 6px;
-  background: color-mix(in srgb, rgb(var(--danger-6)) 7%, var(--color-bg-2));
-  color: rgb(var(--danger-6));
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.inlineError > span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
 .stoppedLabel {
   color: var(--color-text-3);
   font-size: 11px;
-}
-
-.retryMessageButton {
-  color: var(--color-text-3) !important;
 }
 
 .proposalCard {

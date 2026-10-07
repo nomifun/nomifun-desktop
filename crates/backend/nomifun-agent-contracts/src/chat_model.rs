@@ -905,6 +905,137 @@ pub enum ChatModelErrorCode {
     Internal,
 }
 
+/// Presentation-only evidence. Retry and settlement remain governed by the
+/// existing broker code/directive, not by these diagnostic refinements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFailureReason {
+    AuthFailed, InvalidKey, ExpiredKey, BillingRequired, InsufficientQuota, InsufficientBalance, SpendLimitReached,
+    SubscriptionExpired, ModelNotInPlan, PermissionDenied, ModelPermissionDenied,
+    ModelNotFound, EndpointMissing, NonApiResponse, AuthSchemeMismatch, RateLimited,
+    DnsFailure, ConnectionFailed, TlsFailure, ProxyFailure, RequestTimeout,
+    UpstreamServerError, ProviderOverloaded, ProviderUnavailable, NetworkFailure, StreamInterrupted,
+    InvalidResponse, InvalidRequest, UnsupportedFeature, ContentPolicy, PromptTooLong,
+    ConfigurationError, InvalidEndpoint, CredentialsMissing, CredentialTargetMismatch,
+}
+
+impl ModelFailureReason {
+    /// Only exact machine identifiers from a verified error envelope are
+    /// accepted here. Diagnostic messages and nested tool content are excluded.
+    pub fn from_machine_code(code: &str) -> Option<Self> {
+        let code = code.strip_prefix("com.amazon.coral.service#")
+            .or_else(|| code.strip_prefix("com.amazonaws.bedrock#")).unwrap_or(code);
+        Some(match code {
+            "invalid_api_key" | "api_key_invalid" | "API_KEY_INVALID" | "UnrecognizedClientException"
+                | "InvalidClientTokenId" | "invalid_token" => Self::InvalidKey,
+            "api_key_expired" | "key_expired" | "API_KEY_EXPIRED" | "ExpiredTokenException"
+                | "ExpiredToken" | "expired_token" => Self::ExpiredKey,
+            "insufficient_quota" | "quota_exceeded" | "QUOTA_EXCEEDED" | "usage_not_included"
+                | "organization_usage_limit_exceeded" | "billing_hard_limit_reached" => Self::InsufficientQuota,
+            "insufficient_balance" | "credit_balance_exhausted" => Self::InsufficientBalance,
+            "organization_spend_limit_exceeded" | "project_spend_limit_exceeded" => Self::SpendLimitReached,
+            "billing_error" => Self::BillingRequired,
+            "subscription_expired" => Self::SubscriptionExpired,
+            "model_not_in_plan" => Self::ModelNotInPlan,
+            "model_access_denied" | "model_permission_denied" => Self::ModelPermissionDenied,
+            "permission_error" | "permission_denied" | "PERMISSION_DENIED" | "AccessDeniedException" | "accessDeniedException"
+                | "AccessDenied" => Self::PermissionDenied,
+            "model_not_found" => Self::ModelNotFound,
+            "endpoint_not_found" | "not_found_error" | "NOT_FOUND"
+                | "resourceNotFoundException" | "ResourceNotFoundException" => Self::EndpointMissing,
+            "authentication_error" | "authentication_failed" | "UNAUTHENTICATED" | "InvalidSignatureException" => Self::AuthFailed,
+            "unsupported_authentication_scheme" | "invalid_authentication_scheme"
+                | "ACCESS_TOKEN_TYPE_UNSUPPORTED" => Self::AuthSchemeMismatch,
+            "rate_limit_exceeded" | "rate_limit_error" | "rate_limited" | "RATE_LIMIT_EXCEEDED" | "slow_down"
+                | "throttlingException" | "ThrottlingException" | "TooManyRequestsException" => Self::RateLimited,
+            "overloaded_error" | "server_is_overloaded" => Self::ProviderOverloaded,
+            "server_error" | "internal_server_error" | "api_error"
+                | "serviceUnavailableException" | "ServiceUnavailableException"
+                | "internalServerException" | "InternalServerException"
+                | "service_unavailable_error" => Self::UpstreamServerError,
+            "invalid_request_error" | "invalid_argument" | "INVALID_ARGUMENT" | "invalid_prompt"
+                | "unsupported_value" | "invalid_value" | "ValidationException" => Self::InvalidRequest,
+            "content_policy_violation" | "cyber_policy" | "bio_policy" | "misalignment_policy_violation"
+                => Self::ContentPolicy,
+            "context_length_exceeded" | "prompt_too_long" => Self::PromptTooLong,
+            "modelTimeoutException" | "ModelTimeoutException" | "timeout_error" => Self::RequestTimeout,
+            _ => return None,
+        })
+    }
+
+    /// Call only for the native Gemini error object. One unambiguous, exactly
+    /// identified Google ErrorInfo may refine its generic HTTP-style status.
+    pub fn refine_google_error_info(
+        envelope: &serde_json::Map<String, serde_json::Value>,
+        generic: Self,
+    ) -> Option<Self> {
+        use serde_json::Value;
+        let status_reason = match (envelope.get("code").and_then(Value::as_u64),
+            envelope.get("status").and_then(Value::as_str)) {
+            (Some(400), Some("INVALID_ARGUMENT")) => Self::InvalidRequest,
+            (Some(401), Some("UNAUTHENTICATED")) => Self::AuthFailed,
+            (Some(403), Some("PERMISSION_DENIED")) => Self::PermissionDenied,
+            _ => return None,
+        };
+        if status_reason != generic { return None; }
+        let mut reason = None;
+        for detail in envelope.get("details")?.as_array()? {
+            let detail = detail.as_object()?;
+            if detail.get("@type").and_then(Value::as_str)
+                != Some("type.googleapis.com/google.rpc.ErrorInfo")
+                || !matches!(detail.get("domain").and_then(Value::as_str),
+                    Some("googleapis.com" | "generativelanguage.googleapis.com"))
+            { continue; }
+            if reason.is_some() { return None; }
+            let machine = detail.get("reason")?.as_str()?;
+            if !matches!(machine, "API_KEY_INVALID" | "API_KEY_EXPIRED" | "ACCESS_TOKEN_TYPE_UNSUPPORTED") { return None; }
+            reason = Self::from_machine_code(machine);
+        }
+        reason
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelFailureDiagnostic {
+    pub reason: ModelFailureReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_param: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Redacted locally authored OS/transport cause only, never provider prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_detail: Option<String>,
+}
+
+impl ModelFailureDiagnostic {
+    pub fn new(reason: ModelFailureReason) -> Self {
+        Self { reason, http_status: None, provider_code: None, provider_type: None, provider_param: None, provider_id: None, model_name: None, endpoint: None,
+            request_id: None, retry_after_ms: None, protocol: None, auth_scheme: None,
+            content_type: None, transport_detail: None }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatModelError {
@@ -922,6 +1053,8 @@ pub struct ChatModelError {
     /// This is never inferred from diagnostic prose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsupported_feature: Option<ChatModelFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ModelFailureDiagnostic>,
 }
 
 impl ChatModelError {
@@ -939,6 +1072,7 @@ impl ChatModelError {
             route_id: None,
             semantic_output_committed: false,
             unsupported_feature: None,
+            diagnostic: None,
         }
     }
 

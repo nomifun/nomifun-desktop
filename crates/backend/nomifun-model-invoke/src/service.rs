@@ -315,7 +315,14 @@ impl ModelInvokeService {
             .adapter
             .submit(&self.http, &context.call)
             .await
-            .map_err(|error| error.redacted(&redactor))?;
+            .map_err(|error| {
+                let error = if let Ok(endpoint) = context.call.endpoint_url() {
+                    error.with_request_context(&endpoint, &context.call.protocol,
+                        Some(context.call.connection.auth.scheme.diagnostic_id()))
+                } else { error };
+                error.with_provider_id(&context.call.provider_id)
+                    .with_model_name(&context.call.model).redacted(&redactor)
+            })?;
         let outcome = bind_pending_job(
             &context.call.protocol,
             context.call.config_revision,

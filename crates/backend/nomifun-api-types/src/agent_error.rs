@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+pub use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,7 +74,29 @@ pub enum AgentErrorCode {
     /// model may help, while replaying the same turn automatically is unsafe.
     UserLlmProviderUnbackedCompletion,
     UserLlmProviderGatewayError,
+    UserLlmProviderUnavailable,
+    UserLlmProviderUnsupportedFeature,
+    UserLlmProviderInvalidResponse,
+    UserLlmProviderStreamInterrupted,
     UnknownUpstreamError,
+}
+
+/// The engine's reason for stopping an unfinished task. This supplements the
+/// error code for presentation without changing retry or recovery authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskIncompleteReason {
+    BlockedWork,
+    StepLimit,
+    OutputTruncated,
+    UnresolvedPlan,
+    UnverifiedChanges,
+    RunningProcesses,
+    UnverifiedCompletion,
+    RejectedControl,
+    NoProgress,
+    ExecutionGuard,
+    RecoveryGuard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +157,22 @@ pub struct AgentStreamErrorData {
         skip_serializing_if = "Option::is_none"
     )]
     pub workspace_path: Option<String>,
+    /// Host-captured presentation context for this exact admitted Turn.
+    #[serde(default, rename = "agentLabel", alias = "agent_label", skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+    #[serde(default, rename = "agentTemplateKey", alias = "agent_template_key", skip_serializing_if = "Option::is_none")]
+    pub agent_template_key: Option<String>,
+    #[serde(default, rename = "modelName", alias = "model_name", skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(
+        default,
+        rename = "taskIncompleteReason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub task_incomplete_reason: Option<AgentTaskIncompleteReason>,
+    /// The original typed model/transport diagnosis, shared with the Broker.
+    #[serde(default, rename = "providerDiagnostic", skip_serializing_if = "Option::is_none")]
+    pub provider_diagnostic: Option<ModelFailureDiagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +189,11 @@ impl AgentStreamErrorData {
             ownership: None,
             detail: None,
             workspace_path: None,
+            agent_label: None,
+            agent_template_key: None,
+            model_name: None,
+            task_incomplete_reason: None,
+            provider_diagnostic: None,
             retryable: None,
             feedback_recommended: None,
             resolution: None,
@@ -171,6 +215,11 @@ impl AgentStreamErrorData {
             ownership: Some(ownership),
             detail,
             workspace_path: None,
+            agent_label: None,
+            agent_template_key: None,
+            model_name: None,
+            task_incomplete_reason: None,
+            provider_diagnostic: None,
             retryable: Some(retryable),
             feedback_recommended: Some(feedback_recommended),
             resolution,
@@ -181,6 +230,54 @@ impl AgentStreamErrorData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_turn_context_has_public_wire_keys_and_remains_optional() {
+        let mut error = AgentStreamErrorData::legacy("failure", None);
+        let missing = serde_json::to_value(&error).unwrap();
+        for key in ["agentLabel", "agentTemplateKey", "modelName"] {
+            assert!(missing.get(key).is_none());
+        }
+        error.agent_label = Some("Turn Agent".into());
+        error.agent_template_key = Some("chat.minimal".into());
+        error.model_name = Some("turn-model".into());
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["agentLabel"], "Turn Agent");
+        assert_eq!(value["agentTemplateKey"], "chat.minimal");
+        assert_eq!(value["modelName"], "turn-model");
+        assert!(value.get("agent_label").is_none());
+        assert_eq!(serde_json::from_value::<AgentStreamErrorData>(value).unwrap(), error);
+    }
+
+    #[test]
+    fn provider_diagnostic_uses_the_shared_camel_case_contract_without_aliases() {
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::InvalidKey);
+        diagnostic.http_status = Some(401);
+        diagnostic.provider_code = Some("invalid_api_key".into());
+        diagnostic.provider_type = Some("authentication_error".into());
+        diagnostic.provider_param = Some("headers.authorization".into());
+        diagnostic.provider_id = Some("0190f5fe-7c00-7a00-8000-000000000071".into());
+        diagnostic.model_name = Some("actual-request-model".into());
+        diagnostic.endpoint = Some("https://api.example.test/v1/chat/completions".into());
+        diagnostic.request_id = Some("safe-request-id".into());
+        diagnostic.retry_after_ms = Some(1000);
+        diagnostic.protocol = Some("openai.chat_text".into());
+        diagnostic.auth_scheme = Some("bearer".into());
+        diagnostic.content_type = Some("application/json".into());
+        let mut error = AgentStreamErrorData::legacy("Safe fixed authentication failure", None);
+        error.provider_diagnostic = Some(diagnostic);
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["providerDiagnostic"]["reason"], "invalid_key");
+        assert_eq!(value["providerDiagnostic"]["httpStatus"], 401);
+        assert_eq!(value["providerDiagnostic"]["providerParam"], "headers.authorization");
+        assert_eq!(value["providerDiagnostic"]["providerId"], "0190f5fe-7c00-7a00-8000-000000000071");
+        assert_eq!(value["providerDiagnostic"]["modelName"], "actual-request-model");
+        assert!(value.get("provider_diagnostic").is_none());
+        assert!(value["providerDiagnostic"].get("http_status").is_none());
+        assert_eq!(serde_json::from_value::<AgentStreamErrorData>(value).unwrap(), error);
+        let missing = AgentStreamErrorData::legacy("Existing failure", None);
+        assert!(serde_json::to_value(missing).unwrap().get("providerDiagnostic").is_none());
+    }
 
     #[test]
     fn image_unsupported_serde_roundtrip() {
@@ -235,6 +332,7 @@ mod tests {
         assert_eq!(json["code"], "USER_LLM_PROVIDER_AUTH_FAILED");
         assert_eq!(json["ownership"], "user_llm_provider");
         assert!(json.get("workspacePath").is_none());
+        assert!(json.get("taskIncompleteReason").is_none());
         assert_eq!(json["retryable"], false);
         assert_eq!(json["feedback_recommended"], false);
         assert!(json.get("resolution").is_none());
@@ -273,6 +371,7 @@ mod tests {
         assert_eq!(payload.code, Some(AgentErrorCode::UnknownUpstreamError));
         assert_eq!(payload.ownership, None);
         assert_eq!(payload.workspace_path, None);
+        assert_eq!(payload.task_incomplete_reason, None);
         assert_eq!(payload.retryable, None);
         assert_eq!(payload.feedback_recommended, None);
     }
@@ -296,6 +395,11 @@ mod tests {
             ownership: Some(AgentErrorOwnership::Nomifun),
             detail: Some("workspace detail".into()),
             workspace_path: Some("/tmp/Archive ".into()),
+            agent_label: None,
+            agent_template_key: None,
+            model_name: None,
+            task_incomplete_reason: None,
+            provider_diagnostic: None,
             retryable: Some(false),
             feedback_recommended: Some(false),
             resolution: None,
@@ -321,5 +425,38 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.workspace_path.as_deref(), Some("/tmp/Legacy "));
+    }
+
+    #[test]
+    fn task_incomplete_reason_roundtrips_as_camel_case_public_metadata() {
+        for (reason, wire_value) in [
+            (AgentTaskIncompleteReason::BlockedWork, "blocked_work"),
+            (AgentTaskIncompleteReason::StepLimit, "step_limit"),
+            (AgentTaskIncompleteReason::OutputTruncated, "output_truncated"),
+            (AgentTaskIncompleteReason::UnresolvedPlan, "unresolved_plan"),
+            (AgentTaskIncompleteReason::UnverifiedChanges, "unverified_changes"),
+            (AgentTaskIncompleteReason::RunningProcesses, "running_processes"),
+            (AgentTaskIncompleteReason::UnverifiedCompletion, "unverified_completion"),
+            (AgentTaskIncompleteReason::RejectedControl, "rejected_control"),
+            (AgentTaskIncompleteReason::NoProgress, "no_progress"),
+            (AgentTaskIncompleteReason::ExecutionGuard, "execution_guard"),
+            (AgentTaskIncompleteReason::RecoveryGuard, "recovery_guard"),
+        ] {
+            let mut payload = AgentStreamErrorData::classified(
+                "The Agent stopped before completing the task",
+                AgentErrorCode::NomifunTaskIncomplete,
+                AgentErrorOwnership::Nomifun,
+                Some("Original engine diagnostic".into()),
+                false,
+                false,
+                None,
+            );
+            payload.task_incomplete_reason = Some(reason);
+            let json = serde_json::to_value(&payload).unwrap();
+            assert_eq!(json["taskIncompleteReason"], wire_value);
+            assert!(json.get("task_incomplete_reason").is_none());
+            let roundtrip: AgentStreamErrorData = serde_json::from_value(json).unwrap();
+            assert_eq!(roundtrip, payload);
+        }
     }
 }

@@ -194,6 +194,79 @@ impl AgentSessionStore {
         value.map(|value| serde_json::from_str(&value).map_err(SessionStoreError::from)).transpose()
     }
 
+    /// Close an existing native failure pause after the trusted owner has
+    /// joined and released its local Runtime. This does not resume a checkpoint
+    /// or replay effects. The exact pause and its cleanup witness are checked
+    /// again in the same transaction as the failed terminal.
+    pub async fn settle_native_failure_pause(
+        &self,
+        owner: &PrincipalRef,
+        session: &AgentSessionId,
+        operation: &OperationId,
+        snapshot: &nomifun_agent_contracts::ResolvedSnapshotRef,
+        expected: &NativePauseState,
+        permitted_reasons: &[&str],
+        failure: &SessionEventAppend,
+    ) -> Result<bool, SessionStoreError> {
+        if failure.agent_session_id != *session || failure.producer_id.as_ref() != "runtime_supervisor"
+            || failure.semantic_event.kind.0 != "turn/failed"
+            || failure.semantic_event.correlation_id.as_ref() != operation.as_ref()
+        {
+            return Err(SessionStoreError::InvalidEvent("native failure settlement requires an exact supervisor failure".into()));
+        }
+        let mut tx = self.begin_write_transaction().await?;
+        let live = live_session_by_id_tx(&mut tx, session.as_ref()).await?;
+        if &live.owner_ref != owner { return Err(SessionStoreError::ExecutionFenced); }
+        let head = head_by_id_tx(&mut tx, session.as_ref()).await?;
+        if head.status != "paused" || head.active_turn_id.as_deref() != Some(operation.as_ref()) {
+            return Ok(false);
+        }
+        if live.agent_binding.resolved_snapshot_ref != *snapshot
+            || !expected.cleanup_proven || !permitted_reasons.contains(&expected.reason.as_str())
+        {
+            return Ok(false);
+        }
+        let row: (String, Option<String>, i64, i64, i64, bool, i64, Option<String>) = sqlx::query_as(
+            "SELECT started_event_id,native_pause_json,execution_fence,execution_lease_until,execution_generation,native_pause_requested_json IS NOT NULL, \
+             native_checkpoint_revision,native_checkpoint_digest \
+             FROM agent_turns WHERE session_id=? AND operation_id=? AND state='running' AND terminal_event_id IS NULL")
+            .bind(session.as_ref()).bind(operation.as_ref()).fetch_one(&mut *tx).await?;
+        let Some(encoded) = row.1.as_deref() else { return Ok(false); };
+        let actual: NativePauseState = serde_json::from_str(encoded)?;
+        if serde_json::to_value(&actual)? != serde_json::to_value(expected)?
+            || as_u64(row.2, "execution fence")? != expected.execution_fence
+            || row.3 > wall_clock_now_ms() || row.5
+            || as_u64(row.6, "checkpoint revision")? != expected.checkpoint_revision
+            || row.7.as_deref() != expected.checkpoint_digest.as_ref().map(|digest| digest.as_ref())
+        {
+            return Ok(false);
+        }
+        let started = event_by_event_id_tx(&mut tx, &row.0).await?
+            .ok_or_else(|| SessionStoreError::InvalidEvent("native failure pause has no Turn start".into()))?;
+        let started = event_from_row(started)?;
+        if payload_value_for_event_tx(&mut tx, &started).await?.get("resolved_snapshot_ref")
+            != Some(&serde_json::to_value(snapshot)?)
+            || failure.semantic_event.causation_event_id.as_ref() != Some(&started.event_id)
+        {
+            return Ok(false);
+        }
+        // A cleanup flag without its current-generation native host receipt
+        // cannot turn a partial or unknown lineage into send authority.
+        let cleanup_proven: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_events WHERE session_id=? AND correlation_id=? \
+             AND kind='runtime/progress-recorded' AND seq>=? AND seq<=? \
+             AND json_extract(inline_json,'$.event.event')='host_cleanup_proven')")
+            .bind(session.as_ref()).bind(operation.as_ref()).bind(row.4)
+            .bind(as_i64(head.last_seq, "pause observation cursor")?).fetch_one(&mut *tx).await?;
+        let unsettled: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state IN ('pending','unknown'))")
+            .bind(session.as_ref()).fetch_one(&mut *tx).await?;
+        if !cleanup_proven || unsettled { return Ok(false); }
+        self.append_event_tx(&mut tx, failure, None).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn native_pause_requested(&self, lease: &NativeExecutionLease) -> Result<bool, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         native_execution::check_native_lease_tx(&mut tx, lease, false).await?;

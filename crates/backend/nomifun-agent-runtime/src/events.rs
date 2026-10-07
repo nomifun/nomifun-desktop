@@ -2,11 +2,25 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{ActionId, CapabilityId, OperationId};
-use nomifun_chat_model_broker::{ChatFinishReason, ChatToolCall, ChatUsage, ToolCallId};
+use nomifun_chat_model_broker::{ChatFinishReason, ChatModelErrorCode, ChatToolCall, ChatUsage, ToolCallId};
 
 use crate::engine::EngineBinding;
 use crate::error::AgentEngineError;
 use crate::tool::AgentToolResult;
+
+/// Trusted model failure classification and approved diagnostics. Provider
+/// prose never selects a reason or recreates typed facts from public text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentTurnFailure {
+    Model {
+        code: ChatModelErrorCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<nomifun_agent_contracts::ModelFailureDiagnostic>,
+    },
+    ModelStreamEndedWithoutTerminal,
+    InvalidModelEvent,
+}
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
@@ -244,6 +258,8 @@ pub enum AgentEngineEvent {
     TurnFailed {
         model_steps: u16,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<AgentTurnFailure>,
     },
 }
 
@@ -289,3 +305,39 @@ impl AgentEventSink for NoopAgentEventSink {
 }
 
 pub(crate) type SharedAgentEventSink = Arc<dyn AgentEventSink>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_turn_keeps_optional_typed_cause_without_duplicating_its_diagnostic() {
+        let generic: AgentEngineEvent = serde_json::from_value(serde_json::json!({
+            "event":"turn_failed", "model_steps":1, "message":"existing completion guard",
+        })).unwrap();
+        assert!(matches!(&generic, AgentEngineEvent::TurnFailed { failure: None, .. }));
+        assert!(serde_json::to_value(generic).unwrap().get("failure").is_none());
+        let typed = AgentEngineEvent::TurnFailed { model_steps: 1, message: "original diagnostic".into(),
+            failure: Some(AgentTurnFailure::Model { code: ChatModelErrorCode::AuthenticationFailed, diagnostic: None }),
+        };
+        let value = serde_json::to_value(&typed).unwrap();
+        assert_eq!(value["failure"], serde_json::json!({"kind":"model","code":"AUTHENTICATION_FAILED"}));
+        assert_eq!(value["message"], "original diagnostic");
+        assert_eq!(serde_json::from_value::<AgentEngineEvent>(value).unwrap(), typed);
+    }
+
+    #[test]
+    fn failed_turn_preserves_approved_diagnostic_fields_in_the_native_fact() {
+        let mut diagnostic = nomifun_agent_contracts::ModelFailureDiagnostic::new(
+            nomifun_agent_contracts::ModelFailureReason::TlsFailure);
+        diagnostic.transport_detail = Some("TLS certificate verification failed".into());
+        diagnostic.endpoint = Some("https://api.example.test/v1/chat/completions".into());
+        diagnostic.provider_id = Some("0190f5fe-7c00-7a00-8000-000000000072".into());
+        diagnostic.model_name = Some("actual-request-model".into());
+        let event = AgentEngineEvent::TurnFailed { model_steps:1, message:"Safe fixed transport failure".into(),
+            failure:Some(AgentTurnFailure::Model { code:ChatModelErrorCode::ProviderUnavailable, diagnostic:Some(diagnostic.clone()) }) };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["failure"]["diagnostic"], serde_json::to_value(&diagnostic).unwrap());
+        assert_eq!(serde_json::from_value::<AgentEngineEvent>(value).unwrap(), event);
+    }
+}

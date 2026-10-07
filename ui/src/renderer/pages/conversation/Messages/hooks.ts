@@ -571,6 +571,7 @@ const normalizePersistedWorkspaceRuntimeError = (
   const detail = typeof persistedError?.detail === 'string' ? persistedError.detail : message;
 
   return {
+    ...normalizeAgentStreamError(parsed.error),
     message,
     code: 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED',
     ownership: 'nomifun',
@@ -587,7 +588,7 @@ const normalizePersistedSessionConfigurationError = (
   const error = isRecord(parsed.error) ? parsed.error : undefined;
   const code = error?.code ?? parsed.code;
   if (code !== 'NOMIFUN_SESSION_CONFIGURATION_CHANGED') return undefined;
-  return { message, code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED', ownership:'nomifun', detail:typeof error?.detail==='string' ? error.detail : message,
+  return { ...normalizeAgentStreamError(parsed.error), message, code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED', ownership:'nomifun', detail:typeof error?.detail==='string' ? error.detail : message,
     retryable:false, feedback_recommended:false, resolution:{kind:'start_new_session',target:'new_conversation'} };
 };
 

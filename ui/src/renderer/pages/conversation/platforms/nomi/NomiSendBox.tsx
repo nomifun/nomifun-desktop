@@ -48,14 +48,15 @@ import {
   useConversationStopAttemptGuard,
 } from '@/renderer/pages/conversation/platforms/useConversationStopAttemptGuard';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
-import { getConversationRuntimeWorkspaceErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
+import { conversationRequestError, hasCanonicalRequestError, type ConversationRequestFailure } from '@/renderer/pages/conversation/utils/conversationRequestError';
+import ConversationErrorNote from '../../Messages/components/ConversationErrorNote';
 import { warmupConversationForPassiveMount } from '@/renderer/pages/conversation/utils/warmupConversation';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { allSupportedExts } from '@/renderer/services/FileService';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
-import { Button, Message, Tooltip } from '@arco-design/web-react';
+import { Message, Tooltip } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
@@ -216,7 +217,7 @@ const NomiSendBox: React.FC<{
     getTurnCompletionGeneration,
   } = turnActivity;
   const modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice);
-  const modelPickerHint = pauseNotice ? t('conversation.executionPause.title') : running
+  const modelPickerHint = pauseNotice ? t('messages.planPaused') : running
     ? t('conversation.chat.modelSwitchAfterTurn')
     : modelSelectionHint;
   const hasContextUsage =
@@ -258,6 +259,14 @@ const NomiSendBox: React.FC<{
     });
   }, [conversation_id]);
 
+  const [requestFailure, setRequestFailure] = useState<(ConversationRequestFailure & { conversationId: ConversationId }) | null>(null);
+  const requestConversationIdRef = useLatestRef(conversation_id);
+  const reportRequestFailure = useCallback((error: unknown, fallbackCode: string, previousMessageIds?: ReadonlySet<string>, input?: string) => {
+    if (requestConversationIdRef.current !== conversation_id) return;
+    setRequestFailure({ conversationId: conversation_id, error: conversationRequestError(error, fallbackCode), timestamp: Date.now(), previousMessageIds, input });
+  }, [conversation_id, requestConversationIdRef]);
+  useEffect(() => { setRequestFailure(null); }, [conversation_id]);
+
   useEffect(() => {
     if (!conversation_id || isCreating) return;
     let cancelled = false;
@@ -272,10 +281,10 @@ const NomiSendBox: React.FC<{
         }
       })
       .catch((error) => {
-        if (!cancelled) Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        if (!cancelled) reportRequestFailure(error, 'CONVERSATION_PREPARATION_FAILED');
       });
     return () => { cancelled = true; };
-  }, [conversation_id, isCreating, t]);
+  }, [conversation_id, isCreating, reportRequestFailure]);
 
   const addOrUpdateMessage = useAddOrUpdateMessage();
   const removeMessageByMsgId = useRemoveMessageByMsgId();
@@ -348,7 +357,7 @@ const NomiSendBox: React.FC<{
       deferLocalTurnUntilFresh = execution !== undefined
     ) => {
       if (!current_model?.use_model) {
-        Message.warning(t('conversation.chat.noModelSelected'));
+        reportRequestFailure(new Error('No model selected'), 'PROVIDER_UNAVAILABLE');
         throw new Error('No model selected');
       }
       if (!canSendFiles(files)) {
@@ -357,6 +366,8 @@ const NomiSendBox: React.FC<{
 
       // Persisted deliveries open local turn UI only after a fresh receipt.
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
+      const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
+      setRequestFailure(null);
       let msg_id: MessageId | null = null;
       try {
         const selection = await sessionCapabilities.applyBeforeSend();
@@ -415,12 +426,14 @@ const NomiSendBox: React.FC<{
         if (msg_id) removeMessageByMsgId(msg_id);
         setActiveMsgId(null);
         setWaitingResponse(false);
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        reportRequestFailure(error, 'CONVERSATION_SEND_FAILED', previousMessageIds, displayMessage);
         throw error;
       }
     },
     [
       addOrUpdateMessage,
+      reportRequestFailure,
+      messageListRef,
       checkAndUpdateTitle,
       canSendFiles,
       conversation_id,
@@ -531,6 +544,7 @@ const NomiSendBox: React.FC<{
       if (!generation.ready || creation.preparing) throw new Error('请先选择可用的生成模型');
       creationSubmittingRef.current = true;
       setCreationSubmitting(true);
+      setRequestFailure(null);
       const submittedReferences = creation.draft.references;
       try {
         const presetId = await creation.resolvePreset?.() ?? creation.presetId;
@@ -549,7 +563,7 @@ const NomiSendBox: React.FC<{
         creation.update(draft => request.inputs.length && draft.references === submittedReferences ? { ...draft, references: draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)) } : draft);
         emitter.emit('chat.history.refresh');
       } catch (error) {
-        Message.error(error instanceof Error ? error.message : String(error));
+        reportRequestFailure(error, 'CONVERSATION_CREATION_FAILED');
         throw error;
       } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
       return;
@@ -586,6 +600,8 @@ const NomiSendBox: React.FC<{
       if (!canSendFiles(filesToSend)) return;
       setWaitingResponse(true);
       const displayMessage = buildDisplayMessage(message, filesToSend, workspacePath);
+      const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
+      setRequestFailure(null);
       try {
         const res = await ipcBridge.conversation.sendMessage.invoke({
           conversation_id,
@@ -619,7 +635,7 @@ const NomiSendBox: React.FC<{
         if (filesToSend.length > 0) emitter.emit('nomi.workspace.refresh');
       } catch (error) {
         setWaitingResponse(false);
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        reportRequestFailure(error, 'CONVERSATION_SEND_FAILED', previousMessageIds, displayMessage);
         throw error;
       }
     },
@@ -634,6 +650,7 @@ const NomiSendBox: React.FC<{
       reconcilePublicDeliveryReplay,
       messageListRef,
       addOrUpdateMessage,
+      reportRequestFailure,
       setActiveMsgId,
       setWaitingResponse,
       t,
@@ -647,6 +664,7 @@ const NomiSendBox: React.FC<{
   const executeSteer = useCallback(
     async ({ input, files }: Pick<ConversationCommandQueueItem, 'input' | 'files'>) => {
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
+      setRequestFailure(null);
       let msg_id: MessageId | null = null;
       try {
         const res = await ipcBridge.conversation.steer.invoke({
@@ -691,12 +709,13 @@ const NomiSendBox: React.FC<{
         if (msg_id) removeMessageByMsgId(msg_id);
         // Retain a held draft for explicit review. This error may follow
         // successful delivery, so it must never automatically start a turn.
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        reportRequestFailure(error, 'CONVERSATION_STEER_FAILED');
         throw error;
       }
     },
     [
       addOrUpdateMessage,
+      reportRequestFailure,
       conversation_id,
       reconcileAfterStreamTerminal,
       reconcilePublicDeliveryReplay,
@@ -808,6 +827,7 @@ const NomiSendBox: React.FC<{
 
   // Clear conversation context (release model context); keeps message records.
   const handleClearContext = async (): Promise<void> => {
+    setRequestFailure(null);
     try {
       await ipcBridge.conversation.clearContext.invoke({ conversation_id });
       Message.success({
@@ -817,26 +837,23 @@ const NomiSendBox: React.FC<{
       });
     } catch (error) {
       console.warn('[NomiSendBox] clear context failed', error);
-      Message.error({
-        content: t('conversation.clearContext.failed', { defaultValue: 'Failed to clear context' }),
-        closable: true,
-      });
+      reportRequestFailure(error, 'CONVERSATION_CONTEXT_CLEAR_FAILED');
     }
   };
 
+  const visibleRequestFailure = requestFailure?.conversationId === conversation_id
+    && !hasCanonicalRequestError(requestFailure, messageList) ? requestFailure : null;
+
   return (
     <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto ${compactProductComposer ? 'mb-12px' : 'mb-16px'}`}>
-      {sessionCapabilities.error && <div role='alert' className='text-12px text-t-secondary mb-8px'>
-        {sessionCapabilities.error.message}
-        <Button type='text' size='mini' onClick={sessionCapabilities.retry}>{t('common.retry')}</Button>
-      </div>}
-      {pauseNotice && (
-        <div className='mb-8px flex justify-end'>
-          <Button size='small' loading={isStopping} onClick={() => { void handleStop(); }}>
-            {t('conversation.executionPause.stop')}
-          </Button>
-        </div>
-      )}
+      {visibleRequestFailure && <ConversationErrorNote
+        error={visibleRequestFailure.error} timestamp={visibleRequestFailure.timestamp} sessionId={visibleRequestFailure.conversationId}
+      />}
+      {!visibleRequestFailure && sessionCapabilities.error && <ConversationErrorNote
+        error={conversationRequestError(sessionCapabilities.error, 'SESSION_CAPABILITIES_FAILED')}
+        sessionId={conversation_id}
+        recoveryAction={<button type='button' className='message-error-note__retry' onClick={sessionCapabilities.retry}>{t('common.retry')}</button>}
+      />}
       <CommandQueuePanel
         items={queuedCommands}
         paused={isQueuePaused}
@@ -873,7 +890,7 @@ const NomiSendBox: React.FC<{
           emitter.emit('nomi.selected.file', items);
           setAtPath(items);
         }}
-        loading={isCreating ? creationSubmitting : isBusy}
+        loading={isCreating ? creationSubmitting : isBusy || Boolean(pauseNotice)}
         disabled={Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || sessionCapabilities.loading || !sessionCapabilities.state || sessionCapabilities.saving)}
         preserveDraftUntilAccepted
         skipChatWarmup={isCreating}

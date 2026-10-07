@@ -921,7 +921,7 @@ mod tests {
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),
                 arguments:StrictJsonValue(serde_json::json!({"path":"result.txt"})),provider_metadata:None}},
             AgentEngineEvent::ToolCompleted {step:1,result:result.clone()},
-            AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into()},
+            AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into(),failure:None},
         ];
         let original=serde_json::to_value(&events).unwrap();let input=requirement();let mut history=Vec::new();
         replay_closed_turn(&mut history,input.clone(),&events).unwrap();assert_eq!(history[0],input);
@@ -977,7 +977,7 @@ mod tests {
                 AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"old-control".into(),name:name.into(),
                     arguments:StrictJsonValue(serde_json::json!({})),provider_metadata:None}},
                 AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("old-control".into(),original,true)},
-                AgentEngineEvent::TurnFailed {model_steps:1,message:"original failure".into()},
+                AgentEngineEvent::TurnFailed {model_steps:1,message:"original failure".into(),failure:None},
             ];
             let persisted = serde_json::to_value(&events).unwrap();
             let mut history=Vec::new();
@@ -1102,6 +1102,7 @@ mod tests {
             AgentEngineEvent::TurnFailed {
                 model_steps: 1,
                 message: "application restarted".into(),
+                failure: None,
             },
         ];
         let mut history = Vec::new();

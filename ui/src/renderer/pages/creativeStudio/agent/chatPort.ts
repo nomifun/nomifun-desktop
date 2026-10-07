@@ -7,6 +7,7 @@
 import type { CreativeModelSelectionRef } from '../models';
 import type { CreativeStudioAgentMessage } from './types';
 import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
 
 export interface CreativeStudioAgentTurnRequest {
   canvasId: string;
@@ -30,7 +31,7 @@ export type CreativeStudioAgentTurnEvent =
   | { type: 'paused'; pause: ConversationPauseNotice }
   | { type: 'completed'; assistantMessageId?: string }
   | { type: 'stopped' }
-  | { type: 'failed'; message: string; code?: string; retryable?: boolean };
+  | { type: 'failed'; message: string; code?: string; retryable?: boolean; error?: AgentStreamErrorInfo; turnId?: string; timestamp?: number };
 
 /**
  * Adapter point for the existing NomiFun conversation/agent runtime. The port

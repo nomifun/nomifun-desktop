@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { cleanup, fireEvent, render, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, within } from '@testing-library/react';
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -15,6 +15,8 @@ import { ConversationProvider, type ConversationContextValue } from '@/renderer/
 import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
 import { emitter } from '@/renderer/utils/emitter';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
+import zhConversation from '@/renderer/services/i18n/locales/zh-CN/conversation.json';
+import zhAgentSettings from '@/renderer/services/i18n/locales/zh-CN/agentSettings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
@@ -24,7 +26,10 @@ import MessageTips from './MessageTips';
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
   lng: 'en-US',
-  resources: { 'en-US': { translation: { conversation, common, agentSettings, settings: { ...settings, oneClickFeedback: 'Report Issue' } } } },
+  resources: {
+    'en-US': { translation: { conversation, common, agentSettings, settings: { ...settings, oneClickFeedback: 'Report Issue' } } },
+    'zh-CN': { translation: { conversation: zhConversation, agentSettings: zhAgentSettings, common, settings } },
+  },
   interpolation: { escapeValue: false },
 });
 
@@ -74,6 +79,52 @@ function mount(message = error, context: Partial<ConversationContextValue> = {})
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('compact message errors', () => {
+  test.each(['en-US', 'zh-CN'])('shows the typed blocked-work reason and guidance separately from diagnostics in %s', async (language) => {
+    await act(async () => { await testI18n.changeLanguage(language); });
+    try {
+      const copy = language === 'zh-CN' ? zhConversation.agentError : conversation.agentError;
+      const detail = 'completion account contains blocked work; this turn cannot be published as task completion';
+      const message: IMessageTips = { ...error, turn_id: sourceId, created_at: 1_000, content: {
+        type: 'error', content: detail, finished_at_ms: 2_000, error: {
+          code: 'NOMIFUN_TASK_INCOMPLETE', message: 'The Agent stopped', detail, retryable: false,
+          taskIncompleteReason: 'blocked_work', agentLabel: 'Research Agent', modelName: 'used-model',
+          workspacePath: '/workspace/research',
+        },
+      } };
+      const { page, container } = mount(message, {
+        currentAgent: { presetId: 'new-agent', label: 'Different Agent' },
+        currentModel: { id: parseProviderId('0190f5fe-7c00-7a00-8000-000000000097'), platform: 'openai', use_model: 'different-model' },
+        workspace: '/different-workspace',
+      });
+      expect(page.getByRole('alert').textContent).toBe(copy.incompleteReasons.blocked_work.title);
+      expect(page.getByText(copy.incompleteReasons.blocked_work.body).closest('[hidden]')).toBeNull();
+      expect(page.getByText(detail).closest('[hidden]')).not.toBeNull();
+      expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
+      fireEvent.click(page.getByRole('button', { name: copy.expandDetails }));
+      const panel = page.getByRole('region', { name: copy.expandDetails });
+      for (const value of ['Research Agent', 'used-model', '1970-01-01T00:00:02.000Z', sourceId, conversationId, '/workspace/research', detail]) {
+        expect(panel.textContent).toContain(value);
+      }
+      for (const value of ['Different Agent', 'different-model', '/different-workspace', 'NOMIFUN_TASK_INCOMPLETE', copy.incompleteReasons.blocked_work.body]) {
+        expect(panel.textContent).not.toContain(value);
+      }
+      expect(container.querySelector('.message-error-note__detail-body')?.textContent).toBe(detail);
+    } finally {
+      await act(async () => { await testI18n.changeLanguage('en-US'); });
+    }
+  });
+
+  test('keeps absent historical identity explicit and localizes verified official Agent names', () => {
+    const { page } = mount({ ...error, content: { ...error.content, error: {
+      ...error.content.error!, agentLabel: 'assistant.general', agentTemplateKey: 'assistant.general',
+    } } }, { currentAgent: { presetId: 'new-agent', label: 'Different Agent' } });
+    fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
+    const panel = page.getByRole('region');
+    expect(panel.textContent).toContain('General');
+    expect(panel.textContent).not.toContain('Different Agent');
+    expect(page.getAllByText(conversation.agentError.details.unavailable).length).toBe(3);
+  });
+
   test('shows the typed gateway account action immediately while details remain collapsed', () => {
     spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockImplementation(() => new Promise(() => {}));
     const message: IMessageTips = { ...error, content: { type: 'error', content: '', error: {
@@ -84,7 +135,8 @@ describe('compact message errors', () => {
     const { page, container } = mount(message, { currentModel: {
       id: parseProviderId('0190f5fe-7c00-7a00-8000-000000000097'), platform: 'nomifun-model-gateway', use_model: 'mock-gpt',
     } });
-    expect(page.getByText('The model gateway subscription has expired. Renew the subscription to continue.').closest('[hidden]')).toBeNull();
+    expect(page.getByText(conversation.agentError.codes.USER_LLM_PROVIDER_BILLING_REQUIRED.body).closest('[hidden]')).toBeNull();
+    expect(page.getByText('The model gateway subscription has expired. Renew the subscription to continue.').closest('[hidden]')).not.toBeNull();
     expect(page.getByRole('link', { name: settings.modelGateway.openSettings })).toBeDefined();
     expect(container.querySelector('.message-error-note__details')?.hasAttribute('hidden')).toBe(true);
     expect(container.querySelector('[data-testid="message-error-retry"]')).toBeNull();
@@ -98,10 +150,11 @@ describe('compact message errors', () => {
     const {page,container}=mount(message);
     expect(page.getByText('Session configuration changed')).toBeDefined();
     expect(container.querySelector('[data-testid="message-error-retry"]')).toBeNull();
-    fireEvent.click(page.getByRole('button',{name:'Show error details'}));
-    expect(page.getByText(/Start a new conversation to continue/)).toBeDefined();
+    fireEvent.click(page.getByRole('button',{name:'Technical details'}));
+    expect(page.getByText(conversation.agentError.codes.NOMIFUN_SESSION_CONFIGURATION_CHANGED.body).closest('[hidden]')).toBeNull();
     expect(container.querySelector('.message-error-note__detail-body')?.textContent)
-      .toBe(`${testI18n.t('conversation.agentError.errorCode')}: NOMIFUN_SESSION_CONFIGURATION_CHANGED\nOriginal provenance diagnostic`);
+      .toBe('Original provenance diagnostic');
+    expect(container.textContent).not.toContain('NOMIFUN_SESSION_CONFIGURATION_CHANGED');
     expect(container.textContent).not.toContain('Agent or model provider');
   });
 
@@ -149,7 +202,7 @@ describe('compact message errors', () => {
   test('starts collapsed and exposes the full diagnosis and feedback only when expanded', () => {
     const { page } = mount();
     expect(page.getByRole('alert').textContent).toBe('Response interrupted');
-    const toggle = page.getByRole('button', { name: 'Show error details' });
+    const toggle = page.getByRole('button', { name: 'Technical details' });
     const panel = document.getElementById(toggle.getAttribute('aria-controls')!)!;
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(panel.hidden).toBe(true);
@@ -157,10 +210,10 @@ describe('compact message errors', () => {
     fireEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(panel.hidden).toBe(false);
-    expect(panel.textContent).toContain('NOMIFUN_STREAM_BROKEN');
+    expect(panel.textContent).not.toContain('NOMIFUN_STREAM_BROKEN');
     expect(panel.textContent).toContain('Diagnostic text');
     expect(page.getByRole('button', { name: 'Report Issue' })).toBeDefined();
-    fireEvent.click(page.getByRole('button', { name: 'Hide error details' }));
+    fireEvent.click(page.getByRole('button', { name: 'Hide technical details' }));
     expect(panel.hidden).toBe(true);
   });
 
@@ -171,20 +224,29 @@ describe('compact message errors', () => {
     expect(emit).toHaveBeenCalledWith('sendbox.edit', {
       msgId: sourceId, createdAt: 1, content: 'Please continue this task.',
     });
-    expect(page.getByRole('button', { name: 'Show error details' }).getAttribute('aria-expanded')).toBe('false');
+    expect(page.getByRole('button', { name: 'Technical details' }).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  test.each([
+    [sourceId, true],
+    [parseMessageId('0190f5fe-7c00-7a00-8000-000000000099'), false],
+  ] as const)('offers retry only when the latest request belongs to the failed Turn %s', (turnId, expected) => {
+    const { page } = mount({ ...error, turn_id: turnId });
+    expect(page.queryByRole('button', { name: 'Retry' }) !== null).toBe(expected);
   });
 
   test.each([{ isProcessing: true }, { readOnly: true }])('does not offer retry in a restricted context %j', (context) => {
     const { page } = mount(error, context);
     expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
-    expect(page.getByRole('button', { name: 'Show error details' })).toBeDefined();
+    expect(page.getByRole('button', { name: 'Technical details' })).toBeDefined();
   });
 
   test('non-retryable errors keep their reason available', () => {
     const { page } = mount({ ...error, content: { ...error.content, error: { ...error.content.error!, retryable: false } } });
     expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
-    fireEvent.click(page.getByRole('button', { name: 'Show error details' }));
-    expect(page.getByText('Needs configuration')).toBeDefined();
+    fireEvent.click(page.getByRole('button', { name: 'Technical details' }));
+    expect(page.queryByText('Needs configuration')).toBeNull();
+    expect(page.getByText(conversation.agentError.codes.NOMIFUN_STREAM_BROKEN.body).closest('[hidden]')).toBeNull();
   });
 
   test('truncation exposes no history-mutating continuation while processing', () => {
@@ -203,7 +265,7 @@ describe('compact message errors', () => {
   test.each(['Legacy diagnostic text', '{"error":"Legacy JSON diagnostic"}'])('keeps legacy details recoverable: %s', (content) => {
     const { page } = mount({ ...error, content: { type: 'error', content } });
     expect(page.getByRole('alert').textContent).toBe(conversation.agentError.fallbackTitle);
-    const toggle = page.getByRole('button', { name: 'Show error details' });
+    const toggle = page.getByRole('button', { name: 'Technical details' });
     const panel = document.getElementById(toggle.getAttribute('aria-controls')!)!;
     expect(panel.hidden).toBe(true);
     fireEvent.click(toggle);
@@ -214,8 +276,8 @@ describe('compact message errors', () => {
   test('each error controls its own details panel', () => {
     const first = mount();
     const second = mount({ ...error, id: 'second-error' });
-    const firstToggle = first.page.getByRole('button', { name: 'Show error details' });
-    const secondToggle = second.page.getByRole('button', { name: 'Show error details' });
+    const firstToggle = first.page.getByRole('button', { name: 'Technical details' });
+    const secondToggle = second.page.getByRole('button', { name: 'Technical details' });
     expect(firstToggle.getAttribute('aria-controls')).not.toBe(secondToggle.getAttribute('aria-controls'));
     fireEvent.click(firstToggle);
     expect(secondToggle.getAttribute('aria-expanded')).toBe('false');

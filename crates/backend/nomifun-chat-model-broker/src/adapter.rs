@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::Stream;
 use nomifun_agent_contracts::{
-    ChatRouteIdentity, ConnectionConfigRef, DigestHex, StrictJsonValue,
+    ChatRouteIdentity, ConnectionConfigRef, DigestHex, ModelFailureDiagnostic, StrictJsonValue,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -45,6 +45,10 @@ pub struct ProviderWireFrame {
     pub event: String,
     #[serde(default)]
     pub data: Value,
+    /// Credential-redacted HTTP context for a verified native error frame.
+    /// Normal output frames carry no diagnostic metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ModelFailureDiagnostic>,
 }
 
 /// One attempt's frame accumulator. Its state is dropped on success, error,
@@ -1283,8 +1287,9 @@ impl ChatFrameDecoder for AttemptFrameDecoder {
     ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
         // Cloud exception headers are normalized outside Messages. Handle them
         // even after the native decoder has already selected a content lifecycle.
-        if let Some(error) = crate::provider_errors::decode(
+        if let Some(error) = crate::provider_errors::decode_with_context(
             self.protocol, &frame.event.trim().to_ascii_lowercase(), &frame.data,
+            frame.diagnostic.as_ref(),
         ) {
             return Err(error);
         }
@@ -1313,7 +1318,9 @@ fn decode_frame_for_protocol(
             "provider frame has an empty event name",
         ));
     }
-    if let Some(error) = crate::provider_errors::decode(protocol, &event_name, &frame.data) {
+    if let Some(error) = crate::provider_errors::decode_with_context(
+        protocol, &event_name, &frame.data, frame.diagnostic.as_ref(),
+    ) {
         return Err(error);
     }
 

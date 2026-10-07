@@ -7,6 +7,7 @@
 import type { CreativeModelSelectionRef } from '../models';
 import type { ReactNode } from 'react';
 import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
 
 export type CreativeStudioAgentView = 'chat' | 'history';
 export type CreativeStudioAgentPanelLoadState = 'loading' | 'ready' | 'failed';
@@ -42,6 +43,10 @@ interface CreativeStudioAgentFailedMessage extends CreativeStudioAgentMessageBas
   role: 'assistant';
   status: 'failed';
   errorMessage: string;
+  /** Transient canonical diagnostics; the exclusive history wire stays authoritative. */
+  error?: AgentStreamErrorInfo;
+  turnId?: string;
+  timestamp?: number;
 }
 
 interface CreativeStudioAgentStoppedMessage extends CreativeStudioAgentMessageBase {
@@ -111,6 +116,8 @@ export interface CreativeStudioAgentPanelProps {
   loadState: CreativeStudioAgentPanelLoadState;
   sessions: readonly CreativeStudioAgentSessionSummary[];
   activeSessionId: string | null;
+  /** Canonical Agent Session identity, distinct from the Canvas chat-session ID. */
+  conversationId?: string;
   messages: readonly CreativeStudioAgentMessage[];
   draft: string;
   model: CreativeModelSelectionRef | null;

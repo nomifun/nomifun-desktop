@@ -8,6 +8,7 @@
 use serde::Serialize;
 use nomifun_net::secret_redaction::redact_url_queries as transport_cause_detail;
 use nomifun_api_types::ModelTechnicalCapability;
+pub use nomifun_api_types::{ModelFailureDiagnostic, ModelFailureReason};
 pub use nomifun_net::provider_gateway_error::GatewayBusinessError;
 
 /// Machine-readable classification of an invocation failure.
@@ -72,6 +73,8 @@ pub struct InvokeError {
     /// Exact native gateway business code from a complete bounded error body.
     /// This transport-only classification is never a canonical Session field.
     pub gateway_business_error: Option<GatewayBusinessError>,
+    /// Redacted evidence only; refinement does not alter legacy retry kind.
+    pub diagnostic: Option<ModelFailureDiagnostic>,
 }
 
 /// Render a transport error's cause chain for a diagnostic, with URL query
@@ -112,6 +115,7 @@ impl InvokeError {
             context_length_rejected: false,
             unsupported_technical_capability: None,
             gateway_business_error: None,
+            diagnostic: None,
         }
     }
 
@@ -125,7 +129,49 @@ impl InvokeError {
     /// classification without exposing internal error bookkeeping fields.
     pub fn with_http_status(mut self, status: u16) -> Self {
         self.http_status = Some(status);
+        if let Some(diagnostic) = self.diagnostic.as_mut() { diagnostic.http_status = Some(status); }
         self
+    }
+
+    pub(crate) fn with_diagnostic(mut self, reason: ModelFailureReason) -> Self {
+        self.diagnostic = Some(ModelFailureDiagnostic::new(reason));
+        self
+    }
+
+    pub(crate) fn with_request_context(mut self, endpoint: &str, protocol: &str, auth_scheme: Option<&str>) -> Self {
+        let diagnostic = self.diagnostic.get_or_insert_with(||
+            ModelFailureDiagnostic::new(crate::provider_diagnostic::kind_reason(self.kind)));
+        if diagnostic.endpoint.is_none() { diagnostic.endpoint = nomifun_net::secret_redaction::sanitized_endpoint(endpoint); }
+        if diagnostic.protocol.is_none() { diagnostic.protocol = Some(protocol.to_owned()); }
+        if let Some(auth_scheme) = auth_scheme { diagnostic.auth_scheme = Some(auth_scheme.to_owned()); }
+        diagnostic.http_status = diagnostic.http_status.or(self.http_status);
+        diagnostic.retry_after_ms = diagnostic.retry_after_ms.or(self.retry_after_ms);
+        self
+    }
+
+    pub(crate) fn with_provider_id(mut self, provider_id: &str) -> Self {
+        let diagnostic = self.diagnostic.get_or_insert_with(||
+            ModelFailureDiagnostic::new(crate::provider_diagnostic::kind_reason(self.kind)));
+        diagnostic.provider_id = Some(provider_id.to_owned());
+        self
+    }
+
+    pub(crate) fn with_model_name(mut self, model_name: &str) -> Self {
+        let diagnostic = self.diagnostic.get_or_insert_with(||
+            ModelFailureDiagnostic::new(crate::provider_diagnostic::kind_reason(self.kind)));
+        diagnostic.model_name = Some(model_name.to_owned());
+        self
+    }
+
+    pub fn model_failure_diagnostic(&self) -> ModelFailureDiagnostic {
+        self.diagnostic.clone().unwrap_or_else(|| {
+            let mut diagnostic = ModelFailureDiagnostic::new(self.http_status
+                .map(crate::provider_diagnostic::http_reason)
+                .unwrap_or_else(|| crate::provider_diagnostic::kind_reason(self.kind)));
+            diagnostic.http_status = self.http_status;
+            diagnostic.retry_after_ms = self.retry_after_ms;
+            diagnostic
+        })
     }
 
     /// A local-configuration error ([`InvokeErrorKind::Config`]).
@@ -184,10 +230,17 @@ impl InvokeError {
         };
         // The label stays the message PREFIX: `provider_health::classify_error`
         // and other callers match on these exact strings.
-        match transport_detail(e) {
+        let detail = transport_detail(e);
+        let mut error = match detail.as_ref() {
             Some(detail) => Self::new(kind, format!("{label} ({detail})")),
             None => Self::new(kind, label),
-        }
+        };
+        let mut diagnostic = ModelFailureDiagnostic::new(transport_reason(e));
+        diagnostic.endpoint = e.url().and_then(|url| nomifun_net::secret_redaction::sanitized_endpoint(url.as_str()));
+        diagnostic.http_status = e.status().map(|status| status.as_u16());
+        diagnostic.transport_detail = Some(detail.map_or_else(|| label.to_owned(), |detail| format!("{label}: {detail}")));
+        error.diagnostic = Some(diagnostic);
+        error
     }
 
     /// Map a `Response::json` failure without copying `reqwest::Error`'s
@@ -211,8 +264,12 @@ impl InvokeError {
     /// Carries the upstream status so a `200 OK` HTML page is still reported as
     /// what it is: the wrong address, answered successfully.
     pub fn non_api_response(status: u16, content_type: &str) -> Self {
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::NonApiResponse);
+        diagnostic.http_status = Some(status);
+        diagnostic.content_type = Some(content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase());
         Self {
             http_status: Some(status),
+            diagnostic: Some(diagnostic),
             ..Self::new(
                 InvokeErrorKind::NonApiResponse,
                 format!(
@@ -235,8 +292,46 @@ impl InvokeError {
         redactor: &nomifun_net::secret_redaction::SecretRedactor,
     ) -> Self {
         self.message = redactor.redact(&self.message);
+        if let Some(diagnostic) = self.diagnostic.as_mut() {
+            for value in [&mut diagnostic.provider_code, &mut diagnostic.provider_type, &mut diagnostic.provider_param, &mut diagnostic.model_name, &mut diagnostic.request_id,
+                &mut diagnostic.protocol, &mut diagnostic.auth_scheme, &mut diagnostic.content_type] {
+                if let Some(text) = value {
+                    let safe = redactor.redact(text);
+                    *value = (safe == *text && !safe.chars().any(char::is_control) && safe.len() <= 256).then_some(safe);
+                }
+            }
+            diagnostic.endpoint = diagnostic.endpoint.as_deref()
+                .map(|value| redactor.redact(value)).and_then(|value| nomifun_net::secret_redaction::sanitized_endpoint(&value));
+            diagnostic.transport_detail = diagnostic.transport_detail.as_deref()
+                .map(|value| redactor.redact(value).chars().take(1000).collect());
+        }
         self
     }
+}
+
+fn transport_reason(error: &reqwest::Error) -> ModelFailureReason {
+    if error.status().is_some_and(|status| status.as_u16() == 407) { return ModelFailureReason::ProxyFailure; }
+    if let Some(reason) = native_cause_reason(error) { return reason; }
+    if error.is_builder() { ModelFailureReason::ConfigurationError }
+    else if error.is_timeout() { ModelFailureReason::RequestTimeout }
+    else if error.is_connect() { ModelFailureReason::ConnectionFailed }
+    else { ModelFailureReason::NetworkFailure }
+}
+
+fn native_cause_reason(error: &(dyn std::error::Error + 'static)) -> Option<ModelFailureReason> {
+    let mut current = Some(error);
+    let mut invalid_url = false;
+    while let Some(source) = current {
+        if source.downcast_ref::<rustls::Error>().is_some()
+            || source.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref)
+                .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some())
+        { return Some(ModelFailureReason::TlsFailure); }
+        invalid_url |= source.downcast_ref::<url::ParseError>().is_some()
+            || source.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref)
+                .is_some_and(|inner| inner.downcast_ref::<url::ParseError>().is_some());
+        current = source.source();
+    }
+    invalid_url.then_some(ModelFailureReason::InvalidEndpoint)
 }
 
 impl From<InvokeError> for nomifun_common::AppError {
@@ -287,6 +382,17 @@ mod tests {
     use nomifun_common::AppError;
 
     use super::*;
+
+    #[test]
+    fn network_subreason_requires_native_error_type_not_lookalike_prose() {
+        let tls = std::io::Error::other(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer));
+        assert_eq!(native_cause_reason(&tls), Some(ModelFailureReason::TlsFailure));
+        let invalid_url = std::io::Error::other(url::ParseError::RelativeUrlWithoutBase);
+        assert_eq!(native_cause_reason(&invalid_url), Some(ModelFailureReason::InvalidEndpoint));
+        for message in ["DNS lookup failed", "invalid peer certificate", "proxy authentication failed"] {
+            assert_eq!(native_cause_reason(&std::io::Error::other(message)), None);
+        }
+    }
 
     #[test]
     fn new_has_no_status_or_retry() {

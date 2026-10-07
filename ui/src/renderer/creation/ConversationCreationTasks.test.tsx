@@ -16,6 +16,8 @@ import { creationModeFor, type ConversationCreationTask, type CreationTaskCapabi
 import { emptyCreationDraft } from './useCreationDraft';
 import { recallCreationTask } from './recallTask';
 import { emitter } from '@/renderer/utils/emitter';
+import conversation from '@/renderer/services/i18n/locales/zh-CN/conversation.json';
+import common from '@/renderer/services/i18n/locales/zh-CN/common.json';
 
 const completedListeners = new Set<(event: IConversationTurnCompletedEvent) => void>();
 beforeEach(() => {
@@ -31,7 +33,7 @@ const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
   lng: 'zh-CN',
   fallbackLng: 'zh-CN',
-  resources: { 'zh-CN': { translation: {} } },
+  resources: { 'zh-CN': { translation: { conversation, common } } },
   interpolation: { escapeValue: false },
 });
 
@@ -323,7 +325,68 @@ test.each(['failed', 'canceled'] as const)('%s terminal tasks remove the running
   expect(page.container.querySelector('[aria-busy="true"]')).toBeNull();
   expect(page.queryByRole('button', { name: '取消任务' })).toBeNull();
   expect(page.queryByRole('button', { name: '预览图片：产物' })).toBeNull();
-  if (status === 'failed') expect(page.getByRole('alert').textContent).toBe('生成服务返回错误');
+  if (status === 'failed') {
+    expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_GENERATION_FAILED.title);
+    expect(page.getByText('生成服务返回错误').closest('[hidden]')).not.toBeNull();
+    fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
+    expect(page.getByText('生成服务返回错误').closest('[hidden]')).toBeNull();
+    expect(page.getAllByText('image-model').some(element => element.tagName === 'DD')).toBe(true);
+    expect(page.getByText(conversationId)).toBeTruthy();
+    expect(page.getByText(messageId)).toBeTruthy();
+  }
+});
+
+test('task status-read failures use shared guidance and retry without creating a Turn', async () => {
+  const list = spyOn(creationClient, 'listCreationTasks').mockRejectedValue(new Error('Original status diagnostic'));
+  const page = renderTasks();
+  expect(await page.findByRole('alert')).toBeTruthy();
+  expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_CREATION_STATUS_FAILED.title);
+  expect(page.getByText('Original status diagnostic').closest('[hidden]')).not.toBeNull();
+  list.mockResolvedValue([]);
+  fireEvent.click(page.getByRole('button', { name: common.retry }));
+  await waitFor(() => expect(page.queryByRole('alert')).toBeNull());
+  expect(page.container.querySelector('[data-creation-task]')).toBeNull();
+});
+
+test.each(['expired_key', 'insufficient_quota', 'spend_limit_reached'] as const)('generation failures retain captured %s diagnosis and actual provider context', async reason => {
+  spyOn(creationClient, 'listCreationTasks').mockResolvedValue([task({
+    status: 'failed', finished_at: 1700000000000,
+    error: { kind: 'provider_error', message: 'Safe generation failure detail', http_status: 429, providerDiagnostic: {
+      reason, httpStatus: 429, providerId, modelName: 'actual-image-route', providerCode: reason,
+      endpoint: 'https://images.example.test/v1/generate?api_key=sk-do-not-display',
+      requestId: 'generation-request-42', transportDetail: 'Safe captured transport detail',
+    } },
+  })]);
+  const page = renderTasks();
+  expect((await page.findByRole('alert')).textContent).toBe(conversation.agentError.providerReasons[reason].title);
+  expect(page.getByText(conversation.agentError.providerReasons[reason].body)).toBeTruthy();
+  expect(page.getByText('Safe captured transport detail').closest('[hidden]')).not.toBeNull();
+  expect(page.container.textContent).not.toContain('sk-do-not-display');
+  fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
+  expect(page.getByText('Safe captured transport detail').closest('[hidden]')).toBeNull();
+  expect(page.getByText('actual-image-route')).toBeTruthy();
+  expect(page.getByText(providerId)).toBeTruthy();
+  expect(page.getByText('https://images.example.test/v1/generate')).toBeTruthy();
+  expect(page.getByText('generation-request-42')).toBeTruthy();
+  const turn = page.getByText(conversation.agentError.details.turn).closest('div');
+  expect(turn?.querySelector('dd')?.textContent).toBe(conversation.agentError.details.unavailable);
+  expect(page.getByText(conversation.agentError.details.message).closest('div')?.querySelector('dd')?.textContent).toBe(messageId);
+  expect(page.getByText(conversation.agentError.details.creationTask).closest('div')?.querySelector('dd')?.textContent).toBe('0190f5fe-7c00-7a00-8000-000000000108');
+  expect(page.getByText(conversation.agentError.details.sessionModel)).toBeTruthy();
+  expect(page.getByText('2023-11-14T22:13:20.000Z')).toBeTruthy();
+  expect(page.queryByText('Safe generation failure detail')).toBeNull();
+});
+
+test('a failed creation task keeps its explicit adjustment action inside shared error controls', async () => {
+  spyOn(creationClient, 'listCreationTasks').mockResolvedValue([task({ status: 'failed', error: null })]);
+  const creation = composer();
+  const page = renderTasks({ composer: creation });
+  expect(await page.findByRole('alert')).toBeTruthy();
+  const retry = page.getByRole('button', { name: testI18n.t('conversation.agentError.adjustAndRetry', { defaultValue: 'Adjust and retry' }) });
+  expect(retry.closest('.message-error-note__controls')).not.toBeNull();
+  fireEvent.click(retry);
+  await waitFor(() => expect(creation.selectMode).toHaveBeenCalledWith('image'));
+  expect(creation.update).toHaveBeenCalledTimes(1);
 });
 
 test('opens the shared full-screen image preview with redundant exit controls', async () => {

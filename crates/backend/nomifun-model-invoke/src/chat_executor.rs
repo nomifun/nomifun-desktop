@@ -18,7 +18,7 @@ use aws_sigv4::http_request::{
 use crc32fast::Hasher;
 use futures_util::{Stream, StreamExt};
 use crate::auth::{AuthMaterial, AuthScheme};
-use crate::error::InvokeError;
+use crate::error::{InvokeError, ModelFailureDiagnostic, ModelFailureReason};
 use crate::transport::{error_from_response_with_timeout, net_err};
 use serde_json::Value;
 use std::time::SystemTime;
@@ -165,7 +165,8 @@ impl SingleAttemptRequest {
             return Err(InvokeError::config("single-attempt protocol is empty"));
         }
         let url = reqwest::Url::parse(self.url.trim())
-            .map_err(|_| InvokeError::config("single-attempt URL is invalid"))?;
+            .map_err(|_| InvokeError::config("single-attempt URL is invalid")
+                .with_diagnostic(ModelFailureReason::InvalidEndpoint))?;
         if !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -174,7 +175,7 @@ impl SingleAttemptRequest {
         {
             return Err(InvokeError::config(
                 "single-attempt URL must be an HTTP(S) URL without userinfo or fragment",
-            ));
+            ).with_diagnostic(ModelFailureReason::InvalidEndpoint));
         }
         if self.model.trim().is_empty() {
             return Err(InvokeError::config("single-attempt model is empty"));
@@ -203,6 +204,10 @@ fn sign_bedrock_request(
     material: &AuthMaterial,
     body: &[u8],
 ) -> Result<reqwest::RequestBuilder, InvokeError> {
+    if request.framing == SingleAttemptFraming::AwsEventStream && !matches!(material.scheme, AuthScheme::Bedrock) {
+        return Err(InvokeError::config("AWS event-stream protocol requires SigV4 authentication")
+            .with_diagnostic(ModelFailureReason::AuthSchemeMismatch));
+    }
     let region = request
         .region
         .as_deref()
@@ -281,6 +286,7 @@ fn sign_bedrock_request(
 pub struct SingleAttemptFrame {
     pub event: String,
     pub data: Value,
+    pub diagnostic: Option<ModelFailureDiagnostic>,
 }
 
 pub type SingleAttemptStream =
@@ -337,24 +343,35 @@ impl SingleAttemptHttpExecutor {
         &self,
         request: SingleAttemptRequest,
     ) -> Result<SingleAttemptStream, InvokeError> {
-        request.validate()?;
+        request.validate().map_err(|error| error.with_request_context(&request.url, &request.protocol, None))?;
         let (material, response) = tokio::time::timeout(request.timeout, async {
             let material = self.credentials.resolve(&request.credential).await?;
-            material.validate_credentials()?;
+            material.validate_credentials().map_err(|error|
+                error.with_request_context(&request.url, &request.protocol, Some(material.scheme.diagnostic_id()))
+                    .redacted(&material.secret_redactor()))?;
             let response = self.send_once(&request, &material).await?;
             Ok::<_, InvokeError>((material, response))
         })
         .await
-        .map_err(|_| deadline::elapsed("provider request setup timeout"))??;
+        .map_err(|_| deadline::elapsed("provider request setup timeout")
+            .with_request_context(&request.url, &request.protocol, None))?
+        .map_err(|error| error.with_request_context(&request.url, &request.protocol, None))?;
+        let redactor = material.secret_redactor();
+        let mut context = crate::provider_diagnostic::response_context(&response, Some(&request.protocol),
+            Some(material.scheme.diagnostic_id()), &redactor);
         if !response.status().is_success() {
             let error = error_from_response_with_timeout(response, request.idle_timeout, &request.protocol).await;
-            return Err(error.redacted(&material.secret_redactor()));
+            return Err(error.with_request_context(&request.url, &request.protocol, Some(material.scheme.diagnostic_id()))
+                .redacted(&redactor));
         }
         if let Some(content_type) =
             nomifun_net::api_response::is_non_api_content_type(response.headers())
         {
             let status = response.status().as_u16();
-            return Err(InvokeError::non_api_response(status, &content_type));
+            context.reason = ModelFailureReason::NonApiResponse;
+            let mut error = InvokeError::non_api_response(status, &content_type);
+            error.diagnostic = Some(context);
+            return Err(error.redacted(&redactor));
         }
 
         let json_response = request.framing == SingleAttemptFraming::Sse
@@ -373,7 +390,18 @@ impl SingleAttemptHttpExecutor {
         } else {
             stream_response(bytes, request.framing, self.max_line_bytes)
         };
-        Ok(Box::pin(deadline::FrameDeadlineStream::new(stream, request.idle_timeout)))
+        let protocol = request.protocol.clone();
+        let endpoint = request.url.clone();
+        let auth_scheme = material.scheme.diagnostic_id();
+        Ok(Box::pin(deadline::FrameDeadlineStream::new(stream, request.idle_timeout).map(move |frame| {
+            frame.map(|mut frame| {
+                if crate::provider_diagnostic::frame_is_error(&frame.event, &frame.data) {
+                    frame.diagnostic = Some(crate::provider_diagnostic::refine_from_body(context.clone(),
+                        &frame.data, Some(&protocol), &redactor));
+                }
+                frame
+            }).map_err(|error| error.with_request_context(&endpoint, &protocol, Some(auth_scheme)).redacted(&redactor))
+        })))
     }
 
     async fn send_once(
@@ -396,11 +424,15 @@ impl SingleAttemptHttpExecutor {
             .post(request.url.trim())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone());
-        let response = self.authenticator
-            .apply(builder, request, material, &body)?
+        let mut response = self.authenticator
+            .apply(builder, request, material, &body).map_err(|error|
+                error.with_request_context(&request.url, &request.protocol, Some(material.scheme.diagnostic_id()))
+                    .redacted(&material.secret_redactor()))?
             .send()
             .await
-            .map_err(|error| net_err(error).redacted(&material.secret_redactor()))?;
+            .map_err(|error| net_err(error).with_request_context(&request.url, &request.protocol,
+                Some(material.scheme.diagnostic_id())).redacted(&material.secret_redactor()))?;
+        response.extensions_mut().insert(material.secret_redactor());
         #[cfg(debug_assertions)]
         tracing::trace!(target: "nomifun_model_wire", http_status = response.status().as_u16(), "provider response status");
         Ok(response)
@@ -548,6 +580,7 @@ where
         std::task::Poll::Ready(Some(Ok(SingleAttemptFrame {
             event: "json".to_owned(),
             data,
+            diagnostic: None,
         })))
     }
 }
@@ -716,7 +749,7 @@ fn decode_bedrock_payload(payload: &[u8]) -> Result<SingleAttemptFrame, InvokeEr
         .and_then(Value::as_str)
         .unwrap_or("message")
         .to_owned();
-    Ok(SingleAttemptFrame { event, data })
+    Ok(SingleAttemptFrame { event, data, diagnostic: None })
 }
 
 #[cfg(test)]

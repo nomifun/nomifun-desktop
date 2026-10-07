@@ -7,6 +7,7 @@ import type { ConversationId, CronJobId, MessageId } from '@/common/types/ids';
 
 import type { TProviderWithModel } from '@/common/config/storage';
 import React, { createContext, useContext } from 'react';
+import type { ConversationPauseNotice } from '@/renderer/pages/conversation/utils/conversationRuntime';
 
 /**
  * Conversation context interface
@@ -67,6 +68,8 @@ export interface ConversationContextValue {
    * after {duration}"). Session-local; cleared when a new turn starts.
    */
   stopNotice?: { stoppedAt: number } | null;
+  /** Current canonical pause, retained independently of error presentation. */
+  executionPause?: ConversationPauseNotice | null;
 
   /** Current binding identity for presentation of a durable Agent transition. */
   currentAgent?: { presetId: string; label: string };

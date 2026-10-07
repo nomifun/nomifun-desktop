@@ -142,5 +142,6 @@ pub(super) fn exception_frame(
     Ok(Some(SingleAttemptFrame {
         event: "bedrock.exception".to_owned(),
         data: json!({"error": {"code": code}}),
+        diagnostic: None,
     }))
 }

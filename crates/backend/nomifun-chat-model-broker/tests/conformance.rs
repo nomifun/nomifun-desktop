@@ -335,6 +335,7 @@ fn basic_request(route: &ResolvedChatRoute) -> ChatModelRequest {
 
 fn frame(event: &str, data: serde_json::Value) -> Result<ProviderWireFrame, ChatModelError> {
     Ok(ProviderWireFrame {
+        diagnostic: None,
         event: event.to_owned(),
         data,
     })
@@ -474,6 +475,7 @@ fn every_recorded_wire_decodes_to_its_canonical_event_sequence() {
         .collect::<BTreeMap<_, _>>();
 
     for fixture in recorded_conformance_fixtures() {
+        assert!(fixture.wire_events.iter().all(|frame| frame.diagnostic.is_none()));
         let adapter = &adapters[&fixture.protocol];
         let decoded = fixture
             .wire_events
@@ -482,6 +484,39 @@ fn every_recorded_wire_decodes_to_its_canonical_event_sequence() {
             .flat_map(|frame| adapter.decode_frame(frame).expect("recorded frame"))
             .collect::<Vec<_>>();
         assert_eq!(decoded, fixture.expected_events, "{}", fixture.scenario_id);
+    }
+}
+
+#[test]
+fn official_decoders_preserve_redacted_http_context_on_verified_errors() {
+    use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    for adapter in adapters(&transports) {
+        let protocol = adapter.protocol();
+        let (event, data) = match protocol {
+            ChatProtocol::Bedrock => ("bedrock.exception", serde_json::json!({
+                "error": {"code": "accessDeniedException"}
+            })),
+            ChatProtocol::Gemini => ("json", serde_json::json!({
+                "error": {"code": 403, "status": "PERMISSION_DENIED", "message": "private-native-key"}
+            })),
+            _ => ("error", serde_json::json!({"error": {"type": "permission_error",
+                "message": "private-native-key", "request_id": "private-native-key"}})),
+        };
+        let mut context = ModelFailureDiagnostic::new(ModelFailureReason::AuthFailed);
+        context.http_status = Some(403);
+        context.request_id = Some("req_redacted_context".to_owned());
+        context.endpoint = Some("https://provider.example.test/v1".to_owned());
+        let frame = ProviderWireFrame { event: event.to_owned(), data, diagnostic: Some(context.clone()) };
+        let request = basic_request(&route(protocol, "error-context", 1));
+        let mut decoder = adapter.new_frame_decoder_for(&request).unwrap();
+        for error in [adapter.decode_frame(frame.clone()).unwrap_err(), decoder.decode_frame(frame).unwrap_err()] {
+            let mut expected = context.clone();
+            expected.reason = ModelFailureReason::PermissionDenied;
+            assert_eq!(error.diagnostic, Some(expected), "{protocol:?}");
+            assert!(!serde_json::to_string(&error).unwrap().contains("private-native-key"));
+        }
     }
 }
 
@@ -525,6 +560,7 @@ fn bounded_json_fallback_decodes_openai_chat_and_gemini_responses() {
             .expect("official adapter has an attempt-local decoder");
         let events = decoder
             .decode_frame(ProviderWireFrame {
+                diagnostic: None,
                 event: "json".into(),
                 data,
             })
@@ -602,6 +638,7 @@ fn openai_chat_raw_sse_shape_decodes_text_tools_usage_and_finish() {
         .flat_map(|data| {
             adapter
                 .decode_frame(ProviderWireFrame {
+                    diagnostic: None,
                     event: "message".to_owned(),
                     data,
                 })
@@ -689,6 +726,7 @@ fn openai_chat_done_marker_completes_a_stream_without_finish_reason() {
         .flat_map(|(index, data)| {
             adapter
                 .decode_frame(ProviderWireFrame {
+                    diagnostic: None,
                     event: if index == 2 {
                         "done".to_owned()
                     } else {
@@ -790,6 +828,7 @@ fn gemini_raw_sse_and_json_shapes_decode_parts_usage_and_finish() {
         .flat_map(|data| {
             adapter
                 .decode_frame(ProviderWireFrame {
+                    diagnostic: None,
                     event: "message".to_owned(),
                     data,
                 })
@@ -843,6 +882,7 @@ fn gemini_raw_sse_and_json_shapes_decode_parts_usage_and_finish() {
 
     let json_events = adapter
         .decode_frame(ProviderWireFrame {
+            diagnostic: None,
             event: "json".to_owned(),
             data: serde_json::json!({
                 "candidates": [{
@@ -890,6 +930,7 @@ fn gemini_blocked_payload_is_provider_failure_before_empty_candidate_validation(
     let adapter = GeminiAdapter::new(transports[&ChatProtocol::Gemini].clone());
     let error = adapter
         .decode_frame(ProviderWireFrame {
+            diagnostic: None,
             event: "message".to_owned(),
             data: serde_json::json!({
                 "candidates": [],
@@ -1439,6 +1480,58 @@ async fn broker_discards_failed_pre_semantic_attempt_and_fails_over_once() {
             .last()
             .is_some_and(|event| event.event.is_terminal())
     );
+}
+
+#[tokio::test]
+async fn final_failure_diagnostic_uses_actual_failover_provider_and_model() {
+    use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
+    let mut native = frame("error", serde_json::json!({"error": {
+        "code": "invalid_api_key", "message": "private native diagnostic"
+    }})).unwrap();
+    let mut context = ModelFailureDiagnostic::new(ModelFailureReason::AuthFailed);
+    context.provider_id = Some("stale-selected-provider".to_owned());
+    context.model_name = Some("stale-selected-model".to_owned());
+    native.diagnostic = Some(context);
+    for (frames, reason, code, semantic) in [
+        (vec![Ok(native)], ModelFailureReason::InvalidKey, ChatModelErrorCode::AuthenticationFailed, false),
+        (vec![frame("message", serde_json::json!({"choices": "malformed"}))],
+            ModelFailureReason::InvalidResponse, ChatModelErrorCode::ProtocolViolation, false),
+        (vec![], ModelFailureReason::StreamInterrupted, ChatModelErrorCode::StreamInterrupted, false),
+        (vec![frame("message", serde_json::json!({"choices": [{"index": 0,
+                "delta": {"content": "committed output"}, "finish_reason": null}]})),
+            frame("message", serde_json::json!({"choices": "malformed"}))],
+            ModelFailureReason::InvalidResponse, ChatModelErrorCode::ProtocolViolation, true),
+    ] {
+        let primary_route = route(ChatProtocol::Anthropic, "selected-primary", 1);
+        let failover_route = route(ChatProtocol::OpenaiChat, "actual-failure", 1);
+        let request = basic_request(&primary_route);
+        let primary = ScriptedTransport::new([TransportScript::Frames(vec![frame("error",
+            serde_json::json!({"error": {"type": "overloaded_error"}}))])]);
+        let failover = ScriptedTransport::new([TransportScript::Frames(frames)]);
+        let transports = transport_map([
+            (ChatProtocol::Anthropic, provider_transport(&primary)),
+            (ChatProtocol::OpenaiChat, provider_transport(&failover)),
+        ]);
+        let broker = broker(StaticCausalityGate::allow(), ResolvedChatRouteSet {
+            primary: primary_route, failovers: vec![failover_route.clone()],
+        }, Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+            BrokerRetryPolicy { max_total_attempts: 2, max_attempts_per_route: 1 });
+        let output = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+        assert_eq!(primary.calls(), 1);
+        assert_eq!(failover.calls(), 1);
+        let error = output.last().unwrap().as_ref().unwrap_err();
+        assert_eq!(error.code, code);
+        let diagnostic = error.diagnostic.as_ref().unwrap();
+        assert_eq!(diagnostic.reason, reason);
+        assert_eq!(diagnostic.provider_id.as_deref(), Some(failover_route.provider_id.as_ref()));
+        assert_eq!(diagnostic.model_name.as_deref(), Some(failover_route.model.as_str()));
+        assert_eq!(error.semantic_output_committed, semantic);
+        if semantic {
+            assert_eq!(error.retry, ChatRetryDirective::Never);
+        }
+        assert_eq!(diagnostic.http_status, None);
+        assert_eq!(diagnostic.endpoint, None);
+    }
 }
 
 #[tokio::test]

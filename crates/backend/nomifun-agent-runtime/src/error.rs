@@ -19,6 +19,7 @@ pub enum AgentEngineError {
     Model {
         code: ChatModelErrorCode,
         message: String,
+        diagnostic: Option<nomifun_agent_contracts::ModelFailureDiagnostic>,
     },
 
     #[error("Agent Runtime model stream ended without a terminal event")]
@@ -93,16 +94,10 @@ pub enum AgentEngineError {
 
 impl AgentEngineError {
     pub fn from_model_error(error: ChatModelError) -> Self {
-        // Preserve the Broker's trusted HTTP status through the existing
-        // string boundary. Only this numeric metadata is added; redaction of the
-        // existing message remains the Broker owner's responsibility.
-        let message = match error.provider_status {
-            Some(status) => format!("provider_http_status={status}; {}", error.message),
-            None => error.message,
-        };
         Self::Model {
             code: error.code,
-            message,
+            message: error.message,
+            diagnostic: error.diagnostic,
         }
     }
 
@@ -122,13 +117,17 @@ mod tests {
 
     #[test]
     fn model_error_preserves_typed_http_status_and_code() {
+        use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
         let mut error = ChatModelError::provider_unavailable("request rejected");
         error.provider_status = Some(503);
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::UpstreamServerError);
+        diagnostic.http_status = Some(503);
+        error.diagnostic = Some(diagnostic.clone());
         assert!(matches!(AgentEngineError::from_model_error(error),
-            AgentEngineError::Model { code: ChatModelErrorCode::ProviderUnavailable, message }
-                if message == "provider_http_status=503; request rejected"));
+            AgentEngineError::Model { code: ChatModelErrorCode::ProviderUnavailable, message, diagnostic: Some(actual) }
+                if message == "request rejected" && actual == diagnostic));
         assert!(matches!(AgentEngineError::from_model_error(ChatModelError::invalid_request("bad input")),
-            AgentEngineError::Model { code: ChatModelErrorCode::InvalidRequest, message } if message == "bad input"));
+            AgentEngineError::Model { code: ChatModelErrorCode::InvalidRequest, message, diagnostic: None } if message == "bad input"));
     }
 }
 

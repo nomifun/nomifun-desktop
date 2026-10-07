@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
+    ModelFailureReason,
     ChatRouteRecord as CanonicalChatRouteRecord, ConnectionConfigRef, DigestHex, digest_payload,
     validate_chat_route_records,
 };
@@ -1577,6 +1578,8 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
         request: ProviderWireRequest,
         credential: CredentialLease,
     ) -> Result<ProviderWireStream, ChatModelError> {
+        let attempted_provider_id = request.provider_id.as_ref().to_owned();
+        let attempted_model = request.model.clone();
         let credential_handle = credential.opaque_handle().to_owned();
         let credential_guard = AttemptCredentialGuard {
             registry: self.credentials.clone(),
@@ -1648,14 +1651,35 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
         // a response body stream; retain no decrypted material while the
         // provider stream is being consumed.
         drop(credential_guard);
-        let stream = result.map_err(invoke_error_to_chat_error)?;
-        Ok(Box::pin(stream.map(|frame| {
+        let stream = result.map_err(|error| {
+            let mut error = invoke_error_to_chat_error(error);
+            if let Some(diagnostic) = error.diagnostic.as_mut() {
+                diagnostic.provider_id = Some(attempted_provider_id.clone());
+                diagnostic.model_name = Some(attempted_model.clone());
+            }
+            error
+        })?;
+        Ok(Box::pin(stream.map(move |frame| {
             frame
-                .map(|frame| ProviderWireFrame {
+                .map(|mut frame| {
+                    if let Some(diagnostic) = frame.diagnostic.as_mut() {
+                        diagnostic.provider_id = Some(attempted_provider_id.clone());
+                        diagnostic.model_name = Some(attempted_model.clone());
+                    }
+                    ProviderWireFrame {
                     event: frame.event,
                     data: frame.data,
+                    diagnostic: frame.diagnostic,
+                    }
                 })
-                .map_err(invoke_error_to_chat_error)
+                .map_err(|error| {
+                    let mut error = invoke_error_to_chat_error(error);
+                    if let Some(diagnostic) = error.diagnostic.as_mut() {
+                        diagnostic.provider_id = Some(attempted_provider_id.clone());
+                        diagnostic.model_name = Some(attempted_model.clone());
+                    }
+                    error
+                })
         })))
     }
 }
@@ -2006,6 +2030,7 @@ fn repository_error_status(error: ProductionRepositoryError) -> u16 {
 }
 
 fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
+    let mut diagnostic = error.model_failure_diagnostic();
     if let Some(business) = error.gateway_business_error {
         let (code, retry) = match business {
             nomifun_model_invoke::GatewayBusinessError::InsufficientBalance
@@ -2020,6 +2045,15 @@ fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
         let mut mapped = ChatModelError::new(code, business.action_message(), retry);
         mapped.provider_status = error.http_status;
         mapped.retry_after_ms = error.retry_after_ms;
+        diagnostic.reason = match business {
+            nomifun_model_invoke::GatewayBusinessError::InsufficientBalance => ModelFailureReason::InsufficientBalance,
+            nomifun_model_invoke::GatewayBusinessError::SubscriptionExpired => ModelFailureReason::SubscriptionExpired,
+            nomifun_model_invoke::GatewayBusinessError::ModelNotInPlan => ModelFailureReason::ModelNotInPlan,
+            nomifun_model_invoke::GatewayBusinessError::KeyExpired => ModelFailureReason::ExpiredKey,
+            nomifun_model_invoke::GatewayBusinessError::RateLimited => ModelFailureReason::RateLimited,
+        };
+        diagnostic.provider_code = Some(business.code().to_owned());
+        mapped.diagnostic = Some(diagnostic);
         return mapped;
     }
     if error.is_context_length_rejected() {
@@ -2029,6 +2063,8 @@ fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
             ChatRetryDirective::Never,
         );
         mapped.provider_status = error.http_status;
+        diagnostic.reason = ModelFailureReason::PromptTooLong;
+        mapped.diagnostic = Some(diagnostic);
         return mapped;
     }
     let unsupported_feature = error.unsupported_technical_capability.map(|capability| match capability {
@@ -2092,6 +2128,8 @@ fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
     mapped.retry_after_ms = error.retry_after_ms;
     mapped.provider_status = error.http_status;
     mapped.unsupported_feature = unsupported_feature;
+    if unsupported_feature.is_some() { diagnostic.reason = ModelFailureReason::UnsupportedFeature; }
+    mapped.diagnostic = Some(diagnostic);
     mapped
 }
 

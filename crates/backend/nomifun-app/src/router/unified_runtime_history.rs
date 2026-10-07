@@ -17,6 +17,7 @@ pub(super) fn project_interrupted_terminal(events: &mut Vec<AgentEngineEvent>, r
         "failed" | "interrupted" => events.push(AgentEngineEvent::TurnFailed {
             model_steps: 0,
             message: "Canonical owner ended interrupted execution. Saved tool observations are historical data; uncertain outcomes require reconciliation, not replay.".into(),
+            failure: None,
         }),
         "cancelled" => events.push(AgentEngineEvent::TurnCancelled { model_steps: 0 }),
         _ => {}

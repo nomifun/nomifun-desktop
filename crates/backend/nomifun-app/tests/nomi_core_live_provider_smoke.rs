@@ -1189,19 +1189,6 @@ fn admission_conflict_code(value: &Value) -> Option<&'static str> {
             ("Agent Runtime context is", "CODING_CONTEXT_TOO_LARGE"),
             ("Agent Runtime model stream ended without a terminal event", "CODING_MODEL_TERMINAL_MISSING"),
             ("Agent Runtime turn panicked", "CODING_TURN_PANICKED"),
-            ("provider_http_status=400;", "CODING_PROVIDER_HTTP_400"),
-            ("provider_http_status=401;", "CODING_PROVIDER_HTTP_401"),
-            ("provider_http_status=402;", "CODING_PROVIDER_HTTP_402"),
-            ("provider_http_status=403;", "CODING_PROVIDER_HTTP_403"),
-            ("provider_http_status=404;", "CODING_PROVIDER_HTTP_404"),
-            ("provider_http_status=408;", "CODING_PROVIDER_HTTP_408"),
-            ("provider_http_status=409;", "CODING_PROVIDER_HTTP_409"),
-            ("provider_http_status=422;", "CODING_PROVIDER_HTTP_422"),
-            ("provider_http_status=429;", "CODING_PROVIDER_HTTP_429"),
-            ("provider_http_status=500;", "CODING_PROVIDER_HTTP_500"),
-            ("provider_http_status=502;", "CODING_PROVIDER_HTTP_502"),
-            ("provider_http_status=503;", "CODING_PROVIDER_HTTP_503"),
-            ("provider_http_status=504;", "CODING_PROVIDER_HTTP_504"),
             ("model reused a prior tool-call identity in history", "CODING_HISTORY_CALL_REUSED"),
             ("model stream event follows tool admission or results in the same step", "CODING_HISTORY_STREAM_AFTER_TOOL"),
             ("tool event differs from the active replay model step", "CODING_HISTORY_TOOL_STEP_MISMATCH"),
@@ -1244,7 +1231,28 @@ fn admission_conflict_code(value: &Value) -> Option<&'static str> {
             ("Nomi Wave 2 AgentSession", "CONFLICT_WORKSPACE_ADMISSION"),
             ("Agent Runtime requires an owned process execute grant", "CONFLICT_PROCESS_GRANT"),
         ].into_iter().find_map(|(known, code)| message.contains(known).then_some(code)),
-        Value::Object(values) => values.values().find_map(admission_conflict_code),
+        Value::Object(values) => {
+            let provider_http_code = values.get("providerDiagnostic")
+                .and_then(|diagnostic| diagnostic.get("httpStatus"))
+                .and_then(Value::as_u64)
+                .and_then(|status| match status {
+                    400 => Some("CODING_PROVIDER_HTTP_400"),
+                    401 => Some("CODING_PROVIDER_HTTP_401"),
+                    402 => Some("CODING_PROVIDER_HTTP_402"),
+                    403 => Some("CODING_PROVIDER_HTTP_403"),
+                    404 => Some("CODING_PROVIDER_HTTP_404"),
+                    408 => Some("CODING_PROVIDER_HTTP_408"),
+                    409 => Some("CODING_PROVIDER_HTTP_409"),
+                    422 => Some("CODING_PROVIDER_HTTP_422"),
+                    429 => Some("CODING_PROVIDER_HTTP_429"),
+                    500 => Some("CODING_PROVIDER_HTTP_500"),
+                    502 => Some("CODING_PROVIDER_HTTP_502"),
+                    503 => Some("CODING_PROVIDER_HTTP_503"),
+                    504 => Some("CODING_PROVIDER_HTTP_504"),
+                    _ => None,
+                });
+            provider_http_code.or_else(|| values.values().find_map(admission_conflict_code))
+        },
         Value::Array(values) => values.iter().find_map(admission_conflict_code),
         _ => None,
     }
@@ -3045,6 +3053,33 @@ async fn nomi_core_general_desktop_reaches_live_stepfun() {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn provider_http_diagnostics_require_typed_public_metadata() {
+        for (status, expected) in [
+            (400, "CODING_PROVIDER_HTTP_400"), (401, "CODING_PROVIDER_HTTP_401"),
+            (402, "CODING_PROVIDER_HTTP_402"), (403, "CODING_PROVIDER_HTTP_403"),
+            (404, "CODING_PROVIDER_HTTP_404"), (408, "CODING_PROVIDER_HTTP_408"),
+            (409, "CODING_PROVIDER_HTTP_409"), (422, "CODING_PROVIDER_HTTP_422"),
+            (429, "CODING_PROVIDER_HTTP_429"), (500, "CODING_PROVIDER_HTTP_500"),
+            (502, "CODING_PROVIDER_HTTP_502"), (503, "CODING_PROVIDER_HTTP_503"),
+            (504, "CODING_PROVIDER_HTTP_504"),
+        ] {
+            let error = json!({"projection":{"error":{
+                "providerDiagnostic":{"reason":"provider_unavailable","httpStatus":status},
+                "detail":"private provider prose NEVER_PRINT_ME",
+            }}});
+            assert_eq!(admission_conflict_code(&error), Some(expected));
+        }
+        for error in [
+            json!({"detail":"provider_http_status=503; NEVER_PRINT_ME"}),
+            json!({"providerDiagnostic":{"httpStatus":"503"}}),
+            json!({"providerDiagnostic":{"http_status":503}}),
+            json!({"httpStatus":503}),
+        ] {
+            assert_eq!(admission_conflict_code(&error), None);
+        }
+    }
 
     #[test]
     fn marker_tool_policy_requires_the_exact_requested_settled_delegation() {

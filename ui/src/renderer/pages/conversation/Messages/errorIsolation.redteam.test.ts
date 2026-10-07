@@ -120,7 +120,8 @@ describe('conversation error isolation red-team contracts', () => {
   test('HTTP and nested configuration codes keep the same non-retryable recovery advice', () => {
     for (const fields of [
       {source:'send_failed',code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',error:undefined},
-      {error:{code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',message:'Configuration changed',detail:'Original local diagnostic'}},
+      {error:{code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',message:'Configuration changed',detail:'Original local diagnostic',
+        agentLabel:'Original Agent',agentTemplateKey:'assistant.general',modelName:'original-model',workspacePath:'/original-workspace'}},
     ]) {
       const original=errorMessage('coded-local-config',messageId(9),400,'Configuration changed');
       if(original.type!=='tips') throw new Error('expected error tip');
@@ -130,6 +131,12 @@ describe('conversation error isolation red-team contracts', () => {
       expect(normalized.content.error?.ownership).toBe('nomifun');
       expect(normalized.content.error?.retryable).toBe(false);
       expect(normalized.content.error?.resolution).toEqual({kind:'start_new_session',target:'new_conversation'});
+      if (fields.error) {
+        expect(normalized.content.error?.agentLabel).toBe('Original Agent');
+        expect(normalized.content.error?.agentTemplateKey).toBe('assistant.general');
+        expect(normalized.content.error?.modelName).toBe('original-model');
+        expect(normalized.content.error?.workspacePath).toBe('/original-workspace');
+      }
     }
   });
 

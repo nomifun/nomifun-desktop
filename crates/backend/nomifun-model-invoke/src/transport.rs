@@ -13,7 +13,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::de::DeserializeOwned;
 
 use crate::auth::AuthMaterial;
-use crate::error::{GatewayBusinessError, InvokeError, InvokeErrorKind};
+use crate::error::{GatewayBusinessError, InvokeError, InvokeErrorKind, ModelFailureDiagnostic, ModelFailureReason};
 use nomifun_api_types::ModelTechnicalCapability;
 use nomifun_net::provider_capability::{
     ProviderTechnicalCapability, classify_unsupported_technical_capability_body,
@@ -80,10 +80,12 @@ where
 /// reads as a provider bug rather than a wrong address.
 fn reject_non_api_response(response: reqwest::Response) -> Result<reqwest::Response, InvokeError> {
     match nomifun_net::api_response::is_non_api_content_type(response.headers()) {
-        Some(content_type) => Err(InvokeError::non_api_response(
-            response.status().as_u16(),
-            &content_type,
-        )),
+        Some(content_type) => {
+            let redactor = response_secret_redactor(&response);
+            let mut error = InvokeError::non_api_response(response.status().as_u16(), &content_type);
+            error.diagnostic = Some(crate::provider_diagnostic::response_context(&response, None, None, &redactor));
+            Err(error.redacted(&redactor))
+        },
         None => Ok(response),
     }
 }
@@ -198,6 +200,7 @@ async fn error_from_response_with_body_deadline(
     protocol: Option<&str>,
 ) -> InvokeError {
     let redactor = response_secret_redactor(&resp);
+    let fallback_diagnostic = crate::provider_diagnostic::response_context(&resp, protocol, None, &redactor);
     let status = resp.status();
     let code = status.as_u16();
     let kind = match code {
@@ -208,13 +211,14 @@ async fn error_from_response_with_body_deadline(
     };
     // Read the header before the bounded body reader consumes the response.
     let retry_after_ms = parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
-    let (snippet, context_length_rejected, unsupported_technical_capability, gateway_business_error) = match timeout {
+    let (snippet, context_length_rejected, unsupported_technical_capability, gateway_business_error, diagnostic) = match timeout {
         Some(timeout) => tokio::time::timeout(timeout, read_error_body_snippet(resp, protocol))
             .await
             .unwrap_or_else(|_| {
                 (
                     "<provider error body read timed out>".to_owned(),
                     false,
+                    None,
                     None,
                     None,
                 )
@@ -228,6 +232,22 @@ async fn error_from_response_with_body_deadline(
         Some(_) => InvokeErrorKind::QuotaExhausted,
         None => kind,
     };
+    let mut diagnostic = diagnostic.unwrap_or(fallback_diagnostic);
+    diagnostic.retry_after_ms = retry_after_ms;
+    if let Some(business) = gateway_business_error {
+        diagnostic.reason = match business {
+            GatewayBusinessError::InsufficientBalance => ModelFailureReason::InsufficientBalance,
+            GatewayBusinessError::SubscriptionExpired => ModelFailureReason::SubscriptionExpired,
+            GatewayBusinessError::ModelNotInPlan => ModelFailureReason::ModelNotInPlan,
+            GatewayBusinessError::KeyExpired => ModelFailureReason::ExpiredKey,
+            GatewayBusinessError::RateLimited => ModelFailureReason::RateLimited,
+        };
+        diagnostic.provider_code = Some(business.code().to_owned());
+    } else if matches!(code, 400 | 413 | 422) && context_length_rejected {
+        diagnostic.reason = ModelFailureReason::PromptTooLong;
+    } else if matches!(code, 400 | 422) && unsupported_technical_capability.is_some() {
+        diagnostic.reason = ModelFailureReason::UnsupportedFeature;
+    }
     InvokeError {
         kind,
         message: gateway_business_error.map(|business| business.action_message().to_owned())
@@ -240,6 +260,7 @@ async fn error_from_response_with_body_deadline(
             .then_some(unsupported_technical_capability)
             .flatten(),
         gateway_business_error,
+        diagnostic: Some(diagnostic),
     }
 }
 
@@ -256,8 +277,9 @@ pub(crate) fn response_secret_redactor(resp: &reqwest::Response) -> SecretRedact
 async fn read_error_body_snippet(
     mut resp: reqwest::Response,
     protocol: Option<&str>,
-) -> (String, bool, Option<ModelTechnicalCapability>, Option<GatewayBusinessError>) {
+) -> (String, bool, Option<ModelTechnicalCapability>, Option<GatewayBusinessError>, Option<ModelFailureDiagnostic>) {
     let redactor = response_secret_redactor(&resp);
+    let context = crate::provider_diagnostic::response_context(&resp, protocol, None, &redactor);
     if let Some(declared) = resp.content_length()
         && declared > MAX_ERROR_RESPONSE_BODY_BYTES as u64
     {
@@ -267,6 +289,7 @@ async fn read_error_body_snippet(
                 MAX_ERROR_RESPONSE_BODY_BYTES
             ),
             false,
+            None,
             None,
             None,
         );
@@ -303,6 +326,7 @@ async fn read_error_body_snippet(
                         false,
                         None,
                         None,
+                        None,
                     );
                 }
                 break;
@@ -326,6 +350,8 @@ async fn read_error_body_snippet(
             Some("bedrock.anthropic_messages") => false,
             _ => true,
         });
+    let diagnostic = complete.then(|| serde_json::from_slice::<serde_json::Value>(&body).ok())
+        .flatten().map(|value| crate::provider_diagnostic::refine_from_body(context, &value, protocol, &redactor));
     // Exact credentials must be removed before presentation truncation; a
     // credential crossing that boundary otherwise leaves an unmatchable
     // prefix. A capped/incomplete transport read needs the same tail guard.
@@ -347,6 +373,7 @@ async fn read_error_body_snippet(
         context_length_rejected,
         unsupported_technical_capability,
         gateway_business_error,
+        diagnostic,
     )
 }
 

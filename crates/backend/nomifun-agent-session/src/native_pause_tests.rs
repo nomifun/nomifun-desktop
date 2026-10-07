@@ -6,6 +6,182 @@ fn evidence() -> NativeOwnerEvidence {
     NativeOwnerEvidence { verified: true, evidence_digest: digest('a'), reference: "fixture-owner-inspection".into() }
 }
 
+async fn model_failure_pause(store: &AgentSessionStore, key: &str, reason: &str,
+    cleanup: bool, witness: bool) -> (Fixture, crate::NativePauseState) {
+    let f = fixture(store, key).await;
+    let lease = store.claim_native_execution(claim(&f, "failure-owner", 0, None)).await.unwrap();
+    checkpoint(store, &f, &lease).await;
+    if witness {
+        store.append_native_observation(&lease, &progress(&f, "failure-cleanup",
+            json!({"event":"host_cleanup_proven"})), None).await.unwrap();
+    }
+    let pause = store.pause_native_execution(&lease, reason, cleanup).await.unwrap();
+    (f, pause)
+}
+
+fn paused_failure_terminal(f: &Fixture, pause: &crate::NativePauseState) -> SessionEventAppend {
+    append(&f.session.agent_session_id, "model-failure-terminal", "runtime_supervisor", "model-failure-terminal",
+        "turn/failed", "lease-turn", Some(f.started.clone()), json!({"message":"Model unavailable",
+            "error":{"message":"Model unavailable","code":"USER_LLM_PROVIDER_GATEWAY_ERROR","detail":pause.reason},
+            "finished_at_ms":pause.paused_at_ms}))
+}
+
+#[tokio::test]
+async fn proven_model_failure_pause_closes_as_failed_and_admits_the_next_turn() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (f, pause) = model_failure_pause(&store, "settled-model-failure", "EXECUTION_MODEL_PROVIDER_UNAVAILABLE", true, true).await;
+    let session = &f.session.agent_session_id;
+    let terminal = paused_failure_terminal(&f, &pause);
+    let operation = "lease-turn".into();
+    assert!(store.settle_native_failure_pause(&owner(), session, &operation, &snapshot_ref(), &pause,
+        &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &terminal).await.unwrap());
+    assert!(!store.settle_native_failure_pause(&owner(), session, &operation, &snapshot_ref(), &pause,
+        &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &terminal).await.unwrap());
+    let receipt = store.read_turn_receipt(session, &operation).await.unwrap();
+    assert_eq!(receipt.status, TurnReceiptStatus::Failed);
+    assert_eq!(receipt.terminal_event.unwrap().kind.0, "turn/failed");
+    let head = store.head(session).await.unwrap();
+    assert_eq!(head.status, "ready");
+    assert!(head.active_turn_id.is_none());
+    assert!(store.native_pause_state(session, &operation).await.unwrap().is_none());
+    store.start_turn(session, "session_api".into(), "next-after-failure".into(), "next-turn".into(),
+        StrictJsonValue(json!({"content":"Try a different model"}))).await.unwrap();
+    assert_eq!(store.head(session).await.unwrap().active_turn_id.as_deref(), Some("next-turn"));
+}
+
+#[tokio::test]
+async fn native_failure_settlement_rejects_unknown_manual_and_unproven_pauses() {
+    for (reason, cleanup, witness) in [
+        ("EXECUTION_USER_REQUESTED", true, true),
+        ("NATIVE_RECOVERY_RECONCILIATION_REQUIRED", true, true),
+        ("EXECUTION_MODEL_FIXTURE_UNKNOWN", true, true),
+        ("EXECUTION_MODEL_PROVIDER_UNAVAILABLE", false, true),
+        ("EXECUTION_MODEL_PROVIDER_UNAVAILABLE", true, false),
+    ] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (f, pause) = model_failure_pause(&store, "pause-not-failure", reason, cleanup, witness).await;
+        let cursor = store.current_cursor(&f.session.agent_session_id).await.unwrap();
+        assert!(!store.settle_native_failure_pause(&owner(), &f.session.agent_session_id, &"lease-turn".into(),
+            &snapshot_ref(), &pause, &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &paused_failure_terminal(&f, &pause))
+            .await.unwrap());
+        assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), cursor);
+        assert_eq!(store.head(&f.session.agent_session_id).await.unwrap().status, "paused");
+    }
+}
+
+#[tokio::test]
+async fn native_failure_settlement_keeps_exact_owner_pause_fence_and_snapshot() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (f, pause) = model_failure_pause(&store, "failure-identity", "EXECUTION_MODEL_PROVIDER_UNAVAILABLE", true, true).await;
+    let terminal = paused_failure_terminal(&f, &pause);
+    let session = &f.session.agent_session_id;
+    let cursor = store.current_cursor(session).await.unwrap();
+    let foreign = PrincipalRef { principal_kind:"user".into(), principal_id:"foreign-owner".into() };
+    assert!(matches!(store.settle_native_failure_pause(&foreign, session, &"lease-turn".into(), &snapshot_ref(), &pause,
+        &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &terminal).await, Err(SessionStoreError::ExecutionFenced)));
+    for field in 0..4 {
+        let mut stale = pause.clone();
+        let mut snapshot = snapshot_ref();
+        match field {
+            0 => stale.revision += 1,
+            1 => stale.execution_fence += 1,
+            2 => stale.checkpoint_revision += 1,
+            _ => snapshot.snapshot_digest = digest('f'),
+        }
+        assert!(!store.settle_native_failure_pause(&owner(), session, &"lease-turn".into(), &snapshot, &stale,
+            &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &terminal).await.unwrap());
+        assert_eq!(store.current_cursor(session).await.unwrap(), cursor);
+    }
+    // Isolated fault injection: a partial checkpoint/pause lineage must not
+    // become an unlocked failed Turn even when the cleanup flag was retained.
+    sqlx::query("UPDATE agent_turns SET native_checkpoint_revision=native_checkpoint_revision+1 WHERE session_id=? AND operation_id='lease-turn'")
+        .bind(session.as_ref()).execute(store.test_pool()).await.unwrap();
+    assert!(!store.settle_native_failure_pause(&owner(), session, &"lease-turn".into(), &snapshot_ref(), &pause,
+        &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &terminal).await.unwrap());
+    assert_eq!(store.current_cursor(session).await.unwrap(), cursor);
+}
+
+#[tokio::test]
+async fn an_explicit_owner_pause_request_keeps_the_model_failure_paused() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (f, pause) = model_failure_pause(&store, "owner-keeps-pause", "EXECUTION_MODEL_PROVIDER_UNAVAILABLE", true, true).await;
+    store.request_native_pause(&owner(), &f.session.agent_session_id, &"lease-turn".into(), "keep-paused", "Inspect existing work")
+        .await.unwrap();
+    let before = store.current_cursor(&f.session.agent_session_id).await.unwrap();
+    assert!(!store.settle_native_failure_pause(&owner(), &f.session.agent_session_id, &"lease-turn".into(),
+        &snapshot_ref(), &pause, &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &paused_failure_terminal(&f, &pause)).await.unwrap());
+    assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
+    assert_eq!(store.head(&f.session.agent_session_id).await.unwrap().status, "paused");
+}
+
+#[tokio::test]
+async fn native_failure_settlement_preserves_pending_and_unknown_effect_fences() {
+    for unknown in [false, true] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let f = fixture(&store, "failure-effect-fence").await;
+        let lease = store.claim_native_execution(claim(&f, "effect-owner", 0, None)).await.unwrap();
+        checkpoint(&store, &f, &lease).await;
+        let tool = append(&f.session.agent_session_id, "failure-tool", "runtime_supervisor", "failure-tool",
+            "tool/call-started", "failure-tool", Some(f.started.clone()),
+            json!({"operation_id":"failure-write","capability_id":"workspace.files","action_id":"workspace.files/write"}));
+        let tool_event = store.append_native_event(&lease, &tool, None).await.unwrap().ack.unwrap().event_id;
+        let effect = EffectEventRequest {
+            agent_session_id:f.session.agent_session_id.clone(), effect_id:"failure-effect".into(), turn_id:"lease-turn".into(),
+            operation_id:"failure-write".into(), owner_domain:"workspace".into(), capability_module:"workspace.files".into(),
+            action_id:"workspace.files/write".into(), resource_binding_id:None, resource_key:Some("fixture-workspace".into()),
+            input_digest:digest('7'), recorded_at:1_788_000_000_010, event_id:"failure-effect-start".into(),
+            producer_id:"capability-host".into(), idempotency_key:"failure-effect-start".into(), correlation_id:"failure-effect".into(),
+            strategy:EffectStrategy::ExternalUncertainEffect, causation_event_id:Some(tool_event),
+            payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+        };
+        let started = store.record_effect_started(effect.clone()).await.unwrap().ack.unwrap().event_id;
+        if unknown {
+            store.record_effect_terminal(EffectEventRequest { event_id:"failure-effect-unknown".into(),
+                producer_id:"owning-plugin".into(), causation_event_id:Some(started), ..effect },
+                EffectTerminalState::Uncertain).await.unwrap();
+        }
+        let failure = append(&f.session.agent_session_id, "native-effect-failure", "runtime_supervisor", "native-effect-failure",
+            "turn/failed", "lease-turn", Some(f.started.clone()), json!({"message":"Model unavailable"}));
+        let completion = append(&f.session.agent_session_id, "native-effect-message", "runtime_supervisor", "native-effect-message",
+            "message/completed", "native-effect-assistant", Some(f.started.clone()), json!({"part_count":0}));
+        let before_terminal = store.current_cursor(&f.session.agent_session_id).await.unwrap();
+        let rejected = store.append_native_chat_completion(&lease, &completion, &failure).await;
+        assert!(matches!(rejected, Err(SessionStoreError::RecoveryRequiresReconciliation | SessionStoreError::ExecutionFenced)),
+            "a new native failure cannot unlock an unresolved effect: {rejected:?}");
+        assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before_terminal);
+        store.append_native_observation(&lease, &progress(&f, "failure-cleanup",
+            json!({"event":"host_cleanup_proven"})), None).await.unwrap();
+        let pause = store.pause_native_execution(&lease, "EXECUTION_MODEL_PROVIDER_UNAVAILABLE", true).await.unwrap();
+        let before = store.current_cursor(&f.session.agent_session_id).await.unwrap();
+        assert!(!store.settle_native_failure_pause(&owner(), &f.session.agent_session_id, &"lease-turn".into(),
+            &snapshot_ref(), &pause, &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &paused_failure_terminal(&f, &pause))
+            .await.unwrap());
+        assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
+        assert_eq!(store.head(&f.session.agent_session_id).await.unwrap().status, "paused");
+        assert_eq!(store.read_effect(&f.session.agent_session_id, "failure-effect").await.unwrap().unwrap().state,
+            if unknown { AgentEffectState::Unknown } else { AgentEffectState::Pending });
+    }
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn failure_pause_settlement_and_explicit_resume_have_one_winner() {
+    let store = AgentSessionStore::open_in_memory_with_connections(2).await.unwrap();
+    let (f, pause) = model_failure_pause(&store, "failure-resume-race", "EXECUTION_MODEL_PROVIDER_UNAVAILABLE", true, true).await;
+    let request = NativeResumeRequest { operation_id:"lease-turn".into(), idempotency_key:"resume-failure-race".into(),
+        expected_pause_revision:pause.revision, expected_checkpoint_revision:pause.checkpoint_revision,
+        expected_checkpoint_digest:pause.checkpoint_digest.clone().unwrap(), budget:Default::default(), cleanup_attestation:None };
+    let prepared = prepare(&store, &f).await;
+    let terminal = paused_failure_terminal(&f, &pause);
+    let principal = owner();
+    let snapshot = snapshot_ref();
+    let (failed, resumed) = tokio::join!(store.settle_native_failure_pause(&principal, &f.session.agent_session_id,
+        &request.operation_id, &snapshot, &pause, &["EXECUTION_MODEL_PROVIDER_UNAVAILABLE"], &terminal),
+        store.commit_native_resume(&principal, &f.session.agent_session_id, &request, prepared));
+    assert_ne!(failed.unwrap(), resumed.is_ok());
+    let head = store.head(&f.session.agent_session_id).await.unwrap();
+    assert!(matches!(head.status.as_str(), "ready" | "running"));
+}
+
 #[tokio::test]
 async fn paused_input_is_fenced_idempotent_and_never_authorizes_execution() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();

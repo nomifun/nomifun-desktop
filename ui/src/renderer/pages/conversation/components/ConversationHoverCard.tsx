@@ -17,7 +17,7 @@ import type { TFunction } from 'i18next';
  */
 const conversationActiveLabel = (c: TChatConversation, t: TFunction): string => {
   if (c.status === 'running' && c.extra?.execution_phase === 'paused') {
-    return t('conversation.executionPause.title');
+    return t('messages.planPaused');
   }
   if (c.runtime?.state) {
     return t(`conversation.hoverCard.runtime.${c.runtime.state}`);

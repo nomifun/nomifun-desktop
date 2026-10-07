@@ -1,12 +1,4 @@
 {
-  "executionPause": {
-    "title": "Execution paused",
-    "stop": "End this turn",
-    "providerUnavailable": "The model service is temporarily unavailable. The task is incomplete; completed operations are retained.",
-    "incomplete": "The task is incomplete. Completed operations are retained.",
-    "cleanupRequired": "Resource cleanup is unconfirmed. Review the execution state before continuing.",
-    "sendBlocked": "Continuation requires a recovery check. This conversation cannot accept new messages yet."
-  },
   "welcome": {
     "title": "New conversation",
     "placeholder": "Send a message, upload files, open a folder, or create a scheduled task...",
@@ -115,13 +107,80 @@
     }
   },
   "agentError": {
-    "expandDetails": "Show error details",
-    "collapseDetails": "Hide error details",
+    "expandDetails": "Technical details",
+    "collapseDetails": "Hide technical details",
     "fallbackTitle": "The agent could not reply",
-    "errorCode": "Error code",
-    "retryable": "Retryable",
-    "notRetryable": "Needs configuration",
-    "resolutionPrefix": "Suggestion: ",
+    "fallbackBody": "This request failed, and the specific cause is not yet known. Review the technical details; if the problem persists, send feedback with that information.",
+    "details": {
+      "rawDetail": "Original detail",
+      "agent": "Agent",
+      "model": "Model",
+      "timestamp": "Time",
+      "turn": "Turn ID",
+      "session": "Session ID",
+      "message": "Message ID",
+      "creationTask": "Creation task ID",
+      "workspace": "Workspace path",
+      "unavailable": "Not recorded",
+      "httpStatus": "HTTP status",
+      "providerCode": "Upstream code",
+      "providerType": "Upstream type",
+      "endpoint": "Endpoint",
+      "requestId": "Request ID",
+      "retryAfterMs": "Retry-After (ms)",
+      "protocol": "API protocol",
+      "authScheme": "Auth method",
+      "contentType": "Response content type",
+      "providerParam": "Parameter or field",
+      "providerId": "Provider ID",
+      "sessionModel": "Session-selected model"
+    },
+    "incompleteReasons": {
+      "blocked_work": {
+        "title": "Some work is still blocked",
+        "body": "The Agent reported blocked work, so this task could not fully finish. Review the failure notes in the process record, resolve the reported issues, then resend the remaining task."
+      },
+      "step_limit": {
+        "title": "This turn reached its execution step limit",
+        "body": "The Agent used all execution steps allowed for this turn before the task finished. Review the existing results, then split the remaining task into smaller steps and resend them."
+      },
+      "output_truncated": {
+        "title": "The model response was cut off by its output limit",
+        "body": "The model response repeatedly reached its output limit before the task finished. Review the existing files and process record, then narrow the task or switch models and resend the remaining work."
+      },
+      "unresolved_plan": {
+        "title": "The execution plan still has unfinished work",
+        "body": "The Agent ended its response while the execution plan still had unfinished items. Review the task list and existing results, then ask the Agent to complete or explain the remaining items."
+      },
+      "unverified_changes": {
+        "title": "File changes have not been verified",
+        "body": "After a file change failed, the Agent did not check the affected files again, so the final result is unconfirmed. Review those files, then ask the Agent to verify the changes and resolve the remaining issues."
+      },
+      "running_processes": {
+        "title": "Processes were still running when the response ended",
+        "body": "Processes were still running when the Agent tried to finish, so the task result was not confirmed. Review the output in the process record and existing results, identify any remaining work, then resend the task."
+      },
+      "unverified_completion": {
+        "title": "Task completion has not been verified",
+        "body": "The Agent did not submit a valid final result, so the app could not confirm that the task finished. Review the existing files and process record, then ask the Agent to verify the results and explain any remaining work."
+      },
+      "rejected_control": {
+        "title": "The model used an invalid operation format",
+        "body": "The model did not submit the required tool call or a valid final response, so the task stopped. Review the existing results, then simplify the remaining request or switch models and retry."
+      },
+      "no_progress": {
+        "title": "Repeated operations did not advance the task",
+        "body": "The Agent repeatedly tried to adjust the plan or submit results without advancing the task. Review the process record, clarify the remaining goal or switch models, then resend the task."
+      },
+      "execution_guard": {
+        "title": "Execution state validation failed",
+        "body": "The current execution state did not pass the app's checks, so this turn stopped. Review the existing results and technical details; if the problem repeats after retrying, send feedback."
+      },
+      "recovery_guard": {
+        "title": "Task recovery validation failed",
+        "body": "The app could not confirm that this task could be safely restored, so this turn stopped. Review the existing files and process record, then start a new conversation with the remaining task."
+      }
+    },
     "resolution": {
       "retry": "Retry later, or send this message again.",
       "wait_for_current_response": "Wait for the current response to finish before sending another message.",
@@ -138,14 +197,9 @@
       "reduce_context": "Reduce the message content, referenced files, or context size, then retry.",
       "send_feedback": "Send feedback with logs so the team can investigate."
     },
-    "ownership": {
-      "nomifun": "App",
-      "user_agent": "Agent",
-      "user_llm_provider": "Model provider",
-      "unknown_upstream": "Upstream"
-    },
     "codes": {
       "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED": {
+        "title": "Conversation Agent configuration is incompatible",
         "body": "This conversation’s saved agent configuration is incompatible with the current configuration. Confirm a compatible configuration through the conversation’s agent selector, or start a new conversation. Existing records are preserved."
       },
       "INTERRUPTED_BY_RESTART": {
@@ -154,11 +208,11 @@
       },
       "OUTPUT_TRUNCATED": {
         "title": "The model reached its output limit",
-        "body": "This response was cut off before the task could finish. Existing files and completed actions were kept. Continue execution to resume from the durable state."
+        "body": "This response reached its output limit before the task finished. Review the existing files and process record, then narrow the task and resend the remaining work."
       },
       "TURN_REQUESTS_EXHAUSTED": {
         "title": "The turn used all of its model requests",
-        "body": "The task did not finish before this turn's request budget was exhausted. Existing files and completed actions were kept. Continue execution to resume safely."
+        "body": "The Agent used all model requests allowed for this turn before the task finished. Review the existing files and process record, then resend the remaining task."
       },
       "PROVIDER_UNAVAILABLE": {
         "title": "No model available",
@@ -189,8 +243,8 @@
         "body": "The request failed while the app was processing it. Please retry once; if it repeats, send feedback."
       },
       "NOMIFUN_TASK_INCOMPLETE": {
-        "title": "The Agent did not finish this task",
-        "body": "This turn stopped after some actions may have succeeded. Check the project files and process record before continuing."
+        "title": "Task completion is unconfirmed",
+        "body": "This turn stopped, but the app could not confirm that the entire task finished. Review the existing files and process record, then resend the items that still need completion or verification."
       },
       "USER_LLM_PROVIDER_INVALID_TOOL_CALL": {
         "title": "Invalid model tool call",
@@ -257,8 +311,8 @@
         "body": "The agent needs environment variables that are not configured. Add them in settings or your shell environment, then reconnect."
       },
       "USER_LLM_PROVIDER_AUTH_FAILED": {
-        "title": "Model provider authentication failed",
-        "body": "The selected provider rejected the API key or account credentials. Check the provider settings and try again."
+        "title": "Model service authentication failed",
+        "body": "Model service authentication failed, but the exact credential or authentication method issue is unconfirmed. Check the API key provider, expiration, and authentication method, then retry."
       },
       "USER_LLM_PROVIDER_CONFIG_ERROR": {
         "title": "Model provider configuration is invalid",
@@ -277,16 +331,16 @@
         "body": "The provider did not respond in time. Retry later or switch to a more stable provider."
       },
       "USER_LLM_PROVIDER_NETWORK_ERROR": {
-        "title": "Could not reach the model provider",
-        "body": "A network or DNS error prevented access to the provider. Check your network, proxy, and Base URL."
+        "title": "The model service network request failed",
+        "body": "The model service network request failed, and the specific connection issue is unconfirmed. Check the network, proxy, and endpoint, then review the technical details to identify the cause."
       },
       "USER_LLM_PROVIDER_GATEWAY_ERROR": {
         "title": "Model provider service is unavailable",
         "body": "The provider returned a gateway or service error. Retry later or use another provider."
       },
       "USER_LLM_PROVIDER_PERMISSION_DENIED": {
-        "title": "Model provider permission denied",
-        "body": "The provider account does not have permission for this model or operation. Check account permissions or choose another model."
+        "title": "Access to the model service was denied",
+        "body": "Access to the model service was denied, but the specific restriction is unconfirmed. Check account and model permissions, the API address, and proxy or gateway access rules."
       },
       "USER_LLM_PROVIDER_BILLING_REQUIRED": {
         "title": "Model provider billing is required",
@@ -297,8 +351,8 @@
         "body": "The selected model is unavailable or does not support the requested capability. Choose a supported model and retry."
       },
       "USER_LLM_PROVIDER_ENDPOINT_NOT_FOUND": {
-        "title": "Model provider endpoint was not found",
-        "body": "The provider endpoint or API path was not found. Check the Base URL, deployment name, and API compatibility."
+        "title": "The model service could not find the requested resource",
+        "body": "The model service could not find the requested resource. Check the Base URL, API path and protocol, and deployment or model name, then retry."
       },
       "USER_LLM_PROVIDER_INVALID_REQUEST": {
         "title": "Model provider rejected the request",
@@ -333,8 +387,253 @@
       "UNKNOWN_UPSTREAM_ERROR": {
         "title": "The upstream agent or provider failed",
         "body": "The app received an upstream error but could not classify it confidently. Review the details below or send feedback."
+      },
+      "EXECUTION_MODEL_PROVIDER_UNAVAILABLE": {
+        "title": "The model service is temporarily unavailable",
+        "body": "The model service cannot process requests right now, so this request failed. Review the existing results, then retry later or switch models and resend the remaining task."
+      },
+      "EXECUTION_CLEANUP_UNCONFIRMED": {
+        "title": "Task resource cleanup is unconfirmed",
+        "body": "Resource cleanup for this turn is unconfirmed, so new messages cannot be sent yet. Wait for the app to confirm cleanup and update its state; if sending remains blocked, review the technical details and send feedback."
+      },
+      "EXECUTION_PAUSED": {
+        "title": "Task paused",
+        "body": "This turn paused, and completed operations are retained. Review the process record and existing results to identify any remaining work."
+      },
+      "EXECUTION_USER_REQUESTED": {
+        "title": "Task paused at your request",
+        "body": "This turn paused at your request. Review the process record and existing results to identify any remaining work."
+      },
+      "EXECUTION_ATTACH_FAILED": {
+        "title": "Could not connect the execution environment",
+        "body": "The app could not connect the execution environment for this turn, so the task paused. Review the existing results and technical details; if it cannot be restored, send feedback."
+      },
+      "EXECUTION_PREPARATION_BLOCKED": {
+        "title": "Task preparation did not finish",
+        "body": "Preparation for this turn did not finish, so the task paused. Review the technical details and resolve the reported issues before retrying."
+      },
+      "EXECUTION_SESSION_PAYLOAD_BUDGET": {
+        "title": "Conversation content reached its capacity limit",
+        "body": "This conversation reached its content capacity limit, so the task paused and cannot record more execution results. Review the existing results, then start a new conversation with the remaining task."
+      },
+      "EXECUTION_MODEL_STREAM_ENDED_WITHOUT_TERMINAL": {
+        "title": "The model response ended unexpectedly",
+        "body": "The model response stream ended before a normal completion, so this request failed. Review the existing results, then retry or switch models and resend the remaining task."
+      },
+      "EXECUTION_MODEL_INVALID_EVENT": {
+        "title": "The model returned an invalid response format",
+        "body": "The model returned response data that could not be processed, so this request failed. Review the existing results, then retry; if it happens again, switch models or send feedback."
+      },
+      "CONVERSATION_SEND_FAILED": {
+        "title": "Message could not be sent",
+        "body": "An error occurred while sending the message, and the specific cause is not yet known. Check whether the message arrived in the conversation before resending it; if the problem persists, review the technical details and send feedback."
+      },
+      "CONVERSATION_PREPARATION_FAILED": {
+        "title": "Message preparation failed",
+        "body": "An error occurred while preparing the message, and the specific cause is not yet known. Check the selected Agent, model, and workspace, then retry; if the problem persists, review the technical details and send feedback."
+      },
+      "CONVERSATION_CREATION_FAILED": {
+        "title": "Conversation could not be created",
+        "body": "An error occurred while creating the conversation, and the specific cause is not yet known. Check the conversation list to see whether it was created before trying again; if the problem persists, review the technical details and send feedback."
+      },
+      "CONVERSATION_STEER_FAILED": {
+        "title": "Additional instructions could not be submitted",
+        "body": "An error occurred while submitting additional instructions, and the specific cause is not yet known. Check the process record to see whether they arrived before resending them; if the problem persists, review the technical details and send feedback."
+      },
+      "CONVERSATION_CONTEXT_CLEAR_FAILED": {
+        "title": "Conversation context could not be cleared",
+        "body": "An error occurred while clearing the conversation context, and the specific cause is not yet known. Reopen the conversation to check its state, then retry; if the problem persists, review the technical details and send feedback."
+      },
+      "SESSION_CAPABILITIES_FAILED": {
+        "title": "Conversation capabilities could not be loaded",
+        "body": "The available models and capabilities for this conversation could not be loaded. Reopen the conversation and retry; if the problem persists, check the Agent connection and review the technical details."
+      },
+      "CONVERSATION_CREATION_STATUS_FAILED": {
+        "title": "Conversation creation status could not be loaded",
+        "body": "The conversation creation status could not be loaded, so its creation result is unconfirmed. Check the conversation list or retry later to avoid creating the same conversation twice."
+      },
+      "CONVERSATION_GENERATION_FAILED": {
+        "title": "Generation request failed",
+        "body": "An error occurred while processing the generation request, and the specific cause is not yet known. Review the existing results, then retry; if the problem persists, review the technical details and send feedback."
+      },
+      "EXECUTION_MODEL_UNSUPPORTED_FEATURE": {
+        "title": "The model does not support a required feature",
+        "body": "The model service does not support a feature required by this request, so this request failed. Remove the unsupported content or switch models, then resend the remaining task."
+      },
+      "EXECUTION_MODEL_PROTOCOL_VIOLATION": {
+        "title": "The model response violated the protocol",
+        "body": "The model service returned data that did not follow the response protocol, so this request failed. Retry; if it happens again, switch models or send feedback."
+      },
+      "EXECUTION_MODEL_STREAM_INTERRUPTED": {
+        "title": "The model response stream was interrupted",
+        "body": "The model response stream was interrupted during execution, so this request failed. Review the existing results, then retry or switch models and resend the remaining task."
+      },
+      "USER_LLM_PROVIDER_IMAGE_UNSUPPORTED": {
+        "title": "The model does not support image input",
+        "body": "The current model cannot process the images in this request. Remove the images or choose a model that supports image input, then resend the request."
+      },
+      "USER_LLM_PROVIDER_UNAVAILABLE": {
+        "title": "The model service is temporarily unavailable",
+        "body": "The model service cannot process requests right now, so this request failed. Review the existing files and process record, then retry later or switch models and resend the remaining task."
+      },
+      "USER_LLM_PROVIDER_UNSUPPORTED_FEATURE": {
+        "title": "The model does not support a required feature",
+        "body": "The model service does not support a feature required by this request, so this request failed. Review the existing results, then remove the unsupported content or switch models and resend the remaining task."
+      },
+      "USER_LLM_PROVIDER_INVALID_RESPONSE": {
+        "title": "The model returned an invalid response format",
+        "body": "The model service returned response data that could not be processed, so this request failed. Review the existing results, then retry the remaining task; if it happens again, switch models or send feedback."
+      },
+      "USER_LLM_PROVIDER_STREAM_INTERRUPTED": {
+        "title": "The model response stream was interrupted",
+        "body": "The model response stream was interrupted before the task finished, so this request failed. Review the existing files and process record, then retry or switch models and resend the remaining task."
       }
-    }
+    },
+    "adjustAndRetry": "Adjust and retry",
+    "providerReasons": {
+      "auth_failed": {
+        "title": "Model service authentication failed",
+        "body": "Model service authentication failed, but the exact credential or authentication method issue is unconfirmed. Check the API key provider, expiration, and authentication method, then retry."
+      },
+      "invalid_key": {
+        "title": "The model service credentials are invalid",
+        "body": "The provider explicitly reported invalid credentials. Check the API key, access token or cloud credentials and their provider, project or region; update them in model settings if needed, then retry."
+      },
+      "expired_key": {
+        "title": "Model service credentials have expired",
+        "body": "The provider explicitly reported that the credentials have expired. Refresh them or create a new API key, update model settings, then retry."
+      },
+      "insufficient_quota": {
+        "title": "Model service quota is insufficient",
+        "body": "The provider explicitly reported insufficient available quota for this account. Check the quota, billing status, and reset time, then add quota or wait for it to reset before retrying."
+      },
+      "insufficient_balance": {
+        "title": "The model service account has insufficient balance",
+        "body": "The provider explicitly reported insufficient account balance. Add credit to the provider account or switch to a provider with available credit, then retry."
+      },
+      "subscription_expired": {
+        "title": "The model service subscription has expired",
+        "body": "The provider explicitly reported that the account subscription has expired. Renew it or choose a plan and model available to the account, then retry."
+      },
+      "model_not_in_plan": {
+        "title": "The selected model is not included in the current plan",
+        "body": "The provider explicitly reported that the selected model is outside the current plan. Choose a model included in the plan or update the subscription, then retry."
+      },
+      "permission_denied": {
+        "title": "Access to the model service was denied",
+        "body": "Access to the model service was denied, but the specific restriction is unconfirmed. Check account and model permissions, the API address, and proxy or gateway access rules."
+      },
+      "model_permission_denied": {
+        "title": "The account cannot access the selected model",
+        "body": "The provider explicitly denied this account access to the selected model. Check account, project, and model permissions, or choose a model available to the account, then retry."
+      },
+      "endpoint_missing": {
+        "title": "The model service could not find the requested resource",
+        "body": "The model service could not find the requested resource. Check the Base URL, API path and protocol, and deployment or model name, then retry."
+      },
+      "non_api_response": {
+        "title": "The model endpoint returned non-API content",
+        "body": "The request returned a web page or other content that is not a model API response. Check that the Base URL points to an API endpoint and the protocol matches, and check for proxy or gateway login pages."
+      },
+      "auth_scheme_mismatch": {
+        "title": "Authentication method does not match the model API",
+        "body": "The configured authentication method does not match the model API requirements. Select the method required by the provider API, check the protocol and credentials, then retry."
+      },
+      "rate_limited": {
+        "title": "Model service requests are rate limited",
+        "body": "The provider limited this request, which may involve request rate, concurrency or a periodic allowance. Check the model and organization limits; if a retry delay was returned, wait for that delay before retrying."
+      },
+      "dns_failure": {
+        "title": "Could not resolve the model service address",
+        "body": "DNS resolution failed for the model service address. Check the Base URL hostname, DNS, network, and proxy settings, then retry."
+      },
+      "connection_failed": {
+        "title": "Could not connect to the model service",
+        "body": "A connection to the model service could not be established. Check the endpoint host and port, service availability, and network and proxy settings, then retry."
+      },
+      "tls_failure": {
+        "title": "Secure connection to the model service failed",
+        "body": "The TLS handshake or certificate verification failed for the model service. Check the HTTPS address, certificates, system time, and proxy settings, then retry."
+      },
+      "proxy_failure": {
+        "title": "The model request proxy connection failed",
+        "body": "The model request could not pass through the configured proxy. Check its address, port, authentication method, and availability, then retry."
+      },
+      "request_timeout": {
+        "title": "Model service request timed out",
+        "body": "A complete model response was not received within the time limit. Check the network and proxy, then retry later or switch providers."
+      },
+      "upstream_server_error": {
+        "title": "The model service returned a server error",
+        "body": "The model service or an intermediate gateway returned a server error. Retry later and check the provider status; if it persists, switch providers."
+      },
+      "provider_unavailable": {
+        "title": "The model service is currently unavailable",
+        "body": "The model service cannot process the request right now, and the specific cause is unconfirmed. Retry later; if it persists, review the provider status and technical details or switch providers."
+      },
+      "network_failure": {
+        "title": "The model service network request failed",
+        "body": "The model service network request failed, and the specific connection issue is unconfirmed. Check the network, proxy, and endpoint, then review the technical details to identify the cause."
+      },
+      "stream_interrupted": {
+        "title": "Model response transmission was interrupted",
+        "body": "Transmission of the model response was interrupted before it finished. Check the network and proxy, then retry; if it repeats, switch providers or send feedback."
+      },
+      "invalid_response": {
+        "title": "The model response does not match the API protocol",
+        "body": "The model service returned data that could not be processed with the current API protocol. Check the Base URL, selected protocol, and service compatibility; if the configuration is correct, switch models or send feedback."
+      },
+      "invalid_request": {
+        "title": "The model request parameters cannot be used",
+        "body": "The request parameters cannot be processed as required by the model API. Check the model name, API protocol, generation parameters and referenced content, or simplify the message and retry."
+      },
+      "unsupported_feature": {
+        "title": "A feature required by this request is unavailable",
+        "body": "The model service could not handle a feature required by this request. Check model capabilities and the API protocol, then adjust the request or choose a compatible model."
+      },
+      "model_not_found": {
+        "title": "Model not found",
+        "body": "The provider could not find the selected model; its name may be invalid or it may not be visible to this account. Check the model ID, deployment name, and models available to the account, then retry."
+      },
+      "content_policy": {
+        "title": "Model service rejected the content",
+        "body": "The provider rejected this request under its content policy. Review the message and referenced content against the provider requirements; if ordinary content was misclassified, send feedback to the provider and include the request ID from technical details if available."
+      },
+      "billing_required": {
+        "title": "Model service requires billing",
+        "body": "The model service returned a payment-required response, and the specific billing restriction is unconfirmed. Check the account billing status, plan, and balance, then retry."
+      },
+      "prompt_too_long": {
+        "title": "The request context exceeds the model limit",
+        "body": "The provider explicitly rejected the request context length. Reduce the message, referenced files or history, or choose a model with a larger context window."
+      },
+      "provider_overloaded": {
+        "title": "The model service is overloaded",
+        "body": "The provider explicitly reported that it is overloaded and could not handle this request. Wait for the indicated delay before retrying, or choose another available provider."
+      },
+      "configuration_error": {
+        "title": "The model request configuration cannot be used",
+        "body": "The app could not prepare or complete the model request with the current configuration. Check the API protocol, endpoint, authentication configuration and required parameters."
+      },
+      "invalid_endpoint": {
+        "title": "The model endpoint URL is invalid",
+        "body": "The configured endpoint does not meet the request requirements. Check the Base URL HTTP(S) scheme, domain, port and API path, and remove any username, password or # fragment from the address."
+      },
+      "credentials_missing": {
+        "title": "The model service credential is unavailable",
+        "body": "The app could not obtain the credential bound to this model. Check whether the provider credential is configured or was removed, and whether required environment variables or connection settings are available."
+      },
+      "credential_target_mismatch": {
+        "title": "The credential does not match the target model API",
+        "body": "The app refused to send this credential to a mismatched target API. Check the credential provider, connection binding, API address and region settings."
+      },
+      "spend_limit_reached": {
+        "title": "The model service spend limit was reached",
+        "body": "The provider explicitly reported that this organization or project reached its configured spend limit. Check the organization and project, review their budget limits and reset cycle in the provider console, and adjust the limit with the required account permission before retrying."
+      }
+    },
+    "copyDetails": "Copy technical details",
+    "renewSubscription": "Renew subscription"
   },
   "workspace": {
     "title": "Project",

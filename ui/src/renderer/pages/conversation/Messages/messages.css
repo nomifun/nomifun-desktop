@@ -71,6 +71,10 @@
   width: 100%;
   min-width: 0;
   color: var(--color-text-1);
+  padding: 12px 14px;
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  background: var(--color-fill-1);
 }
 
 .message-error-note__summary {
@@ -78,7 +82,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
-  min-height: 32px;
+  min-height: 22px;
   padding-left: 24px;
 }
 
@@ -117,25 +121,19 @@
   overflow-wrap: anywhere;
 }
 
-.message-error-note__controls,
-.message-error-note__recovery {
+.message-error-note__guidance {
+  min-width: 0;
+  margin: 4px 0 0 24px;
+}
+
+.message-error-note__controls {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 6px 12px;
   min-width: 0;
   max-width: 100%;
-}
-
-.message-error-note__recovery {
-  gap: 8px;
-}
-
-.message-error-note__recovery::before {
-  content: '';
-  width: 1px;
-  height: 12px;
-  background: var(--border-base);
+  margin-top: 6px;
 }
 
 .message-error-note__toggle,
@@ -161,8 +159,7 @@
 }
 
 .message-error-note__toggle {
-  width: 32px;
-  padding: 4px;
+  padding: 4px 0;
 }
 
 .message-error-note__toggle > span {
@@ -194,6 +191,11 @@
   outline-offset: 2px;
 }
 
+.message-error-note__copy:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .message-error-note__retry:disabled {
   color: var(--color-text-4);
   cursor: not-allowed;
@@ -204,8 +206,9 @@
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-  max-width: 560px;
-  margin: 6px 0 0 24px;
+  margin: 8px 0 0 24px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-base);
 }
 
 /* Explicit because author-level display:flex overrides the hidden attribute. */
@@ -221,14 +224,43 @@
   overflow-wrap: anywhere;
 }
 
-.message-error-note__meta {
+.message-error-note__context {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+}
+
+.message-error-note__context-row {
+  display: grid;
+  grid-template-columns: minmax(72px, max-content) minmax(0, 1fr);
+  gap: 6px 12px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.message-error-note__context-row dt,
+.message-error-note__detail-label {
   color: var(--color-text-3);
   font-size: 12px;
   line-height: 18px;
   overflow-wrap: anywhere;
 }
 
+.message-error-note__context-row dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text-2);
+  overflow-wrap: anywhere;
+  white-space: break-spaces;
+}
+
 .message-error-note__detail-body {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: var(--color-bg-1);
   max-height: 180px;
   overflow: auto;
   color: var(--color-text-2);
@@ -243,6 +275,12 @@
   display: flex;
   align-items: center;
   margin-left: -7px;
+  gap: 4px;
+}
+
+.message-error-note__copy {
+  min-height: 32px;
+  padding: 4px 7px;
 }
 
 .message-error-note__actions .message-error-note__feedback {
