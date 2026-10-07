@@ -51,10 +51,7 @@ SIGNED=0
 seen_dashdash=0
 for arg in "$@"; do
   # Reject retired options even after --; never forward them to Tauri.
-  if [[ "$arg" == "--with-codex-runtime" || "$arg" == --with-codex-runtime=* ]]; then
-    echo "❌ 外部 Codex Runtime 打包入口已移除；Engine 必须随主程序源码编译注册。" >&2
-    exit 1
-  elif [[ "$arg" == "--debug" || "$arg" == "-d" || "$arg" == "--no-bundle" || "$arg" == "--no-sign" || "$arg" == "--target" || "$arg" == --target=* || "$arg" == "-t" || "$arg" == "--profile" || "$arg" == --profile=* || "$arg" == "--bundles" || "$arg" == --bundles=* || "$arg" == "-b" ]]; then
+  if [[ "$arg" == "--debug" || "$arg" == "-d" || "$arg" == "--no-bundle" || "$arg" == "--no-sign" || "$arg" == "--target" || "$arg" == --target=* || "$arg" == "-t" || "$arg" == "--profile" || "$arg" == --profile=* || "$arg" == "--bundles" || "$arg" == --bundles=* || "$arg" == "-b" ]]; then
     echo "❌ build:mac 固定生成完整 arm64 release App/DMG；不能透传 ${arg}。开发包请使用 build:fast。" >&2
     exit 1
   elif [[ "$arg" == "--signed" ]]; then
@@ -167,24 +164,6 @@ verify_macos_app() {
   else
     [[ "$archs" == "x86_64" ]] || { echo "❌ x86_64 app has architectures: $archs" >&2; exit 1; }
   fi
-  local retired_artifact
-  # Include symlinks and hello metadata. A failed traversal is not evidence
-  # that the retired resource is absent.
-  [[ -d "$app/Contents/Resources" && ! -L "$app/Contents/Resources" ]] || {
-    echo "❌ app Resources 目录缺失或为符号链接: $app" >&2
-    exit 1
-  }
-  retired_artifact="$(find "$app/Contents/Resources" \
-    \( -name 'nomifun-codex-runtime' -o -name 'nomifun-codex-runtime.hello.json' \) \
-    -print -quit)" || {
-    echo "❌ 无法检查 app 中的已退役 Runtime 资源: $app" >&2
-    exit 1
-  }
-  if [[ -n "$retired_artifact" ]]; then
-    echo "❌ app 包含已退役 Codex Runtime 资源: $retired_artifact" >&2
-    exit 1
-  fi
-
   local cef_framework="$app/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
   local cef_runtime="$app/Contents/Resources/browser-cef/runtime.json"
   [[ -f "$cef_framework" && -f "$cef_runtime" ]] || {

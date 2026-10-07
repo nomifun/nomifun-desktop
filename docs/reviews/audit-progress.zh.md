@@ -1333,10 +1333,10 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `apps/desktop/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `apps/web/` | 部分完成 | R133入口/build及共享build-support全读，复用关闭信号9/0；实际信号/长连接及共享bootstrap/auth未闭环 |
 | `crates/agent/nomi-a11y/` | 部分完成 | R109完整13源码4433行及2examples244行；Windows23/0、winsmoke check；Linux/macOS未运行及R109-06剩余边界保留 |
-| `crates/agent/nomi-agent/` | 部分完成 | R47 SkillTool 的 inline shell、副作用标记与完成证据消费链已核对；R48 ProtocolSink/CLI 共同输出入口已验证。R141原生requirement_tools完整复核586行，schema/execute与结果构造精简8/0；其余engine/builder/session/工具编排未完成全模块审计 |
+| `crates/agent/nomi-agent/` | 已移除 | crate 已删除（功能并入现役引擎）；历史审计记录见上文轮次台账 |
 | `crates/agent/nomi-browser-engine/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `crates/agent/nomi-browser/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
-| `crates/agent/nomi-cli/` | 部分完成 | R34/R41/R48 已审 CLI 生产文件和命令回归，JSON 所有输出入口失败清理 17/0；MCP connect_all 的取消及 bootstrap 跨 crate 归属等见 R30-02 |
+| `crates/agent/nomi-cli/` | 已移除 | crate 已删除；历史审计记录见上文轮次台账 |
 | `crates/agent/nomi-compact/` | 已验证 | R29 全文件及工具输出调用链；CRLF/JSON/TOON/Unicode 修复，54/0+Agent 8/0；Full 有损及首候选块限制见报告 |
 | `crates/agent/nomi-computer/` | 部分完成 | R116补交全读10源码3881行及example26行，输入/元素fallback与缓存修复离线44/0；真实桌面/跨会话/多阶段平台边界R116-05保留 |
 | `crates/agent/nomi-config/` | 部分完成 | R32–R33 全生产文件已读；合并/hook/schema/旧 shell 清理验证 184/0；仅余硬迁移并发窗口、历史测试设计剩余核对 |
@@ -1367,7 +1367,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-browser-platform/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `crates/backend/nomifun-channel/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-chat-model-broker/` | 部分完成 | R84完整读8源文件+conformance/6fixtures，27/0；静默流释放/claim顺序及无效分支已修，R84-03保留 |
-| `crates/backend/nomifun-codex-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-codex-runtime/` | 已移除 | crate 随已退役的 sidecar 方案删除，不再纳入审计范围 |
 | `crates/backend/nomifun-common/` | 部分完成 | R59/R102/R106原范围；R110目录/执行配置20/0、R111 scoped_auth全读21/0；R112原子文件去重16/0；R117/R120删冗余，最新15/0；factory_reset生产全读/测试部分，跨模块契约未闭环 |
 | `crates/backend/nomifun-companion/` | 部分完成 | R59/R63 export.rs解压预算及临时目录所有权已修，定向26/0；其余export/全模块未深审，后续业务取消事务见R60-03 |
 | `crates/backend/nomifun-conversation/` | 部分完成 | R4 已核对 list_messages 的 owner 校验、游标解析和 keyset 排序契约；其余 service、运行时/发送/权限路径待审 |

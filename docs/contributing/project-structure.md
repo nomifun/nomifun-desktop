@@ -16,9 +16,9 @@ nomifun-tauri/
 │   ├── web/                      nomifun-web bin: standalone server (API + SPA)
 │   └── desktop/                  nomifun-desktop bin: Tauri shell (embedded backend)
 ├── crates/
-│   ├── agent/                    15 nomi-* crates — the AI agent engine
-│   ├── backend/                  29 nomifun-* crates — the HTTP/WS backend
-│   └── shared/                   2 genuine cross-layer crates
+│   ├── agent/                    nomi-* crates — the AI agent engine
+│   ├── backend/                  nomifun-* crates — the HTTP/WS backend
+│   └── shared/                   cross-layer crates
 ├── ui/                           React SPA (Vite + UnoCSS), the only Bun workspace
 │   ├── src/common/               cross-host code: API clients, types, utils
 │   ├── src/platform/             tiny host bridge (storage / logger / theme)
@@ -77,9 +77,9 @@ to a future independent repository.
 
 | Directory | Prefix | Count | Role | Future repo |
 | --- | --- | --- | --- | --- |
-| [`crates/agent/`](../../crates/agent) | `nomi-*` | 15 | AI agent engine. Self-contained — no dependency on any `nomifun-*` crate. | historical extraction target |
-| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 32 | HTTP/WS server, data layer, auth, sessions, cron, knowledge, terminal, companion, public gateway, ... | historical extraction target |
-| [`crates/shared/`](../../crates/shared) | mixed | 2 | Cross-layer utilities used by both sides. | shared |
+| [`crates/agent/`](../../crates/agent) | `nomi-*` | 11 | AI agent engine. Self-contained — no dependency on any `nomifun-*` crate. | historical extraction target |
+| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 54 | HTTP/WS server, data layer, auth, sessions, cron, knowledge, terminal, companion, public gateway, ... | historical extraction target |
+| [`crates/shared/`](../../crates/shared) | mixed | 5 | Cross-layer utilities used by both sides. | shared |
 
 ## The agent-layer seam
 
@@ -104,7 +104,7 @@ When you add a new backend crate that needs an agent type:
 Why: this keeps the agent engine mostly independent and prevents feature crates
 from silently tying themselves to engine internals.
 
-## `crates/agent/` — 15 `nomi-*` crates (the AI agent engine)
+## `crates/agent/` — the `nomi-*` crates (the AI agent engine)
 
 | Crate | One-line role |
 | --- | --- |
@@ -116,14 +116,11 @@ from silently tying themselves to engine internals.
 | [`nomi-tools`](../../crates/agent/nomi-tools) | Built-in tools registry: bash, edit, glob, grep, read, tool-search, file-cache. |
 | [`nomi-mcp`](../../crates/agent/nomi-mcp) | MCP client used by the agent: config, manager, protocol, tool-proxy, transports. |
 | [`nomi-memory`](../../crates/agent/nomi-memory) | Long-term cross-session memory — preferences, feedback, project context, external references. |
-| [`nomi-agent`](../../crates/agent/nomi-agent) | Core engine: turn execution, bootstrap, commands, compaction, confirmation, delegation, output sinks. |
-| [`nomi-cli`](../../crates/agent/nomi-cli) | Standalone `nomi` binary that drives the engine without a host process. |
 | [`nomi-computer`](../../crates/agent/nomi-computer) | Desktop computer-use tool implementation. |
 | [`nomi-a11y`](../../crates/agent/nomi-a11y) | Accessibility helpers used by computer-use flows. |
 | [`nomi-browser-engine`](../../crates/agent/nomi-browser-engine) | Self-hosted browser/CDP automation engine. |
-| [`nomi-browser`](../../crates/agent/nomi-browser) | Browser-use tool layer. |
 
-## `crates/backend/` — 29 `nomifun-*` crates (the backend)
+## `crates/backend/` — the `nomifun-*` crates (the backend)
 
 | Crate | One-line role |
 | --- | --- |
@@ -141,7 +138,6 @@ from silently tying themselves to engine internals.
 | [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent) | **The single bridge to `crates/agent/`.** Built-in `nomi` Agent factory, runtime registry, and runtime handles; re-exports `nomi_config` / `nomi_types` / `RequirementSink`. |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp) | MCP server config, multi-agent sync adapters, OAuth, connection testing. |
 | [`nomifun-conversation`](../../crates/backend/nomifun-conversation) | Conversation + message CRUD with streaming relay and response middleware. |
-| [`nomifun-extension`](../../crates/backend/nomifun-extension) | Extension registry: manifest parsing, hub installer, skill scanning, lifecycle hooks. |
 | [`nomifun-channel`](../../crates/backend/nomifun-channel) | External channel integration: plugin system, pairing handshake, per-session messaging, formatter. |
 | [`nomifun-agent-execution`](../../crates/backend/nomifun-agent-execution) | Persistent single- and multi-Agent execution aggregate: participants, steps, attempts, scheduling, decisions, recovery, and events. |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron) | Scheduled-job engine: cron scheduler, executor, lifecycle event emitter, busy-guard. |
@@ -149,7 +145,6 @@ from silently tying themselves to engine internals.
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm) | Intelligent Decision-Making Mode: per-session supervision keeping agent / terminal sessions alive through provider faults. |
 | [`nomifun-webhook`](../../crates/backend/nomifun-webhook) | Webhook management + AutoWork completion notifications (Lark/飞书 custom bots), per-tag bindings. |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal) | PTY-backed terminal sessions managed alongside conversations; streams output via the realtime broadcaster. |
-| [`nomifun-preset`](../../crates/backend/nomifun-preset) | Reusable launch configurations; merges builtin + user + extension presets, resolves target-specific immutable snapshots, and serves `/api/presets`. |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge) | Knowledge bases, bound-base state, and scoped knowledge MCP search. |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion) | Desktop companions, figures, per-companion memory (every row owned by exactly one companion), and companion-bound state. |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway) | Platform Gateway MCP registry and process-issued capability tools. |

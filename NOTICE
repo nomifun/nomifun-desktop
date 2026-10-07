@@ -36,5 +36,19 @@ The Windows installer template is derived from:
 The vendored template carries a prominent modification notice and preserves
 its exact upstream revision and checksum in apps/desktop/nsis/installer.nsi.
 
+The built-in agent engine includes code adapted from the OpenAI Codex
+project:
+
+  Codex
+  https://github.com/openai/codex
+  Copyright OpenAI
+  Licensed under the Apache License, Version 2.0.
+
+Adapted portions include the secret-redaction sanitizer
+(crates/shared/nomi-redact), head/tail tool-output truncation
+(crates/agent/nomi-tools), and project-instruction configuration
+defaults (crates/agent/nomi-config). Each adapted site carries a
+prominent upstream-source notice.
+
 Our sincere thanks to the maintainers and communities of the open-source
 projects NomiFun uses.
