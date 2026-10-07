@@ -1,0 +1,42 @@
+/* Use opaque text-selection cursors instead of the Windows XOR I-beam,
+ * which can become white over light WebView2 surfaces during GPU composition.
+ * The opposite-color outline also keeps each cursor visible over selected text.
+ * This controls the mouse pointer; insertion carets keep their existing colors.
+ */
+:root {
+  --nomi-text-cursor: url('./cursors/text-light.svg') 12 12;
+}
+
+:root[data-theme='dark'] {
+  --nomi-text-cursor: url('./cursors/text-dark.svg') 12 12;
+}
+
+input:not(
+  :disabled,
+  [aria-disabled='true'],
+  [type='hidden'],
+  [type='checkbox'],
+  [type='radio'],
+  [type='range'],
+  [type='button'],
+  [type='submit'],
+  [type='reset'],
+  [type='image'],
+  [type='file'],
+  [type='color']
+),
+textarea:not(:disabled, [aria-disabled='true']),
+[contenteditable='true']:not([aria-disabled='true']),
+[contenteditable='']:not([aria-disabled='true']),
+[contenteditable='plaintext-only']:not([aria-disabled='true']),
+.cm-content:not([aria-disabled='true']),
+.arco-input-tag:not(.arco-input-tag-disabled),
+.arco-select-show-search:not(.arco-select-disabled),
+.arco-select-multiple:not(.arco-select-disabled),
+.arco-tree-select-show-search:not(.arco-tree-select-disabled),
+.arco-tree-select-multiple:not(.arco-tree-select-disabled),
+.arco-cascader-show-search:not(.arco-cascader-disabled),
+.arco-cascader-multiple:not(.arco-cascader-disabled) {
+  /* CodeMirror and component styles also declare cursor: text. */
+  cursor: var(--nomi-text-cursor), text !important;
+}
