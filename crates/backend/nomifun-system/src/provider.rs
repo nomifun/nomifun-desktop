@@ -63,11 +63,11 @@ pub async fn disable_retired_provider_platforms(
 
 #[derive(Clone)]
 pub struct ProviderService {
-    repo: Arc<dyn IProviderRepository>,
-    model_repo: Arc<dyn IProviderModelRepository>,
-    capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
-    connection_repo: Arc<dyn IProviderConnectionRepository>,
-    encryption_key: [u8; 32],
+    pub(crate) repo: Arc<dyn IProviderRepository>,
+    pub(crate) model_repo: Arc<dyn IProviderModelRepository>,
+    pub(crate) capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
+    pub(crate) connection_repo: Arc<dyn IProviderConnectionRepository>,
+    pub(crate) encryption_key: [u8; 32],
     coordinator: Option<SharedProviderDeletionCoordinator>,
 }
 
@@ -152,6 +152,9 @@ impl ProviderService {
         req: CreateProviderRequest,
     ) -> Result<ProviderResponse, AppError> {
         let platform = req.platform.trim();
+        if platform.eq_ignore_ascii_case(crate::model_gateway::PLATFORM) {
+            return Err(AppError::BadRequest("Use model-gateway/create to import the validated catalog atomically".into()));
+        }
         reject_retired_platform(platform)?;
         validate_provider_id(req.provider_id.as_deref())?;
         validate_required_text("platform", platform)?;
@@ -259,6 +262,11 @@ impl ProviderService {
             .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
         if is_retired_provider_platform(&existing.platform) {
             return Err(retired_provider_error());
+        }
+        if existing.platform == crate::model_gateway::PLATFORM
+            && (req.base_url.is_some() || req.credentials.is_some() || req.auth_scheme.is_some())
+        {
+            return Err(AppError::BadRequest("Gateway address and key must be updated together through model-gateway/connection".into()));
         }
         if let Some(name) = req.name.as_deref() {
             validate_required_text("name", name)?;
@@ -438,7 +446,7 @@ impl ProviderService {
         Ok(())
     }
 
-    fn row_to_response(
+    pub(crate) fn row_to_response(
         &self,
         row: Provider,
         models: Vec<ProviderModelResponse>,
@@ -463,12 +471,12 @@ impl ProviderService {
     }
 }
 
-struct ConnectionTarget {
-    base_url: String,
-    auth_scheme: String,
+pub(crate) struct ConnectionTarget {
+    pub(crate) base_url: String,
+    pub(crate) auth_scheme: String,
 }
 
-fn unique_connection_targets(
+pub(crate) fn unique_connection_targets(
     connections: &[PreparedProviderConnection],
 ) -> Result<HashMap<String, ConnectionTarget>, AppError> {
     let mut targets = HashMap::with_capacity(connections.len());
@@ -492,7 +500,7 @@ fn unique_connection_targets(
     Ok(targets)
 }
 
-fn validate_capability_set(
+pub(crate) fn validate_capability_set(
     platform: &str,
     default_base_url: &str,
     default_auth_scheme: &str,
@@ -522,7 +530,7 @@ fn validate_capability_set(
     Ok(())
 }
 
-fn validate_capability(
+pub(crate) fn validate_capability(
     platform: &str,
     default_base_url: &str,
     default_auth_scheme: &str,

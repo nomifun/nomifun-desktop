@@ -15,12 +15,48 @@ pub trait IProviderRepository: Send + Sync {
         connections: &[UpsertProviderConnectionParams<'_>],
     ) -> Result<(Provider, ProviderModelRow), DbError>;
 
+    /// Create the provider, selected models, and named connections as one
+    /// graph. Each display name corresponds to the model at the same index.
+    async fn create_graph(
+        &self,
+        _params: CreateProviderParams<'_>,
+        _models: &[NewProviderModel<'_>],
+        _display_names: &[Option<String>],
+        _connections: &[UpsertProviderConnectionParams<'_>],
+    ) -> Result<(Provider, Vec<ProviderModelRow>), DbError> {
+        Err(DbError::Conflict("atomic provider graph creation is unsupported".into()))
+    }
+
     async fn update(
         &self,
         id: &str,
         expected_config_revision: i64,
         params: UpdateProviderParams<'_>,
     ) -> Result<Provider, DbError>;
+
+    /// Update the default connection and any supplied named connections in
+    /// one revision-fenced transaction. Unmentioned roles are preserved.
+    async fn update_with_connections(
+        &self,
+        _id: &str,
+        _expected_config_revision: i64,
+        _params: UpdateProviderParams<'_>,
+        _connections: &[UpsertProviderConnectionParams<'_>],
+    ) -> Result<Provider, DbError> {
+        Err(DbError::Conflict("atomic provider connection update is unsupported".into()))
+    }
+
+    /// Atomically upsert a selected model set without deleting unselected
+    /// models. The provider revision fences configuration and lifecycle races.
+    async fn save_graph_models(
+        &self,
+        _provider_id: &str,
+        _expected_config_revision: i64,
+        _models: &[NewProviderModel<'_>],
+        _display_names: &[Option<String>],
+    ) -> Result<Vec<ProviderModelRow>, DbError> {
+        Err(DbError::Conflict("atomic provider model synchronization is unsupported".into()))
+    }
 
     /// Clone provider metadata, models, capabilities, and named connections in
     /// one transaction. Capability health observations are not copied.

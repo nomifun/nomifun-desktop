@@ -13,12 +13,13 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::de::DeserializeOwned;
 
 use crate::auth::AuthMaterial;
-use crate::error::{InvokeError, InvokeErrorKind};
+use crate::error::{GatewayBusinessError, InvokeError, InvokeErrorKind};
 use nomifun_api_types::ModelTechnicalCapability;
 use nomifun_net::provider_capability::{
     ProviderTechnicalCapability, classify_unsupported_technical_capability_body,
 };
 use nomifun_net::secret_redaction::SecretRedactor;
+use nomifun_net::provider_gateway_error::classify_gateway_business_error_body;
 
 /// Map a reqwest transport error onto [`InvokeError`]
 /// (timeout → [`InvokeErrorKind::Timeout`], else [`InvokeErrorKind::Network`]).
@@ -177,7 +178,7 @@ fn parse_retry_after_at(value: Option<&reqwest::header::HeaderValue>, now: Syste
 /// [`InvokeErrorKind::ProviderError`]. `http_status` is always set and any
 /// valid `Retry-After` (including on 503) is retained as `retry_after_ms`.
 pub async fn error_from_response(resp: reqwest::Response) -> InvokeError {
-    error_from_response_with_body_deadline(resp, None).await
+    error_from_response_with_body_deadline(resp, None, None).await
 }
 
 /// Streaming chat has no total HTTP body deadline. Bound the diagnostic read
@@ -186,13 +187,15 @@ pub async fn error_from_response(resp: reqwest::Response) -> InvokeError {
 pub(crate) async fn error_from_response_with_timeout(
     resp: reqwest::Response,
     timeout: Duration,
+    protocol: &str,
 ) -> InvokeError {
-    error_from_response_with_body_deadline(resp, Some(timeout)).await
+    error_from_response_with_body_deadline(resp, Some(timeout), Some(protocol)).await
 }
 
 async fn error_from_response_with_body_deadline(
     resp: reqwest::Response,
     timeout: Option<Duration>,
+    protocol: Option<&str>,
 ) -> InvokeError {
     let redactor = response_secret_redactor(&resp);
     let status = resp.status();
@@ -205,29 +208,38 @@ async fn error_from_response_with_body_deadline(
     };
     // Read the header before the bounded body reader consumes the response.
     let retry_after_ms = parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
-    let (snippet, context_length_rejected, unsupported_technical_capability) = match timeout {
-        Some(timeout) => tokio::time::timeout(timeout, read_error_body_snippet(resp))
+    let (snippet, context_length_rejected, unsupported_technical_capability, gateway_business_error) = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, read_error_body_snippet(resp, protocol))
             .await
             .unwrap_or_else(|_| {
                 (
                     "<provider error body read timed out>".to_owned(),
                     false,
                     None,
+                    None,
                 )
             }),
-        None => read_error_body_snippet(resp).await,
+        None => read_error_body_snippet(resp, protocol).await,
     };
     let snippet = redactor.redact(&snippet);
+    let kind = match gateway_business_error {
+        Some(GatewayBusinessError::KeyExpired) => InvokeErrorKind::Auth,
+        Some(GatewayBusinessError::RateLimited) => InvokeErrorKind::RateLimited,
+        Some(_) => InvokeErrorKind::QuotaExhausted,
+        None => kind,
+    };
     InvokeError {
         kind,
-        message: format!("provider returned {status}: {snippet}"),
+        message: gateway_business_error.map(|business| business.action_message().to_owned())
+            .unwrap_or_else(|| format!("provider returned {status}: {snippet}")),
         http_status: Some(code),
         retry_after_ms,
         catalog_failure: false,
-        context_length_rejected: matches!(code, 400 | 413 | 422) && context_length_rejected,
-        unsupported_technical_capability: matches!(code, 400 | 422)
+        context_length_rejected: gateway_business_error.is_none() && matches!(code, 400 | 413 | 422) && context_length_rejected,
+        unsupported_technical_capability: (gateway_business_error.is_none() && matches!(code, 400 | 422))
             .then_some(unsupported_technical_capability)
             .flatten(),
+        gateway_business_error,
     }
 }
 
@@ -243,7 +255,9 @@ pub(crate) fn response_secret_redactor(resp: &reqwest::Response) -> SecretRedact
 
 async fn read_error_body_snippet(
     mut resp: reqwest::Response,
-) -> (String, bool, Option<ModelTechnicalCapability>) {
+    protocol: Option<&str>,
+) -> (String, bool, Option<ModelTechnicalCapability>, Option<GatewayBusinessError>) {
+    let redactor = response_secret_redactor(&resp);
     if let Some(declared) = resp.content_length()
         && declared > MAX_ERROR_RESPONSE_BODY_BYTES as u64
     {
@@ -253,6 +267,7 @@ async fn read_error_body_snippet(
                 MAX_ERROR_RESPONSE_BODY_BYTES
             ),
             false,
+            None,
             None,
         );
     }
@@ -287,6 +302,7 @@ async fn read_error_body_snippet(
                         format!("<provider error body read failed: {error}>"),
                         false,
                         None,
+                        None,
                     );
                 }
                 break;
@@ -301,7 +317,22 @@ async fn read_error_body_snippet(
     let unsupported_technical_capability = complete
         .then(|| explicit_unsupported_technical_capability(&body))
         .flatten();
-    let mut snippet: String = String::from_utf8_lossy(&body)
+    let gateway_business_error = complete
+        .then(|| classify_gateway_business_error_body(&body)).flatten()
+        .filter(|_| match protocol {
+            Some("gemini.generate_text") => serde_json::from_slice::<serde_json::Value>(&body).ok()
+                .and_then(|value| value.get("error").and_then(|error| error.get("code")).map(serde_json::Value::is_number))
+                .unwrap_or(false),
+            Some("bedrock.anthropic_messages") => false,
+            _ => true,
+        });
+    // Exact credentials must be removed before presentation truncation; a
+    // credential crossing that boundary otherwise leaves an unmatchable
+    // prefix. A capped/incomplete transport read needs the same tail guard.
+    let safe_body = if complete { body.as_slice() } else {
+        &body[..redactor.redaction_safe_truncation_boundary(&body)]
+    };
+    let mut snippet: String = redactor.redact(&String::from_utf8_lossy(safe_body))
         .chars()
         .take(MAX_ERROR_RESPONSE_SNIPPET_CHARS)
         .collect();
@@ -315,6 +346,7 @@ async fn read_error_body_snippet(
         snippet,
         context_length_rejected,
         unsupported_technical_capability,
+        gateway_business_error,
     )
 }
 
@@ -1067,6 +1099,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_business_codes_survive_bounded_http_error_reads_without_diagnostics() {
+        for business in [GatewayBusinessError::InsufficientBalance, GatewayBusinessError::SubscriptionExpired,
+            GatewayBusinessError::ModelNotInPlan, GatewayBusinessError::KeyExpired, GatewayBusinessError::RateLimited] {
+            let expected_kind = if business.is_billing() { InvokeErrorKind::QuotaExhausted }
+                else if business == GatewayBusinessError::KeyExpired { InvokeErrorKind::Auth }
+                else { InvokeErrorKind::RateLimited };
+            for body in [json!({"error":{"code":business.code(), "type":"unsupported_parameter", "param":"tools",
+                "message":"private https://provider.invalid?key=secret", "purchase_url":"https://untrusted.invalid/buy"}}),
+                json!({"error":{"code":business.http_status(), "details":[{
+                    "@type":"type.googleapis.com/google.rpc.ErrorInfo", "domain":"nomifun-model-gateway",
+                    "reason":business.code().to_ascii_uppercase(), "metadata":{"nomifun_code":business.code()}
+                }]}})] {
+                let response = respond(ResponseTemplate::new(business.http_status()).set_body_json(body)
+                    .insert_header("retry-after", "7")).await;
+                let error = error_from_response(response).await;
+                assert_eq!(error.kind, expected_kind);
+                assert_eq!(error.gateway_business_error, Some(business));
+                assert_eq!(error.message, business.action_message());
+                assert_eq!(error.retry_after_ms, Some(7_000));
+                assert_eq!(error.unsupported_technical_capability, None);
+                assert!(!error.is_context_length_rejected());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_error_evidence_requires_complete_native_envelopes() {
+        let complete = json!({"error":{"message":"x".repeat(700), "code":"insufficient_balance"}});
+        let error = error_from_response(respond(ResponseTemplate::new(402).set_body_json(complete)).await).await;
+        assert_eq!(error.gateway_business_error, Some(GatewayBusinessError::InsufficientBalance), "machine code beyond presentation truncation must survive");
+        for body in [
+            json!({"error":{"message":"insufficient_balance", "code":"provider_error"}}).to_string(),
+            json!({"tool_output":{"error":{"code":"subscription_expired"}}}).to_string(),
+            json!({"error":{"code":"model_not_in_plan"}, "choices":[{"delta":{"content":"already emitted"}}]}).to_string(),
+            json!({"error":{"code":"insufficient_balance", "message":"x".repeat(MAX_ERROR_RESPONSE_BODY_BYTES)}}).to_string(),
+            "{\"error\":{\"code\":\"key_expired\"}".to_owned(),
+        ] {
+            let error = error_from_response(respond(ResponseTemplate::new(402).set_body_string(body)).await).await;
+            assert_eq!(error.gateway_business_error, None);
+            assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_chat_http_errors_obey_the_exact_attempted_protocol() {
+        for protocol in ["gemini.generate_text", "bedrock.anthropic_messages"] {
+            let response = respond(ResponseTemplate::new(402)
+                .set_body_json(json!({"error":{"code":"insufficient_balance"}}))).await;
+            let error = error_from_response_with_timeout(response, Duration::from_secs(1), protocol).await;
+            assert_eq!(error.gateway_business_error, None, "invalid native envelope for {protocol}");
+            assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        }
+        let response = respond(ResponseTemplate::new(402).set_body_json(json!({"error":{"code":402,
+            "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo", "domain":"nomifun-model-gateway",
+                "reason":"INSUFFICIENT_BALANCE", "metadata":{"nomifun_code":"insufficient_balance"}}]}}))).await;
+        let error = error_from_response_with_timeout(response, Duration::from_secs(1), "gemini.generate_text").await;
+        assert_eq!(error.gateway_business_error, Some(GatewayBusinessError::InsufficientBalance));
+        assert_eq!(error.message, GatewayBusinessError::InsufficientBalance.action_message());
+    }
+
+    #[tokio::test]
     async fn error_from_response_redacts_every_runtime_key_and_encoded_form() {
         let first = "sk first/+?=";
         let second = "sk-second-secret";
@@ -1153,6 +1246,17 @@ mod tests {
         let resp = respond(ResponseTemplate::new(500).set_body_string("x".repeat(600))).await;
         let err = error_from_response(resp).await;
         assert_eq!(err.message.chars().filter(|c| *c == 'x').count(), 500);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_truncation_does_not_keep_a_runtime_credential_prefix() {
+        let secret = "boundary-secret-for-redaction";
+        let mut response = respond(ResponseTemplate::new(500)
+            .set_body_string(format!("{}{} trailing diagnostic", "x".repeat(493), secret))).await;
+        response.extensions_mut().insert(SecretRedactor::new([secret]));
+        let error = error_from_response(response).await;
+        assert!(!error.message.contains("boundar"), "credential prefix escaped: {}", error.message);
+        assert!(error.message.contains("[REDACT"));
     }
 
     #[tokio::test]

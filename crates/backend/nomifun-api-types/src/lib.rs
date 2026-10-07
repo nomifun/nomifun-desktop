@@ -184,6 +184,8 @@ pub use provider::{
     ProbeProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
     ProviderHealthCheckResponse, ProviderReachability, ProviderResponse, UpdateProviderRequest,
 };
+pub mod model_gateway;
+pub use model_gateway::*;
 pub use provider_connection::{
     ProviderConnectionInput, ProviderConnectionResponse, SaveProviderConnectionRequest,
 };

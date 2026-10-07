@@ -38,6 +38,35 @@ impl ClassifiedError {
 }
 
 impl AgentSendError {
+    /// Convert only the Broker's locally authored gateway action and its
+    /// existing typed model classification. Native diagnostics never enter
+    /// this mapper, and the current Agent error contract stays unchanged.
+    pub fn from_model_gateway_failure(
+        model_code: nomifun_chat_model_broker::ChatModelErrorCode,
+        message: &str,
+    ) -> Option<Self> {
+        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+        use nomifun_chat_model_broker::ChatModelErrorCode;
+        let message = if let Some(rest) = message.strip_prefix("provider_http_status=") {
+            let (status, action) = rest.split_once("; ")?;
+            if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+            action
+        } else { message };
+        let business = GatewayBusinessError::from_action_message(message)?;
+        let (expected_code, agent_code, retryable, kind) = match business {
+            GatewayBusinessError::InsufficientBalance | GatewayBusinessError::SubscriptionExpired
+            | GatewayBusinessError::ModelNotInPlan => (ChatModelErrorCode::ProviderUnavailable,
+                AgentErrorCode::UserLlmProviderBillingRequired, false, AgentErrorResolutionKind::CheckProviderBilling),
+            GatewayBusinessError::KeyExpired => (ChatModelErrorCode::AuthenticationFailed,
+                AgentErrorCode::UserLlmProviderAuthFailed, false, AgentErrorResolutionKind::CheckProviderCredentials),
+            GatewayBusinessError::RateLimited => (ChatModelErrorCode::RateLimited,
+                AgentErrorCode::UserLlmProviderRateLimited, true, AgentErrorResolutionKind::Retry),
+        };
+        if expected_code != model_code { return None; }
+        let target = (kind != AgentErrorResolutionKind::Retry).then_some(AgentErrorResolutionTarget::ProviderSettings);
+        Some(Self::new(message, agent_code, AgentErrorOwnership::UserLlmProvider,
+            None, retryable, false, resolution(kind, target)))
+    }
     pub fn session_configuration_changed(detail: impl Into<String>) -> Self {
         Self::new(
             "The tool configuration no longer matches this session",
@@ -1049,6 +1078,36 @@ fn truncate_chars(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use nomifun_api_types::{AgentErrorResolutionKind, AgentErrorResolutionTarget};
+
+    #[test]
+    fn gateway_model_actions_use_existing_agent_codes_without_provider_diagnostics() {
+        use nomifun_chat_model_broker::ChatModelErrorCode;
+        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+        for business in [GatewayBusinessError::InsufficientBalance, GatewayBusinessError::SubscriptionExpired,
+            GatewayBusinessError::ModelNotInPlan, GatewayBusinessError::KeyExpired, GatewayBusinessError::RateLimited] {
+            let (model_code, code) = if business.is_billing() {
+                (ChatModelErrorCode::ProviderUnavailable, AgentErrorCode::UserLlmProviderBillingRequired)
+            } else if business == GatewayBusinessError::KeyExpired {
+                (ChatModelErrorCode::AuthenticationFailed, AgentErrorCode::UserLlmProviderAuthFailed)
+            } else { (ChatModelErrorCode::RateLimited, AgentErrorCode::UserLlmProviderRateLimited) };
+            for message in [business.action_message().to_owned(),
+                format!("provider_http_status={}; {}", business.http_status(), business.action_message())] {
+                let error = AgentSendError::from_model_gateway_failure(model_code, &message).unwrap();
+                assert_eq!(error.code(), Some(code));
+                assert_eq!(error.stream_error().message, business.action_message());
+                assert_eq!(error.stream_error().detail, None);
+                assert_eq!(error.stream_error().retryable, Some(business == GatewayBusinessError::RateLimited));
+                assert_eq!(error.stream_error().feedback_recommended, Some(false));
+            }
+            assert!(AgentSendError::from_model_gateway_failure(ChatModelErrorCode::InvalidRequest,
+                business.action_message()).is_none());
+        }
+        for message in ["insufficient_balance", "provider said subscription_expired",
+            "The model gateway balance is insufficient. Top up the account to continue. secret",
+            "provider_http_status=secret; The model gateway balance is insufficient. Top up the account to continue."] {
+            assert!(AgentSendError::from_model_gateway_failure(ChatModelErrorCode::ProviderUnavailable, message).is_none());
+        }
+    }
 
     #[test]
     fn sanitize_error_detail_redacts_bearer_values_after_tokenization() {

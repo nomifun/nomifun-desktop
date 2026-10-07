@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nomifun_api_types::ModelTask;
+use nomifun_api_types::{MODEL_GATEWAY_CATALOG_BASELINE_PARAM, ModelTask};
 pub use nomifun_api_types::{
     AuthSchemeDescriptor, EndpointRootShape, ModelProtocolManifestResponse,
     PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
@@ -16,7 +16,8 @@ pub use nomifun_api_types::{
 
 use crate::adapter::AdapterRegistry;
 use crate::adapters::{
-    default_adapters, default_realtime_adapters, is_reserved_local_transport_param_key,
+    default_adapters, default_realtime_adapters, is_local_provider_metadata_param_key,
+    is_reserved_local_transport_param_key,
 };
 use crate::error::InvokeError;
 use crate::realtime::RealtimeAdapterRegistry;
@@ -280,6 +281,7 @@ const fn preset(
 const PRESETS: &[PresetSpec] = &[
     PresetSpec { preset: "custom", platform: "custom", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
     PresetSpec { preset: "new-api", platform: "new-api", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
+    PresetSpec { preset: "nomifun-model-gateway", platform: "nomifun-model-gateway", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
     PresetSpec { preset: "gemini", platform: "gemini", base_url: Some("https://generativelanguage.googleapis.com"), requires_user_input: false, auth_scheme: Some("header_key:x-goog-api-key") },
     preset("Agnes", "agnes", "https://apihub.agnes-ai.com/v1"),
     preset("OpenAI", "openai", "https://api.openai.com/v1"),
@@ -496,7 +498,7 @@ const OPENAI_CHAT_PLATFORMS: &[&str] = &[
     "openrouter", "dashscope", "dashscope-coding", "siliconflow", "zhipu", "glm-coding-plan",
     "moonshot-cn", "moonshot-global", "xai", "ark", "ark-coding-plan", "ark-agent-plan",
     "qianfan", "qianfan-coding-plan", "hunyuan", "hunyuan-global", "lingyi", "poe", "ppio",
-    "modelscope", "infiniai", "ctyun", "stepfun", "stepfun-plan",
+    "modelscope", "infiniai", "ctyun", "stepfun", "stepfun-plan", "nomifun-model-gateway",
 ];
 
 use ModelTask::{
@@ -509,11 +511,11 @@ use ProtocolTransportKind::{Http, Sdk, Websocket};
 
 const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ProtocolSpec { id: "openai.chat_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: ALL_SCOPES, platforms: OPENAI_CHAT_PLATFORMS, connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/chat/completions")] },
-    ProtocolSpec { id: "openai.responses", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_ONLY, platforms: &["openai"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/responses")] },
-    ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
+    ProtocolSpec { id: "openai.responses", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_ONLY, platforms: &["openai", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Chat, "endpoint", Submit, "POST", "/responses")] },
+    ProtocolSpec { id: "anthropic.messages", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["anthropic", "nomifun-model-gateway"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1/messages")] },
     ProtocolSpec { id: "bedrock.anthropic_messages", tasks: &[Chat], executor: Agent, transport: Sdk, scopes: NATIVE_ONLY, platforms: &["bedrock"], connection_role: None, endpoints: &[] },
-    ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
-    ProtocolSpec { id: "openai.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "ctyun"], connection_role: None, endpoints: &[
+    ProtocolSpec { id: "gemini.generate_text", tasks: &[Chat], executor: Agent, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini", "nomifun-model-gateway"], connection_role: None, endpoints: &[origin_endpoint(Chat, "endpoint", Submit, "POST", "/v1beta/models/{model}:streamGenerateContent?alt=sse")] },
+    ProtocolSpec { id: "openai.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "ctyun", "nomifun-model-gateway"], connection_role: None, endpoints: &[
         endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
         endpoint(ImageEdit, "endpoint", Submit, "POST", "/images/edits"),
     ] },
@@ -530,10 +532,10 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
         endpoint(VideoGeneration, "endpoint", Submit, "POST", "/videos"),
         endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "https://apihub.agnes-ai.com/agnesapi?video_id={id}"),
     ] },
-    ProtocolSpec { id: "openai.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "novita", "openrouter", "siliconflow", "ppio", "infiniai", "qianfan", "hunyuan", "hunyuan-global", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/embeddings")] },
-    ProtocolSpec { id: "generic.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: COMPAT_CUSTOM, platforms: &["siliconflow", "ppio", "qianfan", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
-    ProtocolSpec { id: "openai.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "siliconflow"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
-    ProtocolSpec { id: "openai.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
+    ProtocolSpec { id: "openai.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "novita", "openrouter", "siliconflow", "ppio", "infiniai", "qianfan", "hunyuan", "hunyuan-global", "ctyun", "zhipu", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/embeddings")] },
+    ProtocolSpec { id: "generic.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: COMPAT_CUSTOM, platforms: &["siliconflow", "ppio", "qianfan", "ctyun", "zhipu", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
+    ProtocolSpec { id: "openai.audio_transcriptions", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "siliconflow", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/audio/transcriptions")] },
+    ProtocolSpec { id: "openai.audio_speech", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "nomifun-model-gateway"], connection_role: None, endpoints: &[endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/audio/speech")] },
     ProtocolSpec { id: "gemini.generate_content", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[
         origin_endpoint(ImageGeneration, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
         origin_endpoint(ImageEdit, "endpoint", Submit, "POST", "/v1beta/models/{model}:generateContent"),
@@ -837,6 +839,14 @@ pub fn validate_provider_params_for_protocol(
             ));
         }
     }
+    if object
+        .get(MODEL_GATEWAY_CATALOG_BASELINE_PARAM)
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(InvokeError::config(format!(
+            "{MODEL_GATEWAY_CATALOG_BASELINE_PARAM} is local catalog synchronization metadata and must be a JSON object"
+        )));
+    }
     // This historical StepFun adapter-control hint is deliberately consumed
     // nowhere. Reject it at save time instead of accepting a no-op field or
     // leaking it upstream.
@@ -927,6 +937,11 @@ pub fn validate_provider_params_for_protocol(
         ProviderParamsEncoding::Json => Ok(()),
         ProviderParamsEncoding::ScalarFields => {
             if let Some((key, value)) = object.iter().find(|(key, value)| {
+                // Local metadata is persisted for catalog synchronization and
+                // removed by adapters before provider form/query encoding.
+                if is_local_provider_metadata_param_key(key) {
+                    return false;
+                }
                 if protocol_id == "xai.stt" && key.as_str() == "keyterm" {
                     return match value {
                         serde_json::Value::String(_) => false,
@@ -1874,6 +1889,108 @@ mod tests {
         );
         let recommendation = view.recommendation.expect("OpenAI Chat recommendation");
         assert_eq!(recommendation.protocol_id, "openai.chat_text");
+    }
+
+    #[test]
+    fn model_gateway_requires_an_operator_address_and_explicit_catalog_protocols() {
+        let preset = platform_presets()
+            .into_iter()
+            .find(|preset| preset.platform == "nomifun-model-gateway")
+            .expect("model gateway preset");
+        assert_eq!(preset.preset, "nomifun-model-gateway");
+        assert!(preset.platform_default_base_url.is_none());
+        assert!(preset.requires_user_input);
+        assert_eq!(preset.default_auth_scheme.as_deref(), Some("bearer"));
+
+        for task in ALL_MODEL_TASKS {
+            let view = protocol_manifest_for_connection(
+                "nomifun-model-gateway",
+                Some("https://operator.example/v1"),
+                task,
+            );
+            assert!(view.recommendation.is_none(), "must use catalog protocol for {task:?}");
+            assert!(view.platform_default_base_url.is_none());
+            assert!(view.protocols.iter().all(|protocol| protocol.default_connections.is_empty()));
+        }
+    }
+
+    #[test]
+    fn model_gateway_exposes_every_catalog_protocol_with_native_auth_contracts() {
+        for (protocol, task) in [
+            ("openai.chat_text", Chat),
+            ("openai.responses", Chat),
+            ("anthropic.messages", Chat),
+            ("gemini.generate_text", Chat),
+            ("openai.images", ImageGeneration),
+            ("openai.images", ImageEdit),
+            ("openai.embeddings", Embedding),
+            ("generic.rerank", Rerank),
+            ("openai.audio_speech", SpeechSynthesis),
+            ("openai.audio_transcriptions", SpeechRecognition),
+        ] {
+            let view = protocol_manifest_for("nomifun-model-gateway", task);
+            let descriptor = view.protocols.iter()
+                .find(|descriptor| descriptor.protocol_id == protocol)
+                .unwrap_or_else(|| panic!("missing {protocol} for {task:?}"));
+            assert!(descriptor.platforms.iter().any(|platform| platform == "nomifun-model-gateway"));
+        }
+
+        for (protocol, auth) in [
+            ("openai.chat_text", "bearer"),
+            ("openai.responses", "bearer"),
+            ("anthropic.messages", "header_key:x-api-key"),
+            ("gemini.generate_text", "header_key:x-goog-api-key"),
+        ] {
+            let descriptor = protocol_descriptor(protocol).unwrap();
+            assert_eq!(descriptor.allowed_auth_schemes, vec![auth.to_owned()]);
+            assert_eq!(descriptor.requires_output_ceiling, protocol == "anthropic.messages");
+        }
+    }
+
+    #[test]
+    fn model_gateway_responses_is_explicit_opt_in_without_widening_custom_scope() {
+        let descriptor = protocol_descriptor("openai.responses").unwrap();
+        assert_eq!(descriptor.scopes, vec![ProtocolScope::Native]);
+        for platform in ["custom", "new-api", "typo-provider"] {
+            let view = protocol_manifest_for(platform, Chat);
+            assert!(view.protocols.iter().all(|protocol| protocol.protocol_id != "openai.responses"));
+        }
+        assert!(protocol_manifest_for("nomifun-model-gateway", Chat)
+            .protocols.iter().any(|protocol| protocol.protocol_id == "openai.responses"));
+    }
+
+    #[test]
+    fn model_gateway_catalog_baseline_is_local_metadata_for_every_catalog_task() {
+        let params = serde_json::json!({
+            MODEL_GATEWAY_CATALOG_BASELINE_PARAM: {
+                "alias": "Gateway model", "context_window": 128000,
+                "provider_params": {"generationConfig": {"temperature": 0.2}}
+            }
+        });
+        for (protocol, task) in [
+            ("openai.chat_text", Chat),
+            ("openai.responses", Chat),
+            ("anthropic.messages", Chat),
+            ("gemini.generate_text", Chat),
+            ("openai.images", ImageGeneration),
+            ("openai.images", ImageEdit),
+            ("openai.embeddings", Embedding),
+            ("generic.rerank", Rerank),
+            ("openai.audio_speech", SpeechSynthesis),
+            ("openai.audio_transcriptions", SpeechRecognition),
+        ] {
+            validate_provider_params_for_protocol(protocol, task, &params)
+                .unwrap_or_else(|error| panic!("{protocol} {task:?}: {error}"));
+        }
+        for baseline in [
+            serde_json::json!(null), serde_json::json!([]),
+            serde_json::json!("invalid"), serde_json::json!(1),
+        ] {
+            assert!(validate_provider_params_for_protocol(
+                "openai.audio_transcriptions", SpeechRecognition,
+                &serde_json::json!({MODEL_GATEWAY_CATALOG_BASELINE_PARAM: baseline}),
+            ).is_err());
+        }
     }
 
     #[test]

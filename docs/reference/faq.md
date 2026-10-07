@@ -17,6 +17,22 @@ No. NomiFun is a self-host project. There is no SaaS instance, no managed login 
 
 You can expose your desktop install temporarily to other devices (your phone, your laptop) using [WebUI Remote Access](../guides/webui-remote-access.md), but that is a per-instance feature, not a hosted service.
 
+## Does the optional model gateway mean NomiFun operates a paid service?
+
+No. NomiFun provides open-source gateway software and a public protocol. A gateway
+can be self-hosted or independently operated by a community member. It is an
+optional model provider you choose, not a hosted NomiFun workspace or account.
+The official project conducts no commercial operations, never charges for any
+project feature, and does not operate any paid services. Model-token charges are
+paid directly to the model service you choose; that service sets its own billing
+and data policies.
+
+Desktop remains usable with your existing providers and keys. To connect a
+gateway, enter its runtime URL and your key in the [gateway setup flow](../guides/model-routing.md#connect-an-optional-model-gateway).
+Provider website, key-management, recharge, and billing links open as HTTPS
+pages in your system browser. They do not sign you into Desktop, and keys are
+not imported through deep links.
+
 ## Does the desktop app require login?
 
 No. The desktop WebView is trusted through a per-boot local trust token injected
@@ -55,17 +71,24 @@ Run `nomicore doctor` to see what your install detects.
 
 For raw model access (e.g. provider keys, custom OpenAI-compatible endpoints), the system supports configurable providers via `/api/providers/*` and the in-app settings UI. You bring the API keys; NomiFun stores them encrypted at rest in the data directory.
 
-There is no built-in agent that calls out to a hosted NomiFun endpoint — there is no such endpoint. Every provider you configure is something you control.
+The built-in agent uses only the model provider configuration you select. An
+optional, independently operated model gateway is another provider choice; it
+does not create an official hosted NomiFun service.
 
 ## Is NomiFun really local-only?
 
-The application logic and your data are local. The model providers you configure are not — a chat turn makes outbound calls to whichever provider you selected (Anthropic, OpenAI, Google, …). That is between you and the provider.
+The application logic and your workspace data are local. Requests to the model
+services you configure can leave the machine, including model invocation, model
+catalogs, and quota queries. A chosen cloud service or independently operated
+gateway processes those requests under its own data and billing policies.
 
 What NomiFun itself does over the network:
 
 - Optional update checks (system info / check-update endpoint).
 - Extension marketplace (`/api/hub/*`) — only if you actively use it.
-- Whatever your configured providers do — typically API calls to LLM providers.
+- Requests to your configured model services, including model invocation,
+  model catalogs, and quota queries. Gateway metadata is fetched during the
+  setup flow; account queries use that gateway's key.
 
 There is no telemetry pipeline, no analytics SDK, no `SENTRY_DSN` integration in the binary. The backend does not phone home on its own.
 

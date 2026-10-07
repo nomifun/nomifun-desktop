@@ -9,20 +9,22 @@ import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { IMessageText, IMessageTips } from '@/common/chat/chatLib';
-import { parseConversationId, parseMessageId } from '@/common/types/ids';
+import { parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
+import { ipcBridge } from '@/common';
 import { ConversationProvider, type ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
 import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
 import { emitter } from '@/renderer/utils/emitter';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
+import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import { MessageListProvider } from '../hooks';
 import MessageTips from './MessageTips';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
   lng: 'en-US',
-  resources: { 'en-US': { translation: { conversation, common, agentSettings, settings: { oneClickFeedback: 'Report Issue' } } } },
+  resources: { 'en-US': { translation: { conversation, common, agentSettings, settings: { ...settings, oneClickFeedback: 'Report Issue' } } } },
   interpolation: { escapeValue: false },
 });
 
@@ -72,6 +74,21 @@ function mount(message = error, context: Partial<ConversationContextValue> = {})
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('compact message errors', () => {
+  test('shows the typed gateway account action immediately while details remain collapsed', () => {
+    spyOn(ipcBridge.modelGateway.providerMeta, 'invoke').mockImplementation(() => new Promise(() => {}));
+    const message: IMessageTips = { ...error, content: { type: 'error', content: '', error: {
+      code: 'USER_LLM_PROVIDER_BILLING_REQUIRED', ownership: 'user_llm_provider', retryable: false,
+      message: 'The model gateway subscription has expired. Renew the subscription to continue.',
+      resolution: { kind: 'check_provider_billing', target: 'provider_settings' },
+    } } };
+    const { page, container } = mount(message, { currentModel: {
+      id: parseProviderId('0190f5fe-7c00-7a00-8000-000000000097'), platform: 'nomifun-model-gateway', use_model: 'mock-gpt',
+    } });
+    expect(page.getByText('The model gateway subscription has expired. Renew the subscription to continue.').closest('[hidden]')).toBeNull();
+    expect(page.getByRole('link', { name: settings.modelGateway.openSettings })).toBeDefined();
+    expect(container.querySelector('.message-error-note__details')?.hasAttribute('hidden')).toBe(true);
+    expect(container.querySelector('[data-testid="message-error-retry"]')).toBeNull();
+  });
   test('local session configuration changes offer a new conversation without a provider retry', () => {
     const message: IMessageTips = { ...error, content:{type:'error',content:'Local guard refused the request',error:{
       message:'The tool configuration no longer matches this session',code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',

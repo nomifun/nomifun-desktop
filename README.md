@@ -51,7 +51,7 @@
 
 ---
 
-**NomiFun** is everything you imagine an AI workstation to be — and it runs on your terms. One React frontend and one Rust backend give you an evolving desktop companion, an unattended automation platform, a unified knowledge base, native computer- and browser-use, and an open capability bus that any agent can drive. No cloud account. No telemetry. No subscription. Your data never leaves your machine except for the LLM calls **you** configure.
+**NomiFun** is everything you imagine an AI workstation to be — and it runs on your terms. One React frontend and one Rust backend give you an evolving desktop companion, an unattended automation platform, a unified knowledge base, native computer- and browser-use, and an open capability bus that any agent can drive. No NomiFun cloud account. No telemetry. No subscription. Your workspace data stays local; requests go to the model services **you** configure, including model invocation, model catalogs, and quota queries.
 
 > The product name is **NomiFun**. Lowercase `nomifun` is used only for code identifiers, crate names, environment variables, and repository paths.
 
@@ -129,10 +129,10 @@ innovation timeline. Simplified Chinese:
 
 Data security is not a setting in NomiFun — it is the architecture.
 
-- **All data is local.** NomiFun never proactively sends your data anywhere. The **only** outbound network calls are the LLM requests you explicitly configure to your chosen model provider. There is no other third-party service integration phoning home.
+- **All data is local.** NomiFun never proactively sends your data anywhere. Model-service requests go to the services you explicitly configure, including model invocation, model catalogs, and quota queries. See the [FAQ](docs/reference/faq.md#is-nomifun-really-local-only) for other network features you can choose to use.
 - **Safe for anyone who cares about data.** Individuals and enterprises with strict data-handling requirements can use it with confidence. The code is **fully open and open to audit**.
 - **We cut features to keep this promise.** To guarantee your data stays yours, we deliberately dropped several advanced, genuinely fun feature designs. Everything here is in service of letting users — and developers — relax.
-- **No ads. No commercialization. No membership tiers.** We promise to *never* charge for any feature of this project. The only thing that costs money is your LLM provider's tokens, which is outside our control. (If finding/serving models is painful, [reach out](#-contact--community) — we're happy to help build a unified model gateway.)
+- **No ads. No membership tiers. The official project conducts no commercial operations.** We will never charge for any feature of this project, and the official project does not operate any paid services. The only expense is model tokens, which you pay directly to the model service you choose.
 
 See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible-disclosure policy.
 

@@ -57,6 +57,7 @@ import {
 } from './providerAutoConfiguration';
 import useProviderAutoConfiguration from './useProviderAutoConfiguration';
 import ProviderCompatibilityModePicker from './ProviderCompatibilityModePicker';
+import ModelGatewaySetup from './ModelGatewaySetup';
 
 const ProviderLogo: React.FC<{ logo: string | null; name: string; size?: number }> = ({
   logo,
@@ -128,6 +129,7 @@ const AddPlatformModal = ModalHOC<{
         manifestState.manifests.chat;
   const runtimePlatform = providerManifest?.platform ?? selectedPlatform?.platform ?? 'custom';
   const isBedrock = runtimePlatform === 'bedrock';
+  const isModelGateway = preset === 'nomifun-model-gateway';
   const compatibilityProtocolPreferences = useMemo(
     () => providerCompatibilityProtocolPreferences(compatibilityMode),
     [compatibilityMode]
@@ -171,7 +173,7 @@ const AddPlatformModal = ModalHOC<{
     baseUrl,
     authScheme,
     credentials:
-      compatibilityMode !== 'anthropic' &&
+      !isModelGateway && compatibilityMode !== 'anthropic' &&
       credentialsResult.ok &&
       (!isBedrock ||
         (bedrockConfig &&
@@ -501,7 +503,7 @@ const AddPlatformModal = ModalHOC<{
         showClose: true,
       }}
       footer={
-        focusedCallConfigTask ? (
+        isModelGateway ? null : focusedCallConfigTask ? (
           <ModelCallConfigModalFooter
             task={focusedCallConfigTask}
             onCancel={() => modelEditorRef.current?.cancelCallConfig()}
@@ -561,6 +563,8 @@ const AddPlatformModal = ModalHOC<{
               ))}
             </Select>
           </Form.Item>
+
+          {!isModelGateway && <>
 
           {autoConfigurationEnabled && (
             <ProviderCompatibilityModePicker
@@ -690,9 +694,17 @@ const AddPlatformModal = ModalHOC<{
               {t('settings.bedrock.defaultChainHint')}
             </div>
           ) : null}
+          </>}
         </Form>
 
-        {!focusedCallConfigTask && (
+        {isModelGateway && <ModelGatewaySetup
+          initialBaseUrl={deepLinkData?.platform === 'nomifun-model-gateway' ? deepLinkData.base_url : undefined}
+          initialName={deepLinkData?.platform === 'nomifun-model-gateway' ? deepLinkData.name : undefined}
+          onCreated={(created) => { onSubmit(created); modalCtrl.close(); }}
+          onCancel={modalCtrl.close}
+        />}
+
+        {!isModelGateway && !focusedCallConfigTask && (
           <ProviderAutoConfigurationNotice
             enabled={autoConfigurationEnabled}
             loading={autoConfiguration.isLoading}
@@ -701,7 +713,7 @@ const AddPlatformModal = ModalHOC<{
           />
         )}
 
-        <ModelDefinitionEditor
+        {!isModelGateway && <ModelDefinitionEditor
           ref={modelEditorRef}
           value={definition}
           onChange={updateDefinition}
@@ -729,7 +741,7 @@ const AddPlatformModal = ModalHOC<{
           callConfigFooterPlacement='modal'
           connections={pendingConnections}
           onCreateConnection={addPendingConnection}
-        />
+        />}
       </div>
     </NomiModal>
   );
