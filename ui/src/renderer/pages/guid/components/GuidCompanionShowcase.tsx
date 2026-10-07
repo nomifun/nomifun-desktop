@@ -5,7 +5,7 @@ import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
 import { useCompanions } from '@/renderer/pages/nomi/useNomi';
 import { Message } from '@arco-design/web-react';
-import { Add, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
+import { Add, Check, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -88,14 +88,29 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
     // The selected figure is promoted into the visible set before its popover opens.
     setDetailId(companion.companion_id);
   };
-  const floatingSwitch = (companion: ICompanionWithStatus) => {
+  const dismissActions = () => {
+    setDetailId(null);
+    setRosterMenuId(null);
+    setAllOpen(false);
+  };
+  const companionActions = (companion: ICompanionWithStatus) => {
     const pending = pendingFloating?.[companion.companion_id];
     const enabled = pending ?? companion.appearance.companion_enabled;
-    return <button type='button' role='switch' className={styles.floatingSwitch}
-      aria-label={t('guid.showcase.floatingFor', { name: companion.name })}
-      aria-checked={enabled} aria-busy={pending !== undefined} disabled={pending !== undefined}
-      title={t('guid.showcase.floating')}
-      onClick={() => onToggleFloating(companion, !enabled)}><span /></button>;
+    return <>
+      <button type='button' className={styles.actionButton} disabled={Boolean(openingId)}
+        onClick={() => { dismissActions(); onOpenChat(companion); }}>
+        {openingId === companion.companion_id ? t('guid.showcase.opening') : t('guid.showcase.openChat')}
+      </button>
+      <button type='button' className={styles.actionButton}
+        aria-label={t('guid.showcase.floatingFor', { name: companion.name })}
+        aria-pressed={enabled} aria-busy={pending !== undefined} disabled={pending !== undefined}
+        onClick={() => onToggleFloating(companion, !enabled)}>
+        <span>{t('guid.showcase.floating')}</span>
+        <span className={styles.actionIndicator} aria-hidden='true'>{enabled && <Check size={14} fill='currentColor' />}</span>
+      </button>
+      <button type='button' className={styles.actionButton}
+        onClick={() => { dismissActions(); onManage(companion.companion_id); }}>{t('guid.showcase.manage')}</button>
+    </>;
   };
 
   return <section ref={ref} className={styles.showcase} aria-label={t('guid.showcase.title')} data-collapsed={collapsed}>
@@ -126,15 +141,12 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
                   <span className={styles.rosterAvatar}>{avatar(companion, 28)}</span>
                   <span className={styles.rosterName} title={companion.name}>{companion.name}</span>
                 </button>
-                {floatingSwitch(companion)}
                 <GuidPopover open={rosterMenuId === companion.companion_id}
                   onOpenChange={(open) => setRosterMenuId(open ? companion.companion_id : null)}
                   label={t('guid.showcase.moreFor', { name: companion.name })}
                   trigger={<More size={15} />} triggerClassName={styles.iconButton}
-                  panelClassName={styles.rosterActions} portal={false}>
-                  <strong>{companion.name}</strong>
-                  <button type='button' disabled={Boolean(openingId)} onClick={() => { setRosterMenuId(null); setAllOpen(false); onOpenChat(companion); }}>{t('guid.showcase.openChat')}</button>
-                  <button type='button' onClick={() => { setRosterMenuId(null); setAllOpen(false); onManage(companion.companion_id); }}>{t('guid.showcase.manage')}</button>
+                  panelClassName={styles.actionPanel} showArrow portal={false}>
+                  {companionActions(companion)}
                 </GuidPopover>
               </div>)}
               </div>
@@ -174,8 +186,8 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
             data-selected={collapsed ? selected : undefined}>
             <GuidPopover open={detailId === companion.companion_id}
               onOpenChange={(open) => { setDetailId(open ? companion.companion_id : null); if (open) setSelectedId(companion.companion_id); }}
-              label={companion.name} pressed={selected} placement={collapsed ? 'top' : 'right-start'} anchorToFigure={!collapsed}
-              panelClassName={styles.detail} triggerClassName={collapsed ? styles.compactCompanion : styles.companion}
+              label={companion.name} pressed={selected} placement='top' anchorToFigure={!collapsed} showArrow
+              panelClassName={styles.actionPanel} triggerClassName={collapsed ? styles.compactCompanion : styles.companion}
               trigger={<>
                 <span className={collapsed ? styles.smallAvatar : styles.figureSlot}>
                   <span data-showcase-art className={styles.figureArtwork}>{avatar(companion, collapsed ? 36 : figureHeight, !collapsed)}</span>
@@ -183,17 +195,8 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
                 </span>
                 <span className={styles.companionName} title={companion.name}>{companion.name}</span>
               </>}>
-              <strong className={styles.detailName}>{companion.name}</strong>
-              <button type='button' className={styles.primaryButton} disabled={Boolean(openingId)}
-                onClick={() => onOpenChat(companion)}>
-                {openingId === companion.companion_id ? t('guid.showcase.opening') : t('guid.showcase.openChat')}<Right size={14} />
-              </button>
-              <button type='button' className={styles.textButton} onClick={() => onManage(companion.companion_id)}>{t('guid.showcase.manage')}</button>
+              {companionActions(companion)}
             </GuidPopover>
-            <div className={styles.floatingControl}>
-              {!collapsed && <span>{t('guid.showcase.floating')}</span>}
-              {floatingSwitch(companion)}
-            </div>
           </div>;
         })}
       </div>}
