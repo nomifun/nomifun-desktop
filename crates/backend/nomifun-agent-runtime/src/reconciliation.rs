@@ -89,7 +89,8 @@ pub fn reconcile_execution_tail(
                 }
             }
             AgentEngineEvent::ModelOutputTruncated { step: current, discarded_tool_call_ids, .. }
-            | AgentEngineEvent::ModelResponseRejected { step: current, discarded_tool_call_ids, .. } => {
+            | AgentEngineEvent::ModelResponseRejected { step: current, discarded_tool_call_ids, .. }
+            | AgentEngineEvent::VoiceModelStepSuperseded {step:current,discarded_tool_call_ids,..} => {
                 if *current != step || !current_results.is_empty() || proposed.iter().any(|id| admitted.contains(id))
                     || proposed != discarded_tool_call_ids.iter().cloned().collect() { return Err(invalid("discard would hide an admitted effect")); }
                 discarded = true;

@@ -24,6 +24,7 @@ pub use store::{
     MAX_SINGLE_PAYLOAD_BYTES,
     NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_CHECKPOINT_BYTES,
     RuntimeStateObservation,
+    NativeTurnMutationFence,NativeInputContextFence,
     NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS,
     NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED,
     NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation,
