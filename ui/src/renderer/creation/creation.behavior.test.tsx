@@ -311,6 +311,6 @@ describe('conversation creation admission and draft behavior', () => {
     const video = { ...task, capability: 'i2v', inputs: [{ asset_id: 'original', kind: 'image', role: 'first_frame' }, { asset_id: 'mask', kind: 'image', role: 'last_frame' }] } as ConversationCreationTask;
     expect(recallCreationTask(emptyCreationDraft(), video, assets, 'video').references.map(ref => ref.role)).toEqual(['first_frame', 'last_frame']);
     expect(recallCreationTask(emptyCreationDraft(), task, assets, 'video', true).references.map(ref => ref.role)).toEqual(['first_frame']);
-    expect(() => recallCreationTask(emptyCreationDraft(), { ...task, capability: 'tts' }, assets, 'music')).toThrow('不属于音乐');
+    expect(() => recallCreationTask(emptyCreationDraft(), { ...task, capability: 'tts' }, assets, 'music')).toThrow('不属于图片、视频或音乐生成模式');
   });
 });
