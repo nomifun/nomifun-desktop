@@ -58,8 +58,9 @@ const parseWebResponse = async (response: XMLHttpRequest): Promise<SpeechToTextR
   return payload.data;
 };
 
-export async function transcribeAudioBlob(blob: Blob, languageHint?: string): Promise<SpeechToTextResult> {
+export async function transcribeAudioBlob(blob: Blob, languageHint?: string, signal?: AbortSignal): Promise<SpeechToTextResult> {
   ensureAudioSize(blob);
+  if (signal?.aborted) throw new Error('STT_ABORTED');
 
   const mimeType = blob.type || 'audio/webm';
   const file_name = createAudioFileName(mimeType);
@@ -76,6 +77,18 @@ export async function transcribeAudioBlob(blob: Blob, languageHint?: string): Pr
 
   return new Promise<SpeechToTextResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const cleanup = () => {
+      xhr.removeEventListener('load', onLoad);
+      xhr.removeEventListener('error', onError);
+      xhr.removeEventListener('abort', onAbort);
+      signal?.removeEventListener('abort', onSignalAbort);
+    };
+    const fail = (error: unknown) => { if (!settled) { settled = true; cleanup(); reject(error); } };
+    const complete = (result: SpeechToTextResult) => { if (!settled) { settled = true; cleanup(); resolve(result); } };
+    const onError = () => fail(new Error('STT_NETWORK_ERROR'));
+    const onAbort = () => fail(new Error('STT_ABORTED'));
+    const onSignalAbort = () => { xhr.abort(); fail(new Error('STT_ABORTED')); };
     xhr.open('POST', `${getBaseUrl()}/api/stt`);
     // Desktop dev is cross-origin (`http://localhost:5173` ->
     // `http://127.0.0.1:<backend-port>`). Setting `withCredentials` here makes
@@ -90,9 +103,10 @@ export async function transcribeAudioBlob(blob: Blob, languageHint?: string): Pr
       xhr.setRequestHeader(name, value);
     }
 
-    xhr.addEventListener('load', () => {
+    const onLoad = () => {
+      if (settled) return;
       if (xhr.status === 413) {
-        reject(new Error('STT_FILE_TOO_LARGE'));
+        fail(new Error('STT_FILE_TOO_LARGE'));
         return;
       }
       if (xhr.status < 200 || xhr.status >= 300) {
@@ -103,21 +117,17 @@ export async function transcribeAudioBlob(blob: Blob, languageHint?: string): Pr
         } catch {
           detail = xhr.responseText.trim();
         }
-        reject(new Error(`STT_REQUEST_FAILED:${detail || `${xhr.status} ${xhr.statusText}`}`));
+        fail(new Error(`STT_REQUEST_FAILED:${detail || `${xhr.status} ${xhr.statusText}`}`));
         return;
       }
 
-      parseWebResponse(xhr).then(resolve).catch(reject);
-    });
-
-    xhr.addEventListener('error', () => {
-      reject(new Error('STT_NETWORK_ERROR'));
-    });
-
-    xhr.addEventListener('abort', () => {
-      reject(new Error('STT_ABORTED'));
-    });
-
-    xhr.send(formData);
+      parseWebResponse(xhr).then(complete).catch(fail);
+    };
+    xhr.addEventListener('load', onLoad);
+    xhr.addEventListener('error', onError);
+    xhr.addEventListener('abort', onAbort);
+    signal?.addEventListener('abort', onSignalAbort, { once: true });
+    if (signal?.aborted) { onSignalAbort(); return; }
+    try { xhr.send(formData); } catch (error) { fail(error); }
   });
 }

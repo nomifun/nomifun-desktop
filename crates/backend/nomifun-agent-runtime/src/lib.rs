@@ -92,6 +92,8 @@ pub use kernel::{
     compile_agent_tool_plan, AgentToolExposure, KernelAgentToolInvoker,
 };
 pub use model::{BrokerAgentModelPort, AgentModelPort, AgentModelStream};
+mod immediate_correction;
+pub use immediate_correction::AgentImmediateCorrectionPort;
 pub use standard_tools::standard_agent_tool_exposures;
 pub use tool::{
     input_schema_digest, AgentEffectClass, AgentToolBinding, AgentToolInvocation,

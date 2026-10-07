@@ -99,6 +99,16 @@ pub enum AgentEngineEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_hint: Option<String>,
     },
+    /// Only an explicitly voice-started Immediate-policy Turn can emit this.
+    /// The exact unadmitted proposal is withdrawn after owned abort/join;
+    /// no Turn cancellation, tool result, applied input or success is claimed.
+    VoiceModelStepSuperseded {
+        step: u16,
+        model_operation_id: OperationId,
+        steering_receipt_ids: Vec<String>,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        cleanup: nomifun_chat_model_broker::OwnedModelCleanupReceipt,
+    },
     ContextCompacted {
         input_bytes_before: usize,
         input_bytes_after: usize,
@@ -264,6 +274,7 @@ impl AgentEngineEvent {
             | Self::ModelOutputTruncated { .. }
             | Self::ModelResponseRejected { .. }
             | Self::DeliveryReviewSuperseded { .. }
+            | Self::VoiceModelStepSuperseded { .. }
             | Self::TurnCompleted { .. }
             | Self::TurnCancelled { .. }
             | Self::TurnPaused { .. }
