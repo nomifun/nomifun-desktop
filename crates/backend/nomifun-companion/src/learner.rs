@@ -14,14 +14,14 @@ use std::sync::Arc;
 
 use nomifun_ai_agent::nomi_config;
 use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
-use nomifun_common::{AppError, now_ms};
+use nomifun_common::{AppError, generate_id, now_ms};
 use nomifun_model_invoke::ModelInvokeService;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::collector::{LEARN_CURSOR_KEY, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;
-use crate::prompt::{self, LEARN_MAX_TOKENS};
+use crate::prompt;
 use crate::registry::CompanionRegistry;
 use crate::store::{CompanionStore, MOOD_KEY, MemoryFilter};
 
@@ -64,6 +64,9 @@ impl CompanionRunLocks {
 /// persisted as run history.
 #[derive(Debug, Clone, Serialize)]
 pub struct CompanionLearnResult {
+    /// Per-attempt domain receipt returned to the canonical Agent effect
+    /// ledger. A cancelled attempt is not replayed from this ID alone.
+    pub learn_run_id: String,
     pub status: String,
     pub events_processed: i64,
     pub memories_added: i64,
@@ -77,7 +80,7 @@ pub struct CompanionLearnResult {
 /// the scheduled learning distillation calls.)
 #[async_trait::async_trait]
 pub trait CompanionCompleter: Send + Sync {
-    async fn complete(&self, provider_id: &str, model: &str, system: &str, user: &str, max_tokens: u32)
+    async fn complete(&self, provider_id: &str, model: &str, system: &str, user: &str, max_tokens: Option<u32>)
     -> Result<String, AppError>;
 }
 
@@ -107,7 +110,7 @@ impl CompanionCompleter for LiveCompanionCompleter {
         model: &str,
         system: &str,
         user: &str,
-        max_tokens: u32,
+        max_tokens: Option<u32>,
     ) -> Result<String, AppError> {
         let cfg = self.resolve(provider_id, model).await?;
         one_shot_completion(&cfg, system, vec![user_message(user)], max_tokens).await
@@ -192,6 +195,7 @@ impl Learner {
             .await?;
 
         let mut run = CompanionLearnResult {
+            learn_run_id: generate_id(),
             status: "ok".into(),
             events_processed: 0,
             memories_added: 0,
@@ -276,7 +280,7 @@ impl Learner {
         for attempt in 0..2 {
             match self
                 .completer
-                .complete(&model.provider_id, &model.model, prompt::LEARN_SYSTEM, &user_prompt, LEARN_MAX_TOKENS)
+                .complete(&model.provider_id, &model.model, prompt::LEARN_SYSTEM, &user_prompt, None)
                 .await
             {
                 Ok(raw) => match prompt::parse_learn_output(&raw) {
@@ -425,7 +429,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompanionCompleter for CannedCompleter {
-        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
             Ok(self.0.clone())
         }
     }
@@ -439,7 +443,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompanionCompleter for RecordingCompleter {
-        async fn complete(&self, _p: &str, _m: &str, _s: &str, user: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, _s: &str, user: &str, _t: Option<u32>) -> Result<String, AppError> {
             self.prompts.lock().unwrap().push(user.to_owned());
             Ok(self.reply.clone())
         }
@@ -725,7 +729,7 @@ mod tests {
         struct ExplodingCompleter;
         #[async_trait::async_trait]
         impl CompanionCompleter for ExplodingCompleter {
-            async fn complete(&self, _: &str, _: &str, _: &str, _: &str, _: u32) -> Result<String, AppError> {
+            async fn complete(&self, _: &str, _: &str, _: &str, _: &str, _: Option<u32>) -> Result<String, AppError> {
                 panic!("the learner must not call the model for a companion that is gone");
             }
         }
@@ -933,12 +937,13 @@ mod tests {
             "companion_id",
             "error",
             "events_processed",
+            "learn_run_id",
             "memories_added",
             "status",
             "summary",
         ]
         .into_iter()
         .collect();
-        assert_eq!(actual_keys, expected_keys, "live result must not expose persisted run fields");
+        assert_eq!(actual_keys, expected_keys, "live result exposes only its stable receipt and bounded outcome");
     }
 }

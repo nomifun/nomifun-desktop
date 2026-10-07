@@ -30,6 +30,33 @@ pub struct ProcessHandle {
     pub session_id: SessionId,
     pub pid: u32,
     pub started_at: Instant,
+    terminal: ProcessTerminalWitness,
+}
+
+/// Exact read-only final-output/cleanup witness retained by an admitted owner.
+/// It cannot renew a lease or authorize I/O after registry retirement.
+#[derive(Clone)]
+pub struct ProcessTerminalWitness {
+    state: Arc<Mutex<SessionState>>,
+}
+
+impl std::fmt::Debug for ProcessTerminalWitness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ProcessTerminalWitness").finish_non_exhaustive()
+    }
+}
+
+impl ProcessTerminalWitness {
+    pub fn terminal(&self, cursor: OutputCursor) -> Option<ProcessOutcome> {
+        self.state.lock().expect("process terminal witness state lock is poisoned")
+            .terminal.as_ref().map(|record| Session::outcome_from(record, cursor))
+    }
+}
+
+impl ProcessHandle {
+    pub fn terminal_witness(&self) -> ProcessTerminalWitness {
+        self.terminal.clone()
+    }
 }
 
 pub struct SupervisorConfig {
@@ -60,7 +87,7 @@ pub struct ProcessSupervisor {
     /// A read lease spans a complete spawn/ownership transaction. A terminal
     /// fence takes the write lease, waits for admitted starts, and prevents a
     /// later start until the exact cleanup snapshot has drained.
-    admission_gate: tokio::sync::RwLock<()>,
+    admission_gate: Arc<tokio::sync::RwLock<()>>,
     reaper_started: AtomicBool,
     reaper_stop: tokio_util::sync::CancellationToken,
     shutdown: Arc<ShutdownState>,
@@ -72,13 +99,26 @@ struct ShutdownState {
     report: tokio::sync::watch::Sender<Option<ShutdownReport>>,
 }
 
+struct StartWaiter {
+    cancellation: crate::platform::StartCancellation,
+    armed: bool,
+}
+
+impl Drop for StartWaiter {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.cancel();
+        }
+    }
+}
+
 pub(crate) struct Session {
     process: Arc<dyn PlatformProcess>,
     output: Arc<OutputBuffer>,
     policy: ProcessPolicy,
     started_at: Instant,
     last_activity_at: Mutex<Instant>,
-    state: Mutex<SessionState>,
+    state: Arc<Mutex<SessionState>>,
     exit: tokio::sync::watch::Sender<Option<ExitObservation>>,
     lifecycle: tokio::sync::watch::Sender<u64>,
     #[cfg(test)]
@@ -94,6 +134,25 @@ pub(crate) struct Session {
 /// interpreting shutdown completion as proof that the OS process tree vanished.
 pub struct ShutdownReport {
     pub sessions: Vec<ShutdownSessionReport>,
+    pub startups: Vec<StartupCleanupReport>,
+}
+
+impl ShutdownReport {
+    pub fn is_exact(&self) -> bool {
+        self.sessions.iter().all(|session| outcome_reaped(&session.outcome))
+            && self.startups.iter().all(|startup| startup.cleanup.reaped)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Cleanup for a failed native startup without a published user process handle.
+/// Its resource identity is host-owned; no synthetic user PID is introduced.
+pub struct StartupCleanupReport {
+    pub session_id: SessionId,
+    pub owner: ProcessOwner,
+    pub failure: crate::SpawnFailure,
+    pub cleanup: CleanupReport,
+    pub user_code_not_started: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,12 +170,14 @@ pub struct ShutdownSessionReport {
 /// is false.
 pub struct QuiesceReport {
     pub sessions: Vec<QuiesceSessionReport>,
+    pub startups: Vec<StartupCleanupReport>,
     pub errors: Vec<String>,
 }
 
 impl QuiesceReport {
     pub fn is_exact(&self) -> bool {
         self.errors.is_empty()
+            && self.startups.iter().all(|startup| startup.cleanup.reaped)
             && self
                 .sessions
                 .iter()
@@ -220,7 +281,7 @@ impl ProcessSupervisor {
     pub fn new(config: SupervisorConfig) -> Arc<Self> {
         Arc::new(Self {
             registry: Arc::new(Registry::new(config.max_sessions)),
-            admission_gate: tokio::sync::RwLock::new(()),
+            admission_gate: Arc::new(tokio::sync::RwLock::new(())),
             reaper_started: AtomicBool::new(false),
             reaper_stop: tokio_util::sync::CancellationToken::new(),
             shutdown: Arc::new(ShutdownState {
@@ -253,11 +314,64 @@ impl ProcessSupervisor {
         request: NormalizedProcessRequest,
         observer: Option<OutputObserver>,
     ) -> Result<ProcessHandle, ProcessError> {
+        let cancellation = crate::platform::StartCancellation::new();
+        let setup_expired = cancellation.setup_expired();
+        let mut waiter = StartWaiter { cancellation: cancellation.clone(), armed: true };
+        // Acquire admission in this first-polled caller before posting the
+        // worker. A quiesce fence must also wait for a worker not yet scheduled.
+        let admission = self.admission_gate.clone().read_owned().await;
+        self.ensure_reaper_started();
+        let reservation = self.reserve_start_capacity().await?;
+        let (deliver, delivered) = tokio::sync::oneshot::channel();
+        let (acknowledge, acknowledged) = tokio::sync::oneshot::channel();
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            let (result, session) = match supervisor.start_owned(
+                request, observer, cancellation, admission, reservation,
+            ).await {
+                Ok((handle, session)) => (Ok(handle), Some(session)),
+                Err(error) => (Err(error), None),
+            };
+            if deliver.send(result).is_err() || acknowledged.await.is_err() {
+                if let Some(session) = session {
+                    // The caller may drop after its result was queued. Keep
+                    // the same Session until delivery is acknowledged or its
+                    // single cleanup flight has reached a terminal outcome.
+                    let _ = retire_session(session).await;
+                }
+            }
+        });
+        let result = tokio::select! {
+            biased;
+            result = delivered => result.map_err(|_| start_delivery_lost(None))?,
+            _ = setup_expired.cancelled() => return Err(crate::platform::setup_deadline_error()),
+        };
+        if acknowledge.send(()).is_err() {
+            return Err(start_delivery_lost(result.as_ref().ok()));
+        }
+        // No await can separate acknowledgement from returning the result.
+        waiter.armed = false;
+        result
+    }
+
+    async fn start_owned(
+        self: &Arc<Self>,
+        request: NormalizedProcessRequest,
+        observer: Option<OutputObserver>,
+        cancellation: crate::platform::StartCancellation,
+        _admission: tokio::sync::OwnedRwLockReadGuard<()>,
+        mut reservation: StartReservation,
+    ) -> Result<(ProcessHandle, Arc<Session>), ProcessError> {
         // Hold through platform spawn and registry commit. An exact turn fence
         // can therefore neither miss this start nor race a post-snapshot start.
-        let _admission = self.admission_gate.read().await;
-        self.ensure_reaper_started();
-        let mut reservation = self.reserve_start_capacity().await?;
+        if cancellation.is_cancelled() {
+            return Err(ProcessError::SpawnFailed {
+                failure: crate::SpawnFailure {
+                    code: "start_cancelled_before_admission".to_owned(),
+                    message: "start caller was cancelled before platform admission".to_owned(),
+                },
+            });
+        }
         let activity_registry = Arc::downgrade(&self.registry);
         let session_id = SessionId::new();
         let activity: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -273,15 +387,43 @@ impl ProcessSupervisor {
             ),
             None => OutputBuffer::with_activity(request.policy.output_limit_bytes, activity),
         });
-        let spawned = crate::platform::spawn(request.clone(), output.clone()).await?;
-        self.register_reserved(
+        let spawned = match crate::platform::spawn(request.clone(), output.clone(), cancellation).await {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                if let ProcessError::StartLost { failure, last_known: None, cleanup } = &error {
+                    self.registry.record_failed_start(&mut reservation, StartupCleanupReport {
+                        session_id, owner: request.owner.clone(), failure: failure.clone(), cleanup: cleanup.clone(),
+                        user_code_not_started: failure.code == "spawn_cleanup_deferred",
+                    });
+                }
+                return Err(error);
+            }
+        };
+        let startup_failure = spawned.startup_failure;
+        let (handle, session) = self.register_reserved(
             request,
             spawned.owner,
             output,
             &mut reservation,
             session_id,
         )
-        .await
+        .await?;
+        if let Some(failure) = startup_failure {
+            let mut last_known = session.snapshot();
+            last_known.state = ProcessState::Lost;
+            let outcome = retire_session(session).await;
+            let cleanup = match outcome {
+                ProcessOutcome::Exited { cleanup, .. }
+                | ProcessOutcome::Cancelled { cleanup, .. }
+                | ProcessOutcome::TimedOut { cleanup, .. }
+                | ProcessOutcome::Lost { cleanup, .. } => cleanup,
+                ProcessOutcome::SpawnFailed(_) => unreachable!("native owner was already committed"),
+            };
+            return Err(ProcessError::StartLost {
+                failure, last_known: Some(last_known), cleanup,
+            });
+        }
+        Ok((handle, session))
     }
 
     #[cfg(test)]
@@ -300,7 +442,7 @@ impl ProcessSupervisor {
             &mut reservation,
             SessionId::new(),
         )
-        .await
+        .await.map(|(handle, _session)| handle)
     }
 
     async fn register_reserved(
@@ -310,7 +452,7 @@ impl ProcessSupervisor {
         output: Arc<OutputBuffer>,
         reservation: &mut StartReservation,
         session_id: SessionId,
-    ) -> Result<ProcessHandle, ProcessError> {
+    ) -> Result<(ProcessHandle, Arc<Session>), ProcessError> {
         let started_at = Instant::now();
         let pid = process.pid();
         let owner = request.owner;
@@ -325,11 +467,11 @@ impl ProcessSupervisor {
             policy,
             started_at,
             last_activity_at: Mutex::new(started_at),
-            state: Mutex::new(SessionState {
+            state: Arc::new(Mutex::new(SessionState {
                 process_state: ProcessState::Running,
                 exit_observation: None,
                 terminal: None,
-            }),
+            })),
             exit,
             lifecycle,
             #[cfg(test)]
@@ -347,13 +489,14 @@ impl ProcessSupervisor {
         start_waiter(Arc::clone(&session));
         match commit {
             CommitResult::Active => {
-                start_process_deadline(session);
-                Ok(ProcessHandle {
+                start_process_deadline(session.clone());
+                Ok((ProcessHandle {
                     owner,
                     session_id,
                     pid,
                     started_at,
-                })
+                    terminal: ProcessTerminalWitness { state: Arc::clone(&session.state) },
+                }, session))
             }
             CommitResult::Retiring(retirement) => {
                 self.start_retirement(retirement.clone());
@@ -435,7 +578,7 @@ impl ProcessSupervisor {
         yield_until: Instant,
         break_on_output: bool,
     ) -> Result<PollResult, ProcessError> {
-        let action = self.session(owner, session_id)?;
+        let action = self.session_action(owner, session_id, false)?;
         let session = action.session_arc();
         let mut exits = session.exit.subscribe();
         let mut lifecycle = session.lifecycle.subscribe();
@@ -516,9 +659,14 @@ impl ProcessSupervisor {
         cols: u16,
         rows: u16,
     ) -> Result<(), ProcessError> {
-        if cols == 0 || rows == 0 {
+        if !(1..=crate::MAX_PTY_DIMENSION).contains(&cols)
+            || !(1..=crate::MAX_PTY_DIMENSION).contains(&rows)
+        {
             return Err(ProcessError::InvalidTransport {
-                reason: "PTY dimensions must be non-zero".to_owned(),
+                reason: format!(
+                    "PTY dimensions must be between 1 and {}",
+                    crate::MAX_PTY_DIMENSION
+                ),
             });
         }
         let action = self.session(owner, session_id)?;
@@ -660,6 +808,7 @@ impl ProcessSupervisor {
 
         let mut report = QuiesceReport {
             sessions: Vec::new(),
+            startups: self.registry.take_startup_reports(),
             errors: Vec::new(),
         };
         while let Some(result) = workers.join_next().await {
@@ -709,10 +858,21 @@ impl ProcessSupervisor {
         owner: &ProcessOwner,
         session_id: &SessionId,
     ) -> Result<SessionAction, ProcessError> {
-        match self
-            .registry
-            .begin_action(session_id, owner, Instant::now())
-        {
+        self.session_action(owner, session_id, true)
+    }
+
+    fn session_action(
+        &self,
+        owner: &ProcessOwner,
+        session_id: &SessionId,
+        blocks_shutdown: bool,
+    ) -> Result<SessionAction, ProcessError> {
+        let action = if blocks_shutdown {
+            self.registry.begin_action(session_id, owner, Instant::now())
+        } else {
+            self.registry.begin_poll(session_id, owner, Instant::now())
+        };
+        match action {
             Ok(action) => Ok(action),
             Err(LookupError::NotFound) => {
                 Err(ProcessError::SessionNotFound {
@@ -779,6 +939,25 @@ impl ProcessSupervisor {
 
     fn start_retirement(&self, retirement: Arc<Retirement>) {
         start_retirement_driver(self.registry.clone(), retirement);
+    }
+}
+
+fn start_delivery_lost(handle: Option<&ProcessHandle>) -> ProcessError {
+    ProcessError::StartLost {
+        failure: crate::SpawnFailure {
+            code: "start_delivery_owner_lost".to_owned(),
+            message: "owned start worker ended before caller delivery was acknowledged".to_owned(),
+        },
+        last_known: handle.map(|handle| ProcessSnapshot {
+            pid: handle.pid,
+            state: ProcessState::Lost,
+            started_at: handle.started_at,
+            last_activity_at: handle.started_at,
+        }),
+        cleanup: CleanupReport {
+            errors: vec!["start delivery ended without an exact cleanup acknowledgement".to_owned()],
+            ..CleanupReport::default()
+        },
     }
 }
 
@@ -894,7 +1073,8 @@ async fn run_shutdown(registry: Arc<Registry>, shutdown: Arc<ShutdownState>) {
                     .collect::<Vec<_>>();
                 sessions.sort_by_key(|session| session.session_id);
                 registry.complete_shutdown();
-                shutdown.report.send_replace(Some(ShutdownReport { sessions }));
+                let startups = registry.startup_reports();
+                shutdown.report.send_replace(Some(ShutdownReport { sessions, startups }));
                 return;
             }
             continue;
@@ -1099,6 +1279,10 @@ impl Session {
     }
 
     fn outcome(&self, terminal: &TerminalRecord, cursor: OutputCursor) -> ProcessOutcome {
+        Self::outcome_from(terminal, cursor)
+    }
+
+    fn outcome_from(terminal: &TerminalRecord, cursor: OutputCursor) -> ProcessOutcome {
         match &terminal.kind {
             TerminalKind::Exited { fact, output } => ProcessOutcome::Exited {
                 code: fact.code,
@@ -1392,7 +1576,10 @@ async fn stop_session(
         }
         StopStart::Leader => {
             let driver_session = session.clone();
-            let budget = StopBudget::new(request_started_at, stages, &session.policy);
+            let supported_stages = stages.iter().copied().filter(|stage|
+                !matches!(stage, SignalStage::Interrupt) || session.process.supports_interrupt())
+                .collect::<Vec<_>>();
+            let budget = StopBudget::new(request_started_at, &supported_stages, &session.policy);
             let monitor_session = session.clone();
             tokio::spawn(async move {
                 let worker = tokio::spawn(async move {
@@ -1678,7 +1865,7 @@ mod tests {
         SupervisorConfig, outcome_reaped, start_waiter,
     };
     use crate::{
-        CapabilityPolicy, CommandSpec, ProcessOwner, ProcessPolicy,
+        CapabilityPolicy, CleanupReport, CommandSpec, ProcessOwner, ProcessPolicy,
         ProcessOutcome, NormalizedProcessRequest, OutputBuffer, OutputCursor, OutputSnapshot,
         OutputStream, PollResult, ProcessState, SandboxPolicy, SessionId, Transport,
         platform::{ExitFact, PlatformProcess},
@@ -1701,6 +1888,53 @@ mod tests {
         },
     }
 
+    #[tokio::test]
+    async fn failed_startup_without_reap_proof_stays_quarantined_in_boundary_reports() {
+        let supervisor = ProcessSupervisor::new(SupervisorConfig { max_sessions: 1, ..SupervisorConfig::default() });
+        let owner = ProcessOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+        let mut reservation = supervisor.registry.begin_test_reservation().unwrap();
+        supervisor.registry.record_failed_start(&mut reservation, super::StartupCleanupReport {
+            session_id: SessionId::new(), owner: owner.clone(),
+            failure: crate::SpawnFailure { code: "spawn_cleanup_deferred".to_owned(), message: "injected auxiliary authority loss".to_owned() },
+            cleanup: CleanupReport::default(), user_code_not_started: true,
+        });
+        let quiesce = supervisor.quiesce().await;
+        assert!(!quiesce.is_exact());
+        assert!(quiesce.sessions.is_empty());
+        assert_eq!(quiesce.startups.len(), 1);
+        assert_eq!(quiesce.startups[0].owner, owner);
+        assert!(!supervisor.registry.evict_oldest_finished());
+        assert!(matches!(supervisor.registry.test_reserve_once(), Err(crate::registry::ReserveError::Capacity)));
+        let shutdown = supervisor.shutdown().await;
+        assert!(!shutdown.is_exact());
+        assert!(shutdown.sessions.is_empty());
+        assert_eq!(shutdown.startups.len(), 1);
+        assert_eq!(shutdown.startups[0].owner, owner);
+        assert!(!shutdown.startups[0].cleanup.reaped);
+    }
+
+    #[tokio::test]
+    async fn reaped_failed_startup_reports_are_bounded_by_registry_capacity() {
+        let supervisor = ProcessSupervisor::new(SupervisorConfig { max_sessions: 1, ..SupervisorConfig::default() });
+        for _ in 0..8 {
+            if supervisor.registry.test_reserve_once().is_err() {
+                assert!(supervisor.registry.evict_oldest_finished());
+            }
+            let mut reservation = supervisor.registry.begin_test_reservation().unwrap();
+            supervisor.registry.record_failed_start(&mut reservation, super::StartupCleanupReport {
+                session_id: SessionId::new(), owner: ProcessOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+                failure: crate::SpawnFailure { code: "spawn_cleanup_deferred".to_owned(), message: "exact auxiliary reap".to_owned() },
+                cleanup: CleanupReport { reaped: true, ..CleanupReport::default() }, user_code_not_started: true,
+            });
+            assert_eq!(supervisor.registry.startup_reports().len(), 1);
+        }
+        let report = supervisor.quiesce().await;
+        assert!(report.is_exact() && report.sessions.is_empty());
+        assert_eq!(report.startups.len(), 1);
+        assert!(supervisor.registry.startup_reports().is_empty());
+        assert!(supervisor.registry.test_reserve_once().is_ok());
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum FakeSignal {
         Interrupt,
@@ -1720,6 +1954,9 @@ mod tests {
         block_write: Arc<AtomicBool>,
         write_entered: Arc<AtomicBool>,
         write_release: Arc<tokio::sync::Notify>,
+        block_close: Arc<AtomicBool>,
+        close_entered: Arc<AtomicBool>,
+        close_release: Arc<tokio::sync::Notify>,
         reap_release: Arc<tokio::sync::Notify>,
         reap_plan: ReapPlan,
         exit_tx: tokio::sync::watch::Sender<Option<ExitFact>>,
@@ -1742,6 +1979,9 @@ mod tests {
                 block_write: Arc::new(AtomicBool::new(false)),
                 write_entered: Arc::new(AtomicBool::new(false)),
                 write_release: Arc::new(tokio::sync::Notify::new()),
+                block_close: Arc::new(AtomicBool::new(false)),
+                close_entered: Arc::new(AtomicBool::new(false)),
+                close_release: Arc::new(tokio::sync::Notify::new()),
                 reap_release: Arc::new(tokio::sync::Notify::new()),
                 reap_plan: ReapPlan::Pending,
                 exit_tx,
@@ -1856,6 +2096,12 @@ mod tests {
             fake
         }
 
+        fn blocking_close() -> Self {
+            let fake = Self::reaps_on(FakeSignal::Interrupt, 130);
+            fake.block_close.store(true, Ordering::SeqCst);
+            fake
+        }
+
         fn wait_call_count(&self) -> usize {
             self.wait_calls.load(Ordering::SeqCst)
         }
@@ -1952,6 +2198,10 @@ mod tests {
 
         async fn close_stdin(&self) -> io::Result<()> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
+            if self.block_close.load(Ordering::SeqCst) {
+                self.close_entered.store(true, Ordering::SeqCst);
+                self.close_release.notified().await;
+            }
             Ok(())
         }
 
@@ -2215,14 +2465,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resize_rejects_zero_dimensions_before_calling_the_owner() {
+    async fn resize_rejects_out_of_range_dimensions_before_calling_the_owner() {
         let (supervisor, handle, fake, _output) = register_fake(FakeOwner::pending()).await;
 
-        for (cols, rows) in [(0, 24), (80, 0)] {
+        for (cols, rows) in [
+            (0, 24),
+            (80, 0),
+            (crate::MAX_PTY_DIMENSION + 1, 24),
+            (80, crate::MAX_PTY_DIMENSION + 1),
+        ] {
             let error = supervisor
                 .resize(&handle.owner, &handle.session_id, cols, rows)
                 .await
-                .expect_err("zero PTY dimensions should be rejected");
+                .expect_err("out-of-range PTY dimensions should be rejected");
             assert_eq!(error.code(), "invalid_transport");
         }
 
@@ -2288,6 +2543,72 @@ mod tests {
             .await
             .expect("write task should join")
             .expect("write should finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_cancel_and_poll_converge_without_stranding_waiters() {
+        let (supervisor, handle, fake, output) = register_fake(FakeOwner::blocking_close()).await;
+        output.push(OutputStream::Stdout, b"before close");
+        let closing_supervisor = supervisor.clone();
+        let closing_handle = handle.clone();
+        let closing = tokio::spawn(async move {
+            closing_supervisor
+                .close_stdin(&closing_handle.owner, &closing_handle.session_id)
+                .await
+        });
+        wait_for_test_condition(|| fake.close_entered.load(Ordering::SeqCst)).await;
+
+        let polling_supervisor = supervisor.clone();
+        let polling_handle = handle.clone();
+        let polling = tokio::spawn(async move {
+            polling_supervisor
+                .poll(
+                    &polling_handle.owner,
+                    &polling_handle.session_id,
+                    OutputCursor::START,
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        let cancelling_supervisor = supervisor.clone();
+        let cancelling_handle = handle.clone();
+        let cancelling = tokio::spawn(async move {
+            cancelling_supervisor
+                .cancel(&cancelling_handle.owner, &cancelling_handle.session_id)
+                .await
+        });
+        wait_for_test_condition(|| !fake.signal_calls().is_empty()).await;
+        tokio::time::advance(Duration::from_millis(120)).await;
+
+        let cancelled = cancelling
+            .await
+            .expect("cancel task should join")
+            .expect("cancel should settle");
+        let polled = finished(
+            polling
+                .await
+                .expect("poll task should join")
+                .expect("poll should settle"),
+        );
+        let ProcessOutcome::Cancelled { cleanup, .. } = &cancelled else {
+            panic!("cancel must own the shared terminal");
+        };
+        assert!(cleanup.reaped);
+        assert_eq!(polled, cancelled);
+        assert!(
+            !closing.is_finished(),
+            "the injected close waiter must remain independently blocked"
+        );
+
+        fake.close_release.notify_waiters();
+        closing
+            .await
+            .expect("close task should join")
+            .expect("the admitted close should finish");
+        assert_eq!(fake.close_call_count(), 1);
+        assert_eq!(fake.signal_calls(), ["interrupt"]);
+        assert_eq!(fake.wait_call_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2427,11 +2748,11 @@ mod tests {
             policy: policy.clone(),
             started_at,
             last_activity_at: Mutex::new(started_at),
-            state: Mutex::new(SessionState {
+            state: Arc::new(Mutex::new(SessionState {
                 process_state: ProcessState::Running,
                 exit_observation: None,
                 terminal: None,
-            }),
+            })),
             exit,
             lifecycle,
             before_lost_commit: Mutex::new(None),
@@ -2507,11 +2828,11 @@ mod tests {
             policy: policy.clone(),
             started_at,
             last_activity_at: Mutex::new(started_at),
-            state: Mutex::new(SessionState {
+            state: Arc::new(Mutex::new(SessionState {
                 process_state: ProcessState::Running,
                 exit_observation: None,
                 terminal: None,
-            }),
+            })),
             exit,
             lifecycle,
             before_lost_commit: Mutex::new(None),
@@ -3736,6 +4057,149 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn cancel_admitted_before_natural_exit_wins_once_and_is_idempotent() {
+        let (supervisor, handle, fake, output) =
+            register_fake(FakeOwner::exits_after(Duration::from_millis(5), 0)).await;
+        output.push(OutputStream::Stdout, b"race output");
+        let cancelling_supervisor = supervisor.clone();
+        let cancelling_handle = handle.clone();
+        let cancelling = tokio::spawn(async move {
+            cancelling_supervisor
+                .cancel(&cancelling_handle.owner, &cancelling_handle.session_id)
+                .await
+        });
+        wait_for_test_condition(|| !fake.signal_calls().is_empty()).await;
+        tokio::time::advance(Duration::from_millis(120)).await;
+
+        let first = cancelling
+            .await
+            .expect("cancel task should join")
+            .expect("cancel should settle");
+        let ProcessOutcome::Cancelled { cleanup, .. } = &first else {
+            panic!("cancel admitted before natural exit must own the terminal");
+        };
+        assert!(cleanup.reaped);
+        let repeated = supervisor
+            .cancel(&handle.owner, &handle.session_id)
+            .await
+            .expect("repeated cancel should return the same terminal");
+        let polled = finished(
+            supervisor
+                .poll(
+                    &handle.owner,
+                    &handle.session_id,
+                    OutputCursor::START,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await
+                .expect("terminal poll should succeed"),
+        );
+
+        assert_eq!(repeated, first);
+        assert_eq!(polled, first);
+        assert_eq!(fake.wait_call_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn natural_exit_observed_before_cancel_wins_once_and_is_idempotent() {
+        let (supervisor, handle, fake, output) =
+            register_fake(FakeOwner::exits_after(Duration::from_millis(5), 0)).await;
+        output.push(OutputStream::Stdout, b"race output");
+        tokio::time::advance(Duration::from_millis(6)).await;
+        let session = supervisor
+            .registry
+            .get(&handle.session_id)
+            .expect("exit-observed session should remain registered");
+        wait_for_test_condition(|| session.exit_observation().is_some()).await;
+        assert!(session.terminal().is_none());
+
+        let cancelling_supervisor = supervisor.clone();
+        let cancelling_handle = handle.clone();
+        let cancelling = tokio::spawn(async move {
+            cancelling_supervisor
+                .cancel(&cancelling_handle.owner, &cancelling_handle.session_id)
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(120)).await;
+        let first = cancelling
+            .await
+            .expect("cancel task should join")
+            .expect("observed natural exit should settle");
+        let ProcessOutcome::Exited { code, cleanup, .. } = &first else {
+            panic!("natural exit observed before cancel must own the terminal");
+        };
+        assert_eq!(*code, Some(0));
+        assert!(cleanup.reaped);
+        let repeated = supervisor
+            .cancel(&handle.owner, &handle.session_id)
+            .await
+            .expect("repeated cancel should return the natural terminal");
+        let polled = finished(
+            supervisor
+                .poll(
+                    &handle.owner,
+                    &handle.session_id,
+                    OutputCursor::START,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await
+                .expect("terminal poll should succeed"),
+        );
+
+        assert_eq!(repeated, first);
+        assert_eq!(polled, first);
+        assert!(fake.signal_calls().is_empty());
+        assert_eq!(fake.wait_call_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_cancel_waiters_share_one_cleanup_driver_and_terminal() {
+        const WAITER_COUNT: usize = 8;
+        let (supervisor, handle, fake, output) = register_fake(
+            FakeOwner::reaps_after_signal(
+                FakeSignal::Interrupt,
+                Duration::from_millis(5),
+                130,
+            ),
+        )
+        .await;
+        output.push(OutputStream::Stdout, b"shared cancel output");
+        let barrier = Arc::new(tokio::sync::Barrier::new(WAITER_COUNT + 1));
+        let mut waiters = Vec::new();
+        for _ in 0..WAITER_COUNT {
+            let supervisor = supervisor.clone();
+            let handle = handle.clone();
+            let barrier = barrier.clone();
+            waiters.push(tokio::spawn(async move {
+                barrier.wait().await;
+                supervisor.cancel(&handle.owner, &handle.session_id).await
+            }));
+        }
+        barrier.wait().await;
+        wait_for_test_condition(|| !fake.signal_calls().is_empty()).await;
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        let mut outcomes = Vec::new();
+        for waiter in waiters {
+            outcomes.push(
+                waiter
+                    .await
+                    .expect("cancel waiter should join")
+                    .expect("cancel waiter should receive a terminal outcome"),
+            );
+        }
+        let first = outcomes.first().expect("at least one cancel outcome");
+        let ProcessOutcome::Cancelled { cleanup, .. } = first else {
+            panic!("concurrent cancel waiters must share a Cancelled terminal");
+        };
+        assert!(cleanup.reaped);
+        assert!(outcomes.iter().all(|outcome| outcome == first));
+        assert_eq!(fake.signal_calls(), ["interrupt"]);
+        assert_eq!(fake.wait_call_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cancelled_terminal_poll_is_idempotent() {
         let (supervisor, handle, _fake, output) =
             register_fake(FakeOwner::reaps_on(FakeSignal::Interrupt, 130)).await;
@@ -3798,6 +4262,359 @@ mod tests {
             std::task::Poll::Ready(_) => panic!("future unexpectedly completed on its first poll"),
         })
         .await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_shutdown_waits_for_in_flight_owned_spawn() {
+        real_start_shutdown_scenario(false, crate::Transport::Pipe).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_drop_keeps_shutdown_cleanup_witness() {
+        real_start_shutdown_scenario(true, crate::Transport::Pipe).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_pty_start_shutdown_waits_for_in_flight_owned_spawn() {
+        real_start_shutdown_scenario(false, crate::Transport::Pty { cols: 80, rows: 24 }).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_pty_start_drop_keeps_shutdown_cleanup_witness() {
+        real_start_shutdown_scenario(true, crate::Transport::Pty { cols: 80, rows: 24 }).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn real_start_shutdown_scenario(drop_caller: bool, transport: crate::Transport) {
+        let temporary = tempfile::tempdir().expect("native start fixture should have a work root");
+        let scenario = match (&transport, drop_caller) {
+            (crate::Transport::Pipe, false) => "retained-caller",
+            (crate::Transport::Pipe, true) => "drop-caller",
+            (crate::Transport::Pty { .. }, false) => "pty-retained-caller",
+            (crate::Transport::Pty { .. }, true) => "pty-drop-caller",
+        };
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from)
+            .map(|root| root.join(scenario));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).expect("native start evidence root should exist");
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig {
+            max_sessions: 1,
+            reaper_interval: Duration::from_secs(30),
+        });
+        let mut request = native_start_request(directory, &marker);
+        request.transport = transport;
+        let expected_owner = request.owner.clone();
+        let mut start = Box::pin(supervisor.start(request));
+        // Keep the public future unpolled after its first real Pending so the
+        // native worker can start independently of caller delivery.
+        poll_once_pending(start.as_mut()).await;
+        let pid = wait_native_start_marker(&marker).await;
+        let process = NativeStartProbe::new(pid);
+        assert!(!process.is_gone(), "real owned child should be alive at the barrier");
+        let published_before_shutdown = supervisor.registry.counts().0 == 1;
+        let mut shutdown = Box::pin(supervisor.shutdown());
+        poll_once_pending(shutdown.as_mut()).await;
+        let (report, delivery_order_valid) = if drop_caller {
+            drop(start);
+            let report = tokio::time::timeout(Duration::from_secs(6), shutdown.as_mut())
+                .await.expect("shutdown must settle the physically owned cancelled start");
+            (report, true)
+        } else {
+            let (started, report) = tokio::time::timeout(Duration::from_secs(6), async {
+                tokio::join!(start.as_mut(), shutdown.as_mut())
+            }).await.expect("start and shutdown must settle their original ownership transaction");
+            let valid = match started {
+                Ok(handle) => published_before_shutdown && handle.owner == expected_owner && handle.pid == pid,
+                Err(crate::ProcessError::SupervisorShuttingDown) => !published_before_shutdown,
+                _ => false,
+            };
+            (report, valid)
+        };
+        let matching = report.sessions.iter().find(|session| session.owner == expected_owner);
+        let reported_reaped = matching.is_some_and(|session| matches!(
+            &session.outcome, ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped
+        ));
+        let gone_at_shutdown = process.is_gone();
+        let eventual_gone = tokio::time::timeout(Duration::from_secs(6), async {
+            while !process.is_gone() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.is_ok();
+        let fallback_used = !eventual_gone;
+        if fallback_used {
+            process.force_kill();
+        }
+        let repeated = supervisor.shutdown().await;
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "pid": pid,
+                "marker_pid": std::fs::read_to_string(&marker).expect("PID marker must survive cleanup").trim().parse::<u32>().unwrap(),
+                "session_id": matching.map(|session| session.session_id.to_string()),
+                "public_start_first_poll_pending": true,
+                "published_before_shutdown": published_before_shutdown,
+                "caller_dropped": drop_caller,
+                "delivery_order_valid": delivery_order_valid,
+                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap().lines().count(),
+                "report_sessions": report.sessions.len(),
+                "exact_owner_cleanup_reported": reported_reaped,
+                "exact_process_gone_at_shutdown": gone_at_shutdown,
+                "exact_process_eventually_gone": eventual_gone,
+                "exact_handle_fallback_used": fallback_used,
+                "repeated_shutdown_same_report": repeated == report,
+            }).to_string()).expect("native start assertions should be retained");
+        }
+        assert!(eventual_gone, "owned child required independent fallback; not formal cleanup PASS");
+        assert!(delivery_order_valid, "start delivery must match the observed publication order");
+        assert_eq!(report.sessions.len(), 1, "shutdown omitted the physically owned precommit start");
+        assert!(reported_reaped, "shutdown must preserve the original owner/session cleanup witness");
+        assert!(gone_at_shutdown, "shutdown cannot complete before exact process cleanup");
+        assert_eq!(repeated, report);
+        assert_eq!(std::fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{pid}\n"));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_pending_admission_cannot_cross_quiesce() {
+        let temporary = tempfile::tempdir().expect("quiesce fixture should have a work root");
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|root| root.join("quiesce-gap"));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).unwrap();
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let mut start = Box::pin(supervisor.start(native_start_request(directory, &marker)));
+        poll_once_pending(start.as_mut()).await;
+        let report = tokio::time::timeout(Duration::from_secs(6), supervisor.quiesce())
+            .await.expect("quiesce must include an admitted start in its bounded cleanup");
+        let handle = tokio::time::timeout(Duration::from_secs(6), start.as_mut())
+            .await.expect("original start delivery must remain bounded").unwrap();
+        let pid = wait_native_start_marker(&marker).await;
+        assert_eq!(pid, handle.pid);
+        let process = NativeStartProbe::new(pid);
+        let gone_when_delivered = process.is_gone();
+        let matching = report.sessions.iter().find(|session| {
+            session.session_id == handle.session_id && session.owner == handle.owner
+        });
+        let owned_cleanup_reported = matching.is_some_and(|session| outcome_reaped(&session.outcome));
+        // Clean the real process through the original supervisor before a
+        // first failure is reported, while retaining the earlier empty fence.
+        let cleanup = supervisor.cancel(&handle.owner, &handle.session_id).await.unwrap();
+        let final_gone = process.is_gone();
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "pid": pid,
+                "marker_pid": std::fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap(),
+                "quiesce_report_exact": report.is_exact(),
+                "quiesce_report_sessions": report.sessions.len(),
+                "exact_owner_cleanup_reported": owned_cleanup_reported,
+                "process_gone_when_start_delivered_after_quiesce": gone_when_delivered,
+                "formal_followup_reaped": outcome_reaped(&cleanup),
+                "formal_followup_process_gone": final_gone,
+                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap().lines().count(),
+            }).to_string()).unwrap();
+        }
+        assert!(outcome_reaped(&cleanup) && final_gone, "formal followup must clean before FAIL");
+        assert_eq!(report.sessions.len(), 1, "empty quiesce allowed an old admitted start to execute later");
+        assert!(owned_cleanup_reported && report.is_exact());
+        assert!(gone_when_delivered, "an admitted start cannot stay live after its quiesce fence");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_queued_result_drop_cleans_without_shutdown() {
+        let temporary = tempfile::tempdir().expect("drop-alone fixture should have a work root");
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|root| root.join("drop-alone"));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).unwrap();
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig {
+            max_sessions: 1,
+            reaper_interval: Duration::from_secs(30),
+        });
+        let request = native_start_request(directory, &marker);
+        let expected_owner = request.owner.clone();
+        let mut start = Box::pin(supervisor.start(request));
+        poll_once_pending(start.as_mut()).await;
+        let pid = wait_native_start_marker(&marker).await;
+        let process = NativeStartProbe::new(pid);
+        let session_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (sessions, _) = supervisor.registry.quiesce_snapshot();
+                if let Some(session) = sessions.iter().find(|session| session.owner == expected_owner) {
+                    break session.id;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("owned worker must publish while its caller result remains unpolled");
+        assert!(!process.is_gone());
+        drop(start);
+        let gone_without_shutdown = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let terminal = supervisor.terminal_outcome_if_ready(
+                    &expected_owner, &session_id, OutputCursor::START,
+                ).expect("unacknowledged result must retain its original Session");
+                if let Some(ProcessOutcome::Cancelled { cleanup, .. }) = terminal {
+                    break cleanup.reaped && process.is_gone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap_or(false);
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "pid": pid,
+                "marker_pid": std::fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap(),
+                "queued_result_unpolled": true,
+                "exact_cancelled_reaped_without_shutdown": gone_without_shutdown,
+                "exact_handle_fallback_used": !gone_without_shutdown,
+                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap().lines().count(),
+            }).to_string()).unwrap();
+        }
+        if !gone_without_shutdown {
+            process.force_kill();
+        }
+        assert!(gone_without_shutdown, "unacknowledged start must not wait for shutdown or lease expiry");
+        assert_eq!(std::fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{pid}\n"));
+        let next_marker = directory.join("capacity-reuse.pid");
+        let next = supervisor.start(native_start_request(directory, &next_marker))
+            .await.expect("reaped abandoned start must release the sole capacity slot");
+        let next_pid = wait_native_start_marker(&next_marker).await;
+        let next_process = NativeStartProbe::new(next_pid);
+        let outcome = supervisor.cancel(&next.owner, &next.session_id).await.unwrap();
+        assert!(matches!(outcome, ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped));
+        assert!(next_process.is_gone());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_never_polled_has_no_dispatch() {
+        let temporary = tempfile::tempdir().expect("never-polled fixture should have a work root");
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|root| root.join("never-polled"));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).unwrap();
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        drop(supervisor.start(native_start_request(directory, &marker)));
+        tokio::task::yield_now().await;
+        let no_dispatch = supervisor.registry.counts() == (0, 0, 0)
+            && !marker.exists() && !marker.with_extension("starts").exists();
+        assert!(supervisor.shutdown().await.sessions.is_empty());
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "never_polled_zero_dispatch": no_dispatch,
+            }).to_string()).unwrap();
+        }
+        assert!(no_dispatch);
+    }
+
+    #[cfg(any(unix, windows))]
+    fn native_start_request(directory: &std::path::Path, marker: &std::path::Path) -> NormalizedProcessRequest {
+        let mut request = fake_request(ProcessPolicy::default());
+        request.cwd = directory.to_owned();
+        request.capability = CapabilityPolicy::local_owner(directory.to_owned());
+        #[cfg(windows)]
+        {
+            let system_root = std::env::var_os("SystemRoot").expect("Windows has SystemRoot");
+            let escaped_marker = marker.to_string_lossy().replace('\'', "''");
+            let escaped_count = marker.with_extension("starts").to_string_lossy().replace('\'', "''");
+            request.command = CommandSpec::Program {
+                program: std::path::PathBuf::from(system_root)
+                    .join("System32/WindowsPowerShell/v1.0/powershell.exe").into_os_string(),
+                args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
+                    .into_iter().map(std::ffi::OsString::from)
+                    .chain(std::iter::once(std::ffi::OsString::from(format!(
+                        "[System.IO.File]::AppendAllText('{escaped_count}', [string]$PID+[char]10); [System.IO.File]::WriteAllText('{escaped_marker}', [string]$PID); Start-Sleep -Seconds 60"
+                    )))).collect(),
+            };
+        }
+        #[cfg(unix)]
+        {
+            request.command = CommandSpec::Program {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(),
+                    "printf '%s\\n' \"$$\" >> \"$2\"; printf '%s\\n' \"$$\" > \"$1\"; sleep 60".into(),
+                    "native-start-fixture".into(), marker.as_os_str().to_owned(),
+                    marker.with_extension("starts").into_os_string()],
+            };
+        }
+        request
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn wait_native_start_marker(marker: &std::path::Path) -> u32 {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(marker) {
+                    break contents.trim().parse::<u32>().expect("real helper PID marker should parse");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("owned helper must physically execute before cancellation")
+    }
+
+    #[cfg(any(unix, windows))]
+    struct NativeStartProbe {
+        #[cfg(windows)]
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        #[cfg(unix)]
+        pid: libc::pid_t,
+    }
+
+    #[cfg(any(unix, windows))]
+    impl NativeStartProbe {
+        fn new(pid: u32) -> Self {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+                // SAFETY: open a non-inheritable exact handle while this owned helper is live.
+                let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
+                assert!(!handle.is_null(), "exact native child process handle should open");
+                Self { handle }
+            }
+            #[cfg(unix)]
+            { Self { pid: pid as libc::pid_t } }
+        }
+
+        fn is_gone(&self) -> bool {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject};
+                // SAFETY: this probe retains its exact process handle until Drop.
+                unsafe { WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 }
+            }
+            #[cfg(unix)]
+            {
+                // SAFETY: signal zero inspects the directly owned helper without signalling it.
+                (unsafe { libc::kill(self.pid, 0) == -1 })
+                    && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            }
+        }
+
+        fn force_kill(&self) {
+            #[cfg(windows)]
+            // SAFETY: the retained exact handle has terminate access only to this test's child.
+            unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.handle, 1); }
+            #[cfg(unix)]
+            // SAFETY: this PID came from this fixture's direct real platform spawn.
+            unsafe { libc::kill(self.pid, libc::SIGKILL); }
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    impl Drop for NativeStartProbe {
+        fn drop(&mut self) {
+            if !self.is_gone() { self.force_kill(); }
+            #[cfg(windows)]
+            // SAFETY: this test closes its retained non-inherited process handle exactly once.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle); }
+        }
     }
 
     async fn register_fake(

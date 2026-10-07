@@ -10,19 +10,11 @@ import { PRESET_THEMES } from '@renderer/pages/settings/DisplaySettings/presets'
 
 const controlCss = readFileSync(new URL('./theme-control-contract.css', import.meta.url), 'utf8');
 const showcaseSource = readFileSync(new URL('../pages/TestShowcase.tsx', import.meta.url), 'utf8');
-const presetTagPickerSource = readFileSync(
-  new URL('../pages/settings/PresetSettings/PresetTagPicker.tsx', import.meta.url),
-  'utf8'
-);
 const requirementSourceCardSource = readFileSync(
   new URL('../pages/requirements/SourcesPage/SourceCard.tsx', import.meta.url),
   'utf8'
 );
 const knowledgeEmptyStateSource = readFileSync(new URL('../pages/knowledge/KnowledgeEmptyState.tsx', import.meta.url), 'utf8');
-const presetTagFilterSource = readFileSync(
-  new URL('../pages/settings/PresetSettings/PresetTagFilterBar.tsx', import.meta.url),
-  'utf8'
-);
 const diff2HtmlSource = readFileSync(new URL('../components/media/Diff2Html.tsx', import.meta.url), 'utf8');
 const loginCheckboxCss = readFileSync(new URL('../pages/login/LoginPage.css', import.meta.url), 'utf8');
 
@@ -91,15 +83,10 @@ describe('theme control contract', () => {
     // chip left there is nothing for the control palette to own there, so keeping
     // the file here only asserted the presence of a token the component no longer
     // has any reason to use.
-    for (const source of [presetTagPickerSource, requirementSourceCardSource, knowledgeEmptyStateSource]) {
+    for (const source of [requirementSourceCardSource, knowledgeEmptyStateSource]) {
       expect(source.includes('--control-selected-bg')).toBe(true);
       expect(source.includes('--control-selected-fg')).toBe(true);
     }
-  });
-
-  test('uses a matte black and white active state for preset tag filters', () => {
-    expect(presetTagFilterSource.includes('bg-[#151515] text-white border-white')).toBe(true);
-    expect(presetTagFilterSource.includes('shadow-[0_1px_2px_rgba(var(--primary-6),0.08)]')).toBe(false);
   });
 
   test('uses a green track and white thumb for checked switches in dark themes', () => {

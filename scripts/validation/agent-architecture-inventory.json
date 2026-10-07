@@ -1,0 +1,386 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_kind": "agent-architecture-inventory",
+  "updated_on": "2026-10-04",
+  "source": {
+    "barrier_commit": "2ddf08dbc012e14f29f5555c7b076d1ba78c34cb"
+  },
+  "production_scope": {
+    "roots": [
+      "apps",
+      "crates",
+      "ui/src/common",
+      "ui/src/renderer"
+    ],
+    "excluded_prefixes": [
+      "crates/backend/nomifun-agent-contracts/contracts/generated/",
+      "crates/backend/nomifun-agent-contracts/contracts/historical/"
+    ],
+    "excluded_fragments": [
+      "/tests/",
+      "/test/",
+      "/examples/",
+      "/benches/",
+      "/fixtures/",
+      "/snapshots/"
+    ]
+  },
+  "legacy_reachability": [
+    {
+      "id": "runtime.multi_family_literals",
+      "description": "The Coding Runtime family remains reachable beside the official Nomi family.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "literal",
+        "terms": [
+          "nomifun.coding"
+        ]
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "runtime.preset_selector",
+      "description": "Preset and Session metadata still select or persist a Runtime engine; after cutover only the immutable applied migration remains until baseline squash.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "\\bruntime_engine(?:_binding)?\\b",
+        "flags": ""
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "runtime.old_nomi_loop_paths",
+      "description": "The legacy Nomi manager/factory and legacy nomi-agent implementation still exist.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "paths",
+        "paths": [
+          "crates/backend/nomifun-ai-agent/src/factory/nomi.rs",
+          "crates/backend/nomifun-ai-agent/src/manager/nomi/",
+          "crates/agent/nomi-agent/src/"
+        ]
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "runtime.multi_runtime_infrastructure_paths",
+      "description": "Family catalogs, registries and Coding-specific host paths remain in production.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "paths",
+        "paths": [
+          "crates/backend/nomifun-ai-agent/src/runtime_catalog.rs",
+          "crates/backend/nomifun-ai-agent/src/runtime_registry.rs",
+          "crates/backend/nomifun-ai-agent/src/runtime_registry_acquisition.rs",
+          "crates/backend/nomifun-ai-agent/src/runtime_registry_shutdown.rs",
+          "crates/backend/nomifun-ai-agent/src/coding_runtime.rs",
+          "crates/backend/nomifun-app/src/router/runtime_engines.rs",
+          "crates/backend/nomifun-app/src/router/coding_runtime_host.rs",
+          "crates/backend/nomifun-app/src/router/coding_runtime_history.rs",
+          "crates/backend/nomifun-app/src/router/coding_runtime_recovery.rs"
+        ]
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "runtime.compatibility_branches",
+      "description": "Nomi-specific handle downcasts and recovery/session branching remain reachable.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "AgentRuntimeHandle\\s*::\\s*Nomi|(?:binding_)?uses_nomi_(?:session|recovery)",
+        "flags": ""
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "capability.legacy_projection_paths",
+      "description": "Nomi/Coding handwritten capability projections and the 136-ID catalog remain active inputs.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "paths",
+        "paths": [
+          "crates/backend/nomifun-app/src/router/nomi_core_agent_projection.rs",
+          "crates/backend/nomifun-app/src/router/coding_tool_surface.rs",
+          "crates/backend/nomifun-agent-contracts/contracts/target-packages/target-first-party-contributions.v1.json",
+          "crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json"
+        ]
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "capability.legacy_authoring_ids",
+      "description": "The 135 retired operation-level first-party capability IDs are inventoried across active production sources; workspace.artifacts is audited separately as an intentional canonical Module ID reuse.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "catalog_ids",
+        "catalog_path": "scripts/validation/retired-agent-capability-ids.json",
+        "exclude_paths": [
+          "crates/backend/nomifun-db/migrations/",
+          "ui/src/renderer/services/i18n/i18n-keys.d.ts"
+        ]
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "catalog_item_count": 136
+      }
+    },
+    {
+      "id": "store.legacy_agent_tables",
+      "description": "Conversation, Message and split Runtime/effect tables remain the Agent fact chain.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "\\b(?:conversation_delivery_receipts|conversation_runtime_events|conversation_mcp_effects|conversation_hosted_effects|conversation_git_effects)\\b|\\b(?:FROM|INTO|UPDATE|JOIN|TABLE|REFERENCES)\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?(?:conversations|messages)\\b",
+        "flags": "i",
+        "include_paths": [
+          "crates/backend/nomifun-db/",
+          "crates/backend/nomifun-conversation/",
+          "crates/backend/nomifun-app/src/router/"
+        ],
+        "exclude_paths": [
+          "crates/backend/nomifun-db/migrations/",
+          "crates/backend/nomifun-db/src/id_schema_contract.rs"
+        ]
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "store.private_nomi_transcript",
+      "description": "The filesystem Nomi transcript/index remains a second Session authority.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "nomi-sessions|NomiSessionPersistence|nomi_session_persistence",
+        "flags": ""
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "store.fresh_v4_parallel_root_and_schema",
+      "description": "Fresh-v4 root coordination and its session_events/session_payloads schema remain parallel to the target canonical Agent Store.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "fresh[-_]?v4|\\bsession_events\\b|\\bsession_payloads\\b|nomifun-v4\\.db|nomifun-v4-root",
+        "flags": "i",
+        "include_paths": [
+          "crates/backend/nomifun-agent-session/src/",
+          "crates/backend/nomifun-v4-root/src/"
+        ]
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "automation.agent_idmm_surface",
+      "description": "IDMM may own supervision policy but must not restore retired intervention tables or another Session registry.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "\\bidmm_interventions\\b|\\bIdmmSessionRegistry\\b|\\bidmm_supervisor_registry\\b",
+        "flags": ""
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "automation.autowork_parallel_receipts",
+      "description": "AutoWork still owns a private Session delivery/retry state machine instead of using AgentExecution and canonical Agent receipts.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "AutoWork(?:Session|Conversation)Port|AutoWorkTurn(?:DeliveryState|Request)|conversation_delivery_receipts|MAX_ATTEMPTS|attempt_count\\s*(?:<|>)",
+        "flags": "",
+        "include_paths": [
+          "crates/backend/nomifun-requirement/src/",
+          "crates/backend/nomifun-db/migrations/"
+        ]
+      },
+      "retained_facts": [
+        "requirements.owner_conversation_id is the same canonical AgentSession UUID exposed through retained user-facing Conversation terminology; it is not a second Session or receipt authority",
+        "requirements.attempt_count is queue-claim history only; no production retry, recovery or receipt decision may branch on it"
+      ],
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "browser.dedicated_session_entry",
+      "description": "Browser remains a dedicated Conversation entry/resource identity.",
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ],
+      "completion_requirement": "zero_production_references",
+      "matcher": {
+        "kind": "regex",
+        "pattern": "initial-browser-open|会话浏览器|BrowserWorkspaceKey|launch\\(\\s*['\"]browser['\"]\\s*\\)|/api/conversations/[^'\"\\s]*/browser",
+        "flags": ""
+      },
+      "baseline": {
+        "match_count": 0,
+        "file_count": 0,
+        "files_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "storage_ownership": [
+    {
+      "id": "agent_session_chain",
+      "current_facts": [
+        "agent_sessions",
+        "agent_turns",
+        "agent_events",
+        "agent_messages",
+        "agent_payloads"
+      ],
+      "target_owner": "canonical Agent Store",
+      "target_facts": [
+        "agent_sessions",
+        "agent_turns",
+        "agent_events",
+        "agent_messages",
+        "agent_payloads"
+      ],
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ]
+    },
+    {
+      "id": "agent_effect_chain",
+      "current_facts": [
+        "agent_effects"
+      ],
+      "target_owner": "canonical Agent Store plus Domain owner semantics",
+      "target_facts": [
+        "agent_effects"
+      ],
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ]
+    },
+    {
+      "id": "runtime_checkpoint_chain",
+      "current_facts": [
+        "runtime-checkpoints/<session-id>/<digest>",
+        "canonical DB rebuild cursor"
+      ],
+      "target_owner": "Unified Runtime derived checkpoint store",
+      "target_facts": [
+        "runtime-checkpoints/<session-id>/<digest>",
+        "canonical DB rebuild cursor"
+      ],
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ]
+    },
+    {
+      "id": "execution_automation_chain",
+      "current_facts": [
+        "agent_execution_attempts.agent_session_id",
+        "agent_turns",
+        "agent_events"
+      ],
+      "target_owner": "AgentExecution attempts plus canonical Agent Turn receipt",
+      "target_facts": [
+        "agent_execution_attempts.agent_session_id",
+        "agent_turns",
+        "agent_events"
+      ],
+      "owner_tasks": [
+        "AGENT-ARCHITECTURE"
+      ]
+    }
+  ],
+  "timing_baseline": [],
+  "baseline_anomalies": [],
+  "macos_gaps": [
+    {
+      "id": "macos.current_agent_session",
+      "owner_task": "AGENT-ARCHITECTURE",
+      "state": "implemented_unverified",
+      "required_evidence": [
+        "Current source canonical history, channel binding, native reasoning and desktop rendering checks on macOS."
+      ]
+    }
+  ]
+}

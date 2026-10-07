@@ -6,9 +6,16 @@
 
 use std::sync::Arc;
 
-use nomifun_common::{AppError, CsAgentId, CsNoteId, now_ms};
-use nomifun_db::models::{CsAgentRow, CsChannelBindingRow, CsNoteRow, NewCsAgentRow};
-use nomifun_db::{ICustomerServiceRepository, UpdateCsAgentParams};
+use nomifun_common::{AppError, CsAgentId, CsHandoffId, CsNoteId, now_ms, validate_uuidv7};
+use nomifun_db::models::{
+    CS_HANDOFF_STATUS_CANCELLED, CS_HANDOFF_STATUS_CLAIMED, CS_HANDOFF_STATUS_PENDING,
+    CS_HANDOFF_STATUS_RESOLVED, CsAgentRow, CsChannelBindingRow, CsHandoffRow, CsNoteRow,
+    NewCsAgentRow,
+};
+use nomifun_db::{
+    CsHandoffRequestResult, CsNoteWriteMutation, CsNoteWriteReceipt,
+    ICustomerServiceRepository, UpdateCsAgentParams,
+};
 
 /// Inclusive bounds for `cs_agents.max_concurrent`.
 pub const MAX_CONCURRENT_RANGE: std::ops::RangeInclusive<i64> = 1..=64;
@@ -95,6 +102,34 @@ pub struct CreateCsNoteInput {
     pub aliases: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// Input admitted by the typed Agent handoff owner after it has resolved the
+/// selected `customer` resource to one concrete customer-service Agent.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestCsHandoffInput {
+    pub cs_agent_id: String,
+    pub cs_dialogue_id: String,
+    pub requested_by: String,
+    pub idempotency_key: String,
+    pub reason: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentCsNoteWriteInput {
+    pub owner_user_id: String,
+    pub cs_agent_id: String,
+    pub capability_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub cs_note_id: Option<String>,
+    pub kind: Option<String>,
+    pub content: Option<String>,
+    pub aliases: Option<String>,
+    pub enabled: Option<bool>,
 }
 
 fn default_note_kind() -> String {
@@ -249,6 +284,172 @@ impl CustomerServiceService {
             .map(|row| row.cs_agent_id))
     }
 
+    // ── durable human handoffs ──────────────────────────────────────
+
+    pub async fn request_handoff(
+        &self,
+        input: RequestCsHandoffInput,
+    ) -> Result<CsHandoffRequestResult, AppError> {
+        validate_uuidv7(&input.cs_agent_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid cs_agent_id: {error}")))?;
+        validate_uuidv7(&input.cs_dialogue_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid cs_dialogue_id: {error}")))?;
+        validate_uuidv7(&input.requested_by)
+            .map_err(|error| AppError::Forbidden(format!("invalid handoff requester: {error}")))?;
+        let idempotency_key = input.idempotency_key.trim();
+        if idempotency_key.is_empty() || idempotency_key.len() > 512 {
+            return Err(AppError::BadRequest(
+                "handoff idempotency_key must contain 1..=512 bytes".into(),
+            ));
+        }
+        let reason = input.reason.trim();
+        if reason.is_empty() {
+            return Err(AppError::BadRequest("handoff reason must be non-empty".into()));
+        }
+        if reason.chars().count() > 4000 || input.summary.chars().count() > 12000 {
+            return Err(AppError::BadRequest(
+                "handoff reason or summary exceeds the durable queue limit".into(),
+            ));
+        }
+        self.get_agent(&input.cs_agent_id).await?;
+        let now = now_ms();
+        Ok(self
+            .repo
+            .request_handoff(&CsHandoffRow {
+                cs_handoff_id: CsHandoffId::new().into_string(),
+                cs_agent_id: input.cs_agent_id,
+                cs_dialogue_id: input.cs_dialogue_id,
+                requested_by: input.requested_by.clone(),
+                idempotency_key: idempotency_key.to_owned(),
+                reason: reason.to_owned(),
+                summary: input.summary.trim().to_owned(),
+                status: CS_HANDOFF_STATUS_PENDING.to_owned(),
+                claimed_by: None,
+                updated_by: input.requested_by,
+                resolution: String::new(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await?)
+    }
+
+    pub async fn active_handoff_for_dialogue(
+        &self,
+        cs_dialogue_id: &str,
+    ) -> Result<Option<CsHandoffRow>, AppError> {
+        Ok(self
+            .repo
+            .active_handoff_for_dialogue(cs_dialogue_id)
+            .await?)
+    }
+
+    pub async fn list_handoffs(
+        &self,
+        cs_agent_id: &str,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CsHandoffRow>, AppError> {
+        self.get_agent(cs_agent_id).await?;
+        if let Some(status) = status {
+            validate_handoff_status(status)?;
+        }
+        Ok(self
+            .repo
+            .list_handoffs(cs_agent_id, status, limit.clamp(1, 500))
+            .await?)
+    }
+
+    pub async fn claim_handoff(
+        &self,
+        cs_handoff_id: &str,
+        expected_status: &str,
+        actor_user_id: &str,
+    ) -> Result<CsHandoffRow, AppError> {
+        if expected_status != CS_HANDOFF_STATUS_PENDING {
+            return Err(AppError::Conflict(
+                "only a pending handoff may be claimed".into(),
+            ));
+        }
+        Ok(self
+            .repo
+            .transition_handoff(
+                cs_handoff_id,
+                expected_status,
+                CS_HANDOFF_STATUS_CLAIMED,
+                actor_user_id,
+                Some(actor_user_id),
+                "",
+                now_ms(),
+            )
+            .await?)
+    }
+
+    pub async fn resolve_handoff(
+        &self,
+        cs_handoff_id: &str,
+        expected_status: &str,
+        actor_user_id: &str,
+        resolution: &str,
+    ) -> Result<CsHandoffRow, AppError> {
+        if expected_status != CS_HANDOFF_STATUS_CLAIMED {
+            return Err(AppError::Conflict(
+                "a handoff must be claimed before it can be resolved".into(),
+            ));
+        }
+        let resolution = resolution.trim();
+        if resolution.is_empty() || resolution.chars().count() > 12000 {
+            return Err(AppError::BadRequest(
+                "handoff resolution must contain 1..=12000 characters".into(),
+            ));
+        }
+        Ok(self
+            .repo
+            .transition_handoff(
+                cs_handoff_id,
+                expected_status,
+                CS_HANDOFF_STATUS_RESOLVED,
+                actor_user_id,
+                None,
+                resolution,
+                now_ms(),
+            )
+            .await?)
+    }
+
+    pub async fn cancel_handoff(
+        &self,
+        cs_handoff_id: &str,
+        expected_status: &str,
+        actor_user_id: &str,
+        resolution: &str,
+    ) -> Result<CsHandoffRow, AppError> {
+        if !matches!(
+            expected_status,
+            CS_HANDOFF_STATUS_PENDING | CS_HANDOFF_STATUS_CLAIMED
+        ) {
+            return Err(AppError::Conflict(
+                "only a pending or claimed handoff may be cancelled".into(),
+            ));
+        }
+        if resolution.chars().count() > 12000 {
+            return Err(AppError::BadRequest(
+                "handoff cancellation note exceeds 12000 characters".into(),
+            ));
+        }
+        Ok(self
+            .repo
+            .transition_handoff(
+                cs_handoff_id,
+                expected_status,
+                CS_HANDOFF_STATUS_CANCELLED,
+                actor_user_id,
+                None,
+                resolution.trim(),
+                now_ms(),
+            )
+            .await?)
+    }
+
     /// Every customer-service agent whose configured model rides
     /// `provider_id` — the provider-deletion guard's friendly usage listing.
     /// Best-effort: a repo error degrades to an empty list (the repository's
@@ -327,6 +528,85 @@ impl CustomerServiceService {
     pub async fn delete_note(&self, cs_note_id: &str) -> Result<(), AppError> {
         Ok(self.repo.delete_note(cs_note_id).await?)
     }
+
+    /// Exactly-once owner Agent note mutation. The repository commits the
+    /// note and its replay receipt in one SQLite transaction.
+    pub async fn write_note_idempotent(
+        &self,
+        input: AgentCsNoteWriteInput,
+    ) -> Result<CsNoteWriteReceipt, AppError> {
+        validate_uuidv7(&input.owner_user_id)
+            .map_err(|error| AppError::Forbidden(format!("invalid notes.write owner: {error}")))?;
+        validate_uuidv7(&input.cs_agent_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid cs_agent_id: {error}")))?;
+        self.get_agent(&input.cs_agent_id).await?;
+        if input.idempotency_key.trim().is_empty() || input.idempotency_key.len() > 512 {
+            return Err(AppError::BadRequest(
+                "notes.write idempotency key must contain 1..=512 bytes".into(),
+            ));
+        }
+        if input.request_digest.len() != 64
+            || input.request_digest.bytes().any(|byte| {
+                !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte)
+            })
+        {
+            return Err(AppError::BadRequest(
+                "notes.write request digest must be lowercase SHA-256 hex".into(),
+            ));
+        }
+        if let Some(content) = input.content.as_deref()
+            && content.trim().is_empty()
+        {
+            return Err(AppError::BadRequest("笔记内容不能为空".into()));
+        }
+        let now = now_ms();
+        let mutation = if let Some(cs_note_id) = input.cs_note_id {
+            if input.kind.is_none()
+                && input.content.is_none()
+                && input.aliases.is_none()
+                && input.enabled.is_none()
+            {
+                return Err(AppError::BadRequest(
+                    "notes.write update requires at least one changed field".into(),
+                ));
+            }
+            CsNoteWriteMutation::Update {
+                cs_note_id,
+                kind: input.kind,
+                content: input.content,
+                aliases: input.aliases,
+                enabled: input.enabled,
+            }
+        } else {
+            let content = input.content.ok_or_else(|| {
+                AppError::BadRequest("notes.write create requires content".into())
+            })?;
+            CsNoteWriteMutation::Create {
+                note: CsNoteRow {
+                    cs_note_id: CsNoteId::new().into_string(),
+                    cs_agent_id: Some(input.cs_agent_id.clone()),
+                    kind: input.kind.unwrap_or_else(default_note_kind),
+                    content,
+                    aliases: input.aliases.unwrap_or_default(),
+                    enabled: input.enabled.unwrap_or(true),
+                    created_at: now,
+                    updated_at: now,
+                },
+            }
+        };
+        Ok(self
+            .repo
+            .write_note_idempotent(
+                &input.owner_user_id,
+                &input.cs_agent_id,
+                &input.capability_id,
+                &input.idempotency_key,
+                &input.request_digest,
+                mutation,
+                now,
+            )
+            .await?)
+    }
 }
 
 fn validate_max_concurrent(value: i64) -> Result<(), AppError> {
@@ -338,6 +618,22 @@ fn validate_max_concurrent(value: i64) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+fn validate_handoff_status(value: &str) -> Result<(), AppError> {
+    if matches!(
+        value,
+        CS_HANDOFF_STATUS_PENDING
+            | CS_HANDOFF_STATUS_CLAIMED
+            | CS_HANDOFF_STATUS_RESOLVED
+            | CS_HANDOFF_STATUS_CANCELLED
+    ) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "unknown customer-service handoff status {value:?}"
+        )))
+    }
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {

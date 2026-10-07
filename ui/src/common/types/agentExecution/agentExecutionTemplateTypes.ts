@@ -1,21 +1,22 @@
-import type { PresetOverrides, PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import type {
-  AgentId,
-  ExecutionTemplateId,
-  ExecutionTemplateParticipantId,
-  ConversationId,
-  ProviderId,
+AgentPresetId,
+AgentResolvedSnapshot,
+} from '@/common/types/agentPlatform';
+import type {
+AgentId,
+ConversationId,
+ExecutionTemplateId,
+ExecutionTemplateParticipantId,
+ProviderId,
 } from '@/common/types/ids';
 import type {
-  TAdaptationPolicy,
-  TAgentExecution,
-  TDecisionPolicy,
-  TDelegationPolicy,
-  TExecutionModelRef,
-  TParticipantCapability,
-  TParticipantConstraints,
-  TPlanGate,
-  TPlannedExecutionStep,
+TAdaptationPolicy,
+TDecisionPolicy,
+TDelegationPolicy,
+TExecutionModelRef,
+TParticipantCapability,
+TParticipantConstraints,
+TPlannedExecutionStep
 } from './agentExecutionTypes';
 
 export type TAgentExecutionTemplate = {
@@ -33,9 +34,9 @@ export type TAgentExecutionTemplate = {
 export type TAgentExecutionTemplateParticipant = {
   template_participant_id: ExecutionTemplateParticipantId;
   source_agent_id: AgentId;
-  preset_id: PresetReference | null;
+  preset_id: AgentPresetId | null;
   preset_revision: number | null;
-  preset_snapshot: ResolvedPresetSnapshot | null;
+  agent_snapshot: AgentResolvedSnapshot | null;
   provider_id: ProviderId | null;
   model: string | null;
   role: string | null;
@@ -54,11 +55,10 @@ export type TAgentExecutionTemplateDetail = TAgentExecutionTemplate & {
   participants: TAgentExecutionTemplateParticipant[];
 };
 
-export type TAgentExecutionTemplateParticipantInput = {
+type TAgentExecutionTemplateParticipantInput = {
   source_agent_id?: AgentId;
-  preset_id?: PresetReference;
-  preset_snapshot?: ResolvedPresetSnapshot;
-  preset_overrides?: PresetOverrides;
+  preset_id?: AgentPresetId;
+  agent_snapshot?: AgentResolvedSnapshot;
   provider_id?: ProviderId;
   model?: string;
   role?: string;
@@ -95,12 +95,9 @@ export type TCreateExecutionFromTemplate = {
   work_dir?: string;
   max_parallel?: number;
   delegation_policy?: TDelegationPolicy;
-  plan_gate?: TPlanGate;
   adaptation_policy?: TAdaptationPolicy;
   decision_policy?: TDecisionPolicy;
   lead_conversation_id?: ConversationId;
   lead_model?: TExecutionModelRef;
   steps?: TPlannedExecutionStep[];
 };
-
-export type TCreatedExecutionFromTemplate = TAgentExecution;

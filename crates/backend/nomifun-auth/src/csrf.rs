@@ -10,7 +10,7 @@ use nomifun_common::AppError;
 use nomifun_common::constants::{CSRF_COOKIE_NAME, CSRF_HEADER_NAME};
 
 use crate::cookie::CookieConfig;
-use crate::extract::extract_cookie_value;
+use crate::extract::{extract_bearer_token, extract_cookie_value};
 
 /// CSRF protection middleware using the Double Submit Cookie pattern.
 ///
@@ -21,6 +21,10 @@ use crate::extract::extract_cookie_value;
 ///   (idempotent and self-deauthorizing — a forged logout can only end the
 ///   victim's own session, while requiring a token here meant a stale cookie
 ///   made logout permanently fail and the server session survive).
+/// - Requests carrying a non-empty `Authorization: Bearer` credential bypass
+///   cookie CSRF validation. Bearer credentials are non-ambient; the route's
+///   authentication middleware remains authoritative for their validity and
+///   scope.
 /// - All other requests must include an `x-csrf-token` header whose value
 ///   matches the `nomifun-csrf-token` cookie.
 /// - Every response re-issues the CSRF cookie (same token, fresh `Max-Age`):
@@ -43,14 +47,30 @@ pub async fn csrf_middleware(
 
     // Validate CSRF for state-changing requests
     let needs_validation = matches!(method, Method::POST | Method::PUT | Method::DELETE | Method::PATCH);
-    let is_exempt =
-        path == "/login" || path == "/api/auth/qr-login" || path == "/api/auth/setup" || path == "/logout";
+    // Canonical Streamable HTTP MCP uses the same non-ambient installation
+    // Bearer gate; do not require a browser cookie/header pair before its
+    // transport middleware can return the typed auth result.
+    let is_mcp_transport = path == "/mcp" || path.starts_with("/mcp/");
+    let is_exempt = path == "/login"
+        || path == "/api/auth/qr-login"
+        || path == "/api/auth/setup"
+        || path == "/logout"
+        // Remote lifecycle requests authenticate with a non-ambient Bearer
+        // token, so a browser cookie cannot forge them and CSRF does not
+        // apply. The Remote token middleware remains the authoritative gate.
+        || path.starts_with("/api/remote/");
 
     // Locally-trusted requests authenticate via the `X-Nomi-Local-Trust` header,
     // not an ambient cookie, so they are not a CSRF target — skip validation.
     let local_trusted = request.extensions().get::<crate::trust::LocalTrusted>().is_some();
+    let has_non_ambient_bearer = extract_bearer_token(request.headers()).is_some();
 
-    if needs_validation && !is_exempt && !local_trusted {
+    if needs_validation
+        && !is_exempt
+        && !is_mcp_transport
+        && !local_trusted
+        && !has_non_ambient_bearer
+    {
         let header_token = request
             .headers()
             .get(CSRF_HEADER_NAME)
@@ -199,6 +219,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mutation_with_non_ambient_bearer_skips_cookie_csrf() {
+        let resp = test_router()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/thing")
+                    .header(header::AUTHORIZATION, "Bearer installation-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_non_bearer_authorization_does_not_skip_cookie_csrf() {
+        for authorization in ["Bearer ", "Basic abc", "bearer lowercase"] {
+            let resp = test_router()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/api/thing")
+                        .header(header::AUTHORIZATION, authorization)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{authorization}");
+        }
     }
 
     #[tokio::test]

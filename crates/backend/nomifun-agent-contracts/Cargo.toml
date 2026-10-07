@@ -1,0 +1,20 @@
+[package]
+name = "nomifun-agent-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hex.workspace = true
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+semver.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+rusqlite.workspace = true

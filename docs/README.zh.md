@@ -18,6 +18,7 @@
 | 接入 provider、本地模型并配置故障转移 | [guides/model-routing.zh.md](guides/model-routing.zh.md) |
 | 使用无限画布、工作台、素材与模板创作 | [guides/creative-studio.zh.md](guides/creative-studio.zh.md) |
 | 连接小智 ESP32 机器人 | [guides/xiaozhi-robot.zh.md](guides/xiaozhi-robot.zh.md) |
+| 理解 Agent 会话 日志和内容 | [Agent Session 当前架构](architecture/agent-session.zh.md) |
 | 理解当前架构 | [architecture/overview.zh.md](architecture/overview.zh.md) |
 | 构建或打包项目 | [contributing/building-and-packaging.zh.md](contributing/building-and-packaging.zh.md) |
 | 查询参数、环境变量或 API 分组 | [reference/](reference/) |
@@ -41,7 +42,7 @@ docs/
 └── images/               截图清单与图片资源
 ```
 
-当前顶层用户界面包括会话、终端、可扩展模型管理、创意工坊、设定、MCP、
+当前顶层用户界面包括会话、终端、可扩展模型管理、创作、设定、MCP、
 开放能力、需求/AutoWork、定时任务、伙伴、知识库，以及 feature-gated 的
 computer/browser 自动化能力。前端路由真相来源是
 `ui/src/renderer/components/layout/Router.tsx`。

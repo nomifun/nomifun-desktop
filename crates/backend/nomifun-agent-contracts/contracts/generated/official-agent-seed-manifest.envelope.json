@@ -1,0 +1,709 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "manifest_version": "1.0.0",
+    "target_first_party_contribution_digest": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43",
+    "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
+    "templates": {
+      "chat.minimal": {
+        "enabled_capabilities": [],
+        "skill_bindings": [],
+        "required_resource_kinds": [],
+        "required_runtime_features": []
+      },
+      "assistant.general": {
+        "enabled_capabilities": [
+          {
+            "capability": {
+              "id": "model.management"
+            },
+            "action_allowlist": [
+              "model.management/add_model",
+              "model.management/create_provider",
+              "model.management/inspect"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge"
+            },
+            "action_allowlist": [
+              "knowledge/autogen",
+              "knowledge/read",
+              "knowledge/search",
+              "knowledge/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "project.memory"
+            },
+            "action_allowlist": [
+              "project.memory/read",
+              "project.memory/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "web.research"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
+            ]
+          },
+          {
+            "capability": {
+              "id": "automation.schedule"
+            },
+            "action_allowlist": [
+              "automation.schedule/list"
+            ]
+          },
+          {
+            "capability": {
+              "id": "browser"
+            },
+            "action_allowlist": [
+              "browser/navigate",
+              "browser/observe",
+              "browser/render_content"
+            ]
+          },
+          {
+            "capability": {
+              "id": "computer"
+            },
+            "action_allowlist": [
+              "computer/a11y.observe",
+              "computer/observe"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.artifacts"
+            },
+            "action_allowlist": [
+              "workspace.artifacts/publish",
+              "workspace.artifacts/read"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.files"
+            },
+            "action_allowlist": [
+              "workspace.files/delete",
+              "workspace.files/patch",
+              "workspace.files/read",
+              "workspace.files/search",
+              "workspace.files/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.process"
+            },
+            "action_allowlist": [
+              "workspace.process/cancel",
+              "workspace.process/close_stdin",
+              "workspace.process/exec",
+              "workspace.process/input",
+              "workspace.process/poll",
+              "workspace.process/resize",
+              "workspace.process/start"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.vcs"
+            },
+            "action_allowlist": [
+              "workspace.vcs/commit",
+              "workspace.vcs/diff",
+              "workspace.vcs/stage",
+              "workspace.vcs/status"
+            ]
+          },
+          {
+            "capability": {
+              "id": "agent.collaboration"
+            },
+            "action_allowlist": [
+              "agent/delegate",
+              "agent/fork",
+              "agent/request_user_decision"
+            ]
+          },
+          {
+            "capability": {
+              "id": "requirements"
+            },
+            "action_allowlist": [
+              "requirements/claim",
+              "requirements/read",
+              "requirements/status",
+              "requirements/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "creation.media"
+            },
+            "action_allowlist": [
+              "creation.media/audio",
+              "creation.media/image",
+              "creation.media/image_edit",
+              "creation.media/music",
+              "creation.media/video"
+            ]
+          },
+          {
+            "capability": {
+              "id": "plugin.development"
+            },
+            "action_allowlist": [
+              "plugin.development/apply",
+              "plugin.development/check",
+              "plugin.development/inspect",
+              "plugin.development/install",
+              "plugin.development/list",
+              "plugin.development/open",
+              "plugin.development/plan",
+              "plugin.development/preview",
+              "plugin.development/read",
+              "plugin.development/test_action",
+              "plugin.development/test_ui"
+            ]
+          }
+        ],
+        "skill_bindings": [],
+        "required_resource_kinds": [
+          "browser",
+          "computer",
+          "knowledge_base",
+          "process_session",
+          "project_memory",
+          "scheduler",
+          "workspace"
+        ],
+        "required_runtime_features": []
+      },
+      "coding.codex": {
+        "enabled_capabilities": [
+          {
+            "capability": {
+              "id": "workspace.files"
+            },
+            "action_allowlist": [
+              "workspace.files/delete",
+              "workspace.files/patch",
+              "workspace.files/read",
+              "workspace.files/search",
+              "workspace.files/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.vcs"
+            },
+            "action_allowlist": [
+              "workspace.vcs/commit",
+              "workspace.vcs/diff",
+              "workspace.vcs/stage",
+              "workspace.vcs/status"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.process"
+            },
+            "action_allowlist": [
+              "workspace.process/cancel",
+              "workspace.process/close_stdin",
+              "workspace.process/exec",
+              "workspace.process/input",
+              "workspace.process/poll",
+              "workspace.process/resize",
+              "workspace.process/start"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.artifacts"
+            },
+            "action_allowlist": [
+              "workspace.artifacts/publish",
+              "workspace.artifacts/read"
+            ]
+          },
+          {
+            "capability": {
+              "id": "project.memory"
+            },
+            "action_allowlist": [
+              "project.memory/read",
+              "project.memory/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "web.research"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
+            ]
+          },
+          {
+            "capability": {
+              "id": "agent.collaboration"
+            },
+            "action_allowlist": [
+              "agent/delegate",
+              "agent/fork",
+              "agent/request_user_decision"
+            ]
+          }
+        ],
+        "skill_bindings": [],
+        "required_resource_kinds": [
+          "process_session",
+          "project_memory",
+          "workspace"
+        ],
+        "required_runtime_features": [
+          "code_mode",
+          "context.compact.automatic",
+          "context.compact.manual",
+          "multi_agent.coordinate",
+          "process.background_sessions",
+          "responses.native_reasoning",
+          "responses.prompt_cache",
+          "responses.stream_items",
+          "responses.tool_call_correlation",
+          "review.workflow",
+          "subagent.send",
+          "subagent.spawn",
+          "subagent.wait",
+          "thread.fork",
+          "thread.resume",
+          "thread.rollback",
+          "tool.parallel",
+          "tool.search",
+          "turn.cancel",
+          "turn.interrupt",
+          "turn.steer",
+          "validation.feedback"
+        ]
+      },
+      "companion.default": {
+        "enabled_capabilities": [
+          {
+            "capability": {
+              "id": "companion"
+            },
+            "action_allowlist": [
+              "companion/evolve",
+              "companion/learn"
+            ]
+          },
+          {
+            "capability": {
+              "id": "companion.memory"
+            },
+            "action_allowlist": [
+              "companion.memory/recall",
+              "companion.memory/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge"
+            },
+            "action_allowlist": [
+              "knowledge/read",
+              "knowledge/search"
+            ]
+          },
+          {
+            "capability": {
+              "id": "channel.messaging"
+            },
+            "action_allowlist": [
+              "channel.messaging/reply"
+            ]
+          },
+          {
+            "capability": {
+              "id": "robot"
+            },
+            "action_allowlist": [
+              "robot/vision"
+            ]
+          },
+          {
+            "capability": {
+              "id": "automation.schedule"
+            },
+            "action_allowlist": [
+              "automation.schedule/create",
+              "automation.schedule/delete",
+              "automation.schedule/list",
+              "automation.schedule/update"
+            ]
+          }
+        ],
+        "skill_bindings": [],
+        "required_resource_kinds": [
+          "channel",
+          "companion",
+          "companion_memory",
+          "knowledge_base",
+          "robot",
+          "scheduler"
+        ],
+        "required_runtime_features": []
+      },
+      "customer-service.default": {
+        "enabled_capabilities": [
+          {
+            "capability": {
+              "id": "customer.service"
+            },
+            "action_allowlist": [
+              "customer.service/handoff",
+              "customer.service/notes.read"
+            ]
+          },
+          {
+            "capability": {
+              "id": "knowledge"
+            },
+            "action_allowlist": [
+              "knowledge/read",
+              "knowledge/search"
+            ]
+          },
+          {
+            "capability": {
+              "id": "channel.messaging"
+            },
+            "action_allowlist": [
+              "channel.messaging/reply"
+            ]
+          }
+        ],
+        "skill_bindings": [],
+        "required_resource_kinds": [
+          "channel",
+          "customer",
+          "knowledge_base"
+        ],
+        "required_runtime_features": []
+      },
+      "creative-studio.default": {
+        "enabled_capabilities": [
+          {
+            "capability": {
+              "id": "creation.media"
+            },
+            "action_allowlist": [
+              "creation.media/audio",
+              "creation.media/image",
+              "creation.media/image_edit",
+              "creation.media/music",
+              "creation.media/text",
+              "creation.media/video"
+            ]
+          },
+          {
+            "capability": {
+              "id": "creative.workshop"
+            },
+            "action_allowlist": [
+              "creative.workshop/asset.read",
+              "creative.workshop/asset.write",
+              "creative.workshop/canvas.edit",
+              "creative.workshop/canvas.read",
+              "creative.workshop/template.run"
+            ]
+          },
+          {
+            "capability": {
+              "id": "office"
+            },
+            "action_allowlist": [
+              "office/document.edit",
+              "office/preview",
+              "office/sheet.edit",
+              "office/slides.edit"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.files"
+            },
+            "action_allowlist": [
+              "workspace.files/patch",
+              "workspace.files/read",
+              "workspace.files/search",
+              "workspace.files/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.artifacts"
+            },
+            "action_allowlist": [
+              "workspace.artifacts/publish",
+              "workspace.artifacts/read"
+            ]
+          },
+          {
+            "capability": {
+              "id": "workspace.process"
+            },
+            "action_allowlist": [
+              "workspace.process/cancel",
+              "workspace.process/close_stdin",
+              "workspace.process/exec",
+              "workspace.process/input",
+              "workspace.process/poll",
+              "workspace.process/resize",
+              "workspace.process/start"
+            ]
+          },
+          {
+            "capability": {
+              "id": "project.memory"
+            },
+            "action_allowlist": [
+              "project.memory/read",
+              "project.memory/write"
+            ]
+          },
+          {
+            "capability": {
+              "id": "web.research"
+            },
+            "action_allowlist": [
+              "web.research/fetch",
+              "web.research/search"
+            ]
+          }
+        ],
+        "skill_bindings": [
+          {
+            "id": "creative-studio-canvas",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creative-studio-organize",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creative-studio-template",
+            "version": "1.0.0"
+          }
+        ],
+        "required_resource_kinds": [
+          "asset_library",
+          "canvas",
+          "process_session",
+          "project_memory",
+          "workspace"
+        ],
+        "required_runtime_features": []
+      }
+    },
+    "role_coverage": {
+      "chat.minimal": {
+        "required_capability_categories": [],
+        "required_capability_ids": [],
+        "required_runtime_features": [],
+        "required_resource_kinds": []
+      },
+      "assistant.general": {
+        "required_capability_categories": [
+          "agent_collaboration",
+          "automation",
+          "browser",
+          "computer",
+          "file_operations",
+          "generation",
+          "knowledge",
+          "project_memory",
+          "requirements",
+          "shell_process_pty",
+          "vcs_review",
+          "web_research",
+          "workspace_repository"
+        ],
+        "required_capability_ids": [
+          "agent.collaboration",
+          "automation.schedule",
+          "browser",
+          "computer",
+          "creation.media",
+          "knowledge",
+          "project.memory",
+          "requirements",
+          "web.research",
+          "workspace.artifacts",
+          "workspace.files",
+          "workspace.process",
+          "workspace.vcs"
+        ],
+        "required_runtime_features": [],
+        "required_resource_kinds": [
+          "browser",
+          "computer",
+          "knowledge_base",
+          "process_session",
+          "project_memory",
+          "scheduler",
+          "workspace"
+        ]
+      },
+      "coding.codex": {
+        "required_capability_categories": [
+          "agent_collaboration",
+          "file_operations",
+          "native_responses",
+          "project_memory",
+          "shell_process_pty",
+          "skills_plugins",
+          "vcs_review",
+          "web_research",
+          "workspace_repository"
+        ],
+        "required_capability_ids": [
+          "agent.collaboration",
+          "project.memory",
+          "web.research",
+          "workspace.artifacts",
+          "workspace.files",
+          "workspace.process",
+          "workspace.vcs"
+        ],
+        "required_runtime_features": [
+          "code_mode",
+          "context.compact.automatic",
+          "context.compact.manual",
+          "multi_agent.coordinate",
+          "process.background_sessions",
+          "responses.native_reasoning",
+          "responses.prompt_cache",
+          "responses.stream_items",
+          "responses.tool_call_correlation",
+          "review.workflow",
+          "subagent.send",
+          "subagent.spawn",
+          "subagent.wait",
+          "thread.fork",
+          "thread.resume",
+          "thread.rollback",
+          "tool.parallel",
+          "tool.search",
+          "turn.cancel",
+          "turn.interrupt",
+          "turn.steer",
+          "validation.feedback"
+        ],
+        "required_resource_kinds": [
+          "process_session",
+          "project_memory",
+          "workspace"
+        ]
+      },
+      "companion.default": {
+        "required_capability_categories": [
+          "automation",
+          "companion_memory",
+          "im_channel",
+          "knowledge",
+          "learning_evolution",
+          "persona"
+        ],
+        "required_capability_ids": [
+          "automation.schedule",
+          "channel.messaging",
+          "companion",
+          "companion.memory",
+          "knowledge",
+          "robot"
+        ],
+        "required_runtime_features": [],
+        "required_resource_kinds": [
+          "channel",
+          "companion",
+          "companion_memory",
+          "knowledge_base",
+          "robot",
+          "scheduler"
+        ]
+      },
+      "customer-service.default": {
+        "required_capability_categories": [
+          "channel",
+          "dialogue",
+          "handoff",
+          "knowledge",
+          "notes"
+        ],
+        "required_capability_ids": [
+          "channel.messaging",
+          "customer.service",
+          "knowledge"
+        ],
+        "required_runtime_features": [],
+        "required_resource_kinds": [
+          "channel",
+          "customer",
+          "knowledge_base"
+        ]
+      },
+      "creative-studio.default": {
+        "required_capability_categories": [
+          "attachments",
+          "editing",
+          "file_operations",
+          "generation",
+          "project_memory",
+          "shell_process_pty",
+          "web_research",
+          "workspace_repository"
+        ],
+        "required_capability_ids": [
+          "creation.media",
+          "creative.workshop",
+          "office",
+          "project.memory",
+          "web.research",
+          "workspace.artifacts",
+          "workspace.files",
+          "workspace.process"
+        ],
+        "required_runtime_features": [],
+        "required_resource_kinds": [
+          "asset_library",
+          "canvas",
+          "process_session",
+          "project_memory",
+          "workspace"
+        ]
+      }
+    },
+    "non_template_capability_packs": [
+      "research.core"
+    ],
+    "forbidden_official_keys": [
+      "autowork.executor",
+      "requirements.analyst",
+      "research",
+      "research.web"
+    ]
+  },
+  "payload_digest": "7c8cc22d62bb60483dbbe7f3d05348244cdfcb7b06717f1666441daab3730afb"
+}

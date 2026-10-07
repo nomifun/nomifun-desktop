@@ -1,0 +1,2552 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use async_trait::async_trait;
+use nomifun_agent_contracts::{
+    ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
+    ArtifactEnvelope, CapabilityActionDescriptor, CapabilityAuthoringPolicy, CapabilityConsumer,
+    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef,
+    CancellationDescriptor,
+    CanonicalSchemaRef, CorrelationId, DeclaredServiceViewDescriptor, DigestHex, EffectClass,
+    ExactRoleContractRef, HostPortId, HostPortRef, IdempotencyKey,
+    InProcessEntrypointMetadata, JavaScriptEntrypointMetadata, LocalizedMetadata,
+    LogicalArtifactRef, ManagedTaskRegistrationDescriptor, McpBindingId,
+    McpServerId, McpToolCapabilityMapping, McpToolKey, OperationId,
+    PackageContributions,
+    PackageEntrypointMetadata, PackageId, PackageManifest, PackageRef, PlatformConstraint,
+    PluginBootCriticality, PluginBootState, PluginContextDescriptor, PluginDesiredState,
+    PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId, PluginRegistrarDescriptor,
+    PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
+    PluginStateCompareAndSwapOutcome, PluginStateHandleDescriptor, PluginStateMethod,
+    PresetRevisionRef, PrincipalRef, ResolvedRoleProviderLock, ResourceBindingId, ResourceId,
+    ResourceKind, RoleContractKey, RoleContractManifest, RoleMemberContract,
+    RoleMemberRequirement, RoleProviderContribution, RoleProviderMemberContribution,
+    ExecutionRoleId, RuntimeFeatureId, RuntimeProfileKind, RuntimeTarget, ScopeKey,
+    ServiceHandleDescriptor, ServiceKeyRef,
+    ServiceProvision, ServiceRequirement, SkillDefinition, SkillId, SkillRef, StrictJsonValue,
+    ToolPresentationKind, TypedResourceBinding, UserId, ValidatedPluginConfig, VersionString,
+    ContributionSourceKind, capability_module_surface_declarations, digest_bytes, digest_payload,
+};
+use serde_json::json;
+
+#[path = "invocation_preflight_tests.rs"]
+mod invocation_preflight_tests;
+
+#[path = "dependency_call_tests.rs"]
+mod dependency_call_tests;
+
+use crate::{
+    AgentPresetCompiler, CapabilityContextContributionFactory,
+    CapabilityContextContributionRequest, CapabilityHandler, CapabilityInvocationContext,
+    CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
+    ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
+    HostPluginStateApi, InMemoryPluginStatePersistence, KernelError, KernelRegistry,
+    MaterializationPolicy, Materializer, PluginRegistration, PluginStatePersistence, ServiceKey,
+    ResourceHandle, ResourceHandleIdentity, ResourceProviderFactory, ResourceProviderRequest,
+    ResourceProviderResult, RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolHandler,
+    RoleToolInvocationContext, RoleToolOperationRequest, SessionCapabilityState,
+};
+
+const SAMPLE_PACKAGE: &str = "sample.echo";
+const SAMPLE_MOUNT: &str = "sample-echo";
+const SAMPLE_CAPABILITY: &str = "sample.echo";
+const SAMPLE_ACTION: &str = "sample.echo.invoke";
+const SAMPLE_SKILL: &str = "sample.echo-guidance";
+const SAMPLE_SERVER: &str = "sample.echo.server";
+const SAMPLE_RESOURCE_KIND: &str = "sample.echo.target";
+const VERSION: &str = "1.0.0";
+const SAMPLE_AGENT_SESSION_ID: &str = "agent-session-sample-1";
+const SAMPLE_OPERATION_ID: &str = "operation-sample-1";
+const SAMPLE_IDEMPOTENCY_KEY: &str = "idempotency-sample-1";
+const SAMPLE_CORRELATION_ID: &str = "correlation-sample-1";
+const SAMPLE_ROLE: &str = "system.sample_echo";
+
+fn package_ref(package_id: &str) -> PackageRef {
+    PackageRef {
+        id: PackageId::from(package_id),
+        version: VersionString::from(VERSION),
+    }
+}
+
+fn host_port(id: &str) -> HostPortRef {
+    HostPortRef {
+        id: HostPortId::from(id),
+        version: VersionString::from(VERSION),
+    }
+}
+
+fn display(name: &str, description: &str) -> LocalizedMetadata {
+    LocalizedMetadata {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        localized_names: BTreeMap::new(),
+        localized_descriptions: BTreeMap::new(),
+    }
+}
+
+fn registration_for(
+    package_id: &str,
+    mount_id: &str,
+    capability_id: &str,
+    skill_id: &str,
+    server_id: &str,
+    prefix: &str,
+) -> PluginRegistration {
+    let package = package_ref(package_id);
+    let capability_ref = CapabilityRef {
+        id: CapabilityId::from(capability_id),
+    };
+    let config_schema = StrictJsonValue(json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "prefix": {
+                "type": "string",
+                "maxLength": 32
+            }
+        },
+        "required": ["prefix"]
+    }));
+    let action_input_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "message": {"type": "string", "maxLength": 256}
+        },
+        "required": ["message"]
+    });
+    let action_output_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "echo": {"type": "string"},
+            "count": {"type": "integer", "minimum": 1}
+        },
+        "required": ["echo", "count"]
+    });
+    let action_input_schema_digest = digest_payload(&action_input_schema).unwrap();
+    let action_output_schema_digest = digest_payload(&action_output_schema).unwrap();
+    let capability = CapabilityManifest {
+        id: capability_ref.id.clone(),
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            capability_ref.id.as_ref()
+        )),
+        kind: CapabilityKind::Tool,
+        package: package.clone(),
+        display: display("Sample Echo", "Echo a message through the capability host."),
+        requires: Vec::new(),
+        conflicts: Vec::new(),
+        supported_surfaces: capability_module_surface_declarations(
+            ["test"],
+            [CapabilityConsumer::Agent],
+            CapabilityAuthoringPolicy::Direct,
+        ),
+        requires_runtime_features: Vec::new(),
+        supported_platforms: vec![PlatformConstraint::Any],
+        config_schema: StrictJsonValue(json!({
+            "type": "object",
+            "additionalProperties": false
+        })),
+        contributions: CapabilityContributions {
+            actions: vec![CapabilityActionDescriptor {
+                action_id: ActionId::from(SAMPLE_ACTION),
+                input_schema: CanonicalSchemaRef::from(format!(
+                    "schema://{capability_id}/input@1#{}",
+                    action_input_schema_digest.as_ref()
+                )),
+                output_schema: CanonicalSchemaRef::from(format!(
+                    "schema://{capability_id}/output@1#{}",
+                    action_output_schema_digest.as_ref()
+                )),
+                effect_class: EffectClass::WriteReversible,
+                presentation: ToolPresentationKind::FunctionTool,
+            }],
+            context_schema_refs: Vec::new(),
+            context_phase: Default::default(),
+            ui_slot: None,
+            event_schema_refs: Vec::new(),
+            resource_kinds: BTreeSet::from([ResourceKind::from(
+                SAMPLE_RESOURCE_KIND,
+            )]),
+            host_ports: Vec::new(),
+        },
+    };
+    let skill = SkillDefinition {
+        id: SkillId::from(skill_id),
+        version: VersionString::from(VERSION),
+        package: package.clone(),
+        display: display(
+            "Sample Echo Guidance",
+            "Use sample.echo to return the exact requested message.",
+        ),
+        body_ref: LogicalArtifactRef {
+            artifact_id: nomifun_agent_contracts::ArtifactId::from(format!(
+                "{skill_id}.body"
+            )),
+            normalized_relative_path: "skills/sample-echo/SKILL.md".to_owned(),
+            digest: digest_bytes(b"Use sample.echo with one message."),
+        },
+        resources: Vec::new(),
+        requires_capabilities: vec![capability_ref.clone()],
+        supported_surfaces: BTreeSet::from(["test".to_owned()]),
+    };
+    let mcp_mapping = McpToolCapabilityMapping {
+        package: package.clone(),
+        server_id: McpServerId::from(server_id),
+        canonical_tool_key: McpToolKey::from(format!("{server_id}.echo")),
+        schema_digest: action_input_schema_digest,
+        capability: capability_ref.clone(),
+        materialization_version: VersionString::from(VERSION),
+    };
+    let manifest = PackageManifest {
+        schema_version: VersionString::from(VERSION),
+        host_contract_version: VersionString::from(VERSION),
+        package_id: package.id.clone(),
+        package_version: package.version.clone(),
+        display: display("Sample Echo Package", "CI-only source-neutral fixture."),
+        package_dependencies: Vec::new(),
+        requires_runtime_features: Vec::new(),
+        config_schema: config_schema.clone(),
+        provides_services: Vec::new(),
+        requires_services: Vec::new(),
+        entrypoint: InProcessEntrypointMetadata {
+            entrypoint_profile: "trusted-in-process".to_owned(),
+            entrypoint_id: format!("{package_id}.entrypoint"),
+            contract_version: VersionString::from(VERSION),
+        }
+        .into(),
+        contributions: PackageContributions {
+            capabilities: vec![capability],
+            skills: vec![skill],
+            mcp_tools: vec![mcp_mapping],
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
+        },
+    };
+    let source = PluginSourceMetadata {
+        source_kind: PluginSourceKind::TestFixture,
+        source_identity: package_id.to_owned(),
+        source_digest: None,
+    };
+    let cancellation_port = host_port("host.plugin.cancel");
+    let task_port = host_port("host.plugin.tasks");
+    let identity = PluginIdentityDescriptor {
+        package: package.clone(),
+        mount_id: AgentModuleId::from(mount_id),
+    };
+    let metadata = PluginRegistrationMetadata {
+        manifest: ArtifactEnvelope::new(manifest).unwrap(),
+        mount_id: identity.mount_id.clone(),
+        source: source.clone(),
+        boot_state: PluginBootState {
+            criticality: PluginBootCriticality::Required,
+            desired_state: PluginDesiredState::Enabled,
+            effective_state: PluginEffectiveState::Active,
+            diagnostic_code: None,
+        },
+        registrar: PluginRegistrarDescriptor {
+            identity: identity.clone(),
+            allowed_operations: BTreeSet::from([
+                PluginRegistrarOperation::ContributeCapability,
+                PluginRegistrarOperation::ContributeSkill,
+                PluginRegistrarOperation::ContributeMcpToolMapping,
+                PluginRegistrarOperation::BindHostPort,
+            ]),
+            declared_capability_ids: BTreeSet::from([capability_ref.id.clone()]),
+            declared_skill_ids: BTreeSet::from([SkillId::from(skill_id)]),
+            declared_mcp_tool_keys: BTreeSet::from([McpToolKey::from(format!(
+                "{server_id}.echo"
+            ))]),
+            declared_role_ids: BTreeSet::new(),
+            declared_service_keys: BTreeSet::new(),
+            declared_host_ports: BTreeSet::from([
+                cancellation_port.id.clone(),
+                task_port.id.clone(),
+            ]),
+        },
+        context: PluginContextDescriptor {
+            identity,
+            source,
+            validated_config: ValidatedPluginConfig {
+                schema_digest: digest_payload(&config_schema).unwrap(),
+                config_revision: 1,
+                value: StrictJsonValue(json!({"prefix": prefix})),
+            },
+            state: PluginStateHandleDescriptor {
+                package_id: package.id,
+                mount_id: AgentModuleId::from(mount_id),
+                methods: PluginStateMethod::REQUIRED.into_iter().collect(),
+            },
+            declared_services: DeclaredServiceViewDescriptor::default(),
+            host_ports: Vec::new(),
+            typed_command_ports: Vec::new(),
+            domain_outbox_ports: Vec::new(),
+            cancellation: CancellationDescriptor {
+                cancellation_port,
+                scope_key: ScopeKey::from(format!("mount:{mount_id}")),
+            },
+            managed_task_registration: ManagedTaskRegistrationDescriptor {
+                registrar_port: task_port,
+                scope_key: ScopeKey::from(format!("mount:{mount_id}")),
+            },
+        },
+    };
+    let mut registration = PluginRegistration::new(metadata);
+    registration
+        .add_capability_handler(
+            capability_ref.id,
+            Arc::new(EchoHandler {
+                prefix: prefix.to_owned(),
+            }),
+        )
+        .unwrap();
+    registration
+}
+
+fn sample_registration(prefix: &str) -> PluginRegistration {
+    registration_for(
+        SAMPLE_PACKAGE,
+        SAMPLE_MOUNT,
+        SAMPLE_CAPABILITY,
+        SAMPLE_SKILL,
+        "sample.echo.server",
+        prefix,
+    )
+}
+
+fn managed_sample_registration(prefix: &str) -> PluginRegistration {
+    let mut registration = sample_registration(prefix);
+    registration.metadata.source = PluginSourceMetadata {
+        source_kind: PluginSourceKind::ManagedLocal,
+        source_identity: SAMPLE_MOUNT.to_owned(),
+        source_digest: Some(DigestHex::from("a".repeat(64))),
+    };
+    registration
+}
+
+fn managed_policy() -> MaterializationPolicy {
+    MaterializationPolicy {
+        host_contract_version: VersionString::from(VERSION),
+        available_runtime_features: BTreeSet::new(),
+        allowed_sources: BTreeSet::from([PluginSourceKind::ManagedLocal]),
+    }
+}
+
+struct EchoHandler {
+    prefix: String,
+}
+
+#[async_trait]
+impl CapabilityHandler for EchoHandler {
+    async fn invoke(
+        &self,
+        context: CapabilityInvocationContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        if context.agent_session_id.as_ref() != SAMPLE_AGENT_SESSION_ID
+            || context.operation_id.as_ref() != SAMPLE_OPERATION_ID
+            || context.idempotency_key.as_ref() != SAMPLE_IDEMPOTENCY_KEY
+            || context.correlation_id.as_ref() != SAMPLE_CORRELATION_ID
+        {
+            return Err(KernelError::CapabilityExecution {
+                reason: "sample.echo received unexpected invocation identity".to_owned(),
+            });
+        }
+        if context.action_id.as_ref() != SAMPLE_ACTION {
+            return Err(KernelError::ActionNotDeclared {
+                capability_id: context.capability_id,
+                action_id: context.action_id,
+            });
+        }
+        let mcp_lock = context.mcp_tool_lock.as_ref().ok_or_else(|| {
+            KernelError::CapabilityExecution {
+                reason: "sample.echo MCP mapping was not frozen into the invocation context"
+                    .to_owned(),
+            }
+        })?;
+        if mcp_lock.server_id.as_ref() != SAMPLE_SERVER
+            || mcp_lock.canonical_tool_key.as_ref() != format!("{SAMPLE_SERVER}.echo")
+            || mcp_lock.capability_id.as_ref() != SAMPLE_CAPABILITY
+            || mcp_lock.materialization_revision != 1
+        {
+            return Err(KernelError::CapabilityExecution {
+                reason: "sample.echo received a drifted MCP mapping lock".to_owned(),
+            });
+        }
+        let object = input
+            .0
+            .as_object()
+            .ok_or_else(|| KernelError::CapabilityExecution {
+                reason: "sample.echo input must be an object".to_owned(),
+            })?;
+        if object.len() != 1 {
+            return Err(KernelError::CapabilityExecution {
+                reason: "sample.echo input accepts only `message`".to_owned(),
+            });
+        }
+        let message = object
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| KernelError::CapabilityExecution {
+                reason: "sample.echo requires string `message`".to_owned(),
+            })?;
+        let state_key = nomifun_agent_contracts::StateKey::from("invoke-count");
+        let format_version = VersionString::from(VERSION);
+        for _ in 0..8 {
+            let current = context
+                .state
+                .get(&context.state_scope_key, &state_key)
+                .await
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })?;
+            let expected_revision =
+                current.as_ref().map(|entry| entry.revision).unwrap_or(0);
+            let count = current
+                .as_ref()
+                .and_then(|entry| entry.value.0.as_u64())
+                .unwrap_or(0)
+                + 1;
+            match context
+                .state
+                .compare_and_swap(
+                    &context.state_scope_key,
+                    &state_key,
+                    expected_revision,
+                    &format_version,
+                    Some(StrictJsonValue(json!(count))),
+                )
+                .await
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })?
+            {
+                PluginStateCompareAndSwapOutcome::Applied { .. } => {
+                    return Ok(StrictJsonValue(json!({
+                        "echo": format!("{}{}", self.prefix, message),
+                        "count": count
+                    })));
+                }
+                PluginStateCompareAndSwapOutcome::Conflict { .. } => continue,
+            }
+        }
+        Err(KernelError::CapabilityExecution {
+            reason: "sample.echo state remained contended".to_owned(),
+        })
+    }
+}
+
+const SAMPLE_ROLE_TOOL: &str = "sample.echo.role_tool";
+const SAMPLE_ROLE_CONTEXT: &str = "sample.echo.role_context";
+const SAMPLE_ROLE_RESOURCE: &str = "sample.echo.role_resource";
+const SAMPLE_ROLE_ACTION: &str = "sample.echo.role_tool.invoke";
+const SAMPLE_ROLE_RESOURCE_KIND: &str = "sample.echo.role_target";
+const SAMPLE_ROLE_BINDING: &str = "sample-echo-role-target";
+
+fn role_schema_ref(
+    capability_id: &str,
+    suffix: &str,
+    schema: &serde_json::Value,
+) -> CanonicalSchemaRef {
+    CanonicalSchemaRef::from(format!(
+        "schema://{capability_id}/{suffix}@1#{}",
+        digest_payload(schema).expect("role schema digest").as_ref()
+    ))
+}
+
+fn role_capability(
+    package: &PackageRef,
+    capability_id: &str,
+    kind: CapabilityKind,
+) -> CapabilityManifest {
+    let config_schema = StrictJsonValue(json!({
+        "type": "object",
+        "additionalProperties": false
+    }));
+    let resource_kind = ResourceKind::from(SAMPLE_ROLE_RESOURCE_KIND);
+    let action_input_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "value": {"type": "string"}
+        }
+    });
+    let action_output_schema = json!({
+        "type": "object",
+        "additionalProperties": false
+    });
+    let context_schema = json!({
+        "type": "object",
+        "additionalProperties": false
+    });
+    let actions = (kind == CapabilityKind::Tool)
+        .then(|| CapabilityActionDescriptor {
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            input_schema: role_schema_ref(
+                capability_id,
+                "input",
+                &action_input_schema,
+            ),
+            output_schema: role_schema_ref(
+                capability_id,
+                "output",
+                &action_output_schema,
+            ),
+            effect_class: EffectClass::ExternalTransmit,
+            presentation: ToolPresentationKind::FunctionTool,
+        })
+        .into_iter()
+        .collect();
+    let context_schema_refs = (kind == CapabilityKind::ContextContributor)
+        .then(|| role_schema_ref(capability_id, "context", &context_schema))
+        .into_iter()
+        .collect();
+    CapabilityManifest {
+        id: CapabilityId::from(capability_id),
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{capability_id}"
+        )),
+        kind,
+        package: package.clone(),
+        display: display("Sample Role Member", "Kernel operation admission fixture."),
+        requires: Vec::new(),
+        conflicts: Vec::new(),
+        supported_surfaces: capability_module_surface_declarations(
+            ["test"],
+            [CapabilityConsumer::Agent],
+            if kind == CapabilityKind::ResourceProvider {
+                CapabilityAuthoringPolicy::DependencyOnly
+            } else {
+                CapabilityAuthoringPolicy::Direct
+            },
+        ),
+        requires_runtime_features: Vec::new(),
+        supported_platforms: vec![PlatformConstraint::Any],
+        config_schema,
+        contributions: CapabilityContributions {
+            actions,
+            context_schema_refs,
+            context_phase: Default::default(),
+            ui_slot: None,
+            event_schema_refs: Vec::new(),
+            resource_kinds: BTreeSet::from([resource_kind]),
+            host_ports: Vec::new(),
+        },
+    }
+}
+
+fn operation_role_registration(
+    captured_tool: Arc<Mutex<Option<RoleToolInvocationContext>>>,
+    releases: Arc<AtomicUsize>,
+) -> PluginRegistration {
+    let mut registration = sample_registration("");
+    let package = package_ref(SAMPLE_PACKAGE);
+    let tool = role_capability(
+        &package,
+        SAMPLE_ROLE_TOOL,
+        CapabilityKind::Tool,
+    );
+    let context = role_capability(
+        &package,
+        SAMPLE_ROLE_CONTEXT,
+        CapabilityKind::ContextContributor,
+    );
+    let resource = role_capability(
+        &package,
+        SAMPLE_ROLE_RESOURCE,
+        CapabilityKind::ResourceProvider,
+    );
+    let role_key = RoleContractKey {
+        role_id: ExecutionRoleId::from(SAMPLE_ROLE),
+        contract_version: VersionString::from(VERSION),
+    };
+    let members = vec![
+        RoleMemberContract {
+            capability: CapabilityRef {
+                id: tool.id.clone(),
+            },
+            capability_manifest_digest: digest_payload(&tool).unwrap(),
+            requirement: RoleMemberRequirement::Required,
+        },
+        RoleMemberContract {
+            capability: CapabilityRef {
+                id: context.id.clone(),
+            },
+            capability_manifest_digest: digest_payload(&context).unwrap(),
+            requirement: RoleMemberRequirement::Optional,
+        },
+        RoleMemberContract {
+            capability: CapabilityRef {
+                id: resource.id.clone(),
+            },
+            capability_manifest_digest: digest_payload(&resource).unwrap(),
+            requirement: RoleMemberRequirement::Optional,
+        },
+    ];
+    let contract = RoleContractManifest {
+        key: role_key.clone(),
+        members,
+        serialized_target_resource_kind: Some(ResourceKind::from(
+            SAMPLE_ROLE_RESOURCE_KIND,
+        )),
+    };
+    let role = ExactRoleContractRef {
+        key: role_key,
+        contract_digest: digest_payload(&contract).unwrap(),
+    };
+    let required_resource_kinds =
+        BTreeSet::from([ResourceKind::from(SAMPLE_ROLE_RESOURCE_KIND)]);
+    let provider = RoleProviderContribution {
+        role,
+        display: display("Sample Role Provider", "Operation admission fixture."),
+        members: BTreeMap::from([
+            (
+                tool.id.clone(),
+                RoleProviderMemberContribution {
+                    implementation: None,
+                    supported_platforms: vec![PlatformConstraint::Any],
+                    required_resource_kinds: required_resource_kinds.clone(),
+                },
+            ),
+            (
+                context.id.clone(),
+                RoleProviderMemberContribution {
+                    implementation: None,
+                    supported_platforms: vec![PlatformConstraint::Any],
+                    required_resource_kinds: required_resource_kinds.clone(),
+                },
+            ),
+            (
+                resource.id.clone(),
+                RoleProviderMemberContribution {
+                    implementation: None,
+                    supported_platforms: vec![PlatformConstraint::Any],
+                    required_resource_kinds,
+                },
+            ),
+        ]),
+    };
+    {
+        let manifest = &mut registration.metadata.manifest.payload;
+        manifest
+            .contributions
+            .capabilities
+            .extend([tool, context, resource]);
+        manifest.contributions.role_contracts.push(contract);
+        manifest.contributions.role_providers.push(provider);
+    }
+    registration
+        .add_role_action_handler(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_TOOL),
+            Arc::new(SampleRoleAgentHandler),
+        )
+        .unwrap();
+    registration
+        .add_role_tool_handler(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_TOOL),
+            Arc::new(SampleRoleOperationToolHandler {
+                captured: captured_tool,
+            }),
+        )
+        .unwrap();
+    registration
+        .add_role_context_factory(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_CONTEXT),
+            Arc::new(SampleRoleContextFactory),
+        )
+        .unwrap();
+    registration
+        .add_role_resource_factory(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_RESOURCE),
+            Arc::new(SampleRoleResourceFactory { releases }),
+        )
+        .unwrap();
+    refresh_manifest(&mut registration);
+    registration
+}
+
+struct SampleRoleAgentHandler;
+
+#[async_trait]
+impl CapabilityHandler for SampleRoleAgentHandler {
+    async fn invoke(
+        &self,
+        _context: CapabilityInvocationContext,
+        _input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        Ok(StrictJsonValue(json!({"agent_path": true})))
+    }
+}
+
+struct SampleRoleOperationToolHandler {
+    captured: Arc<Mutex<Option<RoleToolInvocationContext>>>,
+}
+
+#[async_trait]
+impl RoleToolHandler for SampleRoleOperationToolHandler {
+    async fn invoke(
+        &self,
+        context: RoleToolInvocationContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        *self.captured.lock().expect("operation tool capture") =
+            Some(context.clone());
+        Ok(StrictJsonValue(json!({
+            "operation_path": true,
+            "input": input.0
+        })))
+    }
+}
+
+struct SampleRoleContextFactory;
+
+#[async_trait]
+impl ContextContributionFactory for SampleRoleContextFactory {
+    async fn contribute(
+        &self,
+        request: ContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Ok(ContextContributionResult {
+            value: Some(StrictJsonValue(json!({
+                "operation_path": request.context.agent_session_id.is_none()
+                    && request.context.resolved_snapshot_ref.is_none(),
+                "mount_id": request.context.mount.identity.mount_id,
+            }))),
+        })
+    }
+}
+
+#[async_trait]
+impl CapabilityContextContributionFactory for SampleRoleContextFactory {
+    async fn contribute(
+        &self,
+        request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Ok(ContextContributionResult {
+            value: Some(StrictJsonValue(json!({
+                "module_context": request.schema_ref.as_ref(),
+            }))),
+        })
+    }
+}
+
+struct SampleRoleResourceFactory {
+    releases: Arc<AtomicUsize>,
+}
+
+struct SampleRoleResourceHandle {
+    identity: ResourceHandleIdentity,
+    releases: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ResourceHandle for SampleRoleResourceHandle {
+    fn identity(&self) -> &ResourceHandleIdentity {
+        &self.identity
+    }
+
+    async fn release(&self) -> Result<(), KernelError> {
+        self.releases.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ResourceProviderFactory for SampleRoleResourceFactory {
+    async fn acquire(
+        &self,
+        request: ResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        let binding = request
+            .context
+            .resource_bindings
+            .first()
+            .ok_or_else(|| KernelError::ResourceBindingMissing {
+                binding_id: ResourceBindingId::from(SAMPLE_ROLE_BINDING),
+            })?;
+        Ok(ResourceProviderResult {
+            handle: Arc::new(SampleRoleResourceHandle {
+                identity: ResourceHandleIdentity {
+                    binding_id: binding.binding_id.clone(),
+                    resource_kind: binding.resource_kind.clone(),
+                    resource_id: binding.resource_id.clone(),
+                },
+                releases: Arc::clone(&self.releases),
+            }),
+        })
+    }
+}
+
+fn principal(id: &str) -> PrincipalRef {
+    PrincipalRef {
+        principal_kind: "user".to_owned(),
+        principal_id: id.to_owned(),
+    }
+}
+
+fn resource_binding(owner_id: &str) -> TypedResourceBinding {
+    TypedResourceBinding {
+        binding_id: ResourceBindingId::from("sample-echo-target"),
+        resource_kind: ResourceKind::from(SAMPLE_RESOURCE_KIND),
+        resource_id: ResourceId::from("echo-target-1"),
+        owner_id: owner_id.to_owned(),
+        operations: BTreeSet::from(["invoke".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }
+}
+
+fn role_resource_binding(owner_id: &str) -> TypedResourceBinding {
+    TypedResourceBinding {
+        binding_id: ResourceBindingId::from(SAMPLE_ROLE_BINDING),
+        resource_kind: ResourceKind::from(SAMPLE_ROLE_RESOURCE_KIND),
+        resource_id: ResourceId::from("role-target-1"),
+        owner_id: owner_id.to_owned(),
+        operations: BTreeSet::from(["invoke".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }
+}
+
+fn role_operation_lock(
+    materialized: &crate::MaterializedRegistry,
+    _binding_id: ResourceBindingId,
+) -> ResolvedRoleProviderLock {
+    let provider = materialized
+        .role_provider(
+            &ExecutionRoleId::from(SAMPLE_ROLE),
+            &AgentModuleId::from(SAMPLE_MOUNT),
+        )
+        .expect("sample role provider");
+    ResolvedRoleProviderLock {
+        provider: provider.provider.clone(),
+        source: provider.source.clone(),
+        supported_members: provider.contribution.members.keys().cloned().collect(),
+    }
+}
+
+fn role_operation_request(
+    materialized: &crate::MaterializedRegistry,
+    owner: PrincipalRef,
+    capability_id: &str,
+    binding: TypedResourceBinding,
+) -> RoleMemberInvocationRequest {
+    let binding_id = binding.binding_id.clone();
+    RoleMemberInvocationRequest {
+        principal: owner.clone(),
+        session_owner: owner,
+        turn_id: None,
+        operation_id: OperationId::from(format!("operation:{capability_id}")),
+        correlation_id: CorrelationId::from(format!("correlation:{capability_id}")),
+        capability_id: CapabilityId::from(capability_id),
+        resource_binding_ids: BTreeSet::from([binding_id.clone()]),
+        state_scope_key: ScopeKey::from("operation:sample-role"),
+        admission: RoleMemberAdmission::Operation {
+            provider_lock: role_operation_lock(materialized, binding_id),
+            registry_generation: materialized.generation,
+            registry_digest: materialized.registry_digest.clone(),
+            resource_bindings: vec![binding],
+        },
+    }
+}
+
+fn sample_revision(owner_id: &str) -> AgentPresetRevision {
+    let payload = AgentPresetRevisionPayload {
+        context_order: Vec::new(),
+        middleware_order: Vec::new(),
+        schema_version: VersionString::from(VERSION),
+        model_route_refs: BTreeMap::new(),
+        chat_route_records: BTreeMap::new(),
+        enabled_capabilities: vec![nomifun_agent_contracts::CapabilitySelection {
+            capability: CapabilityRef {
+                id: CapabilityId::from(SAMPLE_CAPABILITY),
+            },
+            action_allowlist: BTreeSet::from([ActionId::from(SAMPLE_ACTION)]),
+        }],
+        skill_bindings: vec![nomifun_agent_contracts::AgentSkillBinding::package(SkillRef {
+            id: SkillId::from(SAMPLE_SKILL),
+            version: VersionString::from(VERSION),
+        })],
+        system_role_provider_overrides: BTreeMap::new(),
+        persona: "Echo fixture".to_owned(),
+        instructions: "Use the selected echo capability.".to_owned(),
+        starter_prompts: Vec::new(),
+        runtime_policy: Default::default(),
+    };
+    let contribution_locks = Vec::new();
+    let mut revision = AgentPresetRevision {
+        reference: PresetRevisionRef {
+            preset_id: AgentPresetId::from("sample.echo.preset"),
+            revision: 1,
+            revision_digest: DigestHex::from(""),
+        },
+        payload,
+        contribution_locks,
+        created_by: UserId::from(owner_id),
+        created_at_ms: 1,
+        reason: Some("sample fixture".to_owned()),
+    };
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    revision
+}
+
+fn compiler_environment(target_digest: DigestHex) -> CompilerEnvironment {
+    CompilerEnvironment {
+        resolver_version: VersionString::from(VERSION),
+        required_runtime_protocol_version: VersionString::from(VERSION),
+        required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+        runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
+        available_runtime_features: BTreeSet::new(),
+        installation_role_bindings: BTreeMap::new(),
+        canonical_schema_manifest_digest: DigestHex::from("schema-manifest"),
+        target_contribution_manifest_digest: target_digest,
+        host_target: RuntimeTarget::from("windows-desktop-x64"),
+        host_surface: "desktop".to_owned(),
+        availability_evidence_revision: "sample-fixture".to_owned(),
+    }
+}
+
+fn compile_request(revision: AgentPresetRevision, owner: PrincipalRef) -> CompileRequest {
+    CompileRequest {
+        revision,
+        principal: owner,
+        scene: "sample".to_owned(),
+        surface: "test".to_owned(),
+        audience: "test".to_owned(),
+        created_at_ms: 2,
+        resolver_run_id: OperationId::from("resolve-sample"),
+    }
+}
+
+fn invocation(
+    snapshot: &crate::CompiledSnapshot,
+    owner: PrincipalRef,
+    active_generation: u64,
+    message: &str,
+) -> CapabilityInvocationRequest {
+    CapabilityInvocationRequest {
+        principal: owner.clone(),
+        session_owner: owner,
+        agent_session_id: AgentSessionId::from(SAMPLE_AGENT_SESSION_ID),
+        turn_id: OperationId::from("sample-turn"),
+        operation_id: OperationId::from(SAMPLE_OPERATION_ID),
+        idempotency_key: IdempotencyKey::from(SAMPLE_IDEMPOTENCY_KEY),
+        correlation_id: CorrelationId::from(SAMPLE_CORRELATION_ID),
+        resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+        active_set_generation: active_generation,
+        capability_id: CapabilityId::from(SAMPLE_CAPABILITY),
+        action_id: ActionId::from(SAMPLE_ACTION),
+        resource_binding_ids: BTreeSet::from([ResourceBindingId::from(
+            "sample-echo-target",
+        )]),
+        state_scope_key: ScopeKey::from("session:sample-1"),
+        input: StrictJsonValue(json!({"message": message})),
+    }
+}
+
+fn refresh_manifest(registration: &mut PluginRegistration) {
+    let manifest = registration.metadata.manifest.payload.clone();
+    registration.metadata.manifest = ArtifactEnvelope::new(manifest).unwrap();
+}
+
+trait TestEchoService: Send + Sync {
+    fn echo(&self, value: &str) -> String;
+}
+
+struct TestEchoServiceImpl;
+
+impl TestEchoService for TestEchoServiceImpl {
+    fn echo(&self, value: &str) -> String {
+        format!("service:{value}")
+    }
+}
+
+fn add_service_provider<T>(
+    registration: &mut PluginRegistration,
+    key: &ServiceKey<T>,
+    service: Arc<T>,
+) where
+    T: ?Sized + Send + Sync + 'static,
+{
+    registration
+        .metadata
+        .manifest
+        .payload
+        .provides_services
+        .push(ServiceProvision {
+            service: key.reference().clone(),
+        });
+    registration
+        .metadata
+        .registrar
+        .allowed_operations
+        .insert(PluginRegistrarOperation::ProvideService);
+    registration
+        .metadata
+        .registrar
+        .declared_service_keys
+        .insert(key.reference().id.clone());
+    registration
+        .metadata
+        .context
+        .declared_services
+        .provided_services
+        .push(key.reference().clone());
+    registration.provide_service(key, service).unwrap();
+    refresh_manifest(registration);
+}
+
+fn add_service_requirement(
+    registration: &mut PluginRegistration,
+    service: ServiceKeyRef,
+    provider_package: PackageRef,
+    provider_mount_id: AgentModuleId,
+) {
+    registration
+        .metadata
+        .manifest
+        .payload
+        .requires_services
+        .push(ServiceRequirement {
+            service: service.clone(),
+        });
+    registration
+        .metadata
+        .context
+        .declared_services
+        .required_service_handles
+        .push(ServiceHandleDescriptor {
+            service,
+            provider_package,
+            provider_mount_id,
+        });
+    refresh_manifest(registration);
+}
+
+#[tokio::test]
+async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_restart_chain() {
+    let persistence = Arc::new(InMemoryPluginStatePersistence::new());
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::clone(&persistence) as Arc<dyn PluginStatePersistence>,
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![sample_registration("prefix:")])
+        .unwrap();
+    assert!(materialized.packages.contains_key(&PackageId::from(SAMPLE_PACKAGE)));
+    assert!(materialized
+        .capabilities
+        .contains_key(&CapabilityId::from(SAMPLE_CAPABILITY)));
+    assert!(materialized.skills.contains_key(&SkillId::from(SAMPLE_SKILL)));
+    assert!(materialized
+        .mcp_for_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .is_some());
+    let exact_capability = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .expect("materialized sample capability");
+    assert_eq!(
+        exact_capability.contribution_id,
+        exact_capability.manifest.contribution_id
+    );
+    assert_eq!(
+        exact_capability.contribution_lock.contract_digest,
+        exact_capability.schema_digest
+    );
+    assert_eq!(
+        exact_capability.target_artifact_digest,
+        materialized
+            .package(&PackageId::from(SAMPLE_PACKAGE))
+            .unwrap()
+            .manifest_digest
+    );
+
+    let owner = principal("user-a");
+    let revision = sample_revision(&owner.principal_id);
+    let compiled = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision.clone(), owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let replayed = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision, owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    assert_eq!(
+        compiled.snapshot_ref().snapshot_digest,
+        replayed.snapshot_ref().snapshot_digest
+    );
+    assert_eq!(compiled.content().skill_locks.len(), 1);
+    assert_eq!(compiled.content().mcp_tool_locks.len(), 1);
+
+    let active = SessionCapabilityState::new(&compiled);
+    let mut inactive = active.snapshot().unwrap();
+    inactive.active.clear();
+    assert!(matches!(
+        registry
+            .invoke(
+                &compiled,
+                &inactive,
+                invocation(&compiled, owner.clone(), 0, "hello"),
+            )
+            .await,
+        Err(KernelError::CapabilityNotActive { .. })
+    ));
+    let active_snapshot = active.snapshot().unwrap();
+    let first = registry
+        .invoke(
+            &compiled,
+            &active_snapshot,
+            invocation(&compiled, owner.clone(), 0, "hello"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.0, json!({"echo": "prefix:hello", "count": 1}));
+
+    let restarted = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::clone(&persistence) as Arc<dyn PluginStatePersistence>,
+    )
+    .unwrap();
+    let restarted_materialized = restarted
+        .replace_all(vec![sample_registration("prefix:")])
+        .unwrap();
+    let restarted_compiled = AgentPresetCompiler::compile(
+        &restarted_materialized,
+        &compiler_environment(restarted_materialized.registry_digest.clone()),
+        compile_request(sample_revision(&owner.principal_id), owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let restarted_active = SessionCapabilityState::new(&restarted_compiled);
+    let second = restarted
+        .invoke(
+            &restarted_compiled,
+            &restarted_active.snapshot().unwrap(),
+            invocation(&restarted_compiled, owner, 0, "again"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.0, json!({"echo": "prefix:again", "count": 2}));
+}
+
+#[test]
+fn managed_skill_and_mcp_backed_capability_keep_exact_provenance() {
+    let registry = KernelRegistry::new(
+        managed_policy(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![managed_sample_registration("managed:")])
+        .unwrap();
+    let artifact_digest = DigestHex::from("a".repeat(64));
+    let mount_id = AgentModuleId::from(SAMPLE_MOUNT);
+    let binding_id = McpBindingId::from(format!(
+        "{SAMPLE_SERVER}:{SAMPLE_SERVER}.echo"
+    ));
+
+    let capability = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap();
+    assert_eq!(
+        capability.contribution_lock.source_kind,
+        ContributionSourceKind::McpBinding
+    );
+    assert_eq!(
+        capability.contribution_lock.mount_id.as_ref(),
+        Some(&mount_id)
+    );
+    assert_eq!(
+        capability.contribution_lock.mcp_binding_id.as_ref(),
+        Some(&binding_id)
+    );
+    assert_eq!(capability.target_artifact_digest, artifact_digest);
+
+    let skill = materialized.skill(&SkillId::from(SAMPLE_SKILL)).unwrap();
+    assert_eq!(
+        skill.contribution_lock.source_kind,
+        ContributionSourceKind::AgentModule
+    );
+    assert_eq!(skill.contribution_lock.mount_id.as_ref(), Some(&mount_id));
+    assert_eq!(
+        skill.contribution_lock.source_identity.as_ref(),
+        SAMPLE_MOUNT
+    );
+    assert_eq!(
+        skill.contract_digest,
+        digest_payload(&skill.definition).unwrap()
+    );
+    assert_eq!(
+        skill.contribution_lock.contract_digest,
+        skill.contract_digest
+    );
+    assert_eq!(skill.target_artifact_digest, artifact_digest);
+
+    let mcp = materialized
+        .mcp_for_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap();
+    assert_eq!(mcp.binding_id, binding_id);
+    assert_eq!(mcp.contribution_lock, capability.contribution_lock);
+    assert_eq!(mcp.mount_id, mount_id);
+    assert_eq!(mcp.target_artifact_digest, artifact_digest);
+    assert_eq!(mcp.mapping.package, capability.manifest.package);
+}
+
+#[test]
+fn middleware_order_does_not_make_dependency_only_middleware_authorable() {
+    for (kind, policy, expected_not_authorable) in [
+        (
+            CapabilityKind::TurnMiddleware,
+            CapabilityAuthoringPolicy::DependencyOnly,
+            true,
+        ),
+        (
+            CapabilityKind::Tool,
+            CapabilityAuthoringPolicy::Direct,
+            false,
+        ),
+    ] {
+        let mut registration = sample_registration("middleware:");
+        let manifest = &mut registration.metadata.manifest.payload.contributions.capabilities[0];
+        manifest.kind = kind;
+        manifest.supported_surfaces = capability_module_surface_declarations(
+            ["test"],
+            [CapabilityConsumer::Agent],
+            policy,
+        );
+        refresh_manifest(&mut registration);
+        let registry = KernelRegistry::new(
+            MaterializationPolicy::stable_with_test_fixtures(VERSION),
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        ).unwrap();
+        let materialized = registry.replace_all(vec![registration]).unwrap();
+        let mut revision = sample_revision("middleware-owner");
+        revision.payload.middleware_order = vec![SAMPLE_CAPABILITY.into()];
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let result = AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision, principal("middleware-owner")),
+        );
+        if expected_not_authorable {
+            assert!(matches!(result, Err(KernelError::CapabilityNotAuthorable { .. })));
+        } else {
+            assert!(matches!(result, Err(KernelError::InvalidPresetRevision { reason })
+                if reason.contains("must freeze a supported Agent middleware Action contribution")));
+        }
+    }
+}
+
+#[test]
+fn managed_skill_revision_lock_fails_closed_on_mount_drift() {
+    let registry = KernelRegistry::new(
+        managed_policy(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![managed_sample_registration("managed:")])
+        .unwrap();
+    let capability = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap();
+    let skill = materialized.skill(&SkillId::from(SAMPLE_SKILL)).unwrap();
+    let mut revision = sample_revision("managed-owner");
+    revision.contribution_locks = vec![
+        capability.contribution_lock.clone(),
+        skill.contribution_lock.clone(),
+    ];
+    revision.contribution_locks.sort();
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+
+    AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision.clone(), principal("managed-owner")),
+    )
+    .unwrap();
+
+    let skill_lock = revision
+        .contribution_locks
+        .iter_mut()
+        .find(|lock| lock.contribution_id == skill.contribution_id)
+        .unwrap();
+    skill_lock.mount_id = Some(AgentModuleId::from("different-mount"));
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision, principal("managed-owner")),
+        ),
+        Err(KernelError::SkillProvenanceDrift { .. })
+    ));
+}
+
+#[tokio::test]
+async fn frozen_snapshot_survives_unrelated_registry_publication() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+    let owner = principal("unrelated-publication-owner");
+    let compiled = AgentPresetCompiler::compile(
+        &first,
+        &compiler_environment(first.registry_digest.clone()),
+        compile_request(
+            sample_revision(&owner.principal_id),
+            owner.clone(),
+        ),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let active = SessionCapabilityState::new(&compiled);
+
+    registry
+        .replace_all(vec![
+            sample_registration("stable:"),
+            registration_for(
+                "sample.unrelated",
+                "sample-unrelated",
+                "sample.unrelated.run",
+                "sample.unrelated-guidance",
+                "sample.unrelated.server",
+                "unrelated:",
+            ),
+        ])
+        .unwrap();
+
+    let result = registry
+        .invoke(
+            &compiled,
+            &active.snapshot().unwrap(),
+            invocation(&compiled, owner, 0, "still-valid"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.0,
+        json!({"echo": "stable:still-valid", "count": 1})
+    );
+}
+
+#[tokio::test]
+async fn invoke_rejects_exact_mount_and_artifact_drift_without_fallback() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+    let owner = principal("target-drift-owner");
+    let compiled = AgentPresetCompiler::compile(
+        &first,
+        &compiler_environment(first.registry_digest.clone()),
+        compile_request(
+            sample_revision(&owner.principal_id),
+            owner.clone(),
+        ),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let active = SessionCapabilityState::new(&compiled);
+    let active = active.snapshot().unwrap();
+
+    registry
+        .replace_all(vec![registration_for(
+            SAMPLE_PACKAGE,
+            "sample-echo-remounted",
+            SAMPLE_CAPABILITY,
+            SAMPLE_SKILL,
+            "sample.echo.server",
+            "remounted:",
+        )])
+        .unwrap();
+    assert!(matches!(
+        registry
+            .invoke(
+                &compiled,
+                &active,
+                invocation(&compiled, owner.clone(), 0, "mount-drift"),
+            )
+            .await,
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
+
+    let mut changed_artifact = sample_registration("changed:");
+    changed_artifact
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools[0]
+        .schema_digest = DigestHex::from("c".repeat(64));
+    refresh_manifest(&mut changed_artifact);
+    registry.replace_all(vec![changed_artifact]).unwrap();
+    assert!(matches!(
+        registry
+            .invoke(
+                &compiled,
+                &active,
+                invocation(&compiled, owner, 0, "artifact-drift"),
+            )
+            .await,
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
+}
+
+#[tokio::test]
+async fn invoke_rejects_frozen_contribution_identity_drift() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+    let owner = principal("contribution-drift-owner");
+    let mut compiled = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(
+            sample_revision(&owner.principal_id),
+            owner.clone(),
+        ),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let resolved = compiled
+        .envelope
+        .content
+        .enabled_capabilities
+        .first_mut()
+        .expect("sample enabled capability");
+    resolved.contribution_id =
+        nomifun_agent_contracts::ContributionId::from("capability:drifted");
+    resolved.contribution_lock.contribution_id =
+        resolved.contribution_id.clone();
+    compiled.envelope.snapshot_ref.snapshot_digest =
+        digest_payload(&compiled.envelope.content).unwrap();
+    let active = SessionCapabilityState::new(&compiled);
+
+    assert!(matches!(
+        registry
+            .invoke(
+                &compiled,
+                &active.snapshot().unwrap(),
+                invocation(&compiled, owner, 0, "contribution-drift"),
+            )
+            .await,
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
+}
+
+#[test]
+fn compiler_rejects_revision_contribution_lock_drift() {
+    let mut registration = sample_registration("");
+    registration.metadata.source.source_kind = PluginSourceKind::Bundled;
+    registration.metadata.context.source.source_kind = PluginSourceKind::Bundled;
+    let materialized = Materializer::materialize(
+        &MaterializationPolicy::stable(VERSION),
+        &[registration],
+        1,
+    )
+    .unwrap();
+    let owner = principal("revision-lock-owner");
+    let mut revision = sample_revision(&owner.principal_id);
+    let capability_lock = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap()
+        .contribution_lock
+        .clone();
+    let skill_lock = materialized
+        .skill(&SkillId::from(SAMPLE_SKILL))
+        .unwrap()
+        .contribution_lock
+        .clone();
+    revision.contribution_locks =
+        vec![capability_lock.clone(), skill_lock];
+    revision.contribution_locks.sort();
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision.clone(), owner.clone()),
+    )
+    .expect("matching exact lock must compile");
+
+    revision
+        .contribution_locks
+        .iter_mut()
+        .find(|lock| {
+            lock.contribution_id == capability_lock.contribution_id
+        })
+        .unwrap()
+        .source_identity =
+        nomifun_agent_contracts::StableSourceIdentity::from("drifted-source");
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision, owner),
+        ),
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_dispatches_exact_tool_context_and_resource() {
+    let captured_tool = Arc::new(Mutex::new(None));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::clone(&captured_tool),
+            Arc::clone(&releases),
+        )])
+        .unwrap();
+    let owner = principal("operation-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+
+    let tool_request = RoleToolOperationRequest {
+        member: role_operation_request(
+            &materialized,
+            owner.clone(),
+            SAMPLE_ROLE_TOOL,
+            binding.clone(),
+        ),
+        action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+        idempotency_key: IdempotencyKey::from("operation-idempotency"),
+        input: StrictJsonValue(json!({"value": "hello"})),
+    };
+    let tool_result = registry.invoke_role_tool(tool_request).await.unwrap();
+    assert_eq!(
+        tool_result.0,
+        json!({
+            "operation_path": true,
+            "input": {"value": "hello"}
+        })
+    );
+    let captured = captured_tool
+        .lock()
+        .expect("operation tool capture")
+        .clone()
+        .expect("operation tool context");
+    assert!(captured.context.agent_session_id.is_none());
+    assert!(captured.context.resolved_snapshot_ref.is_none());
+    assert_eq!(
+        captured.context.mount.identity.mount_id,
+        AgentModuleId::from(SAMPLE_MOUNT)
+    );
+    assert_eq!(
+        captured.context.provider_lock,
+        role_operation_lock(&materialized, ResourceBindingId::from(SAMPLE_ROLE_BINDING))
+    );
+    assert_eq!(
+        captured.action_id,
+        ActionId::from(SAMPLE_ROLE_ACTION)
+    );
+
+    let context = registry
+        .contribute_role_context_operation(role_operation_request(
+            &materialized,
+            owner.clone(),
+            SAMPLE_ROLE_CONTEXT,
+            binding.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        context.value.expect("operation context").0,
+        json!({
+            "operation_path": true,
+            "mount_id": SAMPLE_MOUNT
+        })
+    );
+
+    let first_handle = registry
+        .acquire_role_resource_operation(role_operation_request(
+            &materialized,
+            owner,
+            SAMPLE_ROLE_RESOURCE,
+            binding,
+        ))
+        .await
+        .unwrap();
+    let replay_handle = registry
+        .acquire_role_resource_operation(role_operation_request(
+            &materialized,
+            principal("operation-owner"),
+            SAMPLE_ROLE_RESOURCE,
+            role_resource_binding("operation-owner"),
+        ))
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&first_handle.handle, &replay_handle.handle));
+    assert_eq!(releases.load(Ordering::Acquire), 0);
+    registry
+        .release_resources(&ScopeKey::from("operation:sample-role"))
+        .await
+        .unwrap();
+    assert_eq!(releases.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_rejects_provider_drift_without_fallback() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let owner = principal("provider-drift-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+    let mut request = role_operation_request(
+        &materialized,
+        owner,
+        SAMPLE_ROLE_TOOL,
+        binding,
+    );
+    if let RoleMemberAdmission::Operation { provider_lock, .. } =
+        &mut request.admission
+    {
+        provider_lock.provider.contribution_digest =
+            DigestHex::from("drifted-contribution");
+    }
+    let result = registry
+        .invoke_role_tool(RoleToolOperationRequest {
+            member: request,
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            idempotency_key: IdempotencyKey::from("provider-drift"),
+            input: StrictJsonValue(json!({"value": "drift"})),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(KernelError::RoleProviderUnavailable { .. })
+    ));
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_rejects_registry_drift() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let owner = principal("registry-drift-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+    let request = role_operation_request(
+        &first,
+        owner,
+        SAMPLE_ROLE_TOOL,
+        binding,
+    );
+    registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let result = registry
+        .invoke_role_tool(RoleToolOperationRequest {
+            member: request,
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            idempotency_key: IdempotencyKey::from("registry-drift"),
+            input: StrictJsonValue(json!({"value": "drift"})),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(KernelError::RegistryGenerationMismatch {
+            expected_generation: 1,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_rejects_resource_binding_mismatch() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let owner = principal("resource-mismatch-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+    let mut request = role_operation_request(
+        &materialized,
+        owner,
+        SAMPLE_ROLE_TOOL,
+        binding,
+    );
+    request.resource_binding_ids =
+        BTreeSet::from([ResourceBindingId::from("wrong-binding")]);
+    let result = registry
+        .invoke_role_tool(RoleToolOperationRequest {
+            member: request,
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            idempotency_key: IdempotencyKey::from("resource-mismatch"),
+            input: StrictJsonValue(json!({"value": "drift"})),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(KernelError::UnexpectedResourceBinding { .. })
+    ));
+}
+
+#[test]
+fn runtime_profile_cannot_inflate_capability_feature_requirements() {
+    let materialized = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap()
+    .replace_all(vec![sample_registration("")])
+    .unwrap();
+    let owner = principal("coding-owner");
+    let revision = sample_revision(&owner.principal_id);
+    let mut coding_environment = compiler_environment(materialized.registry_digest.clone());
+    coding_environment.required_runtime_profile = RuntimeProfileKind::CodingNative;
+    coding_environment.available_runtime_features = BTreeSet::from([
+        RuntimeFeatureId::from("code_mode"),
+        RuntimeFeatureId::from("turn.cancel"),
+    ]);
+    let coding = AgentPresetCompiler::compile(
+        &materialized,
+        &coding_environment,
+        compile_request(revision.clone(), owner.clone()),
+    )
+    .unwrap();
+    assert!(coding.content().required_runtime_features.is_empty());
+
+    let managed = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision, owner),
+    )
+    .unwrap();
+    assert!(managed.content().required_runtime_features.is_empty());
+    assert_ne!(
+        coding.content().compiled_runtime_profile_digest,
+        managed.content().compiled_runtime_profile_digest
+    );
+}
+
+#[tokio::test]
+async fn authority_rejects_wrong_principal_and_resource_without_invoking() {
+    let persistence = Arc::new(InMemoryPluginStatePersistence::new());
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        persistence,
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![sample_registration("")])
+        .unwrap();
+    let owner = principal("owner");
+    let compiled = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(sample_revision("owner"), owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let active = SessionCapabilityState::new(&compiled);
+    let active = active.snapshot().unwrap();
+
+    let mut wrong_principal = invocation(&compiled, principal("other"), 0, "x");
+    wrong_principal.session_owner = owner.clone();
+    assert!(matches!(
+        registry
+            .invoke(&compiled, &active, wrong_principal)
+            .await,
+        Err(KernelError::ResourceOwnerMismatch { .. })
+    ));
+
+    let mut wrong_resource = invocation(&compiled, owner, 0, "x");
+    wrong_resource.resource_binding_ids =
+        BTreeSet::from([ResourceBindingId::from("wrong")]);
+    assert!(matches!(
+        registry
+            .invoke(&compiled, &active, wrong_resource)
+            .await,
+        Err(KernelError::ResourceBindingMissing { .. })
+    ));
+}
+
+#[test]
+fn invalid_config_and_duplicate_capability_do_not_publish_partial_generation() {
+    let persistence = Arc::new(InMemoryPluginStatePersistence::new());
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        persistence,
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![sample_registration("ok:")])
+        .unwrap();
+
+    let mut bad_config = sample_registration("ok:");
+    bad_config.metadata.context.validated_config.value =
+        StrictJsonValue(json!({"prefix": "ok:", "unknown": true}));
+    assert!(matches!(
+        registry.replace_all(vec![bad_config]),
+        Err(KernelError::InvalidPluginConfig { .. })
+    ));
+    let after_bad_config = registry.snapshot().unwrap();
+    assert_eq!(after_bad_config.generation, first.generation);
+    assert_eq!(after_bad_config.registry_digest, first.registry_digest);
+
+    let duplicate = registration_for(
+        "sample.echo.other",
+        "sample-echo-other",
+        SAMPLE_CAPABILITY,
+        "sample.echo-other-guidance",
+        "sample.echo.other.server",
+        "other:",
+    );
+    assert!(matches!(
+        registry.replace_all(vec![sample_registration("ok:"), duplicate]),
+        Err(KernelError::DuplicateCapability { .. })
+    ));
+    assert_eq!(registry.snapshot().unwrap().generation, first.generation);
+
+    let mut duplicate_contribution = registration_for(
+        "sample.echo.contribution-other",
+        "sample-echo-contribution-other",
+        "sample.echo.contribution-other",
+        "sample.echo-contribution-guidance",
+        "sample.echo.contribution-other.server",
+        "other:",
+    );
+    duplicate_contribution
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .capabilities[0]
+        .contribution_id = sample_registration("ok:")
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .capabilities[0]
+        .contribution_id
+        .clone();
+    refresh_manifest(&mut duplicate_contribution);
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("ok:"),
+            duplicate_contribution
+        ]),
+        Err(KernelError::DuplicateContribution { .. })
+    ));
+    assert_eq!(registry.snapshot().unwrap().generation, first.generation);
+}
+
+#[test]
+fn duplicate_skill_and_mcp_faults_do_not_publish_partial_generation() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+
+    let duplicate_skill = registration_for(
+        "sample.duplicate-skill",
+        "sample-duplicate-skill",
+        "sample.duplicate-skill.capability",
+        SAMPLE_SKILL,
+        "sample.duplicate-skill.server",
+        "duplicate:",
+    );
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            duplicate_skill,
+        ]),
+        Err(KernelError::DuplicateSkill { .. })
+    ));
+    let after_duplicate_skill = registry.snapshot().unwrap();
+    assert_eq!(after_duplicate_skill.generation, first.generation);
+    assert_eq!(after_duplicate_skill.registry_digest, first.registry_digest);
+
+    let duplicate_mcp = registration_for(
+        "sample.duplicate-mcp",
+        "sample-duplicate-mcp",
+        "sample.duplicate-mcp.capability",
+        "sample.duplicate-mcp.skill",
+        SAMPLE_SERVER,
+        "duplicate:",
+    );
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            duplicate_mcp,
+        ]),
+        Err(KernelError::DuplicateMcpTool { .. })
+    ));
+    let after_duplicate_mcp = registry.snapshot().unwrap();
+    assert_eq!(after_duplicate_mcp.generation, first.generation);
+    assert_eq!(after_duplicate_mcp.registry_digest, first.registry_digest);
+
+    let mut missing_mcp_target = registration_for(
+        "sample.missing-mcp-target",
+        "sample-missing-mcp-target",
+        "sample.missing-mcp-target.capability",
+        "sample.missing-mcp-target.skill",
+        "sample.missing-mcp-target.server",
+        "missing:",
+    );
+    missing_mcp_target
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools[0]
+        .capability
+        .id = CapabilityId::from("missing.mcp.capability");
+    refresh_manifest(&mut missing_mcp_target);
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            missing_mcp_target,
+        ]),
+        Err(KernelError::MissingMcpCapability { .. })
+    ));
+    let after_missing_target = registry.snapshot().unwrap();
+    assert_eq!(after_missing_target.generation, first.generation);
+    assert_eq!(after_missing_target.registry_digest, first.registry_digest);
+
+    let mut target = registration_for(
+        "sample.mcp-target",
+        "sample-mcp-target",
+        "sample.mcp-target.capability",
+        "sample.mcp-target.skill",
+        "sample.mcp-target.server",
+        "target:",
+    );
+    target
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools
+        .clear();
+    refresh_manifest(&mut target);
+    let mut cross_owner = registration_for(
+        "sample.mcp-owner",
+        "sample-mcp-owner",
+        "sample.mcp-owner.capability",
+        "sample.mcp-owner.skill",
+        "sample.mcp-owner.server",
+        "owner:",
+    );
+    cross_owner
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools[0]
+        .capability = CapabilityRef {
+        id: CapabilityId::from("sample.mcp-target.capability"),
+    };
+    refresh_manifest(&mut cross_owner);
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            target,
+            cross_owner,
+        ]),
+        Err(KernelError::InvalidMcpMaterialization { .. })
+    ));
+    let after_cross_owner = registry.snapshot().unwrap();
+    assert_eq!(after_cross_owner.generation, first.generation);
+    assert_eq!(after_cross_owner.registry_digest, first.registry_digest);
+}
+
+#[test]
+fn dependency_skill_and_service_faults_fail_closed() {
+    let persistence = Arc::new(InMemoryPluginStatePersistence::new());
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        persistence,
+    )
+    .unwrap();
+
+    let mut missing_capability = sample_registration("");
+    missing_capability.metadata.manifest.payload.contributions.capabilities[0]
+        .requires
+        .push(CapabilityRef {
+            id: CapabilityId::from("missing.capability"),
+        });
+    refresh_manifest(&mut missing_capability);
+    assert!(matches!(
+        registry.replace_all(vec![missing_capability]),
+        Err(KernelError::MissingCapabilityDependency { .. })
+    ));
+
+    let mut missing_service = sample_registration("");
+    add_service_requirement(
+        &mut missing_service,
+        ServiceKeyRef {
+            id: nomifun_agent_contracts::ServiceKeyId::from("service.missing"),
+            version: VersionString::from(VERSION),
+        },
+        package_ref("missing.provider"),
+        AgentModuleId::from("missing-provider"),
+    );
+    assert!(matches!(
+        registry.replace_all(vec![missing_service]),
+        Err(KernelError::MissingService { .. })
+    ));
+
+    let mut skill_without_capability = sample_revision("owner");
+    skill_without_capability.payload.enabled_capabilities.clear();
+    skill_without_capability.reference.revision_digest =
+        skill_without_capability.revision_digest().unwrap();
+    let materialized = registry
+        .replace_all(vec![sample_registration("")])
+        .unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(skill_without_capability, principal("owner")),
+        ),
+        Err(KernelError::SkillRequiresCapability { .. })
+    ));
+}
+
+#[test]
+fn typed_service_wiring_is_exact_and_service_cycles_fail() {
+    let service_key =
+        ServiceKey::<dyn TestEchoService>::new("service.sample.echo", VERSION);
+    let mut provider = registration_for(
+        "sample.provider",
+        "sample-provider",
+        "sample.provider.capability",
+        "sample.provider.skill",
+        "sample.provider.server",
+        "",
+    );
+    add_service_provider(
+        &mut provider,
+        &service_key,
+        Arc::new(TestEchoServiceImpl) as Arc<dyn TestEchoService>,
+    );
+    let mut consumer = registration_for(
+        "sample.consumer",
+        "sample-consumer",
+        "sample.consumer.capability",
+        "sample.consumer.skill",
+        "sample.consumer.server",
+        "",
+    );
+    add_service_requirement(
+        &mut consumer,
+        service_key.reference().clone(),
+        package_ref("sample.provider"),
+        AgentModuleId::from("sample-provider"),
+    );
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    registry
+        .replace_all(vec![consumer, provider])
+        .unwrap();
+    let view = registry
+        .declared_service_view(&AgentModuleId::from("sample-consumer"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        view.require(&service_key).unwrap().echo("ok"),
+        "service:ok"
+    );
+
+    let key_a = ServiceKey::<String>::new("service.a", VERSION);
+    let key_b = ServiceKey::<String>::new("service.b", VERSION);
+    let mut a = registration_for(
+        "sample.a",
+        "sample-a",
+        "sample.a.capability",
+        "sample.a.skill",
+        "sample.a.server",
+        "",
+    );
+    let mut b = registration_for(
+        "sample.b",
+        "sample-b",
+        "sample.b.capability",
+        "sample.b.skill",
+        "sample.b.server",
+        "",
+    );
+    add_service_provider(&mut a, &key_a, Arc::new("a".to_owned()));
+    add_service_provider(&mut b, &key_b, Arc::new("b".to_owned()));
+    add_service_requirement(
+        &mut a,
+        key_b.reference().clone(),
+        package_ref("sample.b"),
+        AgentModuleId::from("sample-b"),
+    );
+    add_service_requirement(
+        &mut b,
+        key_a.reference().clone(),
+        package_ref("sample.a"),
+        AgentModuleId::from("sample-a"),
+    );
+    assert!(matches!(
+        registry.replace_all(vec![a, b]),
+        Err(KernelError::ServiceDependencyCycle)
+    ));
+}
+
+#[test]
+fn materialization_is_order_independent_and_stable_policy_excludes_test_fixture() {
+    let left = registration_for(
+        "sample.left",
+        "sample-left",
+        "sample.left.capability",
+        "sample.left.skill",
+        "sample.left.server",
+        "left:",
+    );
+    let right = registration_for(
+        "sample.right",
+        "sample-right",
+        "sample.right.capability",
+        "sample.right.skill",
+        "sample.right.server",
+        "right:",
+    );
+    let first = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap()
+    .replace_all(vec![left.clone(), right.clone()])
+    .unwrap();
+    let second = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap()
+    .replace_all(vec![right, left])
+    .unwrap();
+    assert_eq!(first.registry_digest, second.registry_digest);
+    assert_eq!(first.package_start_order, second.package_start_order);
+    assert_eq!(
+        first.service_dag.topological_start_order,
+        second.service_dag.topological_start_order
+    );
+
+    let production = KernelRegistry::new(
+        MaterializationPolicy::stable(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    assert!(matches!(
+        production.replace_all(vec![sample_registration("")]),
+        Err(KernelError::SourceNotAllowed { .. })
+    ));
+}
+
+#[test]
+fn materializer_validates_entrypoint_contract_versions_by_kind() {
+    let policy = MaterializationPolicy::stable_with_test_fixtures(VERSION);
+    let mut javascript = sample_registration("");
+    javascript.metadata.manifest.payload.entrypoint = JavaScriptEntrypointMetadata {
+        normalized_relative_path: "main.mjs".to_owned(),
+        module_digest: digest_bytes(b"export default {};"),
+        host_protocol_version: VersionString::from(VERSION),
+        sdk_contract_version: VersionString::from(VERSION),
+    }
+    .into();
+    let serialized =
+        serde_json::to_value(&javascript.metadata.manifest.payload.entrypoint).unwrap();
+    assert_eq!(serialized["kind"], "javascript");
+    let round_trip: PackageEntrypointMetadata = serde_json::from_value(serialized).unwrap();
+    assert_eq!(
+        round_trip
+            .as_javascript()
+            .expect("round-trip JavaScript entrypoint")
+            .normalized_relative_path,
+        "main.mjs"
+    );
+    refresh_manifest(&mut javascript);
+
+    let registry = KernelRegistry::new(
+        policy.clone(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    registry.replace_all(vec![javascript.clone()]).unwrap();
+
+    javascript
+        .metadata
+        .manifest
+        .payload
+        .entrypoint
+        .as_javascript_mut()
+        .expect("JavaScript entrypoint")
+        .sdk_contract_version = VersionString::from("not-semver");
+    refresh_manifest(&mut javascript);
+    let registry = KernelRegistry::new(
+        policy.clone(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    assert!(matches!(
+        registry.replace_all(vec![javascript]),
+        Err(KernelError::InvalidVersion {
+            field: "entrypoint.javascript.sdk_contract_version",
+            ..
+        })
+    ));
+
+    let mut mismatched = sample_registration("");
+    mismatched.metadata.manifest.payload.entrypoint =
+        JavaScriptEntrypointMetadata {
+            normalized_relative_path: "main.mjs".to_owned(),
+            module_digest: digest_bytes(b"export default {};"),
+            host_protocol_version: VersionString::from("2.0.0"),
+            sdk_contract_version: VersionString::from(VERSION),
+        }
+        .into();
+    refresh_manifest(&mut mismatched);
+    let registry = KernelRegistry::new(
+        policy,
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    assert!(matches!(
+        registry.replace_all(vec![mismatched]),
+        Err(KernelError::InvalidRegistration { reason, .. })
+            if reason.contains("entrypoint host contract version")
+    ));
+}
+
+#[tokio::test]
+async fn module_freezes_multiple_contributions_and_exact_action_grant_without_widening() {
+    const SECOND_ACTION: &str = "sample.echo.inspect";
+    let mut registration = sample_registration("module:");
+    {
+        let module = &mut registration
+            .metadata
+            .manifest
+            .payload
+            .contributions
+            .capabilities[0];
+        let mut second = module.contributions.actions[0].clone();
+        second.action_id = ActionId::from(SECOND_ACTION);
+        module.contributions.actions.push(second);
+        module.contributions.context_schema_refs = vec![
+            CanonicalSchemaRef::from("schema://sample.echo/context-primary"),
+            CanonicalSchemaRef::from("schema://sample.echo/context-secondary"),
+        ];
+        module.contributions.event_schema_refs = vec![
+            CanonicalSchemaRef::from("schema://sample.echo/event-started"),
+            CanonicalSchemaRef::from("schema://sample.echo/event-finished"),
+        ];
+    }
+    registration
+        .add_capability_context_factory(
+            CapabilityId::from(SAMPLE_CAPABILITY),
+            Arc::new(SampleRoleContextFactory),
+        )
+        .unwrap();
+    refresh_manifest(&mut registration);
+
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry.replace_all(vec![registration]).unwrap();
+    let owner = principal("module-owner");
+    let compiled = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(sample_revision(&owner.principal_id), owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(&owner, vec![resource_binding(&owner.principal_id)])
+    .unwrap();
+
+    let resolved = compiled
+        .resolved_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .expect("resolved module");
+    assert_eq!(resolved.actions.len(), 2);
+    assert_eq!(
+        resolved.action_allowlist,
+        BTreeSet::from([ActionId::from(SAMPLE_ACTION)])
+    );
+    assert_eq!(
+        compiled.policy(&CapabilityId::from(SAMPLE_CAPABILITY)).unwrap().allowed_actions,
+        BTreeSet::from([ActionId::from(SAMPLE_ACTION)])
+    );
+
+    let active = SessionCapabilityState::new(&compiled).snapshot().unwrap();
+    let mut widened = invocation(&compiled, owner, 0, "denied");
+    widened.action_id = ActionId::from(SECOND_ACTION);
+    assert!(matches!(
+        registry.preflight_invocation(&compiled, &active, &widened),
+        Err(KernelError::CapabilityNotInPreset { .. })
+    ));
+}
+
+#[test]
+fn compiler_rejects_implicit_action_authority_and_platform_managed_roots() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry.replace_all(vec![sample_registration("")]).unwrap();
+    let owner = principal("grant-owner");
+    let mut no_actions = sample_revision(&owner.principal_id);
+    no_actions.payload.enabled_capabilities[0].action_allowlist.clear();
+    no_actions.reference.revision_digest = no_actions.revision_digest().unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(no_actions, owner.clone()),
+        ),
+        Err(KernelError::ActionGrantRequired { .. })
+    ));
+
+    let mut managed_registration = sample_registration("");
+    managed_registration.metadata.manifest.payload.contributions.capabilities[0]
+        .supported_surfaces = capability_module_surface_declarations(
+        ["test"],
+        [CapabilityConsumer::Agent],
+        CapabilityAuthoringPolicy::PlatformManaged,
+    );
+    refresh_manifest(&mut managed_registration);
+    let managed_registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let managed = managed_registry.replace_all(vec![managed_registration]).unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &managed,
+            &compiler_environment(managed.registry_digest.clone()),
+            compile_request(sample_revision(&owner.principal_id), owner),
+        ),
+        Err(KernelError::CapabilityNotAuthorable { .. })
+    ));
+}
+
+#[test]
+fn published_registration_metadata_is_derived_from_manifest_and_exports() {
+    let mut registration = sample_registration("");
+    registration.metadata.registrar.allowed_operations.clear();
+    registration
+        .metadata
+        .registrar
+        .declared_capability_ids
+        .clear();
+    registration
+        .metadata
+        .context
+        .declared_services
+        .provided_services
+        .clear();
+
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry.replace_all(vec![registration]).unwrap();
+    let metadata = materialized
+        .plugins
+        .get(&AgentModuleId::from(SAMPLE_MOUNT))
+        .expect("published plugin metadata");
+
+    assert!(metadata
+        .registrar
+        .allowed_operations
+        .contains(&PluginRegistrarOperation::ContributeCapability));
+    assert_eq!(
+        metadata.registrar.declared_capability_ids,
+        BTreeSet::from([CapabilityId::from(SAMPLE_CAPABILITY)])
+    );
+    assert_eq!(
+        metadata.context.identity,
+        metadata.registrar.identity
+    );
+}
+
+#[test]
+fn package_cycles_and_duplicate_service_providers_fail_before_publish() {
+    let mut left = registration_for(
+        "sample.left",
+        "sample-left",
+        "sample.left.capability",
+        "sample.left.skill",
+        "sample.left.server",
+        "",
+    );
+    let mut right = registration_for(
+        "sample.right",
+        "sample-right",
+        "sample.right.capability",
+        "sample.right.skill",
+        "sample.right.server",
+        "",
+    );
+    left.metadata
+        .manifest
+        .payload
+        .package_dependencies
+        .push(package_ref("sample.right"));
+    right
+        .metadata
+        .manifest
+        .payload
+        .package_dependencies
+        .push(package_ref("sample.left"));
+    refresh_manifest(&mut left);
+    refresh_manifest(&mut right);
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    assert!(matches!(
+        registry.replace_all(vec![left, right]),
+        Err(KernelError::PackageDependencyCycle)
+    ));
+    assert_eq!(registry.snapshot().unwrap().generation, 0);
+
+    let service = ServiceKey::<String>::new("service.duplicate", VERSION);
+    let mut first = registration_for(
+        "sample.provider-a",
+        "sample-provider-a",
+        "sample.provider-a.capability",
+        "sample.provider-a.skill",
+        "sample.provider-a.server",
+        "",
+    );
+    let mut second = registration_for(
+        "sample.provider-b",
+        "sample-provider-b",
+        "sample.provider-b.capability",
+        "sample.provider-b.skill",
+        "sample.provider-b.server",
+        "",
+    );
+    add_service_provider(&mut first, &service, Arc::new("a".to_owned()));
+    add_service_provider(&mut second, &service, Arc::new("b".to_owned()));
+    assert!(matches!(
+        registry.replace_all(vec![first, second]),
+        Err(KernelError::DuplicateServiceProvider { .. })
+    ));
+    assert_eq!(registry.snapshot().unwrap().generation, 0);
+}
+
+#[test]
+fn library_skill_snapshot_recompilation_preserves_exact_content_without_package_authority() {
+    use nomifun_agent_contracts::{AgentSkillBinding, FrozenLibrarySkill, LibrarySkillSource, ResolvedSkillLock};
+    let kernel = KernelRegistry::new(MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
+    let registry = kernel.replace_all(vec![sample_registration("prefix:")]).unwrap();
+    let owner = principal("library-owner");
+    let mut revision = sample_revision("library-owner");
+    let skill = FrozenLibrarySkill::new("custom-guide".into(), "Custom guide".into(), LibrarySkillSource::Custom,
+        "Use this exact version. Hooks and scripts are reference data.".into(), BTreeMap::new()).unwrap();
+    revision.payload.skill_bindings = vec![AgentSkillBinding::library(skill.clone())];
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    let environment = compiler_environment(registry.registry_digest.clone());
+    let compiled = AgentPresetCompiler::compile(&registry, &environment, compile_request(revision.clone(), owner.clone())).unwrap();
+    assert_eq!(compiled.content().skill_locks, vec![ResolvedSkillLock::library(skill)]);
+    assert!(AgentPresetCompiler::skills_unchanged(&registry, &revision, &compiled.envelope));
+    let replayed = AgentPresetCompiler::compile(&registry, &environment, compile_request(revision.clone(), owner)).unwrap();
+    assert_eq!(compiled.snapshot_ref(), replayed.snapshot_ref());
+    if let AgentSkillBinding::Library { skill, .. } = &mut revision.payload.skill_bindings[0] { skill.body.push_str(" mutation"); }
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    assert!(AgentPresetCompiler::compile(&registry, &environment, compile_request(revision, principal("library-owner"))).is_err());
+}

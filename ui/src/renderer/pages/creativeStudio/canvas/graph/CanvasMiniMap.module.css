@@ -40,10 +40,6 @@
   fill: rgb(var(--primary-5));
 }
 
-.node[data-minimap-node-type='director'] {
-  fill: color-mix(in srgb, rgb(var(--primary-6)) 60%, rgb(var(--danger-6)));
-}
-
 .node[data-minimap-node-type='group'] {
   fill: rgba(var(--primary-6), 0.06);
   stroke: color-mix(in srgb, rgb(var(--primary-6)) 54%, var(--color-border-3));

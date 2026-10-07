@@ -4,7 +4,6 @@
  */
 
 import common from './common.json';
-import agentMode from './agentMode.json';
 import update from './update.json';
 import login from './login.json';
 import fileSelection from './fileSelection.json';
@@ -17,9 +16,9 @@ import tools from './tools.json';
 import google from './google.json';
 import cron from './cron.json';
 import requirements from './requirements.json';
-import idmm from './idmm.json';
 import starOffice from './starOffice.json';
 import guid from './guid.json';
+import creation from './creation.json';
 import agent from './agent.json';
 import terminal from './terminal.json';
 import webhook from './webhook.json';
@@ -33,13 +32,14 @@ import modelFailover from './modelFailover.json';
 import agentExecution from './agentExecution.json';
 import collaboration from './collaboration.json';
 import creativeStudio from './creativeStudio.json';
-import browser from './browser.json';
+import browserWorkspace from './browserWorkspace.json';
 import ssh from './ssh.json';
-import miniApps from './miniApps.json';
+import pluginPlatform from './pluginPlatform.json';
+import agentSettings from './agentSettings.json';
+import idmm from './idmm.json';
 
 export default {
   common,
-  agentMode,
   update,
   login,
   fileSelection,
@@ -52,9 +52,9 @@ export default {
   google,
   cron,
   requirements,
-  idmm,
   starOffice,
   guid,
+  creation,
   agent,
   terminal,
   webhook,
@@ -68,7 +68,9 @@ export default {
   agentExecution,
   collaboration,
   creativeStudio,
-  browser,
+  browserWorkspace,
   ssh,
-  miniApps,
+  pluginPlatform,
+  agentSettings,
+  idmm,
 };

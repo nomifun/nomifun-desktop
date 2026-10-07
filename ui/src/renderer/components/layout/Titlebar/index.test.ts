@@ -21,22 +21,25 @@ describe('Titlebar action affordances', () => {
     expect(languageMenuSource.includes('title={label}')).toBe(false);
   });
 
-  test('shows the workspace titlebar toggle on mobile only', () => {
-    expect(titlebarSource.includes('const showWorkspaceButton = workspaceAvailable && Boolean(layout?.isMobile);')).toBe(
-      true
-    );
-  });
-
   test('places the readable language selector after the left navigation actions', () => {
     const languageIndex = titlebarSource.indexOf('<TitlebarLanguageMenu');
-    const sessionToggleIndex = titlebarSource.indexOf('tooltip: sessionToggleTooltip');
+    const sessionToggleIndex = titlebarSource.indexOf('<ContentSiderTitlebarToggle');
 
+    expect(sessionToggleIndex).toBeGreaterThan(-1);
     expect(languageIndex).toBeGreaterThan(sessionToggleIndex);
     expect(languageMenuSource.includes('app-titlebar__language-button')).toBe(true);
     expect(languageMenuSource.includes('app-titlebar__language-name')).toBe(true);
     expect(languageMenuSource.includes('SYSTEM_LANGUAGE')).toBe(true);
     expect(languageMenuSource.includes('languageFollowSystem')).toBe(true);
     expect(languageMenuSource.includes('Translate')).toBe(false);
+  });
+
+  test('routes the desktop-companion roster through the shared ContentSider toggle', () => {
+    expect(titlebarSource.includes('nomiSiderChannel')).toBe(true);
+    expect(titlebarSource.includes("location.pathname === '/nomi'")).toBe(true);
+    expect(titlebarSource.includes("t('nomi.workspace.showRoster')")).toBe(true);
+    expect(titlebarSource.includes("t('nomi.workspace.hideRoster')")).toBe(true);
+    expect(titlebarSource.includes('isSessionRoute || isAgentRoute || isNomiRoute')).toBe(true);
   });
 
   test('keeps shared history and quick-create navigation behind Creative Studio save gates', () => {

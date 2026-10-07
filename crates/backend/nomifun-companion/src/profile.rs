@@ -423,6 +423,10 @@ pub struct CompanionProfileConfig {
     /// error.
     #[serde(deserialize_with = "deserialize_companion_profile_id")]
     pub companion_id: String,
+    /// Physical control target for desktop turns. None selects only when
+    /// exactly one robot belongs to this Companion; never guess among devices.
+    #[serde(default)]
+    pub control_robot_id: Option<String>,
     /// Display-only short number (`#1`, `#2`, …) for companion lists. Monotonic
     /// within this machine, allocated by the registry from its private
     /// high-watermark state file (`companion/shared/companion_seq.json`) so a
@@ -472,11 +476,6 @@ pub struct CompanionProfileConfig {
     #[serde(default)]
     pub skills: CompanionSkillConfig,
     pub appearance: CompanionWindowConfig,
-    /// Frozen reusable configuration applied to this companion. Identity,
-    /// memories, evolved skills, window state and channel credentials remain
-    /// companion-owned; this snapshot only supplies execution preferences.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_preset: Option<nomifun_api_types::ResolvedPresetSnapshot>,
     /// User-chosen sidebar position. `None` = never reordered; such companions
     /// sort after every explicitly ordered one, by `created_at`. Distinct from
     /// [`Self::seq`], which is a registry-owned never-reused display ordinal and
@@ -494,6 +493,7 @@ impl CompanionProfileConfig {
         let character = if character.is_empty() { DEFAULT_CHARACTER } else { character };
         Self {
             companion_id: CompanionId::new().into_string(),
+            control_robot_id: None,
             seq,
             name: name.to_owned(),
             character: character.to_owned(),
@@ -506,7 +506,6 @@ impl CompanionProfileConfig {
             evolve: CompanionEvolveConfig::default(),
             skills: CompanionSkillConfig::default(),
             appearance: CompanionWindowConfig::default(),
-            applied_preset: None,
             order_index: None,
             created_at: now_ms(),
         }
@@ -583,16 +582,6 @@ impl CompanionProfileConfig {
                 path.display()
             ))
         })?;
-        if profile
-            .applied_preset
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.resolved_model.is_some())
-        {
-            return Err(nomifun_common::AppError::Internal(format!(
-                "companion profile {} duplicates a Provider reference inside applied_preset",
-                path.display()
-            )));
-        }
         Ok(Some(profile))
     }
 
@@ -628,15 +617,6 @@ impl CompanionProfileConfig {
         // legacy interval would take the whole install down over a schedule.
         self.learn.validate().map_err(std::io::Error::other)?;
         validate_persisted_appearance(&self.appearance).map_err(std::io::Error::other)?;
-        if self
-            .applied_preset
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.resolved_model.is_some())
-        {
-            return Err(std::io::Error::other(
-                "companion side store keeps Provider references only in the fixed model field",
-            ));
-        }
         crate::fsio::save_json_atomic(dir, "config.json", self)
     }
 }

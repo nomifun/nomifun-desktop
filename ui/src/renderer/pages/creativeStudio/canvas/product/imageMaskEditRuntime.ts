@@ -14,10 +14,8 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import type {
-  CreativeWorkbenchRuntimeController,
-  CreativeWorkbenchRuntimeSnapshot,
-} from '../../workbenches/runtime';
+import type { CanvasGenerationRuntimeController, CanvasGenerationRuntimeSnapshot } from '../generation';
+
 import { canvasCommands, validateCanvasConnection } from '../core';
 import type { CreativeCanvasEditorHandle } from '../editor';
 import {
@@ -220,14 +218,9 @@ export async function settleCanvasImageMaskEditTask(input: {
         const created = creativeNodeFromHistoricalAsset(
           asset,
           state,
-          input.viewportSize,
-          {
-            position: canvasImageMaskEditResultPosition(
-              state.document.nodes,
-              config
-            ),
-          }
+          input.viewportSize
         );
+        created.position = canvasImageMaskEditResultPosition(state.document.nodes, config, created.size);
         if (created.type !== 'image') {
           throw new Error(
             creativeStudioProductText(
@@ -314,11 +307,11 @@ export async function orphanCanvasImageMaskEditTask(input: {
 
 /** Resolve as soon as POST is admitted or becomes an explicitly retryable slot. */
 export function waitForCanvasImageMaskEditAdmission(input: {
-  controller: Pick<CreativeWorkbenchRuntimeController, 'subscribe'>;
+  controller: Pick<CanvasGenerationRuntimeController, 'subscribe'>;
   idempotencyKey: string;
-  start: () => Promise<CreativeWorkbenchRuntimeSnapshot>;
+  start: () => Promise<CanvasGenerationRuntimeSnapshot>;
 }): Promise<CanvasImageMaskEditAdmission> {
-  let operation: Promise<CreativeWorkbenchRuntimeSnapshot>;
+  let operation: Promise<CanvasGenerationRuntimeSnapshot>;
   try {
     // start() synchronously clears an older failure before its first await.
     operation = input.start();
@@ -378,13 +371,4 @@ export function waitForCanvasImageMaskEditAdmission(input: {
       }
     );
   });
-}
-
-export function canvasImageMaskEditTaskFromSnapshot(
-  snapshot: CreativeWorkbenchRuntimeSnapshot,
-  taskId: string
-): CreativeTask | null {
-  return (
-    snapshot.entries.find((entry) => entry.task.taskId === taskId)?.task ?? null
-  );
 }

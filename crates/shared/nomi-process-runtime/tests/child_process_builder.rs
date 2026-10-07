@@ -7,6 +7,27 @@ use std::{
 
 use nomi_process_runtime::{ChildProcessBuilder, kill_process_tree};
 
+#[tokio::test]
+async fn managed_cleanup_receipt_observes_shutdown_and_drop_without_terminating() {
+    for explicit_shutdown in [false, true] {
+        let mut builder = ChildProcessBuilder::new(env!("CARGO_BIN_EXE_process_test_helper"));
+        builder.args(["sleep", "10000"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut process = builder.spawn_managed().unwrap();
+        let receipt = process.cleanup_receipt().expect("new process has a cleanup receipt");
+        assert!(tokio::time::timeout(Duration::from_millis(20), receipt.clone().wait())
+            .await.is_err(), "observing a live process must not terminate it");
+        assert!(process.try_wait().unwrap().is_none());
+        if explicit_shutdown {
+            process.shutdown().await.unwrap();
+            assert!(process.cleanup_receipt().is_none());
+        }
+        drop(process);
+        tokio::time::timeout(Duration::from_secs(6), receipt.wait()).await
+            .expect("cleanup observation is bounded").expect("tree cleanup must complete");
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use super::*;

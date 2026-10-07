@@ -5,10 +5,11 @@
  */
 
 import type {
-  PlanUpdate,
   PersistedToolArtifact,
 } from '@/common/types/platform/toolCallTypes';
-import type { IKnowledgeWritebackEvent, IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
+import { OFFICIAL_PRESET_KEYS, type OfficialPresetKey } from '@/common/types/agentPlatform';
+import { normalizeIdmmDecisionExplanation, normalizeIdmmDecisionNotice, type IdmmDecisionExplanation, type IdmmDecisionNotice } from '@/common/types/idmm';
+import type { IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import {
   parseConversationId,
   parseCronJobId,
@@ -23,23 +24,10 @@ import {
 import { uuid } from '../utils';
 import { optionalDisplayText, toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
+import { normalizeModelFailureDiagnostic, type ModelFailureDiagnostic } from './providerDiagnostic';
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
-
-declare const confirmationCorrelationBrand: unique symbol;
-
-/** Confirmation correlation key; transient protocol identity, never a DB entity ID. */
-export type ConfirmationCorrelationId = string & {
-  readonly [confirmationCorrelationBrand]: true;
-};
-
-export const parseConfirmationCorrelationId = (value: unknown): ConfirmationCorrelationId => {
-  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
-    throw new TypeError('confirmation correlation id must be non-empty canonical text');
-  }
-  return value as ConfirmationCorrelationId;
-};
 
 /**
  * @description 跟对话相关的消息类型申明 及相关处理
@@ -51,8 +39,6 @@ type TMessageType =
   | 'tool_call'
   | 'tool_group'
   | 'agent_status'
-  | 'permission'
-  | 'plan'
   | 'thinking'
   | 'available_commands';
 
@@ -105,7 +91,7 @@ export type CronMessageMeta = {
   triggered_at: number;
 };
 
-export type KnowledgeWritebackStatus =
+type KnowledgeWritebackStatus =
   | 'started'
   | 'extracting'
   | 'writing'
@@ -117,12 +103,12 @@ export type KnowledgeWritebackStatus =
   | 'disabled'
   | 'interrupted';
 
-export type KnowledgeWritebackFile = {
+type KnowledgeWritebackFile = {
   kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
 };
 
-export type KnowledgeWritebackFailure = {
+type KnowledgeWritebackFailure = {
   kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
   error?: string;
@@ -146,6 +132,19 @@ export type IMessageText = IMessage<
   'text',
   {
     content: string;
+    /** Actual message time; created_at remains the durable pagination cursor. */
+    display_at_ms?: number;
+    idmm_decision?: IdmmDecisionExplanation;
+    /** Canonical typed output-limit continuation, never inferred from text. */
+    continuation_of_message_id?: MessageId;
+    interaction?: {
+      kind: 'robot' | 'desktop'; robot_id: string; connection_id: string; request_id: string;
+      input_modality: 'speech' | 'text'; output_mode: 'spoken' | 'desktop';
+    };
+    observations?: Array<{
+      question: string; answer: string; observed_at: number;
+      image: { id: string; path: string; mime_type: string; sha256: string };
+    }>;
     /** Backend explicitly replaced the accumulated text for this msg_id. */
     replace?: boolean;
     cronMeta?: CronMessageMeta;
@@ -160,9 +159,9 @@ export type IMessageText = IMessage<
   }
 >;
 
-export type AgentErrorOwnership = 'nomifun' | 'user_agent' | 'user_llm_provider' | 'unknown_upstream';
+type AgentErrorOwnership = 'nomifun' | 'user_agent' | 'user_llm_provider' | 'unknown_upstream';
 
-export type AgentErrorResolutionKind =
+type AgentErrorResolutionKind =
   | 'retry'
   | 'wait_for_current_response'
   | 'start_new_session'
@@ -178,12 +177,19 @@ export type AgentErrorResolutionKind =
   | 'reduce_context'
   | 'send_feedback';
 
-export type AgentErrorResolutionTarget = 'provider_settings' | 'agent_settings' | 'new_conversation' | 'feedback';
+type AgentErrorResolutionTarget = 'provider_settings' | 'agent_settings' | 'new_conversation' | 'feedback';
 
-export type AgentErrorResolution = {
+type AgentErrorResolution = {
   kind: AgentErrorResolutionKind;
   target?: AgentErrorResolutionTarget;
 };
+
+export const AGENT_TASK_INCOMPLETE_REASONS = [
+  'blocked_work', 'step_limit', 'output_truncated', 'unresolved_plan',
+  'unverified_changes', 'running_processes', 'unverified_completion',
+  'rejected_control', 'no_progress', 'execution_guard', 'recovery_guard',
+] as const;
+export type AgentTaskIncompleteReason = (typeof AGENT_TASK_INCOMPLETE_REASONS)[number];
 
 export type AgentStreamErrorInfo = {
   message: string;
@@ -191,12 +197,18 @@ export type AgentStreamErrorInfo = {
   ownership?: AgentErrorOwnership;
   detail?: string;
   workspacePath?: string;
+  taskIncompleteReason?: AgentTaskIncompleteReason;
+  providerDiagnostic?: ModelFailureDiagnostic;
+  /** Frozen execution identity supplied by the host, never the current selection. */
+  agentLabel?: string;
+  agentTemplateKey?: OfficialPresetKey;
+  modelName?: string;
   retryable?: boolean;
   feedback_recommended?: boolean;
   resolution?: AgentErrorResolution;
 };
 
-export type TruncatedTurnFailureCode = 'output_truncated' | 'turn_requests_exhausted';
+type TruncatedTurnFailureCode = 'output_truncated' | 'turn_requests_exhausted';
 
 export type TruncatedTurnRecovery = {
   kind: 'continue_truncated';
@@ -210,7 +222,25 @@ export type IMessageTips = IMessage<
     content: string;
     type: 'error' | 'success' | 'warning';
     error?: AgentStreamErrorInfo;
+    /** Presentation of a verified active pause; never a terminal receipt. */
+    execution_pause?: { reason?: string; cleanupProven: boolean };
     recovery?: TruncatedTurnRecovery;
+    idmm_notice?: IdmmDecisionNotice;
+    agent_transition?: {
+      transition_id: string;
+      previous_agent_label: string;
+      next_agent_label: string;
+      previous_preset_id?: string;
+      next_preset_id?: string;
+      previous_template_key?: OfficialPresetKey;
+      next_template_key?: OfficialPresetKey;
+      effective_from: 'next_turn';
+      handoff_mode: 'continue_task' | 'context_only';
+      completion_gate_inherited: false;
+    };
+    /** Canonical wall-clock interval for the owning turn. */
+    started_at_ms?: number;
+    finished_at_ms?: number;
   }
 >;
 
@@ -225,8 +255,11 @@ export type IMessageToolCall = IMessage<
      * can inspect exactly what the model sent.
      */
     args?: Record<string, unknown> | null;
+    /** Canonical identity projected by the host, separate from the model alias. */
+    capability_id?: string;
+    action_id?: string;
     error?: string;
-    status?: 'running' | 'completed' | 'error';
+    status?: 'running' | 'completed' | 'error' | 'canceled';
     input?: Record<string, unknown>;
     output?: string;
     description?: string;
@@ -260,6 +293,9 @@ export const mergeToolCallContent = (
   if (existing.status === 'error' || incoming.status === 'error') {
     return { ...merged, status: 'error', artifacts: [] };
   }
+  if (existing.status === 'canceled' || incoming.status === 'canceled') {
+    return { ...merged, status: 'canceled', artifacts: [] };
+  }
   if (existing.status === 'completed' && incoming.status !== 'completed') {
     return {
       ...merged,
@@ -273,60 +309,13 @@ export const mergeToolCallContent = (
   return merged;
 };
 
-type IMessageToolGroupConfirmationDetailsBase<Type, Extra extends Record<string, any>> = {
-  type: Type;
-  title: string;
-} & Extra;
-
 export type IMessageToolGroup = IMessage<
   'tool_group',
   Array<{
     call_id: string;
     description: string;
     name: string;
-    render_output_as_markdown: boolean;
-    result_display?:
-      | string
-      | {
-          file_diff: string;
-          file_name: string;
-        }
-      | {
-          img_url: string;
-          relative_path: string;
-        };
-    status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending' | 'Confirming';
-    confirmationDetails?:
-      | IMessageToolGroupConfirmationDetailsBase<
-          'edit',
-          {
-            file_name: string;
-            file_diff: string;
-            isModifying?: boolean;
-          }
-        >
-      | IMessageToolGroupConfirmationDetailsBase<
-          'exec',
-          {
-            rootCommand: string;
-            command: string;
-          }
-        >
-      | IMessageToolGroupConfirmationDetailsBase<
-          'info',
-          {
-            urls?: string[];
-            prompt: string;
-          }
-        >
-      | IMessageToolGroupConfirmationDetailsBase<
-          'mcp',
-          {
-            tool_name: string;
-            tool_display_name: string;
-            server_name: string;
-          }
-        >;
+    status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending';
   }>
 >;
 
@@ -350,16 +339,24 @@ export type IMessageAgentStatus = IMessage<
     session_id?: string;
     is_connected?: boolean;
     has_active_session?: boolean;
+    /** Durable, renderer-facing lifecycle receipt derived from the canonical Turn. */
+    turn_summary?: boolean;
+    turn_state?: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+    started_seq?: number;
+    finished_seq?: number | null;
+    /** Canonical wall-clock interval for the owning turn. */
+    started_at_ms?: number;
+    finished_at_ms?: number;
   }
 >;
 
-export type IMessagePermission = IMessage<'permission', IConfirmation>;
-
 type ResponseTextData = {
   content: unknown;
+  continuation_of_message_id?: unknown;
   replace?: boolean;
   cronMeta?: CronMessageMeta;
   knowledge_writeback?: unknown;
+  idmm_decision?: unknown;
   teammate_message?: unknown;
   sender_name?: unknown;
   sender_backend?: unknown;
@@ -499,7 +496,7 @@ const TERMINAL_KNOWLEDGE_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>(
   'interrupted',
 ]);
 
-export const preferKnowledgeWritebackState = (
+const preferKnowledgeWritebackState = (
   existing: KnowledgeWritebackState | undefined,
   incoming: KnowledgeWritebackState | undefined
 ): KnowledgeWritebackState | undefined => {
@@ -569,7 +566,7 @@ const isResponseTextData = (data: unknown): data is ResponseTextData =>
   'content' in data &&
   !Array.isArray(data);
 
-export const isTextContentReplacement = (content: IMessageText['content'] | undefined): boolean =>
+const isTextContentReplacement = (content: IMessageText['content'] | undefined): boolean =>
   content?.replace === true;
 
 export const mergeTextMessageContent = (
@@ -597,12 +594,21 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
       fallback.content.knowledge_writeback,
       preferred.content.knowledge_writeback
     );
-    if (!knowledgeWriteback) return preferred;
+    const interaction = preferred.content.interaction ?? fallback.content.interaction;
+    // Durable history is passed as primary and owns the decision explanation,
+    // even while a longer live text fragment wins the body.
+    const decision = primary.content.idmm_decision ?? secondary.content.idmm_decision;
+    const observations = (preferred.content.observations?.length ?? 0) >= (fallback.content.observations?.length ?? 0)
+      ? preferred.content.observations : fallback.content.observations;
+    if (!knowledgeWriteback && !interaction && !observations && !decision) return preferred;
     return {
       ...preferred,
       content: {
         ...preferred.content,
-        knowledge_writeback: knowledgeWriteback,
+        ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
+        ...(interaction ? { interaction } : {}),
+        ...(decision ? { idmm_decision: decision } : {}),
+        ...(observations ? { observations } : {}),
       },
     };
   };
@@ -616,14 +622,6 @@ export const preferTextMessageVersion = (primary: IMessageText, secondary: IMess
     : mergePreferredWriteback(primary, secondary);
 };
 
-export type IMessagePlan = IMessage<
-  'plan',
-  {
-    session_id: string;
-    entries: PlanUpdate['update']['entries'];
-  }
->;
-
 export type IMessageThinking = IMessage<
   'thinking',
   {
@@ -635,13 +633,13 @@ export type IMessageThinking = IMessage<
 >;
 
 // Available commands advertised by the agent runtime.
-export type AvailableCommand = {
+type AvailableCommand = {
   name: string;
   description: string;
   hint?: string;
 };
 
-export type IMessageAvailableCommands = IMessage<
+type IMessageAvailableCommands = IMessage<
   'available_commands',
   {
     commands: AvailableCommand[];
@@ -655,36 +653,10 @@ export type TMessage =
   | IMessageToolCall
   | IMessageToolGroup
   | IMessageAgentStatus
-  | IMessagePermission
-  | IMessagePlan
   | IMessageThinking
   | IMessageAvailableCommands;
 
 // 统一所有需要用户交互的用户类型
-export interface IConfirmation<Option extends any = any> {
-  title?: string;
-  id: string;
-  action?: string;
-  description: string;
-  call_id: string;
-  options: Array<{
-    label: string;
-    value: Option;
-    params?: Record<string, string>; // Translation interpolation parameters
-  }>;
-  /**
-   * Command type for exec confirmations (e.g., 'curl', 'npm', 'git')
-   * Used for "always allow" permission memory
-   */
-  command_type?: string;
-  /**
-   * Optional inline page preview (`data:image/png;base64,...`) for a browser
-   * takeover approval. Lets a silent (headless) session show the user the current
-   * page they're approving an irreversible action on. Absent for non-browser prompts.
-   */
-  screenshot?: string;
-}
-
 const AGENT_ERROR_OWNERSHIPS = new Set<AgentErrorOwnership>([
   'nomifun',
   'user_agent',
@@ -716,7 +688,7 @@ const AGENT_ERROR_RESOLUTION_TARGETS = new Set<AgentErrorResolutionTarget>([
   'feedback',
 ]);
 
-export const normalizeAgentErrorResolution = (value: unknown): AgentErrorResolution | undefined => {
+const normalizeAgentErrorResolution = (value: unknown): AgentErrorResolution | undefined => {
   if (!isObject(value) || typeof value.kind !== 'string') {
     return undefined;
   }
@@ -748,15 +720,28 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
       : undefined;
   const detail = typeof value.detail === 'string' ? value.detail : undefined;
   const workspacePath = typeof value.workspacePath === 'string' ? value.workspacePath : undefined;
+  const taskIncompleteReason = code === 'NOMIFUN_TASK_INCOMPLETE'
+    && AGENT_TASK_INCOMPLETE_REASONS.includes(value.taskIncompleteReason as AgentTaskIncompleteReason)
+    ? value.taskIncompleteReason as AgentTaskIncompleteReason : undefined;
+  const agentLabel = typeof value.agentLabel === 'string' ? value.agentLabel : undefined;
+  const agentTemplateKey = OFFICIAL_PRESET_KEYS.includes(value.agentTemplateKey as OfficialPresetKey)
+    ? value.agentTemplateKey as OfficialPresetKey : undefined;
+  const modelName = typeof value.modelName === 'string' ? value.modelName : undefined;
   const retryable = typeof value.retryable === 'boolean' ? value.retryable : undefined;
   const feedback_recommended = typeof value.feedback_recommended === 'boolean' ? value.feedback_recommended : undefined;
   const resolution = normalizeAgentErrorResolution(value.resolution);
+  const providerDiagnostic = normalizeModelFailureDiagnostic(value.providerDiagnostic);
 
   if (
     !code &&
     !ownership &&
     !detail &&
     !workspacePath &&
+    !taskIncompleteReason &&
+    !providerDiagnostic &&
+    !agentLabel &&
+    !agentTemplateKey &&
+    !modelName &&
     retryable === undefined &&
     feedback_recommended === undefined &&
     !resolution
@@ -770,6 +755,11 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
     ...(ownership ? { ownership } : {}),
     ...(detail ? { detail } : {}),
     ...(workspacePath ? { workspacePath } : {}),
+    ...(taskIncompleteReason ? { taskIncompleteReason } : {}),
+    ...(providerDiagnostic ? { providerDiagnostic } : {}),
+    ...(agentLabel ? { agentLabel } : {}),
+    ...(agentTemplateKey ? { agentTemplateKey } : {}),
+    ...(modelName ? { modelName } : {}),
     ...(retryable !== undefined ? { retryable } : {}),
     ...(feedback_recommended !== undefined ? { feedback_recommended } : {}),
     ...(resolution ? { resolution } : {}),
@@ -801,143 +791,22 @@ const normalizeThinkingStatus = (value: unknown): IMessageThinking['content']['s
 const finiteNumber = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 
-const normalizeToolGroupResultDisplay = (
-  value: unknown
-): IMessageToolGroup['content'][number]['result_display'] | undefined => {
-  if (value == null) return undefined;
-  if (typeof value === 'string') return value;
-  if (!isObject(value)) return toDisplayText(value);
-
-  if ('file_diff' in value || 'file_name' in value) {
-    return {
-      file_diff: toDisplayText(value.file_diff),
-      file_name: toDisplayText(value.file_name),
-    };
-  }
-  if ('img_url' in value || 'relative_path' in value) {
-    return {
-      img_url: toDisplayText(value.img_url),
-      relative_path: toDisplayText(value.relative_path),
-    };
-  }
-
-  return toDisplayText(value);
-};
-
-const normalizeToolGroupConfirmationDetails = (
-  value: unknown
-): IMessageToolGroup['content'][number]['confirmationDetails'] | undefined => {
-  if (!isObject(value)) return undefined;
-  const type = value.type;
-  const title = toDisplayText(value.title);
-
-  if (type === 'edit') {
-    return {
-      type,
-      title,
-      file_name: toDisplayText(value.file_name),
-      file_diff: toDisplayText(value.file_diff),
-      ...(typeof value.isModifying === 'boolean' ? { isModifying: value.isModifying } : {}),
-    };
-  }
-  if (type === 'exec') {
-    return {
-      type,
-      title,
-      rootCommand: toDisplayText(value.rootCommand),
-      command: toDisplayText(value.command),
-    };
-  }
-  if (type === 'info') {
-    return {
-      type,
-      title,
-      prompt: toDisplayText(value.prompt),
-      ...(Array.isArray(value.urls) ? { urls: value.urls.map((url) => toDisplayText(url)) } : {}),
-    };
-  }
-  if (type === 'mcp') {
-    return {
-      type,
-      title,
-      tool_name: toDisplayText(value.tool_name),
-      tool_display_name: toDisplayText(value.tool_display_name),
-      server_name: toDisplayText(value.server_name),
-    };
-  }
-
-  return undefined;
-};
-
-const LEGACY_TOOL_GROUP_ARTIFACT_ERROR =
-  'Legacy image result was not backed by a committed artifact receipt';
-
 export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['content'] => {
   if (!Array.isArray(value)) return [];
 
   return value
     .filter(isObject)
+    .filter((item) => typeof item.call_id === 'string' && item.call_id.trim().length > 0)
     .map((item) => {
-      const resultDisplay = normalizeToolGroupResultDisplay(item.result_display);
-      const confirmationDetails = normalizeToolGroupConfirmationDetails(item.confirmationDetails);
       const status = normalizeToolGroupStatus(item.status);
       const description = toDisplayText(item.description);
-      // ToolGroupEntry has no receipt or 2PC-marker fields. Historical
-      // `result_display.img_url` therefore cannot prove delivery and must be
-      // downgraded at message admission, before process summaries can render a
-      // green state. Verified outputs use the detailed ToolCall carrier.
-      const unverifiedLegacyImage =
-        isObject(resultDisplay) &&
-        'img_url' in resultDisplay &&
-        Boolean(optionalDisplayText(resultDisplay.img_url));
       return {
-        call_id: optionalDisplayText(item.call_id) ?? optionalDisplayText(item.id) ?? uuid(),
-        description:
-          unverifiedLegacyImage && status === 'Success'
-            ? description
-              ? `${description}: ${LEGACY_TOOL_GROUP_ARTIFACT_ERROR}`
-              : LEGACY_TOOL_GROUP_ARTIFACT_ERROR
-            : description,
+        call_id: toDisplayText(item.call_id),
+        description,
         name: toDisplayText(item.name, 'Tool'),
-        render_output_as_markdown:
-          typeof item.render_output_as_markdown === 'boolean' ? item.render_output_as_markdown : false,
-        status: unverifiedLegacyImage && status === 'Success' ? 'Error' : status,
-        ...(!unverifiedLegacyImage && resultDisplay !== undefined
-          ? { result_display: resultDisplay }
-          : {}),
-        ...(confirmationDetails ? { confirmationDetails } : {}),
+        status,
       };
     });
-};
-
-const normalizePermissionParams = (params: unknown): Record<string, string> | undefined => {
-  if (!isObject(params)) return undefined;
-  return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, toDisplayText(value)]));
-};
-
-const normalizePermissionContent = (value: unknown): IConfirmation => {
-  const data = isObject(value) ? value : {};
-  const options = Array.isArray(data.options)
-    ? data.options.filter(isObject).map((option, index) => {
-        const params = normalizePermissionParams(option.params);
-        return {
-          label: toDisplayText(option.label, `Option ${index + 1}`),
-          value: option.value,
-          ...(params ? { params } : {}),
-        };
-      })
-    : [];
-
-  return {
-    id: toDisplayText(data.id, uuid()),
-    description: toDisplayText(data.description ?? data.title, ''),
-    call_id: toDisplayText(data.call_id ?? data.id, ''),
-    options,
-    ...(data.title != null ? { title: toDisplayText(data.title) } : {}),
-    ...(data.action != null ? { action: toDisplayText(data.action) } : {}),
-    ...(data.command_type != null ? { command_type: toDisplayText(data.command_type) } : {}),
-    ...(data.screenshot != null ? { screenshot: toDisplayText(data.screenshot) } : {}),
-  };
 };
 
 const TOOL_ARTIFACT_KINDS = new Set<PersistedToolArtifact['kind']>([
@@ -1005,7 +874,7 @@ export const normalizeToolCallContent = (
 ): IMessageToolCall['content'] => {
   const data = isObject(value) ? value : {};
   const rawStatus =
-    data.status === 'running' || data.status === 'completed' || data.status === 'error'
+    data.status === 'running' || data.status === 'completed' || data.status === 'error' || data.status === 'canceled'
       ? data.status
       : undefined;
   let status = rawStatus;
@@ -1063,6 +932,22 @@ const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['conte
     ...(data.session_id != null ? { session_id: toDisplayText(data.session_id) } : {}),
     ...(typeof data.is_connected === 'boolean' ? { is_connected: data.is_connected } : {}),
     ...(typeof data.has_active_session === 'boolean' ? { has_active_session: data.has_active_session } : {}),
+    ...(data.turn_summary === true ? { turn_summary: true } : {}),
+    ...(data.turn_summary === true &&
+      ['running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(data.turn_state as string)
+      ? { turn_state: data.turn_state as IMessageAgentStatus['content']['turn_state'] } : {}),
+    ...(finiteNumber(data.started_seq) != null ? { started_seq: finiteNumber(data.started_seq) } : {}),
+    ...(data.finished_seq === null
+      ? { finished_seq: null }
+      : finiteNumber(data.finished_seq) != null
+        ? { finished_seq: finiteNumber(data.finished_seq) }
+        : {}),
+    ...(finiteNumber(data.started_at_ms) != null
+      ? { started_at_ms: finiteNumber(data.started_at_ms) }
+      : {}),
+    ...(finiteNumber(data.finished_at_ms) != null
+      ? { finished_at_ms: finiteNumber(data.finished_at_ms) }
+      : {}),
   };
 };
 
@@ -1077,6 +962,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const errorData = message.data;
       const structuredError = normalizeAgentStreamError(errorData);
       const recovery = isObject(errorData) ? normalizeTruncatedTurnRecovery(errorData.recovery) : undefined;
+      const notice = isObject(errorData) ? normalizeIdmmDecisionNotice(errorData.idmm_notice) : undefined;
       const errorText =
         (isObject(errorData) ? optionalDisplayText(errorData.message) : undefined) ?? toDisplayText(errorData);
       return {
@@ -1092,6 +978,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           type: 'error',
           ...(structuredError ? { error: structuredError } : {}),
           ...(recovery ? { recovery } : {}),
+          ...(notice ? { idmm_notice: notice } : {}),
         },
       };
     }
@@ -1104,6 +991,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           ? (normalizeAgentStreamError(data.error) ?? normalizeAgentStreamError({ ...data, message: content }))
           : undefined;
       const recovery = normalizeTruncatedTurnRecovery(data.recovery);
+      const notice = normalizeIdmmDecisionNotice(data.idmm_notice);
       return {
         id: uuid(),
         type: 'tips',
@@ -1117,6 +1005,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           type: tipType,
           ...(structuredError ? { error: structuredError } : {}),
           ...(recovery ? { recovery } : {}),
+          ...(notice ? { idmm_notice: notice } : {}),
         },
       };
     }
@@ -1127,6 +1016,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const isRichData = isResponseTextData(data);
       const shouldReplace = message.replace === true || (isRichData && data.replace === true);
       const persistedWriteback = isRichData ? normalizeKnowledgeWritebackState(data.knowledge_writeback) : undefined;
+      const decision = isRichData ? normalizeIdmmDecisionExplanation(data.idmm_decision) : undefined;
       return {
         id: uuid(),
         type: 'text',
@@ -1141,6 +1031,8 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
               cronMeta: normalizeCronMessageMeta(data.cronMeta),
               ...(shouldReplace ? { replace: true } : {}),
               ...(persistedWriteback ? { knowledge_writeback: persistedWriteback } : {}),
+              ...(decision ? { idmm_decision: decision } : {}),
+              ...normalizeTextContinuation(data),
               ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),
             }
           : {
@@ -1186,31 +1078,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         content: normalizeAgentStatusContent(message.data),
       };
     }
-    case 'permission': {
-      return {
-        id: uuid(),
-        type: 'permission',
-        msg_id: message.msg_id,
-        ...turnIdentity,
-        position: 'left',
-        conversation_id: message.conversation_id,
-        created_at,
-        content: normalizePermissionContent(message.data),
-      };
-    }
-    case 'plan': {
-      return {
-        id: uuid(),
-        type: 'plan',
-        msg_id: message.msg_id,
-        ...turnIdentity,
-        position: 'left',
-        conversation_id: message.conversation_id,
-        created_at,
-        status: message.status,
-        content: message.data as any,
-      };
-    }
     case 'thinking': {
       const data = isObject(message.data) ? message.data : { content: message.data };
       const duration = finiteNumber(data.duration) ?? finiteNumber(data.duration_ms);
@@ -1240,8 +1107,9 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
     case 'skill_suggest':
     case 'cron_trigger':
     case 'info': // Stream retry notifications and similar transient agent updates
-    case 'system': // Cron system responses, ignored
-    case 'request_trace': // Request trace events, logged to F12 console (not persisted)
+    case 'request_trace': // Transient request traces are not persisted or rendered.
+      return undefined;
+    case 'system':
       return undefined;
     default: {
       console.warn(
@@ -1252,31 +1120,11 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
   }
 };
 
-export const transformKnowledgeWritebackEvent = (event: IKnowledgeWritebackEvent): IMessageText | undefined => {
-  if (!event.msg_id) return undefined;
-  return {
-    id: uuid(),
-    type: 'text',
-    msg_id: event.msg_id,
-    position: 'left',
-    conversation_id: event.conversation_id,
-    content: {
-      content: '',
-      knowledge_writeback: {
-        status: event.status,
-        attempt_id: event.attempt_id,
-        attempt_generation: event.attempt_generation,
-        started_at: event.started_at,
-        updated_at: event.updated_at,
-        finished_at: event.finished_at,
-        retryable: event.retryable,
-        candidates: event.candidates,
-        written: event.written,
-        failures: event.failures,
-      },
-    },
-  };
-};
+export function normalizeTextContinuation(value: Record<string, unknown>): Partial<IMessageText['content']> {
+  if (typeof value.continuation_of_message_id !== 'string') return {};
+  try { return { continuation_of_message_id: parseMessageId(value.continuation_of_message_id) }; }
+  catch { return {}; }
+}
 
 const normalizeMessageStatus = (value: string | undefined): TMessage['status'] => {
   if (value === 'finish' || value === 'pending' || value === 'error' || value === 'work') return value;
@@ -1288,6 +1136,7 @@ export const transformUserCreatedEvent = (
   conversationId: ConversationId
 ): IMessageText | undefined => {
   if (event.hidden || event.conversation_id !== conversationId || !event.msg_id) return undefined;
+  const decision = normalizeIdmmDecisionExplanation(event.idmm_decision);
   return {
     id: uuid(),
     type: 'text',
@@ -1298,6 +1147,8 @@ export const transformUserCreatedEvent = (
     created_at: event.created_at,
     content: {
       content: event.content,
+      ...(event.interaction ? { interaction: event.interaction } : {}),
+      ...(decision ? { idmm_decision: decision } : {}),
     },
   };
 };
@@ -1353,14 +1204,6 @@ export const composeMessage = (
         if (existingTerminal) {
           return tool;
         }
-        if (
-          ['Success', 'Error', 'Canceled'].includes(newToolData.status) &&
-          !Object.prototype.hasOwnProperty.call(newToolData, 'result_display')
-        ) {
-          // A provisional result retained from Executing is not proof of a
-          // terminal output. The terminal frame must carry it explicitly.
-          merged.result_display = undefined;
-        }
         return merged;
       });
 
@@ -1405,44 +1248,24 @@ export const composeMessage = (
     return pushMessage(message);
   }
 
-  if (message.type === 'plan') {
-    for (let i = 0, len = list.length; i < len; i++) {
-      const msg = list[i];
-      if (msg.type === 'plan' && msg.content.session_id === message.content.session_id) {
-        // Create new object instead of mutating original
-        const merged = { ...msg.content, ...message.content };
-        return updateMessage(i, { ...msg, content: merged });
-      }
-    }
-    return pushMessage(message);
-    // If no existing plan found, add new one
-  }
-
-  // Handle thinking message merging — only merge contiguous streaming chunks
+  // Reasoning has one canonical identity per Turn/model step. A provider can
+  // resume that step after narration or a tool proposal, so reconcile by that
+  // identity rather than creating duplicate rows at transcript boundaries.
   if (message.type === 'thinking') {
-    if (message.content.status === 'done') {
+    if (message.msg_id) {
       for (let i = list.length - 1; i >= 0; i--) {
         const msg = list[i];
         if (msg.type !== 'thinking' || msg.msg_id !== message.msg_id) continue;
 
         const merged = {
           ...msg.content,
-          status: 'done' as const,
+          content: msg.content.content + message.content.content,
+          status: message.content.status,
           duration: message.content.duration,
           subject: message.content.subject || msg.content.subject,
         };
-        return updateMessage(i, { ...msg, content: merged });
+        return updateMessage(i, { ...msg, turn_id: message.turn_id ?? msg.turn_id, content: merged });
       }
-    }
-
-    if (last.type === 'thinking' && last.msg_id === message.msg_id) {
-      // Otherwise append content
-      const merged = {
-        ...last.content,
-        content: last.content.content + message.content.content,
-        subject: message.content.subject || last.content.subject,
-      };
-      return updateMessage(list.length - 1, { ...last, content: merged });
     }
     return pushMessage(message);
   }

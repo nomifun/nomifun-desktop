@@ -51,8 +51,9 @@ pub fn validate_path_with_extra_root(
 /// Like [`validate_path`] but the target does not need to exist yet.
 ///
 /// Canonicalizes the *parent directory* and verifies it is within the sandbox,
-/// then appends the file name component. Useful for write/create operations
-/// where the file itself may not exist yet.
+/// then appends the file name component. Existing targets are resolved and
+/// checked too, so a final symlink cannot redirect a write outside the roots.
+/// Dangling links fail closed. This is not a lock against concurrent renames.
 ///
 /// # Errors
 ///
@@ -99,7 +100,163 @@ pub fn validate_path_for_write(path: &str, allowed_roots: &[&Path]) -> Result<Pa
             path
         )));
     }
-    Ok(joined)
+    match std::fs::symlink_metadata(&joined) {
+        Ok(_) => validate_path(path, allowed_roots),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(joined),
+        Err(error) => Err(AppError::BadRequest(format!(
+            "cannot inspect write target '{}': {}", path, error
+        ))),
+    }
+}
+
+/// Compare already validated, canonical-root-relative patch targets before
+/// creating directories or publishing any file. Windows case sensitivity is a
+/// property of each parent directory, including newly inherited directories.
+pub(crate) fn patch_targets_overlap(
+    root: &Path,
+    left: &Path,
+    right: &Path,
+) -> Result<bool, AppError> {
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = root;
+        Ok(left.starts_with(right) || right.starts_with(left))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        use unicode_normalization::UnicodeNormalization;
+
+        let relative = |path: &Path| {
+            path.strip_prefix(root).map(Path::to_path_buf).map_err(|_| {
+                AppError::Forbidden("patch target is outside the bound workspace".to_owned())
+            })
+        };
+        let root_path = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
+            AppError::BadRequest("workspace root contains a NUL byte".to_owned())
+        })?;
+        // SAFETY: root_path is a live NUL-terminated path. _PC_CASE_SENSITIVE
+        // returns the filesystem comparison mode without mutating the volume.
+        let case_sensitive = unsafe { libc::pathconf(root_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+        if case_sensitive < 0 {
+            return Err(AppError::Conflict(format!(
+                "cannot determine macOS volume case sensitivity for '{}': {}",
+                root.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        let component_key = |component: Component<'_>| -> Result<String, AppError> {
+            let Component::Normal(name) = component else {
+                return Err(AppError::BadRequest(
+                    "patch target contains a non-normal path component".to_owned(),
+                ));
+            };
+            let name = name.to_str().ok_or_else(|| {
+                AppError::BadRequest("patch target is not valid UTF-8".to_owned())
+            })?;
+            let normalized = name.nfd().collect::<String>();
+            Ok(if case_sensitive == 0 {
+                normalized.to_lowercase()
+            } else {
+                normalized
+            })
+        };
+        let left = relative(left)?;
+        let right = relative(right)?;
+        let mut left = left.components();
+        let mut right = right.components();
+        loop {
+            match (left.next(), right.next()) {
+                (Some(a), Some(b)) if component_key(a)? == component_key(b)? => continue,
+                (Some(_), Some(_)) => return Ok(false),
+                // Equality or either normalized path being an ancestor is an overlap.
+                (None, _) | (_, None) => return Ok(true),
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+
+        let relative = |path: &Path| {
+            path.strip_prefix(root).map(Path::to_path_buf).map_err(|_| {
+                AppError::Forbidden("patch target is outside the bound workspace".to_owned())
+            })
+        };
+        let left = relative(left)?;
+        let right = relative(right)?;
+        let mut parent = root.to_path_buf();
+        for (a, b) in left.components().zip(right.components()) {
+            if a != b {
+                let left_name: Vec<u16> = a.as_os_str().encode_wide().collect();
+                let right_name: Vec<u16> = b.as_os_str().encode_wide().collect();
+                let count = |len| i32::try_from(len).map_err(|_| {
+                    AppError::BadRequest("patch path component is too long".to_owned())
+                });
+                let left_len = count(left_name.len())?;
+                let right_len = count(right_name.len())?;
+                // Ordinal comparison does not expand characters or use the
+                // process locale. Keep exact names on case-sensitive parents.
+                // SAFETY: both UTF-16 buffers remain live for their checked lengths.
+                let compared = unsafe {
+                    CompareStringOrdinal(left_name.as_ptr(), left_len, right_name.as_ptr(), right_len, 1)
+                };
+                if compared == 0 {
+                    return Err(AppError::Internal(format!(
+                        "cannot compare patch target names: {}", std::io::Error::last_os_error()
+                    )));
+                }
+                if compared != CSTR_EQUAL || windows_directory_case_sensitive(&parent, root)? {
+                    return Ok(false);
+                }
+            }
+            parent.push(a.as_os_str());
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(windows)]
+fn windows_directory_case_sensitive(path: &Path, workspace_root: &Path) -> Result<bool, AppError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FileCaseSensitiveInfo, GetFileInformationByHandleEx,
+    };
+    use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+
+    // Native Windows directory creation inherits this flag. Walk only absent
+    // parents; denied or unsupported queries cannot prove distinct resources.
+    for parent in path.ancestors().take_while(|parent| parent.starts_with(workspace_root)) {
+        let opened = std::fs::OpenOptions::new().read(true)
+            .access_mode(FILE_READ_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(parent);
+        let file = match opened {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AppError::Conflict(format!(
+                "cannot inspect patch parent '{}': {error}", parent.display()
+            ))),
+        };
+        let mut info = FILE_CASE_SENSITIVE_INFO::default();
+        // SAFETY: File owns the live handle and info is a correctly sized output buffer.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(), FileCaseSensitiveInfo,
+                (&mut info as *mut FILE_CASE_SENSITIVE_INFO).cast(),
+                std::mem::size_of_val(&info) as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(AppError::Conflict(format!(
+                "cannot determine case sensitivity of patch parent '{}': {}",
+                parent.display(), std::io::Error::last_os_error()
+            )));
+        }
+        return Ok(info.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0);
+    }
+    Err(AppError::Conflict("patch parent disappeared during preparation".to_owned()))
 }
 
 /// Reject a file-name component that `Path::join` would not treat as a plain
@@ -174,7 +331,9 @@ pub fn is_unsafe_path_segment(name: &str) -> bool {
     if !cfg!(windows) {
         return false;
     }
-    if name.contains(':') || name.ends_with('.') || name.ends_with(' ') {
+    if name.chars().any(|c| c <= '\u{1f}' || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        || name.ends_with('.') || name.ends_with(' ')
+    {
         return true;
     }
     is_windows_reserved_device_name(name)
@@ -191,7 +350,12 @@ fn is_windows_reserved_device_name(name: &str) -> bool {
     lower
         .strip_prefix("com")
         .or_else(|| lower.strip_prefix("lpt"))
-        .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
+        .is_some_and(|suffix| {
+            // Win32 also recognizes these ISO-8859-1 superscript digits in
+            // DOS device names, including when followed by an extension.
+            let mut chars = suffix.chars();
+            matches!(chars.next(), Some('1'..='9' | '¹' | '²' | '³')) && chars.next().is_none()
+        })
 }
 
 /// The filesystem authority a single file operation runs under, resolved
@@ -214,6 +378,50 @@ pub enum PathAuthority {
     /// `allowed_roots` behaviour). For untrusted / external surfaces, or the
     /// default the UI/file-routes pass (`allowed_roots ∪ workspace`).
     Confined(Vec<PathBuf>),
+    /// Agent workspace authority with the platform-owned `.nomifun` subtree
+    /// excluded even when a symlink/junction aliases it under another name.
+    Workspace(PathBuf),
+}
+
+pub(crate) fn reject_workspace_owner_canonical_path(
+    canonical_root: &Path,
+    canonical_target: &Path,
+) -> Result<(), AppError> {
+    let relative = canonical_target.strip_prefix(canonical_root).map_err(|_| {
+        AppError::Forbidden("workspace path is outside the bound resource".into())
+    })?;
+    if relative.components().next().is_some_and(|component| {
+        matches!(component, Component::Normal(value)
+            if crate::artifact_store::is_workspace_owner_component(value))
+    }) {
+        return Err(AppError::NotFound("workspace path was not found".into()));
+    }
+    Ok(())
+}
+
+/// Validate the nearest existing ancestor so a missing write target cannot
+/// enter `.nomifun` through an already-present alias directory.
+pub(crate) fn validate_workspace_candidate(path: &Path, root: &Path) -> Result<(), AppError> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+        AppError::BadRequest(format!("cannot resolve workspace root: {error}"))
+    })?;
+    let mut probe = path;
+    let canonical_probe = loop {
+        match std::fs::canonicalize(probe) {
+            Ok(value) => break value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                probe = probe.parent().ok_or_else(|| {
+                    AppError::BadRequest("workspace path has no existing ancestor".into())
+                })?;
+            }
+            Err(error) => {
+                return Err(AppError::BadRequest(format!(
+                    "cannot resolve workspace path ancestor: {error}"
+                )));
+            }
+        }
+    };
+    reject_workspace_owner_canonical_path(&canonical_root, &canonical_probe)
 }
 
 /// Authority-aware variant of [`validate_path`]: the target must exist.
@@ -228,6 +436,14 @@ pub fn validate_path_authority(path: &str, authority: &PathAuthority) -> Result<
         PathAuthority::Confined(roots) => {
             let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
             validate_path(path, &refs)
+        }
+        PathAuthority::Workspace(root) => {
+            let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+                AppError::BadRequest(format!("cannot resolve workspace root: {error}"))
+            })?;
+            let canonical = validate_path(path, &[root.as_path()])?;
+            reject_workspace_owner_canonical_path(&canonical_root, &canonical)?;
+            Ok(canonical)
         }
     }
 }
@@ -263,11 +479,29 @@ pub fn validate_path_for_write_authority(
             let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
             validate_path_for_write(path, &refs)
         }
+        PathAuthority::Workspace(root) => {
+            let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+                AppError::BadRequest(format!("cannot resolve workspace root: {error}"))
+            })?;
+            let target = validate_path_for_write(path, &[root.as_path()])?;
+            reject_workspace_owner_canonical_path(&canonical_root, &target)?;
+            Ok(target)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn missing_patch_root_does_not_inherit_case_rules_from_outside_the_workspace() {
+        let fixture = tempfile::tempdir().unwrap();
+        let missing_root = fixture.path().join("missing-workspace");
+        assert!(super::patch_targets_overlap(
+            &missing_root, &missing_root.join("Report.txt"), &missing_root.join("report.txt"),
+        ).is_err());
+    }
+
     use super::*;
     use std::fs;
 

@@ -5,25 +5,26 @@
  */
 
 /**
- * KnowledgeControl — Per-session knowledge-base mounting popover.
+ * KnowledgeControl — Knowledge-base selection and write-back policy popover.
  *
  * Trigger button + popover panel are deliberately aligned with the sibling
- * conversation-header controls (AutoWork / IDMM / MultiAgent): a compact
+ * conversation-header capability controls: a compact
  * `Button size='mini' shape='round'` with an icon + label + tri-state status
- * dot, and a popover whose layout mirrors IdmmControl's design language
+ * dot, and a popover using the shared capability-control design language
  * (icon-chip header + status pill + rounded `bg-fill-1` card sections), instead
  * of the earlier bespoke square icon-button + full-bleed-divider panel.
  *
- * Preserved behaviors from the original implementation:
- * - Three-target resolution: conversation/terminal → workpath, companion → per-profile
- * - Draft mode (Guid page pre-creation binding)
+ * Supported ownership modes:
+ * - Guid draft → one new AgentSession's initial Knowledge resources/policy
+ * - Conversation → live AgentSession Knowledge subset, applied between turns
+ * - terminal → workpath and companion → per-profile target resolution
  * - Binding read/write via `POST /api/knowledge/binding/{kind}/{target_id}`
- * - `knowledge.binding-changed` / base-created/updated/deleted WS refresh
+ * - AgentSession/legacy binding-change + base-created/updated/deleted WS refresh
  * - `disabledReason` tooltip, `applyNote`, `footer` passthrough
  * - First-time discoverability hint tooltip
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button, Input, Message, Popover, Switch, Tooltip } from '@arco-design/web-react';
@@ -35,13 +36,10 @@ import type {
   IKnowledgeBase,
   IKnowledgeBinding,
   IKnowledgeTag,
-  KnowledgeBindingKind,
   KnowledgeWritebackEagerness,
 } from '@/common/adapter/ipcBridge';
-import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useTerminalSessions } from '@/renderer/pages/terminal/useTerminalSessions';
 import {
-  workpathKeyForConversation,
   workpathKeyForTerminal,
 } from '@/renderer/pages/conversation/SessionList/utils/sessionWorkpath';
 import { useKnowledgeTags } from '@/renderer/pages/knowledge/useKnowledgeTags';
@@ -51,6 +49,10 @@ import {
   shouldShowKnowledgeBaseSearch,
 } from './KnowledgeControl.utils';
 import { capabilityHeaderButtonClass, capabilityHeaderButtonStyle } from './CapabilityHeaderButton';
+import {
+  workpathDisplayForKnowledgeTarget,
+  type ResolvedKnowledgeBindingTarget,
+} from '../Workspace/KnowledgePanel/knowledgeBindingTarget';
 
 export type KnowledgeTarget =
   | { kind: 'conversation'; id: ConversationId }
@@ -58,19 +60,18 @@ export type KnowledgeTarget =
   | { kind: 'companion'; id: CompanionId }
   | { kind: 'workpath'; id: string };
 
-/** Draft (pre-creation) mode: the binding lives in the parent's state and is
- * persisted by the parent once a target exists. */
-export type KnowledgeDraft = {
-  value: IKnowledgeBinding;
-  onChange: (next: IKnowledgeBinding) => void;
-};
-
 type KnowledgeControlProps = {
   target?: KnowledgeTarget;
   draft?: KnowledgeDraft;
+  writebackAvailable?: boolean;
   disabledReason?: string;
   applyNote?: string;
   footer?: React.ReactNode;
+};
+
+export type KnowledgeDraft = {
+  value: IKnowledgeBinding;
+  onChange: (next: IKnowledgeBinding) => void;
 };
 
 export const defaultKnowledgeBinding = (): IKnowledgeBinding => ({
@@ -81,16 +82,16 @@ export const defaultKnowledgeBinding = (): IKnowledgeBinding => ({
   kb_ids: [],
 });
 
-// ─── Shared visual tokens (mirror IdmmControl's panel design language) ───────
+// ─── Shared capability-panel visual tokens ──────────────────────────────────
 
-/** Rounded card section — identical token to IdmmControl's `sectionClass`. */
+/** Rounded card section shared by capability panels. */
 const sectionClass =
   'flex flex-col gap-8px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-1)] px-12px py-10px';
 const fieldStackClass = 'min-w-0 flex flex-col gap-4px';
 const fieldLabelClass = 'text-[var(--color-text-1)] text-11px font-600 leading-15px';
 const subtleInsetClass =
   'rounded-8px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-1)] px-10px py-8px';
-/** Tinted surface — mirrors IdmmControl's `watchTone`; `--primary-6` is an RGB triplet. */
+/** Tinted surface; `--primary-6` is an RGB triplet. */
 const tintBg = (color: string, amount = 12): string =>
   `color-mix(in srgb, rgb(${color}) ${amount}%, var(--color-bg-1))`;
 const lineClamp2Style: React.CSSProperties = {
@@ -142,10 +143,9 @@ function kindLabel(kind: IKnowledgeBase['kind'], t: TFunction): string {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disabledReason, applyNote, footer }) => {
+const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, writebackAvailable = true, disabledReason, applyNote, footer }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { conversations } = useConversationHistoryContext();
   const { sessions: terminalSessions } = useTerminalSessions();
   const { tags: allTags } = useKnowledgeTags();
 
@@ -171,50 +171,47 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     [t]
   );
 
-  // ─── Target resolution (unchanged logic) ─────────────────────────────────
-  const resolved = useMemo((): { kind: KnowledgeBindingKind; id: string } | null => {
+  // ─── Target resolution ───────────────────────────────────────────────────
+  const resolved = useMemo((): ResolvedKnowledgeBindingTarget | null => {
     if (!target) return null;
-    if (target.kind === 'companion') return { kind: 'companion', id: target.id };
-    if (target.kind === 'conversation') {
-      const conv = conversations.find((c) => c.id === target.id);
-      if (!conv) return null;
-      return { kind: 'workpath', id: workpathKeyForConversation(conv.extra as Record<string, unknown>) };
-    }
+    if (target.kind === 'companion') return { kind: 'companion', target_id: target.id };
+    if (target.kind === 'conversation') return { kind: 'conversation', target_id: target.id };
     if (target.kind === 'terminal') {
       const session = terminalSessions.find((s) => s.terminal_id === target.id);
       if (!session) return null;
-      return { kind: 'workpath', id: workpathKeyForTerminal(session) };
+      return { kind: 'workpath', target_id: workpathKeyForTerminal(session) };
     }
-    return { kind: 'workpath', id: target.id };
-  }, [target?.kind, target?.id, conversations, terminalSessions]);
+    return { kind: 'workpath', target_id: target.id };
+  }, [target?.kind, target?.id, terminalSessions]);
 
   const kind = resolved?.kind;
-  const id = resolved?.id;
-  const targetUnresolved = !draft && !!target && target.kind !== 'companion' && !resolved;
+  const id = resolved?.target_id;
+  const targetUnresolved = !draft && Boolean(target) && target?.kind !== 'companion' && !resolved;
 
-  // The resolved workpath (for scope display)
-  const workpathDisplay = useMemo(() => {
-    if (!resolved || resolved.kind === 'companion') return null;
-    return resolved.id;
-  }, [resolved]);
+  // Only workpath targets display a shared workspace scope.
+  const workpathDisplay = workpathDisplayForKnowledgeTarget(resolved);
 
   // ─── State ────────────────────────────────────────────────────────────────
   const [bases, setBases] = useState<IKnowledgeBase[]>([]);
   const [basesLoaded, setBasesLoaded] = useState(false);
   const [persistedBinding, setPersistedBinding] = useState<IKnowledgeBinding>(defaultKnowledgeBinding);
-  const binding = draft ? draft.value : persistedBinding;
+  const savingRef = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const binding = draft?.value ?? persistedBinding;
   const [searchQuery, setSearchQuery] = useState('');
-  const isDraftMode = !!draft;
+  const isDraftMode = Boolean(draft);
 
   const reloadBinding = useCallback(async () => {
     if (isDraftMode || !kind || !id) return;
     try {
-      const next = await ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id });
-      setPersistedBinding(next);
+      const next = kind === 'conversation'
+        ? await ipcBridge.agentPlatform.sessions.getKnowledge.invoke({ agent_session_id: id })
+        : await ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id });
+      setPersistedBinding({ channel_write_enabled: false, ...next });
     } catch {
       /* ignore — keep current binding */
     }
-  }, [isDraftMode, kind, id]);
+  }, [id, isDraftMode, kind]);
 
   // ─── Discoverability hint ─────────────────────────────────────────────────
   const [hintVisible, setHintVisible] = useState(false);
@@ -252,11 +249,13 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
           ipcBridge.knowledge.listBases.invoke(),
           isDraftMode || !kind || !id
             ? Promise.resolve(null)
-            : ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id }),
+            : kind === 'conversation'
+              ? ipcBridge.agentPlatform.sessions.getKnowledge.invoke({ agent_session_id: id })
+              : ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id }),
         ]);
         if (cancelled) return;
         setBases(list);
-        if (b) setPersistedBinding(b);
+        if (b) setPersistedBinding({ channel_write_enabled: false, ...b });
       } catch {
         /* ignore — keep defaults */
       } finally {
@@ -266,7 +265,37 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     return () => {
       cancelled = true;
     };
-  }, [kind, id, isDraftMode]);
+  }, [id, isDraftMode, kind]);
+
+  useEffect(() => {
+    if (!draft || !basesLoaded) return;
+    const available = new Set(
+      bases
+        .filter((base) => base.root_exists)
+        .map((base) => base.knowledge_base_id)
+    );
+    const retained = draft.value.kb_ids.filter((id) => available.has(id)).slice(0, 32);
+    const selectedHasReadOnly = retained.some((id) =>
+      bases.find((base) => base.knowledge_base_id === id)?.tree_access !== 'editable'
+    );
+    const policyNeedsReset = (!writebackAvailable || selectedHasReadOnly) && (
+      draft.value.writeback || draft.value.writeback_eagerness !== 'manual'
+    );
+    if (
+      retained.length === draft.value.kb_ids.length
+      && retained.every((id, index) => id === draft.value.kb_ids[index])
+      && !policyNeedsReset
+    ) return;
+    const enabled = retained.length > 0;
+    const writeback = enabled && writebackAvailable && draft.value.writeback;
+    draft.onChange({
+      ...draft.value,
+      enabled,
+      kb_ids: retained,
+      writeback,
+      writeback_eagerness: writeback ? draft.value.writeback_eagerness : 'manual',
+    });
+  }, [bases, basesLoaded, draft, writebackAvailable]);
 
   // Keep base list fresh
   useEffect(() => {
@@ -286,12 +315,19 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
 
   useEffect(() => {
     if (isDraftMode || !kind || !id) return;
+    if (kind === 'conversation') {
+      const unsub = ipcBridge.agentPlatform.sessions.onKnowledgeChanged.on((event) => {
+        if (event.agent_session_id !== id) return;
+        setPersistedBinding({ ...event.binding, channel_write_enabled: false });
+      });
+      return () => unsub();
+    }
     const unsub = ipcBridge.knowledge.onBindingChanged.on((event) => {
       if (event.target_kind !== kind || event.target_id !== id) return;
       void reloadBinding();
     });
     return () => unsub();
-  }, [isDraftMode, kind, id, reloadBinding]);
+  }, [id, isDraftMode, kind, reloadBinding]);
 
   // ─── Persist ──────────────────────────────────────────────────────────────
   const persist = async (next: IKnowledgeBinding) => {
@@ -300,33 +336,83 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
       return;
     }
     if (!kind || !id) return;
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
     setPersistedBinding(next);
     try {
-      await ipcBridge.knowledge.setBinding.invoke({ kind, target_id: id, ...next });
+      const saved = kind === 'conversation'
+        ? await ipcBridge.agentPlatform.sessions.updateKnowledge.invoke({
+            agent_session_id: id,
+            binding: {
+              enabled: next.enabled,
+              writeback: next.writeback,
+              writeback_eagerness: next.writeback_eagerness,
+              kb_ids: next.kb_ids,
+            },
+          })
+        : await ipcBridge.knowledge.setBinding.invoke({ kind, target_id: id, ...next });
+      setPersistedBinding({ channel_write_enabled: false, ...saved });
       if (next.enabled !== binding.enabled) {
         // Terminal workpath bindings re-sync into the live PTY workspace
-        // immediately (backend binding hook); conversation targets apply on
-        // the next message — two different promises, two toasts.
-        const enabledKey =
-          target?.kind === 'terminal' ? 'knowledge.control.enabledOkTerminal' : 'knowledge.control.enabledOk';
+        // immediately through the backend binding hook. Companion profile
+        // rows are product-owned defaults; this control never mutates a live
+        // AgentSession.
+        const enabledKey = target?.kind === 'conversation'
+          ? 'knowledge.control.enabledOkConversation'
+          : target?.kind === 'terminal'
+            ? 'knowledge.control.enabledOkTerminal'
+            : 'knowledge.control.enabledOk';
         Message.success(next.enabled ? t(enabledKey) : t('knowledge.control.disabledOk'));
       }
     } catch (e) {
+      setPersistedBinding(binding);
       Message.error(String(e));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   };
 
   // ─── Handlers ─────────────────────────────────────────────────────────────
+  const selectedBasesHaveReadOnly = binding.kb_ids.some((id) =>
+    bases.find((base) => base.knowledge_base_id === id)?.tree_access !== 'editable'
+  );
+
   const handleToggleBase = (baseId: KnowledgeBaseId) => {
     const isSelected = binding.kb_ids.includes(baseId);
+    if (!isSelected && binding.kb_ids.length >= 32) return;
+    const addsReadOnly = !isSelected
+      && bases.find((base) => base.knowledge_base_id === baseId)?.tree_access !== 'editable';
     const nextIds = isSelected ? binding.kb_ids.filter((x) => x !== baseId) : [...binding.kb_ids, baseId];
     // Auto-enable when first base selected; auto-disable when last removed
     const nextEnabled = nextIds.length > 0 ? true : false;
-    void persist({ ...binding, kb_ids: nextIds, enabled: nextEnabled });
+    void persist({
+      ...binding,
+      kb_ids: nextIds,
+      enabled: nextEnabled,
+      // An unmounted binding must be genuinely inert. Do not carry a stale
+      // write-back policy after the final base is removed.
+      ...(nextEnabled && !addsReadOnly
+        ? {}
+        : { writeback: false, writeback_eagerness: 'manual' as const }),
+    });
   };
 
   const handleWritebackToggle = (v: boolean) => {
+    if (!binding.enabled || !writebackAvailable || (v && selectedBasesHaveReadOnly)) return;
     void persist({ ...binding, writeback: v });
+  };
+
+  const handleEnabledToggle = (enabled: boolean) => {
+    if (enabled && binding.kb_ids.length === 0) return;
+    void persist({
+      ...binding,
+      enabled,
+      ...(enabled
+        ? {}
+        : { writeback: false, writeback_eagerness: 'manual' as const }),
+    });
   };
 
   const handleWritebackEagerness = (eagerness: KnowledgeWritebackEagerness) => {
@@ -339,18 +425,25 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   const filteredBases = useMemo(() => {
     return filterKnowledgeBasesByQuery(bases, searchQuery, tagLabelsByKey, kindLabelsByKind);
   }, [bases, searchQuery, kindLabelsByKind, tagLabelsByKey]);
+  const missingSelectedIds = useMemo(() => {
+    const available = new Set(bases.map((base) => base.knowledge_base_id));
+    return binding.kb_ids.filter((id) => !available.has(id));
+  }, [bases, binding.kb_ids]);
 
   // ─── Derived status (shared by trigger button + panel header pill) ─────────
   // Knowledge has no live run-state — the dot is a binary enabled/off marker
   // (primary when mounted, gray otherwise).
   const dotColor = binding.enabled ? CAPABILITY_COLORS.primary : CAPABILITY_COLORS.off;
-  const statusText = draft
-    ? binding.enabled
-      ? t('guid.advanced.draftOn')
-      : t('guid.advanced.draftOff')
-    : binding.enabled
-      ? t('knowledge.control.mounted', { count: mountedCount })
-      : t('knowledge.control.off');
+  const statusText = !binding.enabled
+    ? t('knowledge.control.off')
+    : binding.writeback
+      ? t(
+          binding.writeback_eagerness === 'auto'
+            ? 'knowledge.control.mountedAuto'
+            : 'knowledge.control.mountedManual',
+          { count: mountedCount }
+        )
+      : t('knowledge.control.mountedReadOnly', { count: mountedCount });
 
   // Compact segmented control (writeback disposition) — tinted track with a
   // primary active pill, sitting on the section's bg-fill-1 surface.
@@ -370,11 +463,11 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
               activeSeg
                 ? 'border border-solid border-[rgba(var(--primary-6),0.28)] bg-[rgba(var(--primary-6),0.12)] text-primary-6 font-600'
                 : 'border border-solid border-transparent text-[var(--color-text-1)] hover:bg-[var(--color-fill-3)]',
-              targetUnresolved && 'cursor-not-allowed opacity-60',
+              (targetUnresolved || saving) && 'cursor-not-allowed opacity-60',
             ]
               .filter(Boolean)
               .join(' ')}
-            onClick={() => !targetUnresolved && onPick(o.value)}
+            onClick={() => !targetUnresolved && !saving && onPick(o.value)}
           >
             {o.label}
           </div>
@@ -392,6 +485,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   const renderBaseRow = (base: IKnowledgeBase) => {
     const isSelected = binding.kb_ids.includes(base.knowledge_base_id);
     const rootMissing = !base.root_exists;
+    const writeUnavailable = writebackAvailable && base.tree_access !== 'editable';
     const cannotSelect = rootMissing && !isSelected;
     const badge = getKindBadge(base.kind);
     const baseTags = base.tags.map((tk) => tagMap[tk]).filter((x): x is IKnowledgeTag => !!x);
@@ -402,13 +496,13 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
         className={[
           'flex items-center gap-9px rounded-8px border border-solid bg-[var(--color-bg-1)] px-8px py-7px cursor-pointer transition-colors',
           isSelected ? 'border-[rgba(var(--primary-6),0.38)]' : 'border-[var(--color-border-2)] hover:bg-fill-2',
-          targetUnresolved && 'opacity-50 cursor-not-allowed',
+          (targetUnresolved || saving) && 'opacity-50 cursor-not-allowed',
           cannotSelect && 'cursor-not-allowed opacity-65 hover:bg-[var(--color-bg-1)]',
         ]
           .filter(Boolean)
           .join(' ')}
         style={isSelected ? { background: tintBg('var(--primary-6)', 7) } : undefined}
-        onClick={() => !targetUnresolved && (!rootMissing || isSelected) && handleToggleBase(base.knowledge_base_id)}
+        onClick={() => !targetUnresolved && !saving && (!cannotSelect || isSelected) && handleToggleBase(base.knowledge_base_id)}
       >
         {/* Checkbox */}
         <span
@@ -451,6 +545,11 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
               })}
             </span>
           )}
+          {!rootMissing && writeUnavailable && (
+            <span className='knowledge-control-write-unavailable mt-2px block text-11px leading-15px text-warning-6'>
+              {t('knowledge.mount.writeAccessRequired')}
+            </span>
+          )}
           {firstTag && (
             <span className='mt-2px flex items-center gap-3px text-11px text-[var(--color-text-2)]'>
               <span
@@ -469,10 +568,10 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   const showSearch = shouldShowKnowledgeBaseSearch(bases.length);
   const panel = (
     <div className='box-border flex w-340px max-h-500px flex-col gap-10px overflow-hidden p-12px'>
-      {/* Header — identical structure to IdmmControl: icon chip + title on the
+      {/* Header uses the shared capability-panel structure: icon chip + title on the
           left, status pill on the right, hint below. The earlier "container
           misalignment" was Arco's own popover-shell padding (now zeroed via
-          .knowledge-control-popover in arco-override.css, same fix IdmmControl
+          .knowledge-control-popover in arco-override.css
           already uses), NOT this row's layout. */}
       <div className='flex flex-col gap-6px'>
         <div className='flex items-center justify-between gap-10px'>
@@ -491,7 +590,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
           </span>
         </div>
         <div className='text-[var(--color-text-2)] text-11px leading-16px' style={lineClamp2Style}>
-          {t('knowledge.control.hint')}
+          {t(isDraftMode ? 'knowledge.control.guidHint' : 'knowledge.control.hint')}
         </div>
         <div
           className='self-start text-11px font-600 text-primary-6 cursor-pointer hover:underline'
@@ -544,17 +643,55 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
 
           {/* Scrollable body */}
           <div className='flex min-h-0 flex-1 flex-col gap-8px overflow-y-auto'>
+            <div className={sectionClass}>
+              <div className='flex items-center justify-between gap-10px'>
+                <span className='min-w-0 flex flex-col gap-2px'>
+                  <span className='text-[var(--color-text-1)] text-13px font-600'>
+                    {t('knowledge.control.mountEnabled')}
+                  </span>
+                  <span className='text-[var(--color-text-2)] text-11px leading-15px'>
+                    {t('knowledge.control.mountEnabledDesc')}
+                  </span>
+                </span>
+                <Switch
+                  size='small'
+                  checked={binding.enabled}
+                  disabled={targetUnresolved || saving || binding.kb_ids.length === 0}
+                  onChange={handleEnabledToggle}
+                />
+              </div>
+            </div>
+
             {/* Mounted-bases section */}
             <div className={sectionClass}>
               <span className={fieldLabelClass}>{t('knowledge.control.basesLabel', { defaultValue: '挂载的知识库' })}</span>
               <div className='flex flex-col gap-3px'>
-                {filteredBases.length === 0 ? (
+                {filteredBases.length === 0 && missingSelectedIds.length === 0 ? (
                   <span className='py-4px text-[var(--color-text-2)] text-11px'>
                     {t('knowledge.filterEmpty', { defaultValue: '没有匹配的知识库' })}
                   </span>
                 ) : (
                   filteredBases.map(renderBaseRow)
                 )}
+                {missingSelectedIds.map((baseId) => (
+                  <button
+                    key={baseId}
+                    type='button'
+                    disabled={targetUnresolved || saving}
+                    className='flex w-full cursor-pointer items-center gap-8px rounded-8px border border-solid border-[rgba(var(--danger-6),0.35)] bg-[rgba(var(--danger-6),0.05)] px-9px py-8px text-left disabled:cursor-not-allowed disabled:opacity-60'
+                    onClick={() => handleToggleBase(baseId)}
+                  >
+                    <span className='min-w-0 flex-1'>
+                      <span className='block truncate text-12px font-600 text-danger-6'>{baseId}</span>
+                      <span className='mt-2px block text-11px leading-15px text-[var(--color-text-2)]'>
+                        {t('knowledge.control.missingSelection')}
+                      </span>
+                    </span>
+                    <span className='shrink-0 text-11px font-600 text-danger-6'>
+                      {t('knowledge.consumers.removeMount')}
+                    </span>
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -566,13 +703,19 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
                     {t('knowledge.control.writeback', { defaultValue: '回血知识库' })}
                   </span>
                   <span className='text-[var(--color-text-2)] text-11px leading-15px'>
-                    {t('knowledge.mount.writebackDesc', { defaultValue: '让本会话把新学到的知识写回知识库' })}
+                    {t(
+                      !writebackAvailable
+                        ? 'knowledge.control.writebackUnavailable'
+                        : selectedBasesHaveReadOnly
+                          ? 'knowledge.control.writebackReadOnlySelection'
+                          : 'knowledge.mount.writebackDesc'
+                    )}
                   </span>
                 </span>
                 <Switch
                   size='small'
                   checked={binding.writeback}
-                  disabled={targetUnresolved}
+                  disabled={targetUnresolved || saving || !binding.enabled || !writebackAvailable || selectedBasesHaveReadOnly || binding.kb_ids.length === 0}
                   onChange={handleWritebackToggle}
                 />
               </div>
@@ -610,7 +753,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     </div>
   );
 
-  // ─── Trigger button (aligned with AutoWork / IDMM / MultiAgent) ────────────
+  // ─── Trigger button aligned with the other capability controls ────────────
   const button = (
     <Button
       size='mini'
@@ -643,14 +786,14 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
       trigger='click'
       position='br'
       content={panel}
-      onVisibleChange={(v) => {
+      onVisibleChange={(v: boolean) => {
         if (v) {
           dismissHint();
           setSearchQuery('');
         }
       }}
     >
-      <Tooltip content={t('knowledge.control.discoverHint')} popupVisible={hintVisible} position='bottom'>
+      <Tooltip content={t(isDraftMode ? 'knowledge.control.guidDiscoverHint' : 'knowledge.control.discoverHint')} popupVisible={hintVisible} position='bottom'>
         {button}
       </Tooltip>
     </Popover>

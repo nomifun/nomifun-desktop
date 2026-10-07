@@ -50,15 +50,20 @@ export interface UpdateCanvasResizeResult {
   node: CanvasGraphNode | null;
 }
 
-export const SOURCE_CANVAS_MIN_NODE_SIZE: CanvasSize = {
+const SOURCE_CANVAS_MIN_NODE_SIZE: CanvasSize = {
   width: 220,
   height: 160,
 };
 
 /** Text can collapse to the compact blue-frame height without affecting media. */
-export const SOURCE_CANVAS_MIN_TEXT_NODE_SIZE: CanvasSize = {
+const SOURCE_CANVAS_MIN_TEXT_NODE_SIZE: CanvasSize = {
   width: 220,
   height: 88,
+};
+
+const SOURCE_CANVAS_MIN_TIMELINE_NODE_SIZE: CanvasSize = {
+  width: 480,
+  height: 128,
 };
 
 const finitePoint = (point: CanvasPoint): boolean =>
@@ -83,6 +88,8 @@ export function startCanvasResize(
   const defaultMinSize =
     node.type === 'text'
       ? SOURCE_CANVAS_MIN_TEXT_NODE_SIZE
+      : node.type === 'timeline'
+        ? SOURCE_CANVAS_MIN_TIMELINE_NODE_SIZE
       : SOURCE_CANVAS_MIN_NODE_SIZE;
   const minSize = {
     width: positiveFinite(options.minSize?.width ?? defaultMinSize.width, 1),

@@ -8,8 +8,7 @@ import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Switch, Message, Empty, Pagination, Spin, Tooltip, Input } from '@arco-design/web-react';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
+import { Button, Switch, Message, Empty, Spin, Tooltip, Input } from '@arco-design/web-react';
 import { useAllCronJobs } from '@renderer/pages/cron/useCronJobs';
 import { formatSchedule, formatNextRun } from '@renderer/pages/cron/cronUtils';
 import { type ICronJob } from '@/common/adapter/ipcBridge';
@@ -25,12 +24,12 @@ import { filterCronJobsByQuery, filterCronJobsByStatus, type CronJobStatusFilter
 import { parseScheduledConversationId } from './scheduledConversationId';
 import { DESKTOP_SCHEDULED_TASK_COLUMNS } from './scheduledTaskLayout';
 import ScheduledTaskActions from './ScheduledTaskActions';
+import { getConversationCreateErrorMessage } from '@renderer/pages/conversation/utils/conversationCreateError';
+import NomiPagination from '@/renderer/components/base/NomiPagination';
 
 const DEFAULT_PAGE_SIZE = 20;
 
 const ScheduledTasksPage: React.FC = () => {
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -124,7 +123,7 @@ const ScheduledTasksPage: React.FC = () => {
           Message.success(t('cron.resumeSuccess'));
         }
       } catch (err) {
-        Message.error(String(err));
+        Message.error(getConversationCreateErrorMessage(err, t));
       }
     },
     [pauseJob, resumeJob, t]
@@ -146,13 +145,13 @@ const ScheduledTasksPage: React.FC = () => {
     <div
       className={classNames(
         'w-full min-h-full box-border overflow-y-auto',
-        isMobile ? 'px-16px py-14px' : 'px-12px py-24px md:px-40px md:py-32px'
+        'px-12px py-24px md:px-40px md:py-32px'
       )}
     >
       <div
         className={classNames(
           'mx-auto flex w-full max-w-800px box-border flex-col',
-          isMobile ? 'gap-14px' : 'gap-16px'
+          'gap-16px'
         )}
       >
         <div className='flex w-full items-center justify-between gap-12px sm:gap-16px max-[520px]:flex-wrap'>
@@ -173,7 +172,7 @@ const ScheduledTasksPage: React.FC = () => {
           <span
             className={classNames(
               'min-w-0 text-t-primary',
-              isMobile ? 'text-12px leading-18px' : 'text-13px leading-20px'
+              'text-13px leading-20px'
             )}
           >
             {t('cron.page.awakeBanner')}
@@ -354,7 +353,7 @@ const ScheduledTasksPage: React.FC = () => {
             </div>
 
             <div className='mt-12px flex justify-end'>
-              <Pagination
+              <NomiPagination
                 className='scheduled-tasks-pagination'
                 current={page}
                 pageSize={pageSize}

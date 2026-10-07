@@ -7,7 +7,7 @@
 import { configService } from '@/common/config/configService';
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 
-export const SPEECH_TO_TEXT_CONFIG_KEY = 'tools.speechToText' as const;
+const SPEECH_TO_TEXT_CONFIG_KEY = 'tools.speechToText' as const;
 export const SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT = 'nomifun:speech-to-text-config-changed';
 
 export const DEFAULT_SPEECH_TO_TEXT_CONFIG: SpeechToTextConfig = {

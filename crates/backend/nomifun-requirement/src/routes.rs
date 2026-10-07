@@ -10,10 +10,11 @@ use nomifun_api_types::{
     ResumeTagRequest, TagBindings, TagSummary, UpdateRequirementRequest, UpdateStatusRequest,
 };
 use nomifun_auth::CurrentUser;
-use nomifun_common::{AppError, ConversationId, PaginatedResult, RequirementId, TerminalId};
+use nomifun_common::{AppError, ConversationId, PaginatedResult, RequirementId};
 use serde::Deserialize;
 
 use crate::state::RequirementRouterState;
+use crate::AutoWorkConfig;
 
 pub fn requirement_routes(state: RequirementRouterState) -> Router {
     Router::new()
@@ -125,7 +126,7 @@ async fn list_tags(
 /// optional. Returns the refreshed tag summary.
 async fn resume_tag(
     State(state): State<RequirementRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(tag): Path<String>,
     body: Option<Json<ResumeTagRequest>>,
 ) -> Result<Json<ApiResponse<TagSummary>>, AppError> {
@@ -140,6 +141,36 @@ async fn resume_tag(
         .requirement_service
         .resume_tag(&tag, &requeue_requirement_ids)
         .await?;
+    // Resume is a durable AutoWork state transition as well as a queue write.
+    // Publish fresh per-session snapshots so open conversation controls and the
+    // sidebar leave `paused` without waiting for another claim.
+    match state.requirement_service.tag_bindings(&user.id).await {
+        Ok(groups) => {
+            for binding in groups
+                .into_iter()
+                .filter(|group| group.tag == tag)
+                .flat_map(|group| group.bindings)
+            {
+                match build_autowork_state(
+                    &state,
+                    &user.id,
+                    binding.kind,
+                    &binding.target_id,
+                )
+                .await
+                {
+                    Ok(snapshot) => state.requirement_service.emit_autowork_state(&snapshot),
+                    Err(error) => tracing::warn!(
+                        tag,
+                        target_id = binding.target_id,
+                        %error,
+                        "Failed to publish resumed AutoWork state"
+                    ),
+                }
+            }
+        }
+        Err(error) => tracing::warn!(tag, %error, "Failed to enumerate resumed AutoWork bindings"),
+    }
     let summary = state
         .requirement_service
         .tags()
@@ -163,9 +194,16 @@ async fn list_tag_bindings(
 ) -> Result<Json<ApiResponse<Vec<TagBindings>>>, AppError> {
     let mut groups = state.requirement_service.tag_bindings(&user.id).await?;
     for group in &mut groups {
+        let paused = state
+            .requirement_service
+            .tag_pause_state(&group.tag)
+            .await?
+            .0;
         for binding in &mut group.bindings {
             if matches!(state.auto_work_runner.live_progress(binding.kind, &binding.target_id), Some((Some(_), _))) {
                 binding.run_state = AutoWorkRunState::Active;
+            } else if paused {
+                binding.run_state = AutoWorkRunState::Paused;
             }
         }
     }
@@ -221,9 +259,8 @@ async fn set_autowork(
 ) -> Result<Json<ApiResponse<AutoWorkState>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     validate_target_id(req.kind, &req.target_id)?;
-    if req.enabled && req.tag.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(AppError::BadRequest("tag is required when enabling autowork".into()));
-    }
+    let config =
+        AutoWorkConfig::normalize(req.enabled, req.tag.as_deref(), req.max_requirements)?;
     // Admin guard (tag/session management): refuse to disable a session that is actively
     // executing a requirement when the request comes from the admin backend. The
     // user must stop it from the session page so a live turn is not interrupted.
@@ -236,59 +273,28 @@ async fn set_autowork(
             "session is actively executing a requirement; stop it from the session page first".into(),
         ));
     }
-    // Ownership + (terminal) eligibility, per target kind.
+    // Target kind is fixed to canonical AgentSession. The runner's config port
+    // performs the owner-scoped Store compare-and-set; no legacy Conversation
+    // row participates in admission.
     match req.kind {
-        AutoWorkTargetKind::Conversation => {
-            // Validate ownership in the conversation ID domain.
-            state
-                .requirement_service
-                .verify_conversation_owner(&req.target_id, &user.id)
-                .await?;
-        }
-        AutoWorkTargetKind::Terminal => {
-            state
-                .requirement_service
-                .verify_terminal_owner(&req.target_id, &user.id)
-                .await?;
-            if req.enabled {
-                state
-                    .requirement_service
-                    .ensure_terminal_autowork_eligible(&req.target_id)
-                    .await?;
-            }
-        }
+        AutoWorkTargetKind::Conversation => {}
+        AutoWorkTargetKind::Terminal => unreachable!("validated above"),
     }
-    // Persist config.
+    // Persist config and reconcile the live loop under one per-target
+    // transition lock. Identical enables are a no-op for the running
+    // Requirement; changed bindings quiesce the prior generation first.
     state
-        .requirement_service
-        .save_autowork_config(
+        .auto_work_runner
+        .apply_config(
+            &user.id,
             req.kind,
             &req.target_id,
-            req.enabled,
-            req.tag.as_deref(),
-            req.max_requirements,
+            config,
+            None,
+            None,
         )
         .await?;
-    // Start/stop the live loop.
-    if req.enabled {
-        if let Some(tag) = req.tag.clone() {
-            // An explicit enable resumes a tag a prior failure left paused, so
-            // toggling 自动工作 on actually RUNS instead of silently inheriting the
-            // paused state (which blocks every conversation bound to the tag —
-            // the recurring "彻底不工作" trap). Best-effort: a resume failure must
-            // not block enabling.
-            if let Err(e) = state.requirement_service.resume_tag_for_enable(&tag).await {
-                tracing::warn!(tag, error = %e, "auto-resume on autowork enable failed (non-fatal)");
-            }
-            state
-                .auto_work_runner
-                .start(req.kind, req.target_id.clone(), tag, req.max_requirements)
-                .await;
-        }
-    } else {
-        state.auto_work_runner.stop(req.kind, &req.target_id).await;
-    }
-    let st = build_autowork_state(&state, req.kind, &req.target_id).await?;
+    let st = build_autowork_state(&state, &user.id, req.kind, &req.target_id).await?;
     state.requirement_service.emit_autowork_state(&st);
     Ok(Json(ApiResponse::ok(st)))
 }
@@ -302,28 +308,20 @@ async fn get_autowork(
         .ok_or_else(|| AppError::BadRequest(format!("unknown autowork target kind: {kind}")))?;
     validate_target_id(kind, &target_id)?;
     match kind {
-        AutoWorkTargetKind::Conversation => {
-            state
-                .requirement_service
-                .verify_conversation_owner(&target_id, &user.id)
-                .await?;
-        }
-        AutoWorkTargetKind::Terminal => {
-            state
-                .requirement_service
-                .verify_terminal_owner(&target_id, &user.id)
-                .await?;
-        }
+        AutoWorkTargetKind::Conversation => {}
+        AutoWorkTargetKind::Terminal => unreachable!("validated above"),
     }
-    let st = build_autowork_state(&state, kind, &target_id).await?;
+    let st = build_autowork_state(&state, &user.id, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(st)))
 }
 
 fn validate_target_id(kind: AutoWorkTargetKind, target_id: &str) -> Result<(), AppError> {
-    let valid = match kind {
-        AutoWorkTargetKind::Conversation => ConversationId::try_from(target_id).is_ok(),
-        AutoWorkTargetKind::Terminal => TerminalId::try_from(target_id).is_ok(),
-    };
+    if kind == AutoWorkTargetKind::Terminal {
+        return Err(AppError::BadRequest(
+            "Terminal AutoWork was retired; bind an AgentPreset Session instead".to_owned(),
+        ));
+    }
+    let valid = ConversationId::try_from(target_id).is_ok();
     if valid {
         Ok(())
     } else {
@@ -336,15 +334,33 @@ fn validate_target_id(kind: AutoWorkTargetKind, target_id: &str) -> Result<(), A
 
 async fn build_autowork_state(
     state: &RequirementRouterState,
+    owner_id: &str,
     kind: AutoWorkTargetKind,
     target_id: &str,
 ) -> Result<AutoWorkState, AppError> {
-    let (enabled, tag, _max) = state.requirement_service.read_autowork_config(kind, target_id).await?;
+    let snapshot = state
+        .requirement_service
+        .read_autowork_config_snapshot(owner_id, kind, target_id)
+        .await?;
+    let enabled = snapshot.config.enabled;
+    let tag = snapshot.config.tag;
     let running = state.auto_work_runner.is_running(kind, target_id);
     let live_tag = state.auto_work_runner.running_tag(kind, target_id).or(tag);
     let (current_requirement_id, completed_count) =
         state.auto_work_runner.live_progress(kind, target_id).unwrap_or((None, 0));
-    let run_state = AutoWorkState::run_state(enabled, current_requirement_id.as_deref());
+    let (paused, paused_reason) = if enabled {
+        match live_tag.as_deref() {
+            Some(tag) => state.requirement_service.tag_pause_state(tag).await?,
+            None => (false, None),
+        }
+    } else {
+        (false, None)
+    };
+    let run_state = AutoWorkState::run_state(
+        enabled,
+        paused,
+        current_requirement_id.as_deref(),
+    );
     Ok(AutoWorkState {
         kind,
         target_id: target_id.to_string(),
@@ -352,6 +368,8 @@ async fn build_autowork_state(
         tag: live_tag,
         running,
         run_state,
+        paused,
+        paused_reason,
         current_requirement_id,
         completed_count,
     })

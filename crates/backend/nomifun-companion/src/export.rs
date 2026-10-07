@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{AppError, TimestampMs, now_ms, validate_uuidv7, zip_safe};
-use nomifun_extension::skill_service::{SkillPaths, SkillScope};
+use nomifun_skill_library::skill_service::{SkillPaths, SkillScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -654,25 +654,22 @@ async fn import_bundle_inner(
     // Extraction temp lives under the shared dir (same volume as the events
     // destination), namespaced to avoid collisions.
     let tmp_root = shared_dir.join(".import-tmp");
-    let extract_dir = tmp_root.join(format!("companion-{}-{}", std::process::id(), now_ms()));
-    tokio::fs::create_dir_all(&extract_dir)
-        .await
+    tokio::fs::create_dir_all(&tmp_root).await
+        .map_err(|e| AppError::Internal(format!("failed to create import temp root: {e}")))?;
+    let extract_dir = tempfile::Builder::new().prefix("companion-").tempdir_in(&tmp_root)
         .map_err(|e| AppError::Internal(format!("failed to create import temp dir: {e}")))?;
 
-    let result = import_extracted(
+    import_extracted(
         store,
         roster,
         skill_paths,
         shared_dir,
         src_path,
-        &extract_dir,
+        Arc::new(extract_dir),
         event_store_lock.as_ref(),
         config.as_ref(),
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-    let _ = tokio::fs::remove_dir(&tmp_root).await; // best-effort, only when empty
-    result
+    .await
 }
 
 async fn import_extracted(
@@ -681,13 +678,14 @@ async fn import_extracted(
     skill_paths: &SkillPaths,
     shared_dir: &Path,
     src_path: &Path,
-    extract_dir: &Path,
+    extract_dir: Arc<tempfile::TempDir>,
     event_store_lock: Option<&crate::collector::SharedEventStoreLock>,
     config: Option<&crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
     let src = src_path.to_path_buf();
-    let dest = extract_dir.to_path_buf();
-    let kind = tokio::task::spawn_blocking(move || extract_zip_validated(&src, &dest))
+    // Blocking work keeps the directory alive if its async caller is cancelled.
+    let dest = Arc::clone(&extract_dir);
+    let kind = tokio::task::spawn_blocking(move || extract_zip_validated(&src, dest.path()))
         .await
         .map_err(|e| AppError::Internal(format!("import task join error: {e}")))??;
 
@@ -697,13 +695,13 @@ async fn import_extracted(
                 store,
                 roster,
                 shared_dir,
-                extract_dir,
+                extract_dir.path(),
                 event_store_lock,
                 config,
             )
             .await
         }
-        EXPORT_KIND_COMPANION => import_companion_bundle(store, roster, skill_paths, extract_dir).await,
+        EXPORT_KIND_COMPANION => import_companion_bundle(store, roster, skill_paths, extract_dir.path()).await,
         other => Err(AppError::BadRequest(format!("导入包类型不支持: {other}"))),
     }
 }
@@ -1469,12 +1467,19 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 /// bound the extraction.
 /// Returns the manifest `kind` after the format/version checks passed.
 fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<String, AppError> {
+    extract_zip_with_budget(archive_path, destination, zip_safe::ZipExtractionBudget::default())
+}
+
+fn extract_zip_with_budget(
+    archive_path: &Path,
+    destination: &Path,
+    mut budget: zip_safe::ZipExtractionBudget,
+) -> Result<String, AppError> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| AppError::BadRequest(format!("failed to open import file: {e}")))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|_| AppError::BadRequest("不是 NomiFun 导出包".into()))?;
 
-    let mut budget = zip_safe::ZipExtractionBudget::default();
     budget
         .check_entry_count(archive.len())
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -1532,11 +1537,10 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Stri
         }
         let mut output = std::fs::File::create(&output_path)
             .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        let written = std::io::copy(&mut entry, &mut output)
-            .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        budget
-            .record_written(written)
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        budget.copy_entry(&mut entry, &mut output).map_err(|error| match error {
+            zip_safe::ZipCopyError::Budget(error) => AppError::BadRequest(error.to_string()),
+            zip_safe::ZipCopyError::Io(error) => AppError::Internal(format!("failed to extract file: {error}")),
+        })?;
     }
 
     let manifest_bytes = std::fs::read(destination.join("manifest.json"))
@@ -1638,7 +1642,7 @@ mod tests {
     /// A real skill tree under the test root — the same layout the app resolves,
     /// so an imported `SKILL.md` lands exactly where the boot audit looks.
     fn skill_paths(root: &Path) -> SkillPaths {
-        nomifun_extension::skill_service::resolve_skill_paths(root, root)
+        nomifun_skill_library::skill_service::resolve_skill_paths(root, root)
     }
 
     /// The homes a companion EXPORT reads: `{root}/{companions}` for a
@@ -1695,6 +1699,19 @@ mod tests {
             last_reinforced_at: 3_333,
             companion_id: None,
         }
+    }
+
+    #[test]
+    fn extraction_budget_stops_writes_before_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("large.zip");
+        write_test_zip(&archive, &[("memories.jsonl", &"x".repeat(64 * 1024))]);
+        let destination = tmp.path().join("output");
+        let error = extract_zip_with_budget(
+            &archive, &destination, zip_safe::ZipExtractionBudget::new(4096, 4),
+        ).unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(ref message) if message.contains("decompression bomb")));
+        assert!(std::fs::metadata(destination.join("memories.jsonl")).unwrap().len() <= 4096);
     }
 
     fn write_test_zip(path: &Path, entries: &[(&str, &str)]) {

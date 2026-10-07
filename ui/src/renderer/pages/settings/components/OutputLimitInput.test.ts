@@ -36,12 +36,16 @@ describe('output limit presets and unit conversion', () => {
     expect(displayValueFromOutputLimit(8_192, 'tokens')).toBe(8_192);
     expect(displayValueFromOutputLimit(8_192, 'k')).toBe(8.192);
     expect(displayValueFromOutputLimit(8_192, 'm')).toBe(0.008192);
+    expect(outputLimitFromDisplayValue(100, 'm')).toBe(100_000_000);
+    expect(outputLimitFromDisplayValue(0xffff_ffff, 'tokens')).toBe(0xffff_ffff);
+    expect(normalizeOutputLimit(100_000_000)).toBe(100_000_000);
   });
 
   test('treats blank or invalid values as the provider default', () => {
     expect(normalizeOutputLimit(undefined)).toBeUndefined();
     expect(normalizeOutputLimit(0)).toBeUndefined();
     expect(normalizeOutputLimit(0.5)).toBeUndefined();
+    expect(normalizeOutputLimit(1.5)).toBeUndefined();
     expect(outputLimitFromDisplayValue(Number.NaN, 'tokens')).toBeUndefined();
     expect(outputLimitFromDisplayValue(-1, 'k')).toBeUndefined();
     expect(outputLimitFromDisplayValue(4_295, 'm')).toBeUndefined();

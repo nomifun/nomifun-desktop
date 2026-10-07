@@ -358,6 +358,14 @@ impl ManagedChildProcess {
         self.child().id()
     }
 
+    /// Observe the attached whole-tree cleanup proof without taking ownership
+    /// of termination. Capture before shutdown; the receipt remains usable if
+    /// this managed process is dropped and cleanup moves to the existing relay.
+    /// None means this owner already completed shutdown or transferred authority.
+    pub fn cleanup_receipt(&self) -> Option<ChildProcessCleanup> {
+        self.cleanup.clone()
+    }
+
     pub async fn shutdown(&mut self) -> io::Result<()> {
         if self.shutdown_complete {
             return Ok(());
@@ -914,6 +922,13 @@ impl ChildProcessBuilder {
 
     pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Self {
         self.inner.env_remove(key);
+        self
+    }
+
+    /// Disable ambient environment inheritance. The adapter must explicitly
+    /// supply every variable its child needs; process-tree ownership is unchanged.
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.inner.env_clear();
         self
     }
 

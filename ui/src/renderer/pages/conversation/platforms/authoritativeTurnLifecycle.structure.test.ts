@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
-const sharedLifecycle = readFileSync(new URL('./useAuthoritativeTurnLifecycle.ts', import.meta.url), 'utf8');
 const runtimeReconciler = readFileSync(
   new URL('./reconcileConversationTurnAfterStreamTerminal.ts', import.meta.url),
   'utf8'
@@ -11,21 +10,6 @@ const statefulLifecycles = ['./nomi/useNomiMessage.ts'].map((path) =>
 );
 
 describe('authoritative turn lifecycle wiring', () => {
-  test('closes simple-platform lifecycle before starting authoritative hydration', () => {
-    const conversationReset = sharedLifecycle.indexOf('}, [conversationId]);');
-    const closeBeforeHydration = sharedLifecycle.lastIndexOf(
-      'closedRef.current = true;',
-      conversationReset
-    );
-    const verifyBeforeHydration = sharedLifecycle.lastIndexOf(
-      'verifyUnannouncedStartRuntimeRef.current = true;',
-      conversationReset
-    );
-
-    expect(closeBeforeHydration).toBeGreaterThan(-1);
-    expect(verifyBeforeHydration).toBeGreaterThan(closeBeforeHydration);
-  });
-
   test('closes the stateful lifecycle before its hydration request and requires exact stream correlation', () => {
     const nomiSource = statefulLifecycles[0];
     const hydration = nomiSource.indexOf(
@@ -53,8 +37,6 @@ describe('authoritative turn lifecycle wiring', () => {
   });
 
   test('invalidates pending stop continuations at the authoritative completion boundary', () => {
-    expect(sharedLifecycle.includes('turnCompletionGenerationRef.current += 1;')).toBe(true);
-    expect(sharedLifecycle.includes('getTurnCompletionGeneration')).toBe(true);
     for (const source of statefulLifecycles) {
       expect(source.includes('turnCompletionGenerationRef.current += 1;')).toBe(true);
       expect(source.includes('getTurnCompletionGeneration')).toBe(true);
@@ -62,8 +44,6 @@ describe('authoritative turn lifecycle wiring', () => {
   });
 
   test('does not let a stale hydration snapshot resurrect a completed turn', () => {
-    expect(sharedLifecycle.includes('generationRef.current === generation')).toBe(true);
-    expect(sharedLifecycle.includes('reconcileSequenceRef.current === sequence')).toBe(true);
     for (const source of statefulLifecycles) {
       expect(source.includes('const hydrationGeneration = turnLifecycleGenerationRef.current;')).toBe(true);
       expect(source.includes('turnLifecycleGenerationRef.current === hydrationGeneration')).toBe(true);
@@ -79,9 +59,6 @@ describe('authoritative turn lifecycle wiring', () => {
   });
 
   test('transfers polling ownership after turn.started and resyncs on reconnect', () => {
-    expect(sharedLifecycle.includes('ipcBridge.conversation.reconnected.on')).toBe(true);
-    expect(sharedLifecycle.includes('reconcileGeneration(generationRef.current);')).toBe(true);
-    expect(sharedLifecycle.includes('conversation.runtime?.active_turn_id')).toBe(true);
 
     for (const source of statefulLifecycles) {
       expect(source.includes('ipcBridge.conversation.reconnected.on')).toBe(true);
@@ -131,11 +108,6 @@ describe('authoritative turn lifecycle wiring', () => {
   });
 
   test('reconciles again after stop-failure restoration invalidates an in-flight null-turn GET', () => {
-    const sharedRestore = sharedLifecycle.indexOf('const restoreAfterStopFailure = useCallback');
-    expect(sharedLifecycle.indexOf('reconcileGeneration(generationRef.current);', sharedRestore)).toBeGreaterThan(
-      sharedRestore
-    );
-
     for (const source of statefulLifecycles) {
       const restore = source.indexOf('const restoreRunningAfterStopFailure = useCallback');
       const reconcile = source.indexOf('startAuthoritativeRuntimeReconciliation();', restore);

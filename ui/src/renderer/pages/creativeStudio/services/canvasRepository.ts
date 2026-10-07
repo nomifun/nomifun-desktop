@@ -51,7 +51,7 @@ export class CreativeCanvasRepositoryError extends Error {
   }
 }
 
-export function isCreativeCanvasRepositoryError(
+function isCreativeCanvasRepositoryError(
   error: unknown
 ): error is CreativeCanvasRepositoryError {
   return (
@@ -63,7 +63,7 @@ export function isCreativeCanvasRepositoryError(
   );
 }
 
-export function toCreativeCanvasRepositoryError(
+function toCreativeCanvasRepositoryError(
   error: unknown
 ): CreativeCanvasRepositoryError {
   if (isCreativeCanvasRepositoryError(error)) return error;

@@ -60,12 +60,10 @@ pub struct CronAgentConfigDto {
     /// Frozen preset revision used when the task was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_revision: Option<i64>,
-    /// Frozen resolved preset payload. Scheduled execution must not silently
-    /// drift when a reusable preset is edited later.
+    /// Frozen resolved Agent payload. Scheduled execution must not silently
+    /// drift when an AgentPreset is edited later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub agent_snapshot: Option<crate::AgentResolvedSnapshot>,
     /// Natural model key. This is not an entity ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -427,7 +425,6 @@ mod tests {
             "custom_agent_id": "agent-1",
             "preset_id": "0190f5fe-7c00-7a00-8000-000000000001",
             "preset_revision": 3,
-            "mode": "auto",
             "model": "claude-sonnet-4-6",
             "config_options": {"key": "value"},
             "workspace": "/tmp/ws"
@@ -486,8 +483,7 @@ mod tests {
             custom_agent_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
-            mode: None,
+            agent_snapshot: None,
             model: None,
             provider_id: None,
             config_options: None,
@@ -509,8 +505,7 @@ mod tests {
             custom_agent_id: Some("c1".into()),
             preset_id: Some("0190f5fe-7c00-7a00-8000-000000000001".into()),
             preset_revision: Some(7),
-            preset_snapshot: None,
-            mode: Some("plan".into()),
+            agent_snapshot: None,
             model: Some("m1".into()),
             provider_id: None,
             config_options: Some(HashMap::from([("a".into(), "b".into())])),
@@ -551,8 +546,7 @@ mod tests {
                     custom_agent_id: None,
                     preset_id: None,
                     preset_revision: None,
-                    preset_snapshot: None,
-                    mode: None,
+                    agent_snapshot: None,
                     model: None,
                     provider_id: None,
                     config_options: None,

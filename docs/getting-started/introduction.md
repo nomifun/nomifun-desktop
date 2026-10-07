@@ -1,7 +1,7 @@
 # Introduction
 
 **NomiFun** is an open-source AI workstation and coding workspace. It unifies
-one agent engine, an extensible provider/model control plane, Creative Studio,
+one agent engine, an extensible provider/model control plane, Creation,
 MCP servers, skills, terminals, knowledge bases, scheduled work, and
 companion/remote capability surfaces in one local-first application.
 
@@ -28,9 +28,9 @@ tabs, MCP servers, and local scripts. NomiFun pulls them into one workspace:
 - **One workspace per conversation.** Conversations can own files, previews,
   diffs, terminals, and knowledge bindings instead of living as isolated chat
   transcripts.
-- **One creation system beyond chat.** Creative Studio combines a persistent
+- **One creation system beyond chat.** Creation combines a persistent
   infinite Canvas, independent Image/Video Workbenches, prompt and asset
-  libraries, private templates, and a bounded Director.
+  libraries, and private templates.
 - **Backend-driven automation.** Scheduled tasks, AutoWork requirements,
   terminal sessions, channel integrations, and completion notifications are
   durable backend services, not foreground browser-tab state.
@@ -68,8 +68,8 @@ For implementation details, see [Architecture Overview](../architecture/overview
 - **Terminals**: PTY-backed agent or shell sessions inside the app.
 - **Models**: providers, extensible model catalog, task capabilities,
   context/output limits, and global IDMM/failover settings.
-- **Creative Studio** (`/workshop/*`): infinite Canvases, independent Image and
-  Video Workbenches, prompts, reusable assets, private templates, and Director.
+- **Creation** (`/workshop/*`): infinite Canvases, independent Image and
+  Video Workbenches, prompts, reusable assets, and private templates.
 - **Presets & Skills**: reusable launch configurations and focused capability management.
 - **MCP**: local MCP server configuration.
 - **Open Capabilities**: WebUI remote access, remote MCP, and REST capability

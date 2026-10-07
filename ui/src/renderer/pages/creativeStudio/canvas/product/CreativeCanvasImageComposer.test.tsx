@@ -97,6 +97,50 @@ const props = (
 });
 
 describe('CreativeCanvasImageComposer', () => {
+  test.each(['queued', 'running'] as const)('blocks another generation on the same node while its task is %s', (state) => {
+    const generated: string[] = [];
+    const componentProps = props({
+      initialPrompt: '第一张图片', task: { state, pendingCount: 1 },
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const view = render(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} />));
+    const input = view.getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    const button = view.getByRole('button', { name: '生成图片' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(input.disabled).toBe(false);
+    fireEvent.click(button);
+    fireEvent.change(input, { target: { value: '第二张图片' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(generated).toEqual([]);
+    view.rerender(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps}
+      task={{ state: 'succeeded', pendingCount: 0 }} />));
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(generated).toEqual(['第二张图片']);
+  });
+
+  test('keeps another node available while this node is running', () => {
+    const generated: string[] = [];
+    const firstNode = props({
+      nodeId: 'first-node', initialPrompt: '第一张图片',
+      task: { state: 'running', pendingCount: 1 },
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const secondNode = props({
+      nodeId: 'second-node', initialPrompt: '第二张图片',
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const view = render(withCanvasTestI18n(<>
+      <CreativeCanvasImageComposer {...firstNode} />
+      <CreativeCanvasImageComposer {...secondNode} />
+    </>));
+    const buttons = view.getAllByRole('button', { name: '生成图片' }) as HTMLButtonElement[];
+    expect(buttons[0]!.disabled).toBe(true);
+    expect(buttons[1]!.disabled).toBe(false);
+    fireEvent.click(buttons[1]!);
+    expect(generated).toEqual(['第二张图片']);
+  });
+
   test('keeps canvas refreshes out of preedit and generates the committed text on click', () => {
     const promptChanges: CreativeCanvasReferencePromptChange[] = [];
     const generated: string[] = [];
@@ -463,7 +507,10 @@ describe('CreativeCanvasImageComposer', () => {
     expect(shellCss.includes('@media (prefers-color-scheme: dark)')).toBe(false);
     expect(shellCss.includes('width: 540px')).toBe(true);
     expect(promptCss.includes('min-height: 92px')).toBe(true);
-    expect(css.includes('padding: 0 4px 4px')).toBe(true);
+    const referenceCss = readFileSync(
+      new URL('./CreativeCanvasReferenceList.module.css', import.meta.url), 'utf8'
+    );
+    expect(referenceCss.includes('padding: 0 4px 4px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(false);
     expect(shellCss.includes('flex: 0 1 156px')).toBe(true);
     expect(

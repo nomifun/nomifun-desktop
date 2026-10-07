@@ -12,21 +12,8 @@ pub enum ProtocolCommand {
         content: String,
     },
     Stop,
-    ToolApprove {
-        call_id: String,
-        #[serde(default)]
-        scope: ApprovalScope,
-    },
-    ToolDeny {
-        call_id: String,
-        #[serde(default)]
-        reason: String,
-    },
     InitHistory {
         text: String,
-    },
-    SetMode {
-        mode: SessionMode,
     },
     SetConfig {
         #[serde(default)]
@@ -55,22 +42,6 @@ pub enum ProtocolCommand {
         headers: Option<HashMap<String, String>>,
     },
     Ping,
-}
-
-#[derive(Debug, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalScope {
-    #[default]
-    Once,
-    Always,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionMode {
-    Default,
-    AutoEdit,
-    Yolo,
 }
 
 #[cfg(test)]

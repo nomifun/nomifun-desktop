@@ -19,7 +19,7 @@ export type PromptCopyState = 'idle' | 'copying' | 'copied' | 'failed';
 export type PromptSaveState = 'idle' | 'saving' | 'saved' | 'failed';
 export type PromptRemoveState = 'idle' | 'removing' | 'removed' | 'failed';
 
-export interface PromptLibraryDetailsProps {
+interface PromptLibraryDetailsProps {
   item: PromptLibraryItem | null;
   locale: string;
   copyState: PromptCopyState;
@@ -45,13 +45,9 @@ function sourceLabel(item: PromptLibraryItem, t: TFunction): string {
       defaultValue: 'Public prompt catalog',
     });
   }
-  return item.source === 'preset'
-    ? t('creativeStudio.prompts.sourcePreset', {
-        defaultValue: 'NomiFun preset',
-      })
-    : t('creativeStudio.prompts.sourceAsset', {
-        defaultValue: 'My text assets',
-      });
+  return t('creativeStudio.prompts.sourceAsset', {
+    defaultValue: 'My text assets',
+  });
 }
 
 function updatedAtLabel(value: number | null, locale: string): string | null {
@@ -192,7 +188,7 @@ export const PromptLibraryDetailsContent: React.FC<PromptLibraryDetailsContentPr
   );
 };
 
-export const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
+const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
   item,
   locale,
   copyState,
@@ -252,79 +248,76 @@ export const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
           defaultValue: 'Prompt details',
         })
       }
-      footer={null}
-      style={{ width: 860, maxWidth: 'calc(100vw - 32px)' }}
+      footer={item ? (
+        <div className={styles.actions}>
+          <p
+            className={styles.copyFeedback}
+            data-copy-state={copyState}
+            data-save-state={saveState}
+            data-remove-state={removeState}
+            role={
+              copyState === 'failed' || saveState === 'failed' || removeState === 'failed'
+                ? 'alert'
+                : 'status'
+            }
+            aria-live='polite'
+          >
+            {feedback}
+          </p>
+          <div className={styles.actionButtons}>
+            <Button
+              type='primary'
+              icon={<Copy theme='outline' size={15} fill='currentColor' />}
+              loading={copyState === 'copying'}
+              onClick={onCopy}
+            >
+              {t('creativeStudio.prompts.copyPromptAction', {
+                defaultValue: 'Copy prompt',
+              })}
+            </Button>
+            {saveState === 'saved' ? (
+              onRemove ? (
+                <Button
+                  icon={<FolderMinus theme='outline' size={15} fill='currentColor' />}
+                  loading={removeState === 'removing'}
+                  onClick={onRemove}
+                >
+                  {t('creativeStudio.prompts.removeFromAssets', {
+                    defaultValue: 'Remove from my assets',
+                  })}
+                </Button>
+              ) : onSave ? (
+                <Button
+                  disabled
+                  icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
+                >
+                  {t('creativeStudio.prompts.addedToAssets', {
+                    defaultValue: 'Added to assets',
+                  })}
+                </Button>
+              ) : null
+            ) : onSave ? (
+              <Button
+                icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
+                loading={saveState === 'saving'}
+                onClick={onSave}
+              >
+                {t('creativeStudio.prompts.addToAssets', {
+                  defaultValue: 'Add to my assets',
+                })}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      style={{ width: 860 }}
       autoFocus={false}
       unmountOnExit
-      getPopupContainer={() =>
-        document.getElementById('creative-studio-portal-root') ?? document.body
-      }
+      getPopupContainer={() => document.body}
       onCancel={onClose}
     >
       {item ? (
-        <>
-          <PromptLibraryDetailsContent item={item} locale={locale} />
-          <div className={styles.actions}>
-            <p
-              className={styles.copyFeedback}
-              data-copy-state={copyState}
-              data-save-state={saveState}
-              data-remove-state={removeState}
-              role={
-                copyState === 'failed' || saveState === 'failed' || removeState === 'failed'
-                  ? 'alert'
-                  : 'status'
-              }
-              aria-live='polite'
-            >
-              {feedback}
-            </p>
-            <div className={styles.actionButtons}>
-              <Button
-                type='primary'
-                icon={<Copy theme='outline' size={15} fill='currentColor' />}
-                loading={copyState === 'copying'}
-                onClick={onCopy}
-              >
-                {t('creativeStudio.prompts.copyPromptAction', {
-                  defaultValue: 'Copy prompt',
-                })}
-              </Button>
-              {saveState === 'saved' ? (
-                onRemove ? (
-                  <Button
-                    icon={<FolderMinus theme='outline' size={15} fill='currentColor' />}
-                    loading={removeState === 'removing'}
-                    onClick={onRemove}
-                  >
-                    {t('creativeStudio.prompts.removeFromAssets', {
-                      defaultValue: 'Remove from my assets',
-                    })}
-                  </Button>
-                ) : onSave ? (
-                  <Button
-                    disabled
-                    icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
-                  >
-                    {t('creativeStudio.prompts.addedToAssets', {
-                      defaultValue: 'Added to assets',
-                    })}
-                  </Button>
-                ) : null
-              ) : onSave ? (
-                <Button
-                  icon={<FolderPlus theme='outline' size={15} fill='currentColor' />}
-                  loading={saveState === 'saving'}
-                  onClick={onSave}
-                >
-                  {t('creativeStudio.prompts.addToAssets', {
-                    defaultValue: 'Add to my assets',
-                  })}
-                </Button>
-              ) : null}
-            </div>
-          </div>
-        </>
+        <PromptLibraryDetailsContent item={item} locale={locale} />
       ) : null}
     </Modal>
   );

@@ -104,7 +104,6 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
           onAdd={handleAdd}
           isAdded={isAdded}
           addedStateLoading={installedStateLoading || !installedStateAvailable}
-          enableTagFilter
           testIdPrefix='skill-market'
           text={{
             syncSuccess: t('settings.skillsMarket.syncSuccess', { defaultValue: '技能市场已更新' }),

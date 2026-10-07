@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
+exclude = ["crates/backend/nomifun-preset", "vendor/wry"]
+
+[patch.crates-io]
+# Child-WebView shutdown belongs to the native browser owner, not a JS callback.
+wry = { path = "vendor/wry" }
 
 [workspace.package]
 version = "0.7.6"
@@ -24,12 +29,12 @@ nomifun-shell = { path = "crates/backend/nomifun-shell" }
 nomifun-ai-agent = { path = "crates/backend/nomifun-ai-agent" }
 nomifun-mcp = { path = "crates/backend/nomifun-mcp" }
 nomifun-model-invoke = { path = "crates/backend/nomifun-model-invoke" }
+nomifun-idmm = { path = "crates/backend/nomifun-idmm" }
 nomifun-conversation = { path = "crates/backend/nomifun-conversation" }
-nomifun-extension = { path = "crates/backend/nomifun-extension" }
+nomifun-skill-library = { path = "crates/backend/nomifun-skill-library" }
 nomifun-channel = { path = "crates/backend/nomifun-channel" }
 nomifun-cron = { path = "crates/backend/nomifun-cron" }
 nomifun-requirement = { path = "crates/backend/nomifun-requirement" }
-nomifun-idmm = { path = "crates/backend/nomifun-idmm" }
 nomifun-knowledge = { path = "crates/backend/nomifun-knowledge" }
 nomifun-companion = { path = "crates/backend/nomifun-companion" }
 nomifun-gateway = { path = "crates/backend/nomifun-gateway" }
@@ -37,14 +42,32 @@ nomifun-public = { path = "crates/backend/nomifun-public" }
 nomifun-webhook = { path = "crates/backend/nomifun-webhook" }
 nomifun-agent-execution = { path = "crates/backend/nomifun-agent-execution" }
 nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
-nomifun-preset = { path = "crates/backend/nomifun-preset" }
 nomifun-customer-service = { path = "crates/backend/nomifun-customer-service" }
 nomifun-workshop = { path = "crates/backend/nomifun-workshop" }
-nomifun-miniapp = { path = "crates/backend/nomifun-miniapp" }
 nomifun-creation = { path = "crates/backend/nomifun-creation" }
 nomifun-app = { path = "crates/backend/nomifun-app" }
 nomifun-robot = { path = "crates/backend/nomifun-robot" }
 nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
+nomifun-agent-contracts = { path = "crates/backend/nomifun-agent-contracts" }
+nomifun-voice-contracts = { path = "crates/backend/nomifun-voice-contracts" }
+nomifun-voice-core = { path = "crates/backend/nomifun-voice-core" }
+nomifun-voice = { path = "crates/backend/nomifun-voice" }
+nomifun-audio = { path = "crates/shared/nomifun-audio" }
+nomifun-agent-session = { path = "crates/backend/nomifun-agent-session" }
+nomifun-agent-kernel = { path = "crates/backend/nomifun-agent-kernel" }
+nomifun-js-runtime = { path = "crates/backend/nomifun-js-runtime" }
+nomifun-plugin-platform = { path = "crates/backend/nomifun-plugin-platform" }
+nomifun-plugin-development = { path = "crates/backend/nomifun-plugin-development" }
+nomifun-chat-model-broker = { path = "crates/backend/nomifun-chat-model-broker" }
+nomifun-agent-runtime = { path = "crates/backend/nomifun-agent-runtime" }
+nomifun-engine-core = { path = "crates/backend/nomifun-engine-core" }
+nomifun-agent-control-plane = { path = "crates/backend/nomifun-agent-control-plane" }
+nomifun-agent-domain-support = { path = "crates/backend/nomifun-agent-domain-support" }
+nomifun-agent-domain-wave1 = { path = "crates/backend/nomifun-agent-domain-wave1" }
+nomifun-agent-domain-wave2 = { path = "crates/backend/nomifun-agent-domain-wave2" }
+nomifun-agent-domain-wave3 = { path = "crates/backend/nomifun-agent-domain-wave3" }
+nomifun-agent-domain-wave4 = { path = "crates/backend/nomifun-agent-domain-wave4" }
+nomifun-agent-domain-wave5 = { path = "crates/backend/nomifun-agent-domain-wave5" }
 
 # --- Internal crates: shared ---
 nomifun-net = { path = "crates/shared/nomifun-net" }
@@ -61,13 +84,10 @@ nomi-config = { path = "crates/agent/nomi-config" }
 nomi-providers = { path = "crates/agent/nomi-providers" }
 nomi-tools = { path = "crates/agent/nomi-tools" }
 nomi-mcp = { path = "crates/agent/nomi-mcp" }
-nomi-skills = { path = "crates/agent/nomi-skills" }
 nomi-memory = { path = "crates/agent/nomi-memory" }
-nomi-agent = { path = "crates/agent/nomi-agent" }
 nomi-computer = { path = "crates/agent/nomi-computer" }
 nomi-a11y = { path = "crates/agent/nomi-a11y" }
 nomi-browser-engine = { path = "crates/agent/nomi-browser-engine" }
-nomi-browser = { path = "crates/agent/nomi-browser" }
 
 # --- Core framework ---
 tokio = { version = "1", features = ["full"] }
@@ -79,6 +99,7 @@ axum = { version = "0.8", features = ["multipart", "ws"] }
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit", "fs"] }
 http = "1"
+httpdate = "1"
 futures = "0.3"
 futures-util = "0.3"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
@@ -115,11 +136,10 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 # CSPRNG for robot device tokens / activation codes. 0.9 renamed `thread_rng()`
 # to `rng()`; 0.9.x is already in the lockfile via transitive deps.
 rand = "0.9"
-# Public Suffix List (compile-time embedded, offline) for browser domain policy.
-psl = "2"
 
 uuid = { version = "1", features = ["v7"] }
 reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip", "rustls-tls", "socks", "system-proxy"], default-features = false }
+ureq = "3.3"
 dashmap = "6"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 prost = "0.13"
@@ -132,6 +152,8 @@ sys-locale = "0.3"
 include_dir = "0.7"
 notify = "8"
 walkdir = "2"
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 ignore = "0.4"
 # Unified-diff computation for the knowledge-base inbox review panel (P4).
 zip = "2"
@@ -201,6 +223,7 @@ toml = "0.8"
 
 # --- Encoding / misc ---
 base64 = "0.22"
+crc32fast = "1"
 # Cheap refcounted byte buffers for the robot audio frame path. Already in the
 # graph via axum/hyper, so this adds nothing to the lockfile.
 bytes = "1"
@@ -274,9 +297,6 @@ tokio-test = "0.4"
 mockall = "0.14"
 rstest = "0.26"
 serial_test = "3"
-# 快照测试：注入侧 aria 契约（observe_fixtures.rs）+ 序列化层契约（T6）防 PW 升级漂移。
-# yaml/json/redactions feature 用于结构化快照与随机字段归一。
-insta = { version = "1.48", features = ["yaml", "json", "redactions"] }
 
 # Minimal debuginfo to shrink build output. Incremental compilation stays at
 # the Cargo default (on for dev/test): it only applies to workspace members and
@@ -298,6 +318,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Runtime attestation hashes the complete Node executable before every launch.
+# Keep the cryptographic implementation fast in development too, so two cold
+# Services fit the unchanged hook deadline without caching or skipping hashes.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.test]
 # Test binaries in this workspace are unusually large on Windows. Even minimal
 # line tables produced hundreds of MiB of PDB data per integration target, so
@@ -307,6 +333,9 @@ debug = false
 
 [profile.test.package."*"]
 debug = false
+
+[profile.test.package.sha2]
+opt-level = 3
 
 # Size-optimized release profile. The packaged `nomifun-desktop.exe` is the first
 # and largest file the NSIS installer writes, and an oversized *unsigned* binary
@@ -332,7 +361,8 @@ debug = false
 #                      appimage/deb/rpm/dmg artifacts).
 # NOT panic = "abort": the codebase relies on panic = "unwind" to isolate a
 # panicking tool from the agent process, at the catch_unwind boundaries in
-# nomi-agent/src/tool_execution.rs and apps/desktop/src/main.rs. Aborting would
+# crates/backend/nomifun-ai-agent/src/engine_sdk.rs and apps/desktop/src/main.rs.
+# Aborting would
 # turn a single tool panic into a full-process crash — a real behavior regression.
 [profile.release]
 opt-level = 3

@@ -1,22 +1,27 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use nomifun_ai_agent::{AgentStreamEvent, AgentRuntimeRegistry};
+use nomifun_ai_agent::AgentStreamEvent;
 use nomifun_api_types::{
-    ConversationRuntimeStateKind, CreateConversationRequest, ListMessagesQuery, MessageResponse, SendMessageRequest,
+    CreateConversationRequest, ListMessagesQuery, MessageResponse, SendMessageRequest,
 };
-use nomifun_common::{AgentType, ConversationSource, MessagePosition, MessageType};
-use nomifun_conversation::ConversationService;
+use nomifun_common::{
+    AgentType, ChannelPluginId, CompanionId, ConversationId,
+    ConversationSource, MessagePosition, MessageType,
+};
 use nomifun_db::IChannelRepository;
 use nomifun_db::models::{
-    CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
+    CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP,
+    CHANNEL_OWNER_DOMAIN_COMPANION, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
     CHANNEL_USER_AUTHORIZATION_AUTO_GROUP, ChannelSessionRow,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, info, warn};
 
 use crate::channel_settings::{ChannelSettingsService, resolved_model_to_provider};
 use crate::error::ChannelError;
+use crate::session_port::{ChannelSessionPort, ChannelTurnReceiptState};
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
 /// 客服域接缝 (customer-service routing seam) — the channel layer's ONLY
@@ -85,6 +90,55 @@ pub trait AssetResolver: Send + Sync {
     async fn resolve(&self, asset_id: &str) -> Option<crate::types::OutgoingMedia>;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentSessionIngressBinding {
+    companion_id: String,
+    agent_session_id: String,
+}
+
+fn session_has_exact_channel_ingress_binding(
+    extra: &serde_json::Value,
+    owner_user_id: &str,
+    channel_plugin_id: &str,
+    companion_id: &str,
+) -> bool {
+    let Some(metadata) = extra.get("nomi_core_session") else {
+        return false;
+    };
+    if metadata.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || metadata.get("kind").and_then(serde_json::Value::as_str)
+            != Some("agent_session")
+    {
+        return false;
+    }
+    metadata
+        .pointer("/binding/typed_resource_bindings")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|bindings| {
+            bindings.iter().any(|binding| {
+                binding.get("resource_kind").and_then(serde_json::Value::as_str)
+                    == Some("channel")
+                    && binding.get("resource_id").and_then(serde_json::Value::as_str)
+                        == Some(channel_plugin_id)
+                    && binding.get("owner_id").and_then(serde_json::Value::as_str)
+                        == Some(owner_user_id)
+                    && binding
+                        .pointer("/typed_parameters/companion_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(companion_id)
+                    && binding.pointer("/typed_parameters/cs_agent_id").is_none()
+                    && binding
+                        .get("operations")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|operations| {
+                            operations.iter().any(|operation| {
+                                operation.as_str() == Some("receive")
+                            })
+                        })
+            })
+        })
+}
+
 /// Bridges channel messages to the conversation + AI agent layer.
 ///
 /// Responsibilities:
@@ -92,10 +146,8 @@ pub trait AssetResolver: Send + Sync {
 /// - Sending user messages to the AI agent
 /// - Receiving stream events and converting them to outgoing messages
 /// - Throttling editMessage calls for streaming responses
-/// - Handling tool confirmation with timeout
 pub struct ChannelMessageService {
-    conversation_svc: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    sessions: Arc<dyn ChannelSessionPort>,
     settings: Arc<ChannelSettingsService>,
     repo: Arc<dyn IChannelRepository>,
     owner_user_id: String,
@@ -105,34 +157,40 @@ pub struct ChannelMessageService {
     /// Conversation path. `None` (default / tests) means no customer-service
     /// domain is available and every bot follows the companion path.
     cs_routing: Option<Arc<dyn CsRouting>>,
-    /// Per-conversation store of the decision currently awaiting a numbered
-    /// reply. Shared with each `ChannelStreamRelay` (writer) so the inbound
-    /// reply can be resolved against the right `call_id`/option.
-    pending_decisions: Arc<crate::pending_decision::PendingDecisionStore>,
+    /// Per-conversation store of the channel-owned stop confirmation currently
+    /// awaiting a numbered reply. Shared with each `ChannelStreamRelay`
+    /// (writer) so the inbound reply resolves against the correct target.
+    stop_confirmations: Arc<crate::pending_decision::ChannelStopConfirmationStore>,
     /// Optional resolver turning workshop asset UUIDv7 ids into raw bytes for
     /// outbound media.
     /// `None` (default / tests) disables channel image sending gracefully.
     asset_resolver: Option<Arc<dyn AssetResolver>>,
+    /// Live EventSource routing installed by `channel.transport/receive` for one exact
+    /// Nomi AgentSession. The Channel message loop reads this map before the
+    /// ordinary companion-session fallback. Entries are process-lifecycle
+    /// leases: Session materialization recreates them after restart, and
+    /// Session release removes them without clearing a newer replacement.
+    agent_session_ingress:
+        Arc<RwLock<HashMap<String, AgentSessionIngressBinding>>>,
 }
 
 impl ChannelMessageService {
     pub fn new(
-        conversation_svc: Arc<ConversationService>,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        sessions: Arc<dyn ChannelSessionPort>,
         settings: Arc<ChannelSettingsService>,
         repo: Arc<dyn IChannelRepository>,
         owner_user_id: String,
     ) -> Self {
         Self {
-            conversation_svc,
-            runtime_registry,
+            sessions,
             settings,
             repo,
             owner_user_id,
             channel_agent_profile: None,
             cs_routing: None,
-            pending_decisions: crate::pending_decision::PendingDecisionStore::new(),
+            stop_confirmations: crate::pending_decision::ChannelStopConfirmationStore::new(),
             asset_resolver: None,
+            agent_session_ingress: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -203,8 +261,10 @@ impl ChannelMessageService {
     /// `ChannelStreamRelay` it spawns and reads it back when intercepting a
     /// numeric reply, so the relay (writer) and the message loop (reader) act
     /// on the same store.
-    pub fn pending_decisions(&self) -> Arc<crate::pending_decision::PendingDecisionStore> {
-        Arc::clone(&self.pending_decisions)
+    pub fn stop_confirmations(
+        &self,
+    ) -> Arc<crate::pending_decision::ChannelStopConfirmationStore> {
+        Arc::clone(&self.stop_confirmations)
     }
 
     /// Installation owner used to namespace server-derived channel operation
@@ -213,17 +273,175 @@ impl ChannelMessageService {
         &self.owner_user_id
     }
 
+    /// Bind one companion-owned Channel EventSource to an exact live Nomi
+    /// AgentSession. A later materialization for the same bot replaces the
+    /// process lease; releasing the older Session cannot erase that newer
+    /// route because unbind compares the Session identity.
+    ///
+    /// The persisted Conversation metadata is re-read here and before every
+    /// inbound delivery. This makes a preset/resource switch fail closed:
+    /// retaining an old in-memory route cannot keep delivering after the
+    /// Session no longer owns the exact Channel binding.
+    pub async fn bind_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+        companion_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), ChannelError> {
+        ChannelPluginId::parse(channel_plugin_id).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "channel AgentSession ingress plugin id is invalid: {error}"
+            ))
+        })?;
+        CompanionId::parse(companion_id).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "channel AgentSession ingress companion id is invalid: {error}"
+            ))
+        })?;
+        ConversationId::parse(agent_session_id).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "channel AgentSession ingress Session id is invalid: {error}"
+            ))
+        })?;
+
+        let plugin = self
+            .repo
+            .get_plugin(channel_plugin_id)
+            .await?
+            .ok_or_else(|| ChannelError::PluginNotFound(channel_plugin_id.to_owned()))?;
+        if !plugin.enabled
+            || plugin.owner_domain != CHANNEL_OWNER_DOMAIN_COMPANION
+            || plugin.companion_id.as_deref() != Some(companion_id)
+        {
+            return Err(ChannelError::InvalidConfig(
+                "channel AgentSession ingress binding is stale or belongs to another domain"
+                    .to_owned(),
+            ));
+        }
+        self.verify_agent_session_ingress(
+            channel_plugin_id,
+            companion_id,
+            agent_session_id,
+        )
+        .await?;
+        self.agent_session_ingress.write().await.insert(
+            channel_plugin_id.to_owned(),
+            AgentSessionIngressBinding {
+                companion_id: companion_id.to_owned(),
+                agent_session_id: agent_session_id.to_owned(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Release every live Channel EventSource route held by this exact
+    /// AgentSession. If the bot was rebound to a newer Session, that entry is
+    /// deliberately retained.
+    pub async fn unbind_agent_session_ingress(
+        &self,
+        agent_session_id: &str,
+    ) -> usize {
+        let mut bindings = self.agent_session_ingress.write().await;
+        let before = bindings.len();
+        bindings.retain(|_, binding| {
+            binding.agent_session_id != agent_session_id
+        });
+        before - bindings.len()
+    }
+
+    /// Read-only lifecycle evidence used by the app composition and tests.
+    pub async fn bound_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+    ) -> Option<String> {
+        self.agent_session_ingress
+            .read()
+            .await
+            .get(channel_plugin_id)
+            .map(|binding| binding.agent_session_id.clone())
+    }
+
+    async fn resolved_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+        companion_id: &str,
+    ) -> Result<Option<String>, ChannelError> {
+        let Some(binding) = self
+            .agent_session_ingress
+            .read()
+            .await
+            .get(channel_plugin_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if binding.companion_id != companion_id {
+            return Err(ChannelError::InvalidConfig(
+                "channel AgentSession ingress companion ownership changed after activation"
+                    .to_owned(),
+            ));
+        }
+        let plugin = self
+            .repo
+            .get_plugin(channel_plugin_id)
+            .await?
+            .ok_or_else(|| ChannelError::PluginNotFound(channel_plugin_id.to_owned()))?;
+        if !plugin.enabled
+            || plugin.owner_domain != CHANNEL_OWNER_DOMAIN_COMPANION
+            || plugin.companion_id.as_deref() != Some(companion_id)
+        {
+            return Err(ChannelError::InvalidConfig(
+                "channel AgentSession ingress resource ownership changed after activation"
+                    .to_owned(),
+            ));
+        }
+        self.verify_agent_session_ingress(
+            channel_plugin_id,
+            companion_id,
+            &binding.agent_session_id,
+        )
+        .await?;
+        Ok(Some(binding.agent_session_id))
+    }
+
+    async fn verify_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+        companion_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), ChannelError> {
+        let session = self
+            .sessions
+            .get(&self.owner_user_id, agent_session_id)
+            .await
+            .map_err(|error| match error {
+                nomifun_common::AppError::NotFound(_) => {
+                    ChannelError::SessionNotFound(agent_session_id.to_owned())
+                }
+                other => ChannelError::MessageSendFailed(other.to_string()),
+            })?;
+        if session.r#type != AgentType::Nomi
+            || !session_has_exact_channel_ingress_binding(
+                &session.extra,
+                &self.owner_user_id,
+                channel_plugin_id,
+                companion_id,
+            )
+        {
+            return Err(ChannelError::InvalidConfig(format!(
+                "Session '{agent_session_id}' no longer owns the exact Channel ingress binding"
+            )));
+        }
+        Ok(())
+    }
+
     /// Whether the conversation's agent is currently working on a turn.
     ///
     /// Used by the message loop as a per-chat concurrency guard: a new
     /// channel message for a busy conversation is answered with a "still
     /// processing" notice instead of being queued as a second prompt.
     pub async fn is_conversation_busy(&self, conversation_id: &str) -> bool {
-        let summary = self.conversation_svc.runtime_summary_for(conversation_id).await;
-        matches!(
-            summary.state,
-            ConversationRuntimeStateKind::Starting | ConversationRuntimeStateKind::Running
-        )
+        self.sessions.is_busy(conversation_id).await
     }
 
     // ── Busy-time pending prompt queue (spec D1) ─────────────────────
@@ -273,9 +491,9 @@ impl ChannelMessageService {
         &self,
         conversation_id: &str,
         idempotency_key: &str,
-    ) -> Result<nomifun_conversation::PublicTurnDeliveryState, ChannelError> {
-        self.conversation_svc
-            .public_turn_delivery_state(&self.owner_user_id, conversation_id, idempotency_key)
+    ) -> Result<ChannelTurnReceiptState, ChannelError> {
+        self.sessions
+            .read_turn_receipt(&self.owner_user_id, conversation_id, idempotency_key)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }
@@ -286,31 +504,8 @@ impl ChannelMessageService {
     /// button (`POST /api/conversations/{id}/cancel`); deliberately NOT the
     /// gateway matrix, which denies Destructive on the Channel surface.
     pub async fn stop_conversation(&self, conversation_id: &str) -> Result<(), ChannelError> {
-        self.conversation_svc
-            .cancel(&self.owner_user_id, conversation_id, &self.runtime_registry)
-            .await
-            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
-    }
-
-    /// Submits a numbered-decision choice back through the confirm chain.
-    ///
-    /// `option_id` is sent as the bare `data` string accepted by
-    /// `ConversationService::confirm` for ACP (`msg_id` is ignored there).
-    /// `always_allow` is `false` — a numbered reply approves this one decision
-    /// only, never a standing grant.
-    pub async fn submit_decision(
-        &self,
-        conversation_id: &str,
-        call_id: &str,
-        option_id: &str,
-    ) -> Result<(), ChannelError> {
-        let req = nomifun_api_types::ConfirmRequest {
-            msg_id: String::new(),
-            data: serde_json::Value::String(option_id.to_owned()),
-            always_allow: false,
-        };
-        self.conversation_svc
-            .confirm(&self.owner_user_id, conversation_id, call_id, req, &self.runtime_registry)
+        self.sessions
+            .cancel(&self.owner_user_id, conversation_id)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }
@@ -330,7 +525,7 @@ impl ChannelMessageService {
             day: None,
         };
         let result = self
-            .conversation_svc
+            .sessions
             .list_messages(&self.owner_user_id, conversation_id, query)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
@@ -341,7 +536,7 @@ impl ChannelMessageService {
     ///
     /// 1. Ensures the session has a backing conversation (creates one if needed)
     /// 2. Warms up the backing Agent runtime so stream subscription is available
-    /// 3. Sends the message via ConversationService
+    /// 3. Sends the message through the typed ChannelSessionPort
     /// 4. Returns the conversation_id and stream receiver for relay
     ///
     /// The caller is responsible for subscribing to stream events and
@@ -419,22 +614,33 @@ impl ChannelMessageService {
             let cid = companion_id
                 .as_deref()
                 .expect("shared companion session requires a companion id");
-            match self.channel_agent_profile.as_ref() {
-                Some(profile) => match profile.ensure_companion_session(cid).await {
-                    Some(id) => id,
-                    // Companion bound but no chat model → can't open its single
-                    // session. Refuse with a notice instead of silently minting a
-                    // leaking an unintended channel conversation (reintroducing the bug).
+            let bound_agent_session = match session.channel_plugin_id.as_deref() {
+                Some(channel_plugin_id) => {
+                    self.resolved_agent_session_ingress(channel_plugin_id, cid)
+                        .await?
+                }
+                None => None,
+            };
+            if let Some(agent_session_id) = bound_agent_session {
+                agent_session_id
+            } else {
+                match self.channel_agent_profile.as_ref() {
+                    Some(profile) => match profile.ensure_companion_session(cid).await {
+                        Some(id) => id,
+                        // Companion bound but no chat model → can't open its single
+                        // session. Refuse with a notice instead of silently minting a
+                        // leaking an unintended channel conversation (reintroducing the bug).
+                        None => {
+                            return Err(ChannelError::CompanionNotReady(
+                                "这个伙伴还没有配置对话模型，请先在桌面端为它选择模型后再聊天。".into(),
+                            ));
+                        }
+                    },
                     None => {
-                        return Err(ChannelError::CompanionNotReady(
-                            "这个伙伴还没有配置对话模型，请先在桌面端为它选择模型后再聊天。".into(),
+                        return Err(ChannelError::MessageSendFailed(
+                            "channel agent profile not configured".into(),
                         ));
                     }
-                },
-                None => {
-                    return Err(ChannelError::MessageSendFailed(
-                        "channel agent profile not configured".into(),
-                    ));
                 }
             }
         } else {
@@ -484,6 +690,7 @@ impl ChannelMessageService {
         // need to correlate the user message back to the conversation should use
         // `conversation_id` + stream events instead of a client-provided id.
         let req = SendMessageRequest {
+            plugin_delivery: None,
             content: text.to_owned(),
             files: vec![],
             inject_skills: vec![],
@@ -498,14 +705,13 @@ impl ChannelMessageService {
         // runtime build. That gate is also the only safe place to recover a
         // pre-admission edit reservation; an observer-only precheck here used
         // to make that crash cutpoint permanently unrecoverable.
-        let delivery = match self
-            .conversation_svc
-            .send_message_with_idempotency_key(
+        let turn = match self
+            .sessions
+            .send_turn(
                 user_id,
                 &conversation_id,
                 idempotency_key,
                 req,
-                &self.runtime_registry,
             )
             .await
         {
@@ -525,22 +731,8 @@ impl ChannelMessageService {
             }
             Err(other) => return Err(ChannelError::MessageSendFailed(other.to_string())),
         };
-        let message_id = delivery.message_id;
-
-        // `send_message_with_idempotency_key` admits synchronously but builds a
-        // cold runtime in its owned background task. Attach as soon as the
-        // registered runtime appears; registration happens before prompt
-        // dispatch. A timeout degrades streaming only and never retries the
-        // model turn.
-        let stream_rx = if delivery.completed {
-            None
-        } else {
-            wait_for_runtime_subscription(
-                &self.runtime_registry,
-                &conversation_id,
-            )
-            .await
-        };
+        let message_id = turn.delivery.message_id;
+        let stream_rx = turn.events;
 
         info!(
             conversation_id = %conversation_id,
@@ -582,7 +774,7 @@ impl ChannelMessageService {
         }
 
         let conversation = match self
-            .conversation_svc
+            .sessions
             .get(&self.owner_user_id, conversation_id)
             .await
         {
@@ -691,7 +883,6 @@ impl ChannelMessageService {
             source: Some(source),
             channel_chat_id: session.chat_id.clone(),
             preset_id: None,
-            preset_overrides: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -710,7 +901,7 @@ impl ChannelMessageService {
         };
         let creation_key = channel_creation_key(&self.owner_user_id, session, creation_scope);
         let response = self
-            .conversation_svc
+            .sessions
             .create_idempotent(&self.owner_user_id, req, &creation_key)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
@@ -794,6 +985,8 @@ impl ChannelMessageService {
                         "the model refused the request",
                     Some(nomifun_ai_agent::protocol::events::TurnStopReason::Cancelled) =>
                         "the turn was cancelled",
+                    Some(nomifun_ai_agent::protocol::events::TurnStopReason::Paused) =>
+                        "execution is paused and requires Session-owner authorization to continue",
                     Some(nomifun_ai_agent::protocol::events::TurnStopReason::EndTurn) | None =>
                         unreachable!("normal finish was handled above"),
                 }
@@ -838,14 +1031,11 @@ impl ChannelMessageService {
                     status: format!("{:?}", data.status),
                 })
             }
-            // Blocking decisions: forward as a numbered text choice. A decision
-            // with no options is unanswerable, so it is dropped (None).
-            AgentStreamEvent::Permission(data) => confirmation_to_decision(data.confirmation()),
             // Events that don't produce user-facing messages
             AgentStreamEvent::Tips(_)
             | AgentStreamEvent::ToolGroup(_)
             | AgentStreamEvent::AgentStatus(_)
-            | AgentStreamEvent::Plan(_)
+            | AgentStreamEvent::TaskPlanChanged
             | AgentStreamEvent::AvailableCommands(_)
             | AgentStreamEvent::SkillSuggest(_)
             | AgentStreamEvent::CronTrigger(_)
@@ -915,12 +1105,15 @@ impl ChannelMessageService {
         }
     }
 
-    /// Builds the numbered-text rendering of a blocking decision.
+    /// Builds the numbered-text rendering of a channel-owned stop confirmation.
     ///
     /// Portable across channels (no card-button dependency): the prompt, a
     /// numbered list of option labels, and an instruction to reply with the
     /// number. Plain `Text` with no buttons.
-    pub fn build_decision_message(prompt: &str, options: &[crate::types::DecisionOption]) -> UnifiedOutgoingMessage {
+    pub fn build_stop_confirmation_message(
+        prompt: &str,
+        options: &[crate::types::ChannelStopOption],
+    ) -> UnifiedOutgoingMessage {
         let mut text = format!("\u{26a0}\u{fe0f} 需要你的决策：\n{prompt}\n");
         for (idx, option) in options.iter().enumerate() {
             text.push_str(&format!("{}. {}\n", idx + 1, option.label));
@@ -943,13 +1136,8 @@ impl ChannelMessageService {
     }
 
     /// Build the `extra` JSON for channel conversations.
-    ///
-    /// Sets `session_mode` to `"yolo"` so the agent auto-approves tool calls —
-    /// channel users have no interactive UI for confirmations.
     pub fn build_channel_extra(backend: Option<&str>) -> serde_json::Value {
-        let mut extra = serde_json::json!({
-            "session_mode": "yolo",
-        });
+        let mut extra = serde_json::json!({});
         if let Some(b) = backend {
             extra["backend"] = serde_json::Value::String(b.to_owned());
         }
@@ -974,26 +1162,6 @@ fn channel_creation_key(
         serde_json::to_vec(&scope).expect("channel creation scope always serializes"),
     );
     format!("channel-session:v1:{digest:x}")
-}
-
-async fn wait_for_runtime_subscription(
-    runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    conversation_id: &str,
-) -> Option<broadcast::Receiver<AgentStreamEvent>> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if let Some(handle) = runtime_registry.get_runtime(conversation_id) {
-            return Some(handle.subscribe());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            warn!(
-                conversation_id,
-                "runtime did not register before channel relay subscription timeout"
-            );
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
 }
 
 /// Result of sending a message to the agent.
@@ -1026,14 +1194,6 @@ pub enum StreamAction {
     Thinking(String),
     /// Tool call status update.
     ToolCall { name: String, status: String },
-    /// A blocking decision (permission / confirmation) the channel user must
-    /// answer. Carried so the relay can forward a numbered list and the
-    /// message loop can map a numeric reply back to `confirm`.
-    Decision {
-        call_id: String,
-        prompt: String,
-        options: Vec<crate::types::DecisionOption>,
-    },
     /// The companion's `nomi_stop_conversation` was denied by the gateway
     /// matrix on the Channel surface (batch-1 handover gap). The relay
     /// forwards the channel-owned numbered stop confirmation; on "确认" the
@@ -1113,42 +1273,9 @@ fn stop_denied_target(
     })
 }
 
-/// Maps a `nomifun_common::Confirmation` to a `Decision` action.
-///
-/// Option values become option ids (ACP `confirm` accepts a bare option-id
-/// string). A confirmation with no options is unanswerable and yields `None`.
-fn confirmation_to_decision(conf: &nomifun_common::Confirmation) -> Option<StreamAction> {
-    let options: Vec<crate::types::DecisionOption> = conf
-        .options
-        .iter()
-        .map(|o| crate::types::DecisionOption {
-            option_id: option_value_to_string(&o.value),
-            label: o.label.clone(),
-        })
-        .collect();
-    if options.is_empty() {
-        return None;
-    }
-    Some(StreamAction::Decision {
-        call_id: conf.call_id.clone(),
-        prompt: conf.title.clone().unwrap_or_else(|| conf.description.clone()),
-        options,
-    })
-}
-
-/// Renders a confirmation option value as the option id string to submit
-/// back through `confirm`. String values pass through verbatim; other JSON
-/// values fall back to their compact serialization.
-fn option_value_to_string(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string())
-}
-
 /// Picks the newest visible user-authored text from a newest-first message
 /// page. User messages are persisted as `type: "text"`, `position: "right"`
-/// with content `{"content": "..."}` (see `ConversationService::send_message`),
+/// with content `{"content": "..."}` (see the host Session implementation),
 /// so this is the inverse of that write path.
 fn extract_last_user_text(items: &[MessageResponse]) -> Option<String> {
     items
@@ -1375,8 +1502,6 @@ mod tests {
         assert_eq!(extra["companion_session"], serde_json::json!(true));
         assert_eq!(extra["channel_platform"], serde_json::json!("telegram"));
         assert_eq!(extra["companion_id"], serde_json::json!("companion_1"));
-        // Existing channel semantics survive.
-        assert_eq!(extra["session_mode"], serde_json::json!("yolo"));
     }
 
     #[test]
@@ -1450,8 +1575,7 @@ mod tests {
 
     #[test]
     fn text_event_produces_append() {
-        let event = AgentStreamEvent::Text(TextEventData {
-            content: "Hello".into(),
+        let event = AgentStreamEvent::Text(TextEventData { step: None, content: "Hello".into(),
         });
         let action = ChannelMessageService::process_stream_event(&event);
         match action {
@@ -1476,6 +1600,7 @@ mod tests {
             TurnStopReason::MaxTurnRequests,
             TurnStopReason::Refusal,
             TurnStopReason::Cancelled,
+            TurnStopReason::Paused,
         ] {
             let event = AgentStreamEvent::Finish(FinishEventData {
                 session_id: None,
@@ -1513,6 +1638,7 @@ mod tests {
     #[test]
     fn thinking_event_produces_thinking() {
         let event = AgentStreamEvent::Thinking(ThinkingEventData {
+            step: None,
             content: "Analyzing...".into(),
             subject: None,
             duration: None,
@@ -1528,6 +1654,7 @@ mod tests {
     #[test]
     fn tool_call_event_produces_tool_call() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -1571,6 +1698,7 @@ mod tests {
     #[test]
     fn completed_creative_studio_tool_call_produces_media() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1604,6 +1732,7 @@ mod tests {
             sha256: "abc".into(),
         };
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1626,6 +1755,7 @@ mod tests {
     #[test]
     fn running_tool_call_still_produces_tool_call_status() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_creative_studio_generate".into(),
             args: serde_json::Value::Null,
@@ -1645,6 +1775,7 @@ mod tests {
     #[test]
     fn completed_tool_call_without_asset_ids_stays_tool_call() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "Read".into(),
             args: serde_json::Value::Null,
@@ -1661,7 +1792,7 @@ mod tests {
         ));
     }
 
-    // ── process_stream_event → Decision ────────────────────────────────
+    // ── process_stream_event → channel stop confirmation ───────────────
 
     #[test]
     fn denied_stop_tool_call_produces_stop_denied_with_target() {
@@ -1671,6 +1802,7 @@ mod tests {
             "{\"error\":\"session_capability_denied\",\"tool\":\"nomi_stop_conversation\"}",
         ] {
             let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+                identity: Default::default(),
                 call_id: "c1".into(),
                 name: "mcp__nomi__nomi_stop_conversation".into(),
                 args: serde_json::json!({ "conversation_id": target }),
@@ -1694,6 +1826,7 @@ mod tests {
     fn denied_stop_target_falls_back_to_raw_input_json() {
         let target = "0190f5fe-7c00-7a00-8abc-012345678902";
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_stop_conversation".into(),
             args: serde_json::Value::Null,
@@ -1716,6 +1849,7 @@ mod tests {
     fn successful_or_unrelated_tool_calls_never_produce_stop_denied() {
         // A SUCCESSFUL stop (allowed surface) keeps the plain tool-call action.
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_stop_conversation".into(),
             args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
@@ -1733,6 +1867,7 @@ mod tests {
 
         // Another denied tool must not be misread as a stop confirmation.
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c2".into(),
             name: "nomi_delete_conversation".into(),
             args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
@@ -1748,63 +1883,6 @@ mod tests {
             Some(StreamAction::ToolCall { .. })
         ));
     }
-
-    #[test]
-    fn permission_confirmation_produces_decision() {
-        let value = serde_json::json!({
-            "id": "conf-1",
-            "call_id": "call-9",
-            "title": "Edit file?",
-            "action": null,
-            "description": "edits main.rs",
-            "command_type": "edit",
-            "options": [
-                { "label": "Yes", "value": "yes" },
-                { "label": "No", "value": "no" },
-            ],
-        });
-        let conf: nomifun_common::Confirmation = serde_json::from_value(value).unwrap();
-        let event = AgentStreamEvent::Permission(conf.into());
-
-        match ChannelMessageService::process_stream_event(&event) {
-            Some(StreamAction::Decision { call_id, prompt, options }) => {
-                assert_eq!(call_id, "call-9");
-                assert_eq!(prompt, "Edit file?");
-                assert_eq!(
-                    options,
-                    vec![
-                        crate::types::DecisionOption {
-                            option_id: "yes".into(),
-                            label: "Yes".into()
-                        },
-                        crate::types::DecisionOption {
-                            option_id: "no".into(),
-                            label: "No".into()
-                        },
-                    ]
-                );
-            }
-            other => panic!("expected Decision, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn permission_with_empty_options_produces_none() {
-        let value = serde_json::json!({
-            "id": "conf-2",
-            "call_id": "call-10",
-            "title": "No choices",
-            "description": "",
-            "options": [],
-        });
-        let conf: nomifun_common::Confirmation = serde_json::from_value(value).unwrap();
-        let event = AgentStreamEvent::Permission(conf.into());
-        assert!(
-            ChannelMessageService::process_stream_event(&event).is_none(),
-            "an unanswerable decision (no options) must not surface"
-        );
-    }
-
 
     // ── build_thinking_message ─────────────────────────────────────────
 
@@ -1838,21 +1916,21 @@ mod tests {
         assert!(msg.buttons.is_none());
     }
 
-    // ── build_decision_message ─────────────────────────────────────────
+    // ── build_stop_confirmation_message ────────────────────────────────
 
     #[test]
-    fn decision_message_is_numbered_plain_text() {
+    fn stop_confirmation_message_is_numbered_plain_text() {
         let options = vec![
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "a".into(),
                 label: "Allow".into(),
             },
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "b".into(),
                 label: "Deny".into(),
             },
         ];
-        let msg = ChannelMessageService::build_decision_message("Proceed?", &options);
+        let msg = ChannelMessageService::build_stop_confirmation_message("Proceed?", &options);
 
         assert_eq!(msg.message_type, OutgoingMessageType::Text);
         assert!(msg.buttons.is_none(), "decision is plain text, no buttons");
@@ -1866,16 +1944,15 @@ mod tests {
     // ── build_channel_extra ───────────────────────────────────────────
 
     #[test]
-    fn yolo_extra_contains_session_mode() {
+    fn channel_extra_without_backend_is_empty() {
         let extra = ChannelMessageService::build_channel_extra(None);
-        assert_eq!(extra["session_mode"], "yolo");
+        assert_eq!(extra, serde_json::json!({}));
         assert!(extra.get("backend").is_none());
     }
 
     #[test]
-    fn yolo_extra_with_backend() {
+    fn channel_extra_with_backend() {
         let extra = ChannelMessageService::build_channel_extra(Some("claude"));
-        assert_eq!(extra["session_mode"], "yolo");
         assert_eq!(extra["backend"], "claude");
     }
 

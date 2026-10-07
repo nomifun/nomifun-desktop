@@ -67,13 +67,6 @@ describe('workspace tool rail dimensions', () => {
     expect(title.includes('color: var(--text-primary);')).toBe(true);
   });
 
-  test('does not change the mobile workspace trigger dimensions', () => {
-    const trigger = rule('\\.workspace-tool-rail-mobile-trigger');
-
-    expect(trigger.includes('width: 24px;')).toBe(true);
-    expect(trigger.includes('height: 70px;')).toBe(true);
-  });
-
   test('keeps labels accessible but visually hidden beneath icon-only controls', () => {
     const label = rule('\\.workspace-tool-rail__label');
 
@@ -82,6 +75,15 @@ describe('workspace tool rail dimensions', () => {
     expect(label.includes('width: 1px;')).toBe(true);
     expect(label.includes('height: 1px;')).toBe(true);
     expect(label.includes('overflow: hidden;')).toBe(true);
+  });
+
+  test('exposes Browser as an accessible AgentSession tool even without a workspace', () => {
+    expect(componentSource.includes('workspaceAvailable?: boolean;')).toBe(true);
+    expect(componentSource.includes('browser?: SessionBrowserTool;')).toBe(true);
+    expect(componentSource.includes('aria-controls={controls}')).toBe(true);
+    expect(componentSource.includes('aria-expanded={controls ? active : undefined}')).toBe(true);
+    expect(componentSource.includes("icon={<Earth size={18} />}")).toBe(true);
+    expect(componentSource.includes('{workspaceAvailable && <ToolRailItem')).toBe(true);
   });
 
   test('uses a compact scoped tooltip and removes the active vertical bar', () => {

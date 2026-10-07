@@ -89,7 +89,6 @@ impl AgentRegistry {
         let agent_capabilities = encode_optional(&snapshot.agent_capabilities, "agent_capabilities")?;
         let auth_methods = encode_optional(&snapshot.auth_methods, "auth_methods")?;
         let config_options = encode_optional(&snapshot.config_options, "config_options")?;
-        let available_modes = encode_optional(&snapshot.available_modes, "available_modes")?;
         let available_models = encode_optional(&snapshot.available_models, "available_models")?;
         let available_commands = encode_optional(&snapshot.available_commands, "available_commands")?;
 
@@ -97,7 +96,6 @@ impl AgentRegistry {
             agent_capabilities: agent_capabilities.as_deref().map(Some),
             auth_methods: auth_methods.as_deref().map(Some),
             config_options: config_options.as_deref().map(Some),
-            available_modes: available_modes.as_deref().map(Some),
             available_models: available_models.as_deref().map(Some),
             available_commands: available_commands.as_deref().map(Some),
         };
@@ -302,7 +300,6 @@ fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<Unavailabl
         agent_capabilities: parse_json(row.agent_capabilities.as_deref(), "agent_capabilities"),
         auth_methods: parse_json(row.auth_methods.as_deref(), "auth_methods"),
         config_options: parse_json(row.config_options.as_deref(), "config_options"),
-        available_modes: parse_json(row.available_modes.as_deref(), "available_modes"),
         available_models: parse_json(row.available_models.as_deref(), "available_models"),
         available_commands: parse_json(row.available_commands.as_deref(), "available_commands"),
     };
@@ -326,7 +323,6 @@ fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<Unavailabl
         env,
         native_skills_dirs,
         behavior_policy,
-        yolo_id: row.yolo_id,
         sort_order: row.sort_order,
         handshake,
     };
@@ -715,11 +711,11 @@ mod tests {
         .await
         .unwrap();
 
-        // Write #3: available_modes only. Capabilities + auth_methods must survive.
+        // Write #3: available_models only. Capabilities + auth_methods must survive.
         reg.apply_handshake_inner(
             &row.agent_id,
             &AgentHandshake {
-                available_modes: Some(serde_json::json!([{"id": "code", "name": "Code"}])),
+                available_models: Some(serde_json::json!([{"id": "model", "name": "Model"}])),
                 ..Default::default()
             },
         )
@@ -734,11 +730,10 @@ mod tests {
         );
         assert!(
             refreshed.handshake.auth_methods.is_some(),
-            "auth_methods must survive the later available_modes write"
+            "auth_methods must survive the later available_models write"
         );
-        assert!(refreshed.handshake.available_modes.is_some());
+        assert!(refreshed.handshake.available_models.is_some());
         // The untouched fields stay untouched (still None from seed).
-        assert!(refreshed.handshake.available_models.is_none());
         assert!(refreshed.handshake.config_options.is_none());
         assert!(refreshed.handshake.available_commands.is_none());
     }

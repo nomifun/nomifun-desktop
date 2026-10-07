@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use nomifun_api_types::McpConnectionTestErrorCode;
 use nomifun_mcp::McpConnectionTestService;
 use nomifun_mcp::McpServerTransport;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -49,6 +50,30 @@ fn echo_command() -> (String, Vec<String>) {
     ("echo".into(), vec!["hello".into()])
 }
 
+#[cfg(windows)]
+fn package_not_found_command() -> (String, Vec<String>) {
+    (
+        "cmd.exe".into(),
+        vec![
+            "/D".into(),
+            "/Q".into(),
+            "/C".into(),
+            "set /p request=& echo npm ERR! code E404 package not found 1>&2".into(),
+        ],
+    )
+}
+
+#[cfg(not(windows))]
+fn package_not_found_command() -> (String, Vec<String>) {
+    (
+        "sh".into(),
+        vec![
+            "-c".into(),
+            "IFS= read -r line; printf '%s\\n' 'npm ERR! code E404 package not found' >&2".into(),
+        ],
+    )
+}
+
 fn test_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
@@ -81,6 +106,29 @@ async fn stdio_nonexistent_command_returns_not_found_error() {
     assert!(result.needs_auth.is_none());
 }
 
+#[tokio::test]
+async fn stdio_stderr_is_projected_as_a_typed_non_secret_failure() {
+    let svc = make_service_with_timeout(Duration::from_secs(3));
+    let (command, args) = package_not_found_command();
+    let transport = McpServerTransport::Stdio {
+        command,
+        args,
+        env: HashMap::new(),
+    };
+
+    let result = svc.test_connection("typed-stderr", &transport).await;
+
+    assert!(!result.success);
+    assert_eq!(
+        result.code,
+        Some(McpConnectionTestErrorCode::CommandStartFailed)
+    );
+    let details = result.details.expect("typed stdio diagnostics");
+    assert_eq!(details["failure_kind"], "package_not_found");
+    assert_eq!(details["owner_code"], "MCP_PACKAGE_NOT_FOUND");
+    assert!(!result.error.unwrap_or_default().contains("npm ERR"));
+}
+
 // ---------------------------------------------------------------------------
 // CT-4: URL not reachable
 // ---------------------------------------------------------------------------
@@ -96,11 +144,12 @@ async fn http_unreachable_url_returns_connection_error() {
     let result = svc.test_connection("test-http", &transport).await;
 
     assert!(!result.success);
-    let error = result.error.as_deref().unwrap();
-    assert!(
-        error.contains("Connection failed"),
-        "expected connection failure in: {error}"
-    );
+    assert_eq!(result.error.as_deref(), Some("MCP request failed"));
+    assert_eq!(result.code, Some(McpConnectionTestErrorCode::ConnectionFailed));
+    let details = result.details.expect("typed local endpoint diagnostics");
+    assert_eq!(details["endpoint_scope"], "local");
+    assert_eq!(details["host"], "127.0.0.1");
+    assert_eq!(details["port"], 1);
 }
 
 #[tokio::test]
@@ -114,11 +163,15 @@ async fn sse_unreachable_url_returns_connection_error() {
     let result = svc.test_connection("test-sse", &transport).await;
 
     assert!(!result.success);
-    let error = result.error.as_deref().unwrap();
-    assert!(
-        error.contains("Connection failed"),
-        "expected connection failure in: {error}"
+    assert_eq!(
+        result.error.as_deref(),
+        Some("MCP legacy SSE connection failed")
     );
+    assert_eq!(result.code, Some(McpConnectionTestErrorCode::ConnectionFailed));
+    let details = result.details.expect("typed local endpoint diagnostics");
+    assert_eq!(details["endpoint_scope"], "local");
+    assert_eq!(details["host"], "127.0.0.1");
+    assert_eq!(details["port"], 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +251,7 @@ async fn sse_401_returns_needs_auth() {
 }
 
 #[tokio::test]
-async fn sse_connection_test_uses_string_jsonrpc_ids() {
+async fn sse_connection_test_round_trips_jsonrpc_ids() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<String>();
@@ -222,7 +275,7 @@ async fn sse_connection_test_uses_string_jsonrpc_ids() {
 
     let result = svc.test_connection("string-id-sse", &transport).await;
 
-    assert!(result.success, "expected string-id SSE server to connect: {result:?}");
+    assert!(result.success, "expected SSE fixture to connect: {result:?}");
     let tools = result.tools.unwrap();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "strict_string_id_tool");
@@ -256,16 +309,20 @@ async fn handle_string_id_sse_connection(
         return Ok(());
     }
 
-    if request.starts_with("POST /messages ") {
+    if request.starts_with("POST /messages ") || request.starts_with("POST /messages?") {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let method = body["method"].as_str().unwrap_or_default();
         match method {
             "initialize" | "tools/list" => {
-                let Some(id) = body["id"].as_str() else {
+                let Some(id) = body
+                    .get("id")
+                    .filter(|id| id.is_string() || id.is_u64())
+                    .cloned()
+                else {
                     write_http_response(
                         &mut stream,
                         "400 Bad Request",
-                        "Bad request: id expected a string",
+                        "Bad request: id expected a JSON-RPC string or integer",
                     )
                     .await?;
                     return Ok(());
@@ -285,7 +342,15 @@ async fn handle_string_id_sse_connection(
                         "id": id,
                         "result": {
                             "tools": [
-                                { "name": "strict_string_id_tool", "description": "Requires string JSON-RPC ids" }
+                                {
+                                    "name": "strict_string_id_tool",
+                                    "description": "Round-trips JSON-RPC ids",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "properties": {}
+                                    }
+                                }
                             ]
                         }
                     }),
@@ -411,6 +476,11 @@ async fn http_500_returns_error_with_status() {
     assert!(!result.success);
     let error = result.error.as_deref().unwrap();
     assert!(error.contains("500"), "expected HTTP 500 in: {error}");
+    assert_eq!(
+        result.code,
+        Some(nomifun_api_types::McpConnectionTestErrorCode::HttpError)
+    );
+    assert_eq!(result.details.as_ref().unwrap()["status"], 500);
 
     server_handle.abort();
 }

@@ -67,6 +67,16 @@ describe('customer service pages structure', () => {
     expect(detailSource.includes('pageSize: NOTE_PAGE_SIZE')).toBe(true);
   });
 
+  test('detail page exposes the durable human handoff queue and every state transition', () => {
+    expect(detailSource.includes('ipcBridge.customerService.listHandoffs.invoke')).toBe(true);
+    expect(detailSource.includes('ipcBridge.customerService.claimHandoff.invoke')).toBe(true);
+    expect(detailSource.includes('ipcBridge.customerService.resolveHandoff.invoke')).toBe(true);
+    expect(detailSource.includes('ipcBridge.customerService.cancelHandoff.invoke')).toBe(true);
+    expect(detailSource.includes("expected_status: 'pending'")).toBe(true);
+    expect(detailSource.includes("expected_status: 'claimed'")).toBe(true);
+    expect(detailStyles.includes('.handoffReason')).toBe(true);
+  });
+
   test('create modal reuses the shared model and knowledge catalogs', () => {
     // Chat-filtered catalog hook (P3): the model list comes from resolve, not raw provider rows.
     expect(createSource.includes('useModelsForTask')).toBe(true);

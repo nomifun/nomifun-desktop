@@ -7,9 +7,10 @@ use crate::models::{AgentExecutionTemplateDetailRows, AgentExecutionTemplateRow}
 pub struct NewAgentExecutionTemplateParticipant {
     pub template_participant_id: String,
     pub source_agent_id: String,
+    /// Serialized canonical AgentResolvedSnapshot for this template candidate.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,

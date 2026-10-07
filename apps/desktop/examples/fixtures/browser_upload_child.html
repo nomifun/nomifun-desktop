@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>__LEVEL__ files</title>
+<style>body{font:15px system-ui;margin:18px}input,button{display:block;margin:16px 0;padding:8px;max-width:350px}</style>
+<label>__LEVEL__ attachment<input id="file" type="file"></label>
+<button id="pick">__LEVEL__ custom picker</button>
+<script>
+async function received(event,source,clicked){
+  const file=event.target.files[0];
+  parent.postMessage({kind:'file',level:'__LEVEL__',source,name:file.name,text:await file.text(),trusted:event.isTrusted,clicked},'*');
+}
+document.getElementById('file').onchange=event=>received(event,'direct',null);
+document.getElementById('pick').onclick=event=>{
+  // This is application code: a transient input need not be attached to DOM.
+  const input=document.createElement('input');input.type='file';
+  input.onchange=chosen=>received(chosen,'custom',event.isTrusted);
+  input.click();
+};
+window.pickFromParent=clicked=>{const input=document.createElement('input');input.type='file';input.onchange=event=>received(event,'parent',clicked);input.click();};
+addEventListener('load',()=>{
+  const rect=document.getElementById('pick').getBoundingClientRect();
+  parent.postMessage({kind:'ready',level:'__LEVEL__',nonce:crypto.randomUUID(),pickPoint:{x:rect.x+rect.width/2,y:rect.y+rect.height/2}},'*');
+});
+</script>

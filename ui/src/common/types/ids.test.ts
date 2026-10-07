@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  CANONICAL_UUID_V7,
   InvalidEntityIdError,
   conversationTarget,
   isSameSessionTarget,
@@ -13,7 +14,6 @@ import {
   parseChannelPluginId,
   parseChannelUserId,
   parseConversationId,
-  parseConversationArtifactId,
   parseCreativeStudioConnectionId,
   parseCreativeStudioNodeId,
   parseCreativeStudioProjectId,
@@ -21,11 +21,9 @@ import {
   parseCronJobId,
   parseCronJobRunId,
   parseFigureId,
-  parseIdmmInterventionId,
   parseMcpServerId,
   parseMessageId,
   parseOptionalEntityId,
-  parsePresetId,
   parseProviderId,
   parseCsAgentId,
   parseRemoteAgentId,
@@ -79,6 +77,14 @@ describe('entity ids', () => {
       expect(error instanceof InvalidEntityIdError).toBe(true);
     }
     expect(tryParseEntityId('conversation', null)).toBeNull();
+  });
+
+  test('rejects a canonical UUIDv7 followed by a trailing newline', () => {
+    const validConversation = '0190f5fe-7c00-7a00-8000-000000000001';
+    const value = `${validConversation}\n`;
+
+    expect(CANONICAL_UUID_V7.test(value)).toBe(false);
+    expectInvalidEntityId(() => parseConversationId(value));
   });
 
   test('rejects legacy prefixes and non-canonical UUID forms for every business kind', () => {
@@ -224,22 +230,6 @@ describe('entity ids', () => {
     }
   });
 
-  test('conversation_artifact_id accepts only a bare canonical lowercase UUIDv7', () => {
-    const artifactId = '0190f5fe-7c00-7a00-8000-000000000014';
-    expect(parseConversationArtifactId(artifactId)).toBe(artifactId);
-    for (const value of invalidBusinessIdValues(artifactId, 'artifact')) {
-      expectInvalidEntityId(() => parseConversationArtifactId(value));
-    }
-  });
-
-  test('intervention_id accepts only a bare canonical lowercase UUIDv7', () => {
-    const interventionId = '0190f5fe-7c00-7a00-8000-000000000015';
-    expect(parseIdmmInterventionId(interventionId)).toBe(interventionId);
-    for (const value of invalidBusinessIdValues(interventionId, 'intervention')) {
-      expectInvalidEntityId(() => parseIdmmInterventionId(value));
-    }
-  });
-
   test('provider_id accepts only a bare canonical lowercase UUIDv7', () => {
     const providerId = '0190f5fe-7c00-7a00-8000-000000000016';
     expect(parseProviderId(providerId)).toBe(providerId);
@@ -248,15 +238,4 @@ describe('entity ids', () => {
     }
   });
 
-  test('preset_id accepts only a bare canonical lowercase UUIDv7', () => {
-    const presetId = '0190f5fe-7c00-7a00-8000-000000000017';
-    expect(parsePresetId(presetId)).toBe(presetId);
-    for (const value of [
-      ...invalidBusinessIdValues(presetId, 'preset'),
-      'office',
-      'builtin:office',
-    ]) {
-      expectInvalidEntityId(() => parsePresetId(value));
-    }
-  });
 });

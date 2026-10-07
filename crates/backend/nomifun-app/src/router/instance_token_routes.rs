@@ -20,6 +20,7 @@ pub struct InstanceTokenRouterState {
     pub provider_repo: Arc<dyn nomifun_db::IProviderRepository>,
     pub token_repo: Arc<dyn IInstanceTokenRepository>,
     pub token_validator: Arc<nomifun_auth::InstanceTokenValidator>,
+    pub admission: Arc<nomifun_auth::RemoteAuthAdmissionFence>,
 }
 
 #[derive(serde::Serialize)]
@@ -48,6 +49,7 @@ async fn has_enabled_provider(state: &InstanceTokenRouterState) -> bool {
 async fn mint(
     State(state): State<InstanceTokenRouterState>,
 ) -> Result<Json<ApiResponse<AccessTokenMintResponse>>, AppError> {
+    let _admission = state.admission.acquire_auth_mutation().await;
     let token = nomifun_auth::generate_random_hex_secret();
     let hash = nomifun_auth::token_sha256_hex(&token);
     state.token_repo.set(&hash).await?;
@@ -63,6 +65,7 @@ async fn mint(
 async fn revoke(
     State(state): State<InstanceTokenRouterState>,
 ) -> Result<Json<ApiResponse<AccessTokenStatusResponse>>, AppError> {
+    let _admission = state.admission.acquire_auth_mutation().await;
     state.token_repo.clear().await?;
     state.token_validator.clear_token();
     Ok(Json(ApiResponse::ok(AccessTokenStatusResponse { configured: false })))

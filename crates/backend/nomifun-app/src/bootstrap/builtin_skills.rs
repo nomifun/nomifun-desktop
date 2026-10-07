@@ -9,17 +9,17 @@ use tracing::warn;
 /// the same binary. When `NOMIFUN_BUILTIN_SKILLS_PATH` is set, skip
 /// materialization — the override path is the source of truth in that mode.
 pub(super) async fn materialize_builtin_skills(data_dir: &Path) -> Result<()> {
-    let skip = std::env::var(nomifun_extension::BUILTIN_SKILLS_ENV_VAR)
+    let skip = std::env::var(nomifun_skill_library::BUILTIN_SKILLS_ENV_VAR)
         .map(|v| !v.is_empty())
         .unwrap_or(false);
     if skip {
         return Ok(());
     }
 
-    let materialize_version = nomifun_extension::builtin_skills_materialize_version(env!("CARGO_PKG_VERSION"));
-    nomifun_extension::materialize_if_needed(
+    let materialize_version = nomifun_skill_library::builtin_skills_materialize_version(env!("CARGO_PKG_VERSION"));
+    nomifun_skill_library::materialize_if_needed(
         data_dir,
-        nomifun_extension::builtin_skills_corpus(),
+        nomifun_skill_library::builtin_skills_corpus(),
         &materialize_version,
     )
     .await

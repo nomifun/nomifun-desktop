@@ -13,60 +13,6 @@ body.login-page-active {
   overflow: hidden;
 }
 
-.login-page__background {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  z-index: 0;
-}
-
-.login-page__background-circle {
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
-  animation: login-float 20s infinite ease-in-out;
-}
-
-.login-page__background-circle--lg {
-  width: 500px;
-  height: 500px;
-  top: -250px;
-  left: -250px;
-  animation-delay: 0s;
-}
-
-.login-page__background-circle--md {
-  width: 350px;
-  height: 350px;
-  bottom: -175px;
-  right: -175px;
-  animation-delay: 5s;
-}
-
-.login-page__background-circle--sm {
-  width: 250px;
-  height: 250px;
-  top: 50%;
-  right: 10%;
-  animation-delay: 10s;
-}
-
-@keyframes login-float {
-  0%,
-  100% {
-    transform: translateY(0) translateX(0) scale(1);
-  }
-  25% {
-    transform: translateY(-20px) translateX(10px) scale(1.05);
-  }
-  50% {
-    transform: translateY(-10px) translateX(-10px) scale(0.95);
-  }
-  75% {
-    transform: translateY(10px) translateX(5px) scale(1.02);
-  }
-}
-
 .login-page__card {
   position: relative;
   z-index: 1;
@@ -101,10 +47,6 @@ body.login-page-active {
   gap: 4px;
   font-size: 13px;
   color: #555;
-}
-
-.login-page__lang-label {
-  font-weight: 500;
 }
 
 .login-page__lang-select {
@@ -398,27 +340,69 @@ body.login-page-active {
   color: #ddd;
 }
 
-@media (max-width: 600px) {
+/* The desktop contract includes 880×600. Compact vertical rhythm only when
+   height is constrained; width, interaction order, and the desktop layout stay
+   unchanged. The max-height remains a safety net for localized/error content. */
+@media (max-height: 680px) and (min-width: 880px) {
   .login-page__card {
-    margin: 20px;
-    padding: 32px 24px;
-    border-radius: 16px;
+    box-sizing: border-box;
+    max-width: 416px;
+    max-height: calc(100vh - 24px);
+    padding: 20px 28px 16px;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+
+  .login-page__lang-select-wrapper {
+    top: 12px;
+  }
+
+  .login-page__header {
+    margin-bottom: 14px;
+  }
+
+  .login-page__logo {
+    margin-bottom: 8px;
+  }
+
+  .login-page__logo svg,
+  .login-page__logo img {
+    width: 52px;
+    height: 52px;
   }
 
   .login-page__title {
-    font-size: 28px;
+    margin-bottom: 4px;
+    font-size: 24px;
   }
 
-  .login-page__subtitle {
-    font-size: 14px;
+  .login-page__form {
+    margin-bottom: 12px;
   }
 
-  .login-page__logo svg {
-    width: 60px;
-    height: 60px;
+  .login-page__form-item {
+    margin-bottom: 12px;
   }
 
-  .login-page__background-circle {
-    display: none;
+  .login-page__label {
+    margin-bottom: 6px;
+  }
+
+  .login-page__input {
+    height: 40px;
+  }
+
+  .login-page__checkbox {
+    margin-top: -4px;
+    margin-bottom: 12px;
+  }
+
+  .login-page__submit {
+    height: 42px;
+    margin-top: 2px;
+  }
+
+  .login-page__footer {
+    padding-top: 12px;
   }
 }

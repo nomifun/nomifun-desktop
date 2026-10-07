@@ -13,7 +13,8 @@ use nomifun_ai_agent::{
     DeltaKind, resolve_provider_config, streaming_completion_text_or_reasoning, user_message,
 };
 use nomifun_api_types::{
-    AgentExecutionDetail, ExecutionParticipant, PlannedExecution, PlannedExecutionStep,
+    AgentExecutionDetail, ExecutionParticipant, ExecutionStepProfile, PlannedExecution,
+    PlannedExecutionStep,
 };
 use nomifun_common::{
     AgentStepMode, AgentToolPolicy, AppError, ExecutionStepKind, ProviderId, ProviderWithModel,
@@ -22,9 +23,9 @@ use nomifun_common::{
 use nomifun_db::{IProviderModelRepository, ProviderModelRow};
 use nomifun_model_invoke::ModelInvokeService;
 
+use crate::control_steps::first_json_object;
 use crate::event_publisher::{AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase};
 
-const PLAN_MAX_TOKENS: u32 = 8192;
 const FALLBACK_TITLE_LEN: usize = 60;
 const PLAN_FALLBACK_NOTICE: &str = "\n\n⚠️ 自动拆解没有返回有效计划，已回退为一个可执行步骤。";
 
@@ -216,7 +217,6 @@ impl LlmPlanProducer {
         participants: &[ExecutionParticipant],
         system: &str,
         user: String,
-        max_tokens: u32,
         sink: Option<&LeadThinkingSink>,
     ) -> Result<String, AppError> {
         let lead = pick_lead(participants).ok_or_else(|| {
@@ -236,7 +236,7 @@ impl LlmPlanProducer {
             &config,
             system,
             vec![user_message(user)],
-            max_tokens,
+            None,
             |kind, delta| {
                 if let Some(sink) = sink {
                     sink(kind.into(), delta);
@@ -267,7 +267,6 @@ impl PlanProducer for LlmPlanProducer {
                 participants,
                 PLAN_SYSTEM,
                 build_plan_user_prompt(goal, participants, &descriptions),
-                PLAN_MAX_TOKENS,
                 sink,
             )
             .await?;
@@ -292,7 +291,6 @@ impl PlanProducer for LlmPlanProducer {
                 &current.participants,
                 ADJUST_SYSTEM,
                 build_adjust_user_prompt(intent, current),
-                PLAN_MAX_TOKENS,
                 sink,
             )
             .await?;
@@ -302,7 +300,7 @@ impl PlanProducer for LlmPlanProducer {
 }
 
 fn pick_lead(participants: &[ExecutionParticipant]) -> Option<ProviderWithModel> {
-    participants.iter().find_map(|participant| {
+    participants.iter().filter(|participant| participant.retired_in_revision.is_none()).find_map(|participant| {
         let provider_id = participant.provider_id.as_ref()?;
         let model = participant.model.as_ref()?;
         (ProviderId::try_from(provider_id.as_str()).is_ok()
@@ -318,7 +316,7 @@ fn pick_lead(participants: &[ExecutionParticipant]) -> Option<ProviderWithModel>
 
 const PLAN_SYSTEM: &str = r#"You are the lead Agent planning one AgentExecution.
 Return ONLY strict JSON with this shape:
-{"steps":[{"title":"...","spec":"...","profile":{"kind":"research","needs_vision":false,"needs_web_search":false,"needs_long_context":false,"needs_high_reasoning":false,"bulk":false},"kind":"agent","agent_mode":"normal","depends_on":[],"participant_index":0,"assignment_rationale":"...","role":"...","tool_policy":"full","fanout_group":null,"control_policy":null,"failure_policy":"fail_execution"}]}
+{"steps":[{"title":"...","spec":"...","profile":{"kind":"research","needs_vision":false,"needs_web_search":false,"needs_long_context":false,"needs_high_reasoning":false,"bulk":false,"managed_process_only":false},"kind":"agent","agent_mode":"normal","depends_on":[],"participant_index":0,"assignment_rationale":"...","role":"...","tool_policy":"full","fanout_group":null,"control_policy":null,"failure_policy":"fail_execution"}]}
 
 Rules:
 - depends_on contains only zero-based indices of earlier steps; keep the DAG acyclic and minimal.
@@ -330,15 +328,16 @@ Rules:
 - Controller steps have agent_mode=null and participant_index=null. Agent steps have control_policy=null and a participant_index when a particular participant is preferred.
 - Use failure_policy=skip_dependents only for a gate whose failure must prevent unsafe downstream work; otherwise fail_execution.
 - Assign cheap/fast participants to simple or bulk work and stronger participants to difficult reasoning. Do not route everything to the strongest model.
-- profile may be null when there is no capability-routing requirement. Set needs_web_search=true only when the work specifically requires provider-native model web search; generic research performed through ordinary tools does not require it.
+- profile may be null when there is no capability-routing requirement. Set needs_web_search=true only when the work specifically requires provider-native model web search; generic research performed through ordinary tools does not require it. managed_process_only is a subtractive host ceiling: set it true only for one turn-scoped lifecycle whose complete spec names start_process plus poll_process and cancel_process/close_process_stdin; it never grants process tools.
 - role is an optional short human-readable description of the work, in the goal's language. It is never a permission value.
 - tool_policy is exactly full, read_only, or read_shell. Use read_only for research/review that only needs Read/Grep/Glob, read_shell for verification/testing that also needs Bash, and full for implementation or any task that must modify files. Controller steps use full. A policy only narrows the caller's inherited authority.
+- A process handle is scoped to one Agent attempt/Turn. Any lifecycle that starts a process, waits or polls for its output, interacts with it, stops or cancels it, and proves cleanup MUST stay in one Agent step. Its spec must call start_process once with wait_ms=0, carry the exact returned process_id through at least one distinct poll_process call and then cancel_process, and require cleanup.reaped=true. Never split that lifecycle across steps or replace it with shell backgrounding, raw PID files, /tmp log indirection, tail, ps, or kill. When the user supplied an existing executable and did not request inspection or modification, do not add preflight file reads, ls/pwd/test probes, or manual instruction discovery solely to launch it; the owner performs executable/cwd preflight and the host injects applicable workspace instructions.
 - title is short; spec is the complete instruction.
 - Use advanced patterns only when they materially improve the result.
 "#;
 
 
-const ADJUST_SYSTEM: &str = r#"You are revising an existing AgentExecution from a user instruction. Return ONLY strict JSON: {"steps":[...]}. Each item is either {"type":"keep","step_id":"existing-id"} or {"type":"new","step":<the same typed step object used by planning>,"dependencies":[{"type":"existing","step_id":"..."}|{"type":"new","index":0}]}. Keep completed work that remains useful, omit obsolete work, add only needed work, and keep the resulting graph acyclic. Never invent an existing id. A new Agent step role is an optional short human-readable work description and never grants tools. Set its explicit tool_policy to full, read_only, or read_shell using the same rules as planning."#;
+const ADJUST_SYSTEM: &str = r#"You are revising an existing AgentExecution from a user instruction. Return ONLY strict JSON: {"steps":[...]}. Each item is either {"type":"keep","step_id":"existing-id"} or {"type":"new","step":<the same typed step object used by planning>,"dependencies":[{"type":"existing","step_id":"..."}|{"type":"new","index":0}]}. Keep completed work that remains useful, omit obsolete work, add only needed work, and keep the resulting graph acyclic. Never invent an existing id. A new Agent step role is an optional short human-readable work description and never grants tools. Set its explicit tool_policy to full, read_only, or read_shell using the same rules as planning. A turn-scoped process lifecycle must keep start_process, poll_process, cancel_process, the exact process_id, and cleanup proof in one new Agent step; never split it across attempts or use raw PID/shell-background substitutes."#;
 
 type DescriptionMap = HashMap<(String, String), String>;
 
@@ -446,8 +445,85 @@ fn parse_plan(raw: &str, goal: &str) -> PlannedExecution {
 }
 
 pub(crate) fn parse_plan_opt(raw: &str) -> Option<PlannedExecution> {
-    let plan: PlannedExecution = serde_json::from_str(&extract_json_object(raw)?).ok()?;
-    (!plan.steps.is_empty()).then_some(plan)
+    let mut plan: PlannedExecution = serde_json::from_str(first_json_object(raw)?).ok()?;
+    if plan.steps.is_empty() || !process_lifecycle_is_single_agent_step(&plan) {
+        return None;
+    }
+    for step in &mut plan.steps {
+        apply_managed_process_ceiling(step);
+    }
+    Some(plan)
+}
+
+fn apply_managed_process_ceiling(step: &mut PlannedExecutionStep) {
+    if step.kind != ExecutionStepKind::Agent {
+        return;
+    }
+    let text = format!("{}\n{}", step.title, step.spec).to_lowercase();
+    if !(text.contains("start_process")
+        && text.contains("poll_process")
+        && (text.contains("cancel_process") || text.contains("close_process_stdin")))
+    {
+        return;
+    }
+    let profile = step.profile.get_or_insert_with(|| ExecutionStepProfile {
+        kind: "tool".to_owned(),
+        needs_vision: false,
+        needs_web_search: false,
+        needs_long_context: false,
+        needs_high_reasoning: false,
+        bulk: false,
+        managed_process_only: true,
+    });
+    profile.managed_process_only = true;
+}
+
+/// A process session is owned by one Runtime Turn and cannot be handed to a
+/// later AgentExecution attempt. Reject an LLM plan that distributes obvious
+/// lifecycle phases across steps so production falls back to the original
+/// goal as one normal Agent step instead of persisting an impossible DAG.
+fn process_lifecycle_is_single_agent_step(plan: &PlannedExecution) -> bool {
+    let mut owner_step = None;
+    for (index, step) in plan.steps.iter().enumerate() {
+        let text = format!("{}\n{}", step.title, step.spec).to_lowercase();
+        let lifecycle_cue = [
+            "start_process",
+            "poll_process",
+            "cancel_process",
+            "process_id",
+            "background process",
+            "background job",
+            "start a process",
+            "launch a process",
+            "start a server",
+            "launch a server",
+            "wait for ready",
+            "stop the process",
+            "terminate the process",
+            "stop the server",
+            "process cleanup",
+            "process is reaped",
+            "后台方式启动",
+            "后台进程",
+            "等待 ready",
+            "停止进程",
+            "终止进程",
+            "进程回收",
+            "tail -f",
+            "kill -0",
+            "sigterm",
+            "sigkill",
+        ]
+        .iter()
+        .any(|cue| text.contains(cue));
+        if !lifecycle_cue {
+            continue;
+        }
+        if owner_step.replace(index).is_some_and(|owner| owner != index) {
+            return false;
+        }
+    }
+    true
 }
 
 fn fallback_plan(goal: &str) -> PlannedExecution {
@@ -479,43 +555,6 @@ fn truncate_title(goal: &str) -> String {
     }
 }
 
-fn extract_json_object(raw: &str) -> Option<String> {
-    let cleaned = raw
-        .replace("```json", "")
-        .replace("```JSON", "")
-        .replace("```", "");
-    let bytes = cleaned.as_bytes();
-    let start = cleaned.find('{')?;
-    let mut depth = 0_i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for index in start..bytes.len() {
-        let current = bytes[index] as char;
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if current == '\\' {
-                escaped = true;
-            } else if current == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match current {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(cleaned[start..=index].to_owned());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AdjustedExecutionNode {
@@ -541,16 +580,21 @@ pub(crate) struct AdjustedExecutionPlan {
 }
 
 pub(crate) fn parse_adjusted_plan(raw: &str) -> Result<AdjustedExecutionPlan, AppError> {
-    let object = extract_json_object(raw).ok_or_else(|| {
+    let object = first_json_object(raw).ok_or_else(|| {
         AppError::BadRequest("主 Agent 的调整计划没有返回 JSON，执行未改动".to_owned())
     })?;
-    let plan: AdjustedExecutionPlan = serde_json::from_str(&object).map_err(|error| {
+    let mut plan: AdjustedExecutionPlan = serde_json::from_str(object).map_err(|error| {
         AppError::BadRequest(format!("主 Agent 的调整计划无效（{error}），执行未改动"))
     })?;
     if plan.steps.is_empty() {
         return Err(AppError::BadRequest(
             "调整计划不能删除全部步骤".to_owned(),
         ));
+    }
+    for node in &mut plan.steps {
+        if let AdjustedExecutionNode::New { step, .. } = node {
+            apply_managed_process_ceiling(step);
+        }
     }
     Ok(plan)
 }
@@ -560,11 +604,12 @@ fn build_adjust_user_prompt(intent: &str, detail: &AgentExecutionDetail) -> Stri
         "INTENT:\n{}\n\nCURRENT EXECUTION (id | title | kind | status | dependencies | latest output):\n",
         intent.trim()
     );
-    for step in &detail.steps {
+    for step in detail.steps.iter().filter(|step| step.superseded_in_revision.is_none()) {
         let dependencies: Vec<&str> = detail
             .dependencies
             .iter()
-            .filter(|dependency| dependency.blocked_step_id == step.step_id)
+            .filter(|dependency| dependency.superseded_in_revision.is_none()
+                && dependency.blocked_step_id == step.step_id)
             .map(|dependency| dependency.blocker_step_id.as_str())
             .collect();
         let output = detail
@@ -604,6 +649,99 @@ mod tests {
 
         let removed = r#"{"steps":[{"title":"A","spec":"do A","kind":"agent","pattern_config":"{}","depends_on":[]}]}"#;
         assert!(parse_plan_opt(removed).is_none());
+    }
+
+    #[test]
+    fn planner_rejects_split_turn_scoped_process_lifecycle() {
+        let split = serde_json::json!({"steps": [
+            {"title":"启动 helper.sh","spec":"以后台方式启动 helper，把 PID 写入文件","kind":"agent","depends_on":[]},
+            {"title":"等待 READY 输出","spec":"用 tail -f 监控输出直到 READY","kind":"agent","depends_on":[0]},
+            {"title":"停止进程","spec":"根据 PID 发送 SIGTERM","kind":"agent","depends_on":[1]},
+            {"title":"确认进程回收","spec":"用 kill -0 检查，必要时发送 SIGKILL","kind":"agent","depends_on":[2]}
+        ]})
+        .to_string();
+        assert!(parse_plan_opt(&split).is_none());
+
+        let coupled = serde_json::json!({"steps": [{
+            "title":"启动、观测并停止 helper",
+            "spec":"在同一 Turn 内调用 start_process 一次，使用 poll_process 等待 READY，再用 cancel_process 及同一 process_id 确认回收",
+            "kind":"agent","depends_on":[]
+        }]})
+        .to_string();
+        let coupled = parse_plan_opt(&coupled).unwrap();
+        assert!(coupled.steps[0]
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.managed_process_only));
+    }
+
+    #[test]
+    fn fenced_plan_preserves_markdown_and_braces_inside_string_values() {
+        let spec = "Write this exact snippet: \n```json\n{\"key\":\"value\"}\n```";
+        let step = serde_json::json!({"title": "snippet", "spec": spec});
+        let raw = format!("preface\n```json\n{}\n```", serde_json::json!({"steps": [step.clone()]}));
+        assert_eq!(parse_plan_opt(&raw).unwrap().steps[0].spec, spec);
+        let adjusted = serde_json::json!({"steps": [{"type": "new", "step": step}]}).to_string();
+        match &parse_adjusted_plan(&adjusted).unwrap().steps[0] {
+            AdjustedExecutionNode::New { step, .. } => assert_eq!(step.spec, spec),
+            _ => panic!("expected new step"),
+        }
+    }
+
+    #[test]
+    fn lead_selection_excludes_retired_participants() {
+        let participant = |model: &str, retired| serde_json::from_value::<ExecutionParticipant>(
+            serde_json::json!({
+                "participant_id": nomifun_common::generate_id(),
+                "execution_id": nomifun_common::AgentExecutionId::new().into_string(),
+                "source_agent_id": nomifun_common::AgentId::new().into_string(),
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "model": model, "sort_order": 0, "introduced_in_revision": 1,
+                "retired_in_revision": retired, "created_at": 0
+            }),
+        ).unwrap();
+        let participants = [participant("old", Some(2)), participant("current", None)];
+        assert!(pick_lead(&participants[..1]).is_none());
+        assert_eq!(pick_lead(&participants).unwrap().model, "current");
+    }
+
+    #[test]
+    fn adjustment_prompt_excludes_superseded_steps_and_edges() {
+        let execution_id = nomifun_common::AgentExecutionId::new().into_string();
+        let old_id = nomifun_common::generate_id();
+        let live_id = nomifun_common::generate_id();
+        let step = |id: &str, title: &str, superseded| serde_json::json!({
+            "step_id": id, "execution_id": execution_id, "title": title, "spec": title,
+            "kind": "agent", "agent_mode": "normal", "status": "pending",
+            "tool_policy": "full", "failure_policy": "fail_execution", "assignment_locked": false,
+            "introduced_in_revision": 1, "superseded_in_revision": superseded,
+            "version": 1, "created_at": 0, "updated_at": 0
+        });
+        let mut detail: AgentExecutionDetail = serde_json::from_value(serde_json::json!({
+            "execution": {
+                "execution_id": execution_id, "goal": "goal", "delegation_policy": "automatic",
+                "adaptation_policy": "fixed", "decision_policy": "automatic", "max_parallel": 1,
+                "status": "running", "version": 2, "plan_revision": 2, "event_sequence": 0,
+                "created_at": 0, "updated_at": 0
+            },
+            "participants": [], "attempts": [],
+            "steps": [step(&old_id, "obsolete", Some(2)), step(&live_id, "current", None)],
+            "dependencies": [{
+                "execution_id": execution_id, "blocker_step_id": old_id, "blocked_step_id": live_id,
+                "introduced_in_revision": 1, "superseded_in_revision": 2
+            }]
+        })).unwrap();
+        let prompt = build_adjust_user_prompt("keep useful work", &detail);
+        assert!(prompt.contains(&live_id));
+        assert!(!prompt.contains(&old_id));
+        detail.steps[0].superseded_in_revision = None;
+        let prompt = build_adjust_user_prompt("keep useful work", &detail);
+        let current_line = prompt.lines().find(|line| line.starts_with(&live_id)).unwrap();
+        assert!(!current_line.contains(&old_id));
+        detail.dependencies[0].superseded_in_revision = None;
+        let prompt = build_adjust_user_prompt("keep useful work", &detail);
+        let current_line = prompt.lines().find(|line| line.starts_with(&live_id)).unwrap();
+        assert!(current_line.contains(&old_id));
     }
 
     #[test]

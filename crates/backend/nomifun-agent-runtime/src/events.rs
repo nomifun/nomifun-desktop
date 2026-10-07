@@ -1,0 +1,380 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use nomifun_agent_contracts::{ActionId, CapabilityId, OperationId};
+use nomifun_chat_model_broker::{ChatFinishReason, ChatModelErrorCode, ChatToolCall, ChatUsage, ToolCallId};
+
+use crate::engine::EngineBinding;
+use crate::error::AgentEngineError;
+use crate::tool::AgentToolResult;
+
+/// Trusted model failure classification and approved diagnostics. Provider
+/// prose never selects a reason or recreates typed facts from public text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentTurnFailure {
+    Model {
+        code: ChatModelErrorCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<nomifun_agent_contracts::ModelFailureDiagnostic>,
+    },
+    ModelStreamEndedWithoutTerminal,
+    InvalidModelEvent,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentEngineEvent {
+    TurnStarted {
+        binding: EngineBinding,
+        turn_operation_id: OperationId,
+    },
+    ExecutionBudgetPrepared {
+        /// Zero means provider-defined/undeclared, never a zero-token ceiling.
+        context_window_tokens: u32,
+        /// Internal context reservation; provider wire ceiling may be absent.
+        max_output_tokens: u32,
+        max_model_steps: u16,
+    },
+    ContextPrepared {
+        dropped_history_messages: usize,
+        warnings: Vec<String>,
+    },
+    /// Turn-local mechanisms activated by observed work. This records actual
+    /// execution weight; it never changes the frozen Snapshot or ToolPlan.
+    RuntimeModulesActivated {
+        modules: Vec<crate::AgentRuntimeModule>,
+        reason: crate::AgentRuntimeActivationReason,
+    },
+    ModelStepStarted {
+        step: u16,
+        operation_id: OperationId,
+    },
+    /// Metadata for the Store's atomic snapshot commit. The snapshot itself
+    /// is latest-state data on the Turn, not another transcript copy.
+    ExecutionCheckpointSaved {
+        step: u16,
+        revision: u64,
+        digest: nomifun_agent_contracts::DigestHex,
+    },
+    ExecutionResumed {
+        checkpoint_revision: u64,
+        checkpoint_step: u16,
+        model_steps: u16,
+        execution_fence: u64,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+    },
+    /// The new window is already committed in this exact checkpoint. This
+    /// event is observability, not an independent budget/authority grant.
+    ExecutionSegmentRenewed {
+        segment: u16,
+        model_steps: u16,
+        checkpoint_revision: u64,
+        reason: crate::AgentSegmentReason,
+    },
+    ExecutionBudgetExhausted {
+        model_steps: u16,
+        segment: u16,
+        checkpoint_revision: Option<u64>,
+        reason: crate::AgentExecutionStopReason,
+    },
+    CompactionStarted {
+        operation_id: OperationId,
+        input_bytes: usize,
+    },
+    /// A rejected summary draft is not a tool invocation or completion proof.
+    /// Do not persist its arguments or treat it as accepted task instructions.
+    CompactionSummaryRejected {
+        operation_id: OperationId,
+        reason: String,
+    },
+    /// Typed prompt rejection before semantic output; only requests a bounded
+    /// compaction. Does not assert that compaction or continuation succeeded.
+    ContextLimitRecoveryStarted {
+        rejected_step: u16,
+    },
+    /// The terminal was explicitly output-limited. Written before dropping
+    /// the proposed batch; none of these calls reached tool admission.
+    ModelOutputTruncated {
+        step: u16,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        continuation: bool,
+    },
+    /// Non-native tool markup, or an active-task terminal without public
+    /// text/calls, was rejected before any tool admission. This closes any
+    /// proposed batch for replay; it is not a transport retry,
+    /// an executed call/result, an output-limit claim or a success event.
+    ModelResponseRejected {
+        step: u16,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        continuation: bool,
+        /// Advisory repair constraint, validated against the exposed surface.
+        /// It never represents a parsed or executed text tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_hint: Option<String>,
+    },
+    /// Only an explicitly voice-started Immediate-policy Turn can emit this.
+    /// The exact unadmitted proposal is withdrawn after owned abort/join;
+    /// no Turn cancellation, tool result, applied input or success is claimed.
+    VoiceModelStepSuperseded {
+        step: u16,
+        model_operation_id: OperationId,
+        steering_receipt_ids: Vec<String>,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        cleanup: nomifun_chat_model_broker::OwnedModelCleanupReceipt,
+    },
+    ContextCompacted {
+        input_bytes_before: usize,
+        input_bytes_after: usize,
+        summary: String,
+        /// Ordered IDs of up to three contiguous complete batches ending at
+        /// the latest exchange, at most 64 IDs, and their retained suffix
+        /// (including intervening/later non-tool responses and accepted input),
+        /// never new executions or effect-completion evidence.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        retained_tool_call_ids: Vec<ToolCallId>,
+        /// Portable replacement after the summary. None is the legacy
+        /// reference-only codec; accepted input references retain ownership.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retained_context: Option<Vec<crate::AgentCompactedItem>>,
+    },
+    CompactionUsage {
+        usage: ChatUsage,
+    },
+    WorkStatus {
+        status: crate::AgentWorkStatus,
+    },
+    PlanUpdated {
+        plan: crate::AgentPlan,
+    },
+    InstructionsUpdated {
+        context: String,
+    },
+    /// Write-ahead recovery obligations and explicit clearing, retained even
+    /// when model history is compacted or chat messages are deleted.
+    PatchRecoveryUpdated {
+        state: crate::AgentPatchRecoveryState,
+    },
+    SteeringInputs {
+        inputs: Vec<crate::AgentSteeringInput>,
+    },
+    TurnInputScope {
+        wire_turn_id: String,
+    },
+    SteeringDeferred {
+        inputs: Vec<crate::AgentSteeringInput>,
+        reason: String,
+    },
+    CompletionReview {
+        status: crate::AgentWorkStatus,
+    },
+    CompletionObservation {
+        observation: crate::AgentCompletionObservation,
+    },
+    CompletionReported {
+        report: crate::AgentCompletionReport,
+    },
+    /// Valid accounting still awaits one bounded public-result review. This
+    /// is not an accepted delivery, terminal event or independent verification.
+    CompletionCandidateRecorded {
+        report: crate::AgentCompletionReport,
+    },
+    /// A user correction superseded an in-flight report-only review. None
+    /// of that response's proposed calls was executed or delivered.
+    DeliveryReviewSuperseded {
+        step: u16,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        continuation: bool,
+    },
+    /// Engine publication of the accepted report after the terminal input
+    /// fence. This is not another provider/model stream event.
+    CompletionDelivered {
+        step: u16,
+        text: String,
+    },
+    OutputTextDelta {
+        step: u16,
+        text: String,
+    },
+    ReasoningDelta {
+        step: u16,
+        text: String,
+    },
+    ToolCallDelta {
+        step: u16,
+        call_id: ToolCallId,
+        name: String,
+        arguments_delta: String,
+    },
+    ToolCallCompleted {
+        step: u16,
+        call: ChatToolCall,
+    },
+    ToolStarted {
+        step: u16,
+        call_id: ToolCallId,
+        capability_id: CapabilityId,
+        action_id: ActionId,
+    },
+    ToolCompleted {
+        step: u16,
+        result: AgentToolResult,
+    },
+    /// An owner-backed observation of an earlier invocation, never another
+    /// tool admission or current completion evidence.
+    ToolOutcomeReconciled {
+        step: u16,
+        result: AgentToolResult,
+        source: crate::AgentReconciliationSource,
+        evidence_event_id: Option<String>,
+        owner_operation_id: Option<OperationId>,
+    },
+    OwnerOutcomeReconciled {
+        call_id: Option<ToolCallId>,
+        effect_id: Option<String>,
+        outcome: String,
+        evidence_event_id: String,
+        source: crate::AgentReconciliationSource,
+    },
+    ExecutionTailReconciled {
+        model_steps: u16,
+        source_checkpoint_revision: u64,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        retained_tool_call_ids: Vec<ToolCallId>,
+        discard_last_model_step: bool,
+        retry_stall_guards: bool,
+    },
+    /// Derived model-context ordering after all results are recorded. This is
+    /// not execution order, model delivery acknowledgement or cleanup proof.
+    ToolResultsOrdered {
+        step: u16,
+        call_ids: Vec<ToolCallId>,
+    },
+    Usage {
+        step: u16,
+        usage: ChatUsage,
+    },
+    TurnCompleted {
+        model_steps: u16,
+        finish_reason: ChatFinishReason,
+    },
+    TurnCancelled {
+        model_steps: u16,
+    },
+    TurnPaused {
+        model_steps: u16,
+        reason: String,
+    },
+    TurnFailed {
+        model_steps: u16,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<AgentTurnFailure>,
+    },
+}
+
+impl AgentEngineEvent {
+    /// Display-only reasoning lifecycle. `None` leaves the current phase alone;
+    /// `Some(None)` closes it, and `Some(Some(step))` starts or resumes that step.
+    /// Live publication and canonical history use the same typed transitions.
+    pub fn reasoning_display_transition(&self) -> Option<Option<u16>> {
+        match self {
+            Self::ReasoningDelta { step, .. } => Some(Some(*step)),
+            Self::ModelStepStarted { .. }
+            | Self::ExecutionResumed { .. }
+            | Self::OutputTextDelta { .. }
+            | Self::CompletionDelivered { .. }
+            | Self::ToolCallDelta { .. }
+            | Self::ToolCallCompleted { .. }
+            | Self::ToolStarted { .. }
+            | Self::ModelOutputTruncated { .. }
+            | Self::ModelResponseRejected { .. }
+            | Self::DeliveryReviewSuperseded { .. }
+            | Self::VoiceModelStepSuperseded { .. }
+            | Self::TurnCompleted { .. }
+            | Self::TurnCancelled { .. }
+            | Self::TurnPaused { .. }
+            | Self::TurnFailed { .. } => Some(None),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait]
+pub trait AgentEventSink: Send + Sync {
+    async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError>;
+    fn supports_checkpoints(&self) -> bool { false }
+
+    async fn execution_pressure(&self) -> Result<crate::AgentExecutionPressure, AgentEngineError> {
+        Ok(crate::AgentExecutionPressure::default())
+    }
+
+    /// None explicitly means this host does not persist native checkpoints.
+    /// It must never be treated as a durable acknowledgement or resume grant.
+    async fn save_checkpoint(&self, _checkpoint: crate::AgentExecutionCheckpoint)
+        -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+        Ok(None)
+    }
+
+    /// Write-ahead admission, not an execution result. Hosts with concurrent
+    /// input must serialize this with their inbox: false means no admission
+    /// was recorded and the call must be deferred without invoking the tool.
+    /// The default is for sinks without a concurrent input owner.
+    async fn admit_tool(&self, event: AgentEngineEvent) -> Result<bool, AgentEngineError> {
+        if !matches!(event, AgentEngineEvent::ToolStarted { .. }) {
+            return Err(AgentEngineError::InvalidContract(
+                "tool admission requires ToolStarted".into(),
+            ));
+        }
+        self.emit(event).await?;
+        Ok(true)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct NoopAgentEventSink;
+
+#[async_trait]
+impl AgentEventSink for NoopAgentEventSink {
+    async fn emit(&self, _event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+        Ok(())
+    }
+}
+
+pub(crate) type SharedAgentEventSink = Arc<dyn AgentEventSink>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_turn_keeps_optional_typed_cause_without_duplicating_its_diagnostic() {
+        let generic: AgentEngineEvent = serde_json::from_value(serde_json::json!({
+            "event":"turn_failed", "model_steps":1, "message":"existing completion guard",
+        })).unwrap();
+        assert!(matches!(&generic, AgentEngineEvent::TurnFailed { failure: None, .. }));
+        assert!(serde_json::to_value(generic).unwrap().get("failure").is_none());
+        let typed = AgentEngineEvent::TurnFailed { model_steps: 1, message: "original diagnostic".into(),
+            failure: Some(AgentTurnFailure::Model { code: ChatModelErrorCode::AuthenticationFailed, diagnostic: None }),
+        };
+        let value = serde_json::to_value(&typed).unwrap();
+        assert_eq!(value["failure"], serde_json::json!({"kind":"model","code":"AUTHENTICATION_FAILED"}));
+        assert_eq!(value["message"], "original diagnostic");
+        assert_eq!(serde_json::from_value::<AgentEngineEvent>(value).unwrap(), typed);
+    }
+
+    #[test]
+    fn failed_turn_preserves_approved_diagnostic_fields_in_the_native_fact() {
+        let mut diagnostic = nomifun_agent_contracts::ModelFailureDiagnostic::new(
+            nomifun_agent_contracts::ModelFailureReason::TlsFailure);
+        diagnostic.transport_detail = Some("TLS certificate verification failed".into());
+        diagnostic.endpoint = Some("https://api.example.test/v1/chat/completions".into());
+        diagnostic.provider_id = Some("0190f5fe-7c00-7a00-8000-000000000072".into());
+        diagnostic.model_name = Some("actual-request-model".into());
+        let event = AgentEngineEvent::TurnFailed { model_steps:1, message:"Safe fixed transport failure".into(),
+            failure:Some(AgentTurnFailure::Model { code:ChatModelErrorCode::ProviderUnavailable, diagnostic:Some(diagnostic.clone()) }) };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["failure"]["diagnostic"], serde_json::to_value(&diagnostic).unwrap());
+        assert_eq!(serde_json::from_value::<AgentEngineEvent>(value).unwrap(), event);
+    }
+}

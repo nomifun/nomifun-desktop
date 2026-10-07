@@ -103,6 +103,14 @@
     "tagRequired": "Choose a tag to enable AutoWork",
     "enabledOk": "AutoWork enabled",
     "disabledOk": "AutoWork disabled",
+    "resume": "Resume",
+    "resumedOk": "AutoWork resumed",
+    "pausedReasons": {
+      "executionFailed": "The previous execution failed. Review it before resuming.",
+      "userInterrupted": "Execution was stopped manually. Resume to continue the queue.",
+      "userActionRequired": "Execution is waiting for human attention.",
+      "unknown": "AutoWork is paused. Review the requirement and execution state."
+    },
     "completedCount": "Completed: {{count}}",
     "emptyTitle": "No tags available",
     "emptyDescription": "Tags are created automatically from requirements. Add a tagged requirement to get started.",
@@ -114,7 +122,8 @@
     "state": {
       "off": "Off",
       "idle": "Idle",
-      "active": "Active"
+      "active": "Active",
+      "paused": "Paused"
     }
   },
   "kanban": {

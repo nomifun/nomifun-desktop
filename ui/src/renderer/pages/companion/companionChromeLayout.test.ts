@@ -5,6 +5,7 @@ const companionSource = readFileSync(new URL('./index.tsx', import.meta.url), 'u
 const companionCss = readFileSync(new URL('./companion.css', import.meta.url), 'utf8');
 const capturePolicySource = readFileSync(new URL('./companionCapturePolicy.ts', import.meta.url), 'utf8');
 const deskGeometrySource = readFileSync(new URL('./deskRestoreGeometry.ts', import.meta.url), 'utf8');
+const switcherSource = readFileSync(new URL('./CompanionSwitcher.tsx', import.meta.url), 'utf8');
 
 describe('desktop companion chrome layout', () => {
   test('keeps the figure stage as the only chrome on the stage shell', () => {
@@ -14,8 +15,16 @@ describe('desktop companion chrome layout', () => {
     expect(figureIndex).toBeGreaterThan(stageIndex);
   });
 
-  test('retains shared native expansion only for chat surfaces', () => {
-    expect(companionSource.includes("type ExpandedWindowMode = 'chat'")).toBe(true);
+  test('keeps desktop companion switcher tooltips flat', () => {
+    const tooltipRule = companionCss.match(/\.nomi-companion-switcher__tooltip \[role='tooltip'\] \{([\s\S]*?)\}/)?.[1] ?? '';
+    expect(tooltipRule.includes('box-shadow: none;')).toBe(true);
+  });
+
+  test('only chat surfaces control native resizing; tooltip hover cannot drive geometry', () => {
+    expect(companionSource.includes("type ExpandedWindowMode = 'chat';")).toBe(true);
+    expect(companionSource.includes('switcherTooltipVisible')).toBe(false);
+    expect(switcherSource.includes('onTooltipVisibleChange')).toBe(false);
+    expect(companionSource.includes('mode !== expandedWindowRequestedModeRef.current')).toBe(true);
     expect(companionSource.includes('expandedWindowSessionRef')).toBe(true);
     expect(companionSource.includes('syncExpandedWindow(expandedMode)')).toBe(true);
     expect(companionSource.includes('internalWindowLayoutRef.current || expandedWindowSessionRef.current')).toBe(true);

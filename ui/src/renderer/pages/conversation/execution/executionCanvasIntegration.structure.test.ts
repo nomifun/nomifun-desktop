@@ -18,7 +18,6 @@ describe('conversation execution canvas integration', () => {
     const edgeSource = readSource(new URL('./executionDagEdges.ts', import.meta.url));
     const nodeSource = readSource(new URL('./nodes/StepNode.tsx', import.meta.url));
     const canvasCss = readSource(new URL('./dag-canvas.css', import.meta.url));
-    const profileSource = readSource(new URL('./ParticipantProfilePanel.tsx', import.meta.url));
 
     expect(chatSource.includes('<ExecutionProvider')).toBe(true);
     expect(chatSource.includes('<ExecutionConversationLayout')).toBe(true);
@@ -33,8 +32,6 @@ describe('conversation execution canvas integration', () => {
     expect(panelSource.includes('agentExecution.status.execution.')).toBe(false);
     expect(panelSource.includes('(showControls || leadThinking.active) &&')).toBe(true);
     expect(panelSource.includes('styles.chips')).toBe(false);
-    expect(panelSource.includes('<ParticipantProfilePanel')).toBe(true);
-    expect(canvasSource.includes('<ParticipantProfilePanel')).toBe(false);
     expect(canvasSource.includes('overviewOpen && (')).toBe(true);
     expect(canvasSource.includes('buildExecutionDagEdges')).toBe(true);
     expect(canvasSource.includes('<NodeInternalsRefresher')).toBe(true);
@@ -53,8 +50,6 @@ describe('conversation execution canvas integration', () => {
     expect(canvasCss.includes('.react-flow__node-step')).toBe(true);
     expect(canvasCss.includes('vector-effect: non-scaling-stroke')).toBe(true);
     expect(canvasCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
-    expect(profileSource.includes("targets: ['conversation', 'execution_step']")).toBe(true);
-    expect(profileSource.includes('<Drawer')).toBe(true);
   });
 
   test('renders only the current plan revision while retaining history in the detail model', () => {
@@ -84,18 +79,24 @@ describe('conversation execution canvas integration', () => {
     expect(projectedSource.includes('expected_execution_version: detail.execution.version')).toBe(true);
   });
 
-  test('keeps the collaboration panel recoverable and usable on compact layouts', () => {
+  test('keeps the collaboration panel on the workspace rail without a duplicate header toggle', () => {
     const layoutSource = readSource(new URL('./ExecutionConversationLayout.tsx', import.meta.url));
-    const panelCss = readSource(new URL('./executionTopPanel.module.css', import.meta.url));
+    const railSource = readSource(new URL('../components/ChatLayout/WorkspaceToolRail.tsx', import.meta.url));
 
-    expect(layoutSource.includes('execution.toggleCanvas')).toBe(true);
-    expect(layoutSource.includes("'agentExecution.panel.open'")).toBe(true);
-    expect(panelCss.includes('@media (max-width: 768px)')).toBe(true);
-    expect(panelCss.includes('width: 100% !important')).toBe(true);
+    expect(layoutSource.includes('workspaceCollaboration={{')).toBe(true);
+    expect(layoutSource.includes('onClick: execution.toggleCanvas')).toBe(true);
+    expect(layoutSource.includes('headerExtra=')).toBe(false);
+    expect(layoutSource.includes('agentExecution.panel.open')).toBe(false);
+    expect(layoutSource.includes('agentExecution.panel.collapse')).toBe(false);
+    expect(railSource.includes('collaboration?.available')).toBe(true);
+    expect(railSource.includes('onClick={collaboration.onClick}')).toBe(true);
   });
 
   test('projects linked executions for every conversation runtime and companion sessions', () => {
     const chatSource = readSource(new URL('../components/ChatConversation.tsx', import.meta.url));
+    const cohabitSource = readSource(
+      new URL('../../nomi/workspace/CompanionCohabitView.tsx', import.meta.url),
+    );
     const companionSource = readSource(
       new URL('../../nomi/companion/CompanionConversation.tsx', import.meta.url),
     );
@@ -105,7 +106,10 @@ describe('conversation execution canvas integration', () => {
     const hookSource = readSource(new URL('./useConversationExecution.ts', import.meta.url));
     const readOnlySource = readSource(new URL('./ReadOnlyConversationView.tsx', import.meta.url));
 
-    expect(chatSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length).toBeGreaterThanOrEqual(3);
+    const executionProviderCount =
+      (chatSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length ?? 0) +
+      (cohabitSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length ?? 0);
+    expect(executionProviderCount).toBeGreaterThanOrEqual(3);
     expect(companionSource.includes('<ExecutionConversationLayout')).toBe(false);
     expect(companionPanelSource.includes('renderInExecutionShell')).toBe(true);
     expect(companionPanelSource.includes('<ExecutionConversationLayout')).toBe(true);

@@ -14,8 +14,9 @@ import type {
   ProviderModelResponse,
 } from '@/common/types/provider/providerModel';
 import type { ProviderId } from '@/common/types/ids';
+import { capabilitySupportsTrait } from '@/common/utils/providerModels';
 
-/** Nine endpoint tasks plus the useful trait-only vision projection. */
+/** Endpoint tasks plus the image-capable Chat adapter projection. */
 export type ModalityKey =
   | 'chat'
   | 'realtime'
@@ -23,6 +24,7 @@ export type ModalityKey =
   | 'image'
   | 'image_edit'
   | 'video'
+  | 'music'
   | 'tts'
   | 'asr'
   | 'embedding'
@@ -30,7 +32,7 @@ export type ModalityKey =
 
 export interface ModalitySpec {
   task: ModelTask;
-  /** Every trait must be present on this exact task capability. */
+  /** Every requested input/search feature must be represented by the adapter. */
   traits: readonly ModelTrait[];
 }
 
@@ -41,6 +43,7 @@ export const MODALITY_SPECS: Record<ModalityKey, ModalitySpec> = {
   image: { task: 'image_generation', traits: [] },
   image_edit: { task: 'image_edit', traits: [] },
   video: { task: 'video_generation', traits: [] },
+  music: { task: 'music_generation', traits: [] },
   tts: { task: 'speech_synthesis', traits: [] },
   asr: { task: 'speech_recognition', traits: [] },
   embedding: { task: 'embedding', traits: [] },
@@ -69,14 +72,14 @@ export interface ModalityProviderGroup {
   models: ModalityModelRow[];
 }
 
-export const matchingCapability = (
+const matchingCapability = (
   model: ProviderModelResponse,
   spec: ModalitySpec
 ): ProviderModelCapabilityResponse | undefined =>
   model.capabilities.find(
     (capability) =>
       capability.task === spec.task &&
-      spec.traits.every((trait) => capability.traits.includes(trait))
+      spec.traits.every((trait) => capabilitySupportsTrait(capability, trait))
   );
 
 export const rowMatchesModality = (

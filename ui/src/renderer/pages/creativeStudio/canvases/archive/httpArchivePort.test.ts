@@ -46,7 +46,7 @@ describe('Creative Studio Canvas HTTP archive port', () => {
           },
         });
       },
-      (_blob, fileName) => saved.push(fileName)
+      async (_blob, fileName) => { saved.push(fileName); }
     );
 
     expect(

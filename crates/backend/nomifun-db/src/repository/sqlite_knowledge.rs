@@ -16,6 +16,21 @@ impl SqliteKnowledgeRepository {
     }
 }
 
+// Resource rows can outlive their selection to preserve historical Effect
+// references. Only the current canonical Agent binding grants membership.
+// Both the consumer view and the delete fence use this exact predicate.
+const CURRENT_AGENT_KNOWLEDGE_RESOURCES_SQL: &str = "\
+    FROM agent_sessions sessions \
+    JOIN json_each(sessions.agent_binding_json, '$.typed_resource_bindings') selected \
+    JOIN agent_session_resources resources \
+      ON resources.session_id = sessions.agent_session_id \
+     AND resources.binding_id = json_extract(selected.value, '$.binding_id') \
+     AND resources.resource_kind = json_extract(selected.value, '$.resource_kind') \
+     AND resources.resource_id = json_extract(selected.value, '$.resource_id') \
+     AND resources.owner_id = json_extract(selected.value, '$.owner_id') \
+    WHERE sessions.state = 'live' AND resources.resource_kind = 'knowledge_base' \
+      AND resources.resource_id = ?";
+
 
 /// Map a binding `target_kind` to the `knowledge_bindings` column that carries
 /// its `target_id`. Returns `None` for an unrecognized kind so callers can
@@ -43,14 +58,15 @@ async fn lock_binding_target(
                 ))
             })?;
             let parent = sqlx::query(
-                "UPDATE conversations SET updated_at = updated_at WHERE conversation_id = ?",
+                "UPDATE agent_sessions SET next_seq = next_seq \
+                 WHERE agent_session_id = ? AND state = 'live'",
             )
             .bind(target_id.as_str())
             .execute(&mut **tx)
             .await?;
             if parent.rows_affected() == 0 {
                 return Err(DbError::Conflict(format!(
-                    "knowledge conversation target '{}' does not exist",
+                    "knowledge AgentSession target '{}' does not exist",
                     target_id
                 )));
             }
@@ -191,20 +207,16 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
             return Err(DbError::NotFound(format!("knowledge base {id}")));
         }
 
-        // RESTRICT: presets are durable configuration and must be
-        // explicitly edited before a referenced knowledge base can disappear.
-        let preset_reference_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(\
-                SELECT 1 FROM preset_knowledge_bases \
-                WHERE knowledge_base_id = ?\
-             )",
-        )
+        let consumers_query = format!(
+            "SELECT COUNT(DISTINCT resources.session_id) {CURRENT_AGENT_KNOWLEDGE_RESOURCES_SQL}"
+        );
+        let session_consumers: i64 = sqlx::query_scalar(&consumers_query)
         .bind(id)
         .fetch_one(&mut *transaction)
         .await?;
-        if preset_reference_exists {
+        if session_consumers > 0 {
             return Err(DbError::Conflict(format!(
-                "knowledge base {id} is still referenced by a preset"
+                "knowledge base is still selected by {session_consumers} AgentSession(s); unmount it from those conversations before deleting it"
             )));
         }
 
@@ -478,6 +490,27 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
         Ok(rows)
     }
 
+    async fn list_agent_sessions_using_kb(
+        &self,
+        kb_id: &str,
+    ) -> Result<Vec<(String, bool)>, DbError> {
+        let consumers_query = format!(
+            "SELECT DISTINCT resources.session_id, \
+                    CASE WHEN json_extract(selected.value, '$.typed_parameters.knowledge_enabled') = 'false' \
+                         THEN 0 ELSE 1 END \
+             {CURRENT_AGENT_KNOWLEDGE_RESOURCES_SQL} \
+             ORDER BY resources.session_id"
+        );
+        let rows: Vec<(String, i64)> = sqlx::query_as(&consumers_query)
+        .bind(kb_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(session_id, enabled)| (session_id, enabled != 0))
+            .collect())
+    }
+
     // ── Knowledge tags ────────────────────────────────────────────────────
 
     async fn list_knowledge_tags(&self) -> Result<Vec<KnowledgeTagRow>, DbError> {
@@ -636,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_base_cascades_binding_membership_but_restricts_preset_usage() {
+    async fn delete_base_cascades_binding_membership() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
         repo.insert_base(&make_base(KB_A)).await.unwrap();
@@ -661,47 +694,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(remaining, vec![KB_B.to_owned()]);
-
-        let preset_id = nomifun_common::PresetId::new();
-        assert!(nomifun_common::validate_uuidv7(preset_id.as_str()).is_ok());
-        sqlx::query(
-            "INSERT INTO presets \
-             (preset_id, source_kind, source_key, revision, name, fallback_allowed, created_at, updated_at) \
-             VALUES (?, 'builtin', 'fixture-preset', 1, 'Preset', 1, 1, 1)",
-        )
-        .bind(preset_id.as_str())
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO preset_knowledge_bases \
-             (preset_id, knowledge_base_id, sort_order, required) \
-             VALUES (?, ?, 0, 1)",
-        )
-        .bind(preset_id.as_str())
-        .bind(KB_B)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let error = repo.delete_base(KB_B).await.unwrap_err();
-        assert!(matches!(error, DbError::Conflict(_)));
-        assert!(repo.get_base(KB_B).await.unwrap().is_some());
-        let (_, still_bound) = repo
+        repo.delete_base(KB_B).await.unwrap();
+        let (_, remaining) = repo
             .get_binding("workpath", "/project")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(still_bound, vec![KB_B.to_owned()]);
+        assert!(remaining.is_empty());
     }
 
-    /// Insert a conversation so the conversation-kind binding has a valid
+    /// Insert a canonical AgentSession so the session-kind binding has a valid
     /// logical target for the repository-level test.
-    async fn seed_conversation(pool: &SqlitePool, id: &str) {
+    async fn seed_agent_session(pool: &SqlitePool, id: &str) {
         let installation_owner = crate::installation_owner_id(pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO conversations (conversation_id, user_id, name, type, status, created_at, updated_at) \
-             VALUES (?, ?, 'c', 'nomi', 'pending', 1, 1)",
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?, json_object('principal_kind','user','principal_id',?), \
+                       'live', 'Knowledge target', 0, 0, '{}', 1, 1)",
         )
         .bind(id)
         .bind(installation_owner)
@@ -710,11 +721,96 @@ mod tests {
         .unwrap();
     }
 
+    /// An Agent transition retains historical resource identities for Effect
+    /// references, while only the current canonical binding selects a base.
+    async fn seed_current_and_retired_knowledge_resources()
+        -> (crate::database::Database, SqliteKnowledgeRepository)
+    {
+        let db = init_database_memory().await.unwrap();
+        let repo = SqliteKnowledgeRepository::new(db.pool().clone());
+        repo.insert_base(&make_base(KB_A)).await.unwrap();
+        repo.insert_base(&make_base(KB_B)).await.unwrap();
+        seed_agent_session(db.pool(), CONVERSATION_ID).await;
+        let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
+        let mut current = None;
+        for (binding_id, kb_id, enabled) in [
+            ("knowledge_base:retired", KB_A, "true"),
+            ("knowledge_base:current", KB_B, "false"),
+        ] {
+            let binding = serde_json::json!({
+                "binding_id": binding_id, "resource_kind": "knowledge_base",
+                "resource_id": kb_id, "owner_id": installation_owner,
+                "operations": ["read"],
+                "typed_parameters": {"knowledge_enabled": enabled}
+            });
+            let digest = nomifun_agent_contracts::digest_payload(&binding).unwrap();
+            sqlx::query(
+                "INSERT INTO agent_session_resources \
+                 (session_id, binding_id, resource_kind, resource_id, owner_id, \
+                  operations_json, typed_parameters_json, binding_digest) \
+                 VALUES (?, ?, 'knowledge_base', ?, ?, '[\"read\"]', ?, ?)",
+            )
+            .bind(CONVERSATION_ID).bind(binding_id).bind(kb_id).bind(&installation_owner)
+            .bind(binding["typed_parameters"].to_string()).bind(digest.as_ref())
+            .execute(db.pool()).await.unwrap();
+            if kb_id == KB_B { current = Some(binding); }
+        }
+        let binding = serde_json::json!({
+            "preset_revision_ref": {
+                "preset_id": OTHER_CONVERSATION_ID, "revision": 1,
+                "revision_digest": "a".repeat(64)
+            },
+            "resolved_snapshot_ref": {
+                "snapshot_id": "resolved:current-knowledge-agent",
+                "snapshot_digest": "b".repeat(64)
+            },
+            "typed_resource_bindings": [current.unwrap()], "binding_version": 2
+        });
+        sqlx::query("UPDATE agent_sessions SET agent_binding_json = ? WHERE agent_session_id = ?")
+            .bind(binding.to_string()).bind(CONVERSATION_ID)
+            .execute(db.pool()).await.unwrap();
+        (db, repo)
+    }
+
+    #[tokio::test]
+    async fn canonical_knowledge_consumers_ignore_retired_resource_rows() {
+        let (db, repo) = seed_current_and_retired_knowledge_resources().await;
+        assert!(repo.list_agent_sessions_using_kb(KB_A).await.unwrap().is_empty(),
+            "historical Effect resource identities must not reauthorize a retired Knowledge base");
+        assert_eq!(repo.list_agent_sessions_using_kb(KB_B).await.unwrap(),
+            vec![(CONVERSATION_ID.to_owned(), false)],
+            "a current disabled selection remains visible with its exact disposition");
+        assert_eq!(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_session_resources WHERE session_id = ?",
+        ).bind(CONVERSATION_ID).fetch_one(db.pool()).await.unwrap(), 2,
+            "consumer filtering must not delete historical resource identities");
+    }
+
+    #[tokio::test]
+    async fn canonical_knowledge_deletion_ignores_retired_but_rejects_current_resources() {
+        let (db, repo) = seed_current_and_retired_knowledge_resources().await;
+        repo.delete_base(KB_A).await.expect("a retired resource row must not block Knowledge base deletion");
+        assert!(repo.get_base(KB_A).await.unwrap().is_none());
+        assert!(matches!(repo.delete_base(KB_B).await, Err(DbError::Conflict(_))),
+            "a current selection protects the base even when Knowledge retrieval is disabled");
+        sqlx::query(
+            "UPDATE agent_sessions SET agent_binding_json = \
+             json_set(agent_binding_json, '$.typed_resource_bindings', json('[]')) \
+             WHERE agent_session_id = ?",
+        ).bind(CONVERSATION_ID).execute(db.pool()).await.unwrap();
+        assert!(repo.list_agent_sessions_using_kb(KB_B).await.unwrap().is_empty());
+        repo.delete_base(KB_B).await.expect("removing the canonical selection must release its delete blocker");
+        assert_eq!(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_session_resources WHERE session_id = ?",
+        ).bind(CONVERSATION_ID).fetch_one(db.pool()).await.unwrap(), 2,
+            "retired referential identities remain available after unmount and base deletion");
+    }
+
     #[tokio::test]
     async fn binding_set_get_roundtrip() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
-        seed_conversation(db.pool(), CONVERSATION_ID).await;
+        seed_agent_session(db.pool(), CONVERSATION_ID).await;
         repo.insert_base(&make_base(KB_A)).await.unwrap();
         repo.insert_base(&make_base(KB_B)).await.unwrap();
 
@@ -835,13 +931,13 @@ mod tests {
         assert!(repo.get_binding("workpath", "/other").await.unwrap().is_none());
     }
 
-    /// Raw conversation deletion leaves logically related rows unchanged.
-    /// Repository-owned cleanup removes the binding and its junction rows.
+    /// Raw AgentSession deletion leaves logically related rows unchanged.
+    /// The canonical delete saga must remove the binding and its junction rows.
     #[tokio::test]
-    async fn deleting_conversation_requires_explicit_binding_cleanup() {
+    async fn deleting_agent_session_requires_explicit_binding_cleanup() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
-        seed_conversation(db.pool(), OTHER_CONVERSATION_ID).await;
+        seed_agent_session(db.pool(), OTHER_CONVERSATION_ID).await;
         repo.insert_base(&make_base(KB_A)).await.unwrap();
 
         let bid = repo
@@ -849,7 +945,7 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::query("DELETE FROM conversations WHERE conversation_id = ?")
+        sqlx::query("DELETE FROM agent_sessions WHERE agent_session_id = ?")
             .bind(OTHER_CONVERSATION_ID)
             .execute(db.pool())
             .await

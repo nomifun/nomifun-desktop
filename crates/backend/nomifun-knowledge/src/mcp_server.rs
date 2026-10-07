@@ -243,10 +243,10 @@ async fn handle_tool_request(
     // session header's KnowledgeControl) must take effect without a relaunch.
     // This stays inside the signed trust boundary — the capability still pins
     // user + terminal + workspace_path, and the binding row is server-side
-    // state of that same workspace. Conversation and external-process
-    // sessions keep their issuance-time scope (conversations are re-issued on
-    // every binding change by the runtime recycler; external broker sessions
-    // deliberately keep their connect-time scope).
+    // state of that same workspace. Other process sessions deliberately keep
+    // their signed issuance-time scope. Canonical AgentSessions do not use
+    // this bridge: their frozen Knowledge resources are dispatched through
+    // the Kernel-owned knowledge Actions.
     let is_terminal_session =
         claims.session.kind == nomifun_common::LoopbackSessionKind::Terminal;
     let (kb_ids, live_terminal_binding): (Vec<KnowledgeBaseId>, Option<KnowledgeBinding>) =
@@ -320,7 +320,7 @@ async fn handle_tool_request(
 fn no_bases_bound_error() -> Value {
     json!({
         "error": "no knowledge bases are currently bound to this workspace; \
-                  ask the user to mount one via the session's knowledge control"
+                  configure the terminal workpath Knowledge binding before retrying"
     })
 }
 

@@ -11,7 +11,7 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import { canvasCommands } from '../core';
+import { canvasCommands, validateCanvasConnection } from '../core';
 import type { CreativeCanvasEditorHandle } from '../editor';
 import {
   canvasAudioComposeConfigForReference,
@@ -21,6 +21,8 @@ import {
   reconcileCanvasAudioComposeConfig,
 } from './canvasAudioComposerCanvas';
 import { creativeStudioProductText } from './i18n';
+import { canvasTaskResultPosition } from './imageTaskCanvasLayout';
+import { creativeNodeFromHistoricalAsset } from './nodeFactory';
 
 export type CanvasAudioComposerEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -75,9 +77,8 @@ export function reconcileCanvasAudioComposeTask(input: {
 }
 
 /**
- * Settle one terminal TTS task into its existing empty audio node. The current
- * contract accepts exactly one real audio asset and never creates a derived
- * node, so an interrupted terminal CAS can safely replay this operation.
+ * Settle one TTS result without overwriting an earlier parallel result. An
+ * occupied source gets a config-linked output; terminal CAS replay is idempotent.
  */
 export async function settleCanvasAudioComposeTask(input: {
   editor: CanvasAudioComposerEditorPort;
@@ -146,18 +147,6 @@ export async function settleCanvasAudioComposeTask(input: {
         )
       );
     }
-    if (
-      sourceBeforeAsset.data.assetId !== null &&
-      sourceBeforeAsset.data.assetId !== resultAssetId
-    ) {
-      throw new Error(
-        creativeStudioProductText(
-          'creativeStudio.canvas.errors.audio.sourceOccupied',
-          '空音频节点在任务完成前已关联其他素材，已停止覆盖。'
-        )
-      );
-    }
-
     const asset = await input.assets.get(resultAssetId);
     if (asset.id !== resultAssetId || asset.kind !== 'audio') {
       throw new Error(
@@ -176,40 +165,71 @@ export async function settleCanvasAudioComposeTask(input: {
           node.id === sourceNodeId && node.type === 'audio'
       );
     if (!source) {
-        throw new Error(
-          creativeStudioProductText(
-            'creativeStudio.canvas.errors.audio.sourceRemoved',
-            '音频创作源节点在结果写入前被移除。'
-          )
-        );
-    }
-    if (source.data.assetId !== null && source.data.assetId !== asset.id) {
-        throw new Error(
-          creativeStudioProductText(
-            'creativeStudio.canvas.errors.audio.sourceOccupied',
-            '空音频节点在任务完成前已关联其他素材，已停止覆盖。'
-          )
-        );
-    }
-    if (source.data.assetId !== asset.id || source.data.title !== asset.title) {
-      input.editor.dispatch(
-        canvasCommands.reconcileRuntimeNode({
-          ...source,
-          data: {
-            ...source.data,
-            assetId: asset.id,
-            title: asset.title,
-            composer: source.data.composer
-              ? {
-                  ...source.data.composer,
-                  model: null,
-                }
-              : null,
-          },
-        })
+      throw new Error(
+        creativeStudioProductText(
+          'creativeStudio.canvas.errors.audio.sourceRemoved',
+          '音频创作源节点在结果写入前被移除。'
+        )
       );
     }
-    input.editor.dispatch(canvasCommands.setSelection([source.id]));
+    if (source.data.assetId === null || source.data.assetId === asset.id) {
+      if (source.data.assetId !== asset.id || source.data.title !== asset.title) {
+        input.editor.dispatch(
+          canvasCommands.reconcileRuntimeNode({
+            ...source,
+            data: {
+              ...source.data,
+              assetId: asset.id,
+              title: asset.title,
+              composer: source.data.composer
+                ? { ...source.data.composer, model: null }
+                : null,
+            },
+          })
+        );
+      }
+    } else {
+      let state = input.editor.getState();
+      let result = state.document.nodes.find(
+        (node): node is Extract<CreativeCanvasNode, { type: 'audio' }> =>
+          node.type === 'audio' && node.data.assetId === asset.id
+      );
+      const mergeKey = `audio-compose:${initialConfig.id}:${input.task.taskId}`;
+      const at = Date.now();
+      if (!result) {
+        const created = creativeNodeFromHistoricalAsset(asset, state, { width: 1, height: 1 });
+        if (created.type !== 'audio') {
+          throw new Error(creativeStudioProductText(
+            'creativeStudio.canvas.errors.audio.nodeConstructionFailed',
+            '音频创作结果未能构造成音频节点。'
+          ));
+        }
+        const config = canvasAudioComposeConfigFromTask(taskDocument(input.editor, input.projectId), input.task);
+        created.position = canvasTaskResultPosition(state.document.nodes, config, created.size);
+        result = created;
+        input.editor.dispatch(canvasCommands.addNode(result, { at, mergeKey, select: false }));
+        state = input.editor.getState();
+      }
+      const connection = {
+        sourceNodeId: initialConfig.id,
+        targetNodeId: result.id,
+        sourceHandle: 'source',
+        targetHandle: 'target',
+      };
+      if (!state.document.connections.some((edge) =>
+        edge.sourceNodeId === connection.sourceNodeId && edge.targetNodeId === connection.targetNodeId
+      )) {
+        const validation = validateCanvasConnection(state.document, connection);
+        if (!validation.ok) {
+          throw new Error(creativeStudioProductText(
+            'creativeStudio.canvas.errors.audio.connectResultFailed',
+            '无法连接音频创作结果：{{code}}。',
+            { code: validation.code }
+          ));
+        }
+        input.editor.dispatch(canvasCommands.connect(initialConfig.id, result.id, { at, mergeKey, select: false }));
+      }
+    }
   }
 
   await input.editor.removePendingTask(input.task.taskId);

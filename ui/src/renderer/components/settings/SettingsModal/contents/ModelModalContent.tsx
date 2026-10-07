@@ -33,7 +33,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import {
   featureRoute,
@@ -43,21 +43,26 @@ import {
 } from './providerInUse';
 import AddModelModal from '@/renderer/pages/settings/components/AddModelModal';
 import AddPlatformModal from '@/renderer/pages/settings/components/AddPlatformModal';
-import ModelAdvancedEditor from '@/renderer/pages/settings/components/ModelAdvancedEditor';
+import ModelAdvancedEditor, { type ModelAdvancedPatch } from '@/renderer/pages/settings/components/ModelAdvancedEditor';
 import ProviderConnectionsSection from '@/renderer/pages/settings/components/ProviderConnectionsSection';
+import ModelGatewayDetails from '@/renderer/pages/settings/components/ModelGatewayDetails';
+import EditModelGatewayModal from '@/renderer/pages/settings/components/EditModelGatewayModal';
 import EditModeModal from '@/renderer/pages/settings/components/EditModeModal';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import ModelHubPageHeader from '@/renderer/pages/modelHub/ModelHubPageHeader';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
-import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import { reorderById, reorderStrings } from './modelProviderOrdering';
 import { healthFailureHeadline } from './healthFailureHeadline';
 import {
   capabilityInputFromResponse,
-  type ProviderModelCapabilityInput,
 } from '@/renderer/pages/settings/components/providerModelAdvanced';
+import {
+  modelConfigurationTarget,
+  withoutModelConfigurationTarget,
+} from '@/renderer/pages/modelHub/modelConfigurationRoute';
+import { modelAdditionTask } from '@/renderer/pages/modelHub/modelAdditionIntent';
 import '../model-provider.css';
 
 /**
@@ -110,7 +115,7 @@ const ModelHealthCheckAction: React.FC<{
           onClick={(event) => event.stopPropagation()}
         >
           <div className='px-8px pb-2px text-12px text-t-secondary'>
-            {label} · {t('settings.modelSupportedTasks', { defaultValue: '支持的任务' })}
+            {label} · {t('settings.modelCallRoutes', { defaultValue: '调用接口' })}
           </div>
           {tasks.map((task) => (
             <Button
@@ -462,6 +467,7 @@ const PriorityDragHandle: React.FC<SortableRenderProps & { label: string }> = ({
 const ModelModalContent: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   // 以「内容面板实际宽度」而非视口宽度做分档：模型管理面板被一次 rail + 二级
   // ContentSider 占去宽度，视口断点(md:/lg:)会误判为宽屏。窄面板下用紧凑布局，
   // 避免 provider 头 hover 展开区(320px)挤占供应商名称。
@@ -470,11 +476,13 @@ const ModelModalContent: React.FC = () => {
   const [collapseKey, setCollapseKey] = useState<Record<string, boolean>>({});
   const [healthCheckLoading, setHealthCheckLoading] = useState<Record<string, boolean>>({});
   const { data, mutate } = useProvidersQuery();
-  // Managed providers have dedicated pages. Keeping them out of generic CRUD
-  // prevents exposing or accidentally overwriting their internal endpoint and
-  // per-boot credential.
-  const editableProviders = useMemo(() => (data ?? []).filter((provider) => !isManagedModelProvider(provider)), [data]);
+  const editableProviders = useMemo(() => data ?? [], [data]);
   const [message, messageContext] = useArcoMessage();
+  const configurationTarget = useMemo(
+    () => modelConfigurationTarget(searchParams),
+    [searchParams]
+  );
+  const initialTask = modelAdditionTask(searchParams);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -483,6 +491,31 @@ const ModelModalContent: React.FC = () => {
     () => editableProviders.map((platform) => providerSortableId(platform.id)),
     [editableProviders]
   );
+
+  useEffect(() => {
+    if (!data || !configurationTarget) return;
+    const provider = editableProviders.find(
+      (candidate) => candidate.id === configurationTarget.providerId
+    );
+    const modelExists = provider?.models.some(
+      (candidate) => candidate.model === configurationTarget.model
+    );
+    if (provider && modelExists) {
+      setCollapseKey((previous) => ({ ...previous, [provider.id]: true }));
+      return;
+    }
+
+    message.warning(t('guid.agentEntries.modelCompatibility.targetNotFound'));
+    setSearchParams(withoutModelConfigurationTarget(searchParams), { replace: true });
+  }, [
+    configurationTarget,
+    data,
+    editableProviders,
+    message,
+    searchParams,
+    setSearchParams,
+    t,
+  ]);
 
   /**
    * 行级模型更新：统一走 providerModel.save 全量模型聚合写。
@@ -520,15 +553,15 @@ const ModelModalContent: React.FC = () => {
       });
   };
 
-  const updateModelCapabilities = async (
+  const updateModelDefinition = async (
     platform: IProvider,
     row: ProviderModelResponse,
-    capabilities: ProviderModelCapabilityInput[]
+    patch: ModelAdvancedPatch
   ): Promise<void> => {
     try {
       await ipcBridge.providerModel.save.invoke({
         provider_id: platform.id,
-        model: { ...providerModelInputFor(row), capabilities },
+        model: { ...providerModelInputFor(applyRowPatch(row, patch)), capabilities: patch.capabilities },
       });
       await mutate();
     } catch (error) {
@@ -579,7 +612,7 @@ const ModelModalContent: React.FC = () => {
           const featureName: Record<ProviderUsageFeature, string> = {
             desktopCompanion: t('settings.providerInUse.desktopCompanion'),
             customerService: t('settings.providerInUse.customerService'),
-            conversation: t('settings.providerInUse.conversation'),
+            agent: t('settings.providerInUse.agent'),
             agentExecution: t('settings.providerInUse.agentExecution'),
           };
           Modal.confirm({
@@ -629,18 +662,10 @@ const ModelModalContent: React.FC = () => {
     const reordered = reorderById(editableProviders, activeData.providerId, overData.providerId);
     if (reordered === editableProviders) return;
 
-    // Preserve every managed provider's full-list slot. Refill only editable
-    // slots and assign their full-list position as sort_order, avoiding a
-    // duplicate sort_order with a managed row (whose CRUD is protected).
-    let editableIndex = 0;
-    const nextArray = data.map((item, fullIndex) => {
-      if (isManagedModelProvider(item)) return item;
-      return { ...reordered[editableIndex++], sort_order: fullIndex };
-    });
-    const reorderedWithOrder = nextArray.filter((item) => !isManagedModelProvider(item));
+    const nextArray = reordered.map((item, index) => ({ ...item, sort_order: index }));
     void mutate(nextArray, false);
 
-    persistProviderOrder(reorderedWithOrder, editableProviders)
+    persistProviderOrder(nextArray, editableProviders)
       .then(() => {
         void mutate();
       })
@@ -831,9 +856,9 @@ const ModelModalContent: React.FC = () => {
   useEffect(() => {
     const pending = consumePendingDeepLink();
     if (pending) {
-      addPlatformModalCtrl.open({ deepLinkData: pending });
+      addPlatformModalCtrl.open({ deepLinkData: pending, initialTask: pending.task ?? initialTask });
     }
-  }, [addPlatformModalCtrl]);
+  }, [addPlatformModalCtrl, initialTask]);
 
   const [addModelModalCtrl, addModelModalContext] = AddModelModal.useModal({
     onSubmit(platform) {
@@ -878,11 +903,20 @@ const ModelModalContent: React.FC = () => {
     },
   });
 
+  const [editGatewayCtrl, editGatewayContext] = EditModelGatewayModal.useModal({
+    onChanged: () => mutate(),
+  });
+  const editProvider = (provider: IProvider) => {
+    if (provider.platform === 'nomifun-model-gateway') editGatewayCtrl.open({ data: provider });
+    else editModalCtrl.open({ data: provider });
+  };
+
   return (
     <div ref={paneRef} className='flex flex-col'>
       {messageContext}
       {addPlatformModalContext}
       {editModalContext}
+      {editGatewayContext}
       {addModelModalContext}
 
       {/* Header with Add Button */}
@@ -895,7 +929,7 @@ const ModelModalContent: React.FC = () => {
               type='outline'
               shape='round'
               icon={<Plus size='16' />}
-              onClick={() => addPlatformModalCtrl.open()}
+              onClick={() => addPlatformModalCtrl.open({ initialTask, deepLinkData: undefined })}
               className='rd-100px border-1px border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
             >
               {t('settings.addProvider', { defaultValue: '添加供应商' })}
@@ -1009,7 +1043,7 @@ const ModelModalContent: React.FC = () => {
                             <span className='mx-6px'>|</span>
                             <span
                               className='cursor-pointer hover:text-t-primary transition-colors'
-                              onClick={() => editModalCtrl.open({ data: platform })}
+                              onClick={() => editProvider(platform)}
                             >
                               {platform.has_credentials
                                 ? t('settings.connections.hasCredentials')
@@ -1029,13 +1063,15 @@ const ModelModalContent: React.FC = () => {
                             onChange={() => toggleProviderEnabled(platform)}
                           />
                           <div className='flex items-center gap-4px'>
-                            <Tooltip content={t('settings.addModel')}>
+                            <Tooltip content={platform.platform === 'nomifun-model-gateway' ? t('settings.modelGateway.syncCatalog') : t('settings.addModel')}>
                               <Button
                                 size='mini'
                                 className='model-provider-action-btn !w-28px !h-28px !min-w-28px text-t-secondary hover:text-t-primary'
                                 icon={<Plus size='14' />}
-                                aria-label={t('settings.addModel')}
-                                onClick={() => addModelModalCtrl.open({ data: platform })}
+                                aria-label={platform.platform === 'nomifun-model-gateway' ? t('settings.modelGateway.syncCatalog') : t('settings.addModel')}
+                                onClick={() => platform.platform === 'nomifun-model-gateway'
+                                  ? setCollapseKey((prev) => ({ ...prev, [platform.id]: true }))
+                                  : addModelModalCtrl.open({ data: platform, initialTask })}
                               />
                             </Tooltip>
                             <Popconfirm
@@ -1057,7 +1093,7 @@ const ModelModalContent: React.FC = () => {
                               size='mini'
                               className='model-provider-action-btn !w-28px !h-28px !min-w-28px text-t-secondary hover:text-t-primary'
                               icon={<Write size='14' />}
-                              onClick={() => editModalCtrl.open({ data: platform })}
+                              onClick={() => editProvider(platform)}
                             />
                             <Tooltip content={t('settings.copyProviderConfig', { defaultValue: '复制整组配置' })}>
                               <Button
@@ -1072,6 +1108,7 @@ const ModelModalContent: React.FC = () => {
                       </div>
                     }
                   >
+                    {platform.platform === 'nomifun-model-gateway' && isExpanded && <ModelGatewayDetails provider={platform} onChanged={() => mutate()} />}
                     <SortableContext
                       items={modelRows.map((row) => modelSortableId(platform.id, row.model))}
                       strategy={verticalListSortingStrategy}
@@ -1124,8 +1161,8 @@ const ModelModalContent: React.FC = () => {
                                         </div>
                                         {checkedCapability && (
                                           <div className='text-12px mt-4px'>
-                                            {t('settings.modelSupportedTasks', {
-                                              defaultValue: '支持的任务',
+                                            {t('settings.modelCallRoutes', {
+                                              defaultValue: '调用接口',
                                             })}
                                             :{' '}
                                             {t(`settings.modelTask.${checkedCapability.task}`, {
@@ -1173,8 +1210,21 @@ const ModelModalContent: React.FC = () => {
                                   providerBaseUrl={platform.base_url}
                                   providerAuthScheme={platform.auth_scheme}
                                   model={model}
+                                  displayName={modelDisplayName}
                                   capabilities={row.capabilities}
-                                  onSave={(patch) => updateModelCapabilities(platform, row, patch.capabilities)}
+                                  onSave={(patch) => updateModelDefinition(platform, row, patch)}
+                                  openRequest={
+                                    configurationTarget?.providerId === platform.id &&
+                                    configurationTarget.model === model
+                                      ? `${configurationTarget.providerId}:${configurationTarget.model}`
+                                      : undefined
+                                  }
+                                  onOpenRequestHandled={() => {
+                                    setSearchParams(
+                                      withoutModelConfigurationTarget(searchParams),
+                                      { replace: true }
+                                    );
+                                  }}
                                 />
 
                                 {/* 模型启用开关（行级）/ Model enable switch (row-level) */}
@@ -1253,7 +1303,7 @@ const ModelModalContent: React.FC = () => {
 
                     {/* 连接档案区 / Per-role connection profiles */}
                     {modelRows.length > 0 && <Divider className='!my-4px !border-[var(--color-border-2)]/70' />}
-                    <ProviderConnectionsSection provider={platform} />
+                    {platform.platform !== 'nomifun-model-gateway' && <ProviderConnectionsSection provider={platform} />}
                   </Collapse.Item>
                 </Collapse>
                   )}

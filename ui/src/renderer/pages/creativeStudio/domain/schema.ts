@@ -10,18 +10,17 @@ import type { ModelTask } from '@/common/config/storage';
 export const CREATIVE_STUDIO_DOCUMENT_SCHEMA = 'nomifun.creative-studio/v1' as const;
 
 /** New documents never share a schema or a fallback reader with the retired workshop. */
-export type CreativeStudioDocumentSchema = typeof CREATIVE_STUDIO_DOCUMENT_SCHEMA;
+type CreativeStudioDocumentSchema = typeof CREATIVE_STUDIO_DOCUMENT_SCHEMA;
 
 export type CreativeCanvasBackground = 'dots' | 'lines' | 'blank';
 
 export type CreativeCanvasNodeKind =
   | 'image'
-  | 'panorama'
   | 'text'
   | 'config'
   | 'video'
   | 'audio'
-  | 'director'
+  | 'timeline'
   | 'group';
 
 /** Node kinds that belong to the user-authored canvas surface. */
@@ -57,7 +56,7 @@ export type CreativeGenerationStatus =
   | 'failed'
   | 'canceled';
 
-export type CreativeJsonPrimitive = string | number | boolean | null;
+type CreativeJsonPrimitive = string | number | boolean | null;
 export type CreativeJsonValue =
   | CreativeJsonPrimitive
   | CreativeJsonValue[]
@@ -112,14 +111,6 @@ export interface CreativeImageNodeData {
   fit: 'contain' | 'cover';
   naturalSize: CreativeSize | null;
   composer: CreativeImageComposerDraft | null;
-}
-
-export interface CreativePanoramaNodeData {
-  assetId: string | null;
-  projection: 'equirectangular';
-  yaw: number;
-  pitch: number;
-  fieldOfView: number;
 }
 
 export interface CreativeTextNodeData {
@@ -190,6 +181,7 @@ export interface CreativeVideoNodeData {
 
 export interface CreativeVideoComposerDraft {
   prompt: string;
+  mentions?: CreativeImagePromptMention[];
   model: CreativeComposerModel | null;
   resolution: string;
   aspectRatio: string;
@@ -213,11 +205,24 @@ export interface CreativeAudioComposerDraft {
   format: 'mp3' | 'wav';
 }
 
-export interface CreativeDirectorNodeData {
-  sceneId: string | null;
-  cameraId: string | null;
-  timelineMs: number;
+type CreativeTimelineClipKind = 'image' | 'video';
+
+/** One durable image/video edit on a timeline track. Times are milliseconds. */
+export interface CreativeTimelineClip {
+  id: string;
+  assetId: string;
+  kind: CreativeTimelineClipKind;
+  startMs: number;
   durationMs: number;
+  sourceStartMs: number;
+  /** Resolved media duration when known; null keeps image clips and old video metadata valid. */
+  sourceDurationMs: number | null;
+}
+
+export interface CreativeTimelineNodeData {
+  title: string;
+  muted: boolean;
+  clips: CreativeTimelineClip[];
 }
 
 export interface CreativeGroupNodeData {
@@ -228,18 +233,19 @@ export interface CreativeGroupNodeData {
 
 export interface CreativeCanvasNodeDataByKind {
   image: CreativeImageNodeData;
-  panorama: CreativePanoramaNodeData;
   text: CreativeTextNodeData;
   config: CreativeConfigNodeData;
   video: CreativeVideoNodeData;
   audio: CreativeAudioNodeData;
-  director: CreativeDirectorNodeData;
+  timeline: CreativeTimelineNodeData;
   group: CreativeGroupNodeData;
 }
 
-export interface CreativeCanvasNodeBase<K extends CreativeCanvasNodeKind> {
+interface CreativeCanvasNodeBase<K extends CreativeCanvasNodeKind> {
   id: string;
   type: K;
+  /** User-defined label shown above the node; absent keeps the derived fallback name. */
+  name?: string;
   position: CreativePoint;
   size: CreativeSize;
   groupId: string | null;
@@ -307,7 +313,7 @@ export interface CreativeChatSessionReference {
 
 export type CreativeLeftPanelView = 'canvas' | 'assets' | 'prompts' | 'templates';
 export type CreativeRightPanelView = 'assistant' | 'properties';
-export type CreativeBottomPanelView = 'timeline' | 'history';
+export type CreativeBottomPanelView = 'history';
 
 export interface CreativeStudioPanelState {
   left: {
@@ -320,6 +326,7 @@ export interface CreativeStudioPanelState {
     width: number;
     activeView: CreativeRightPanelView;
   };
+  /** Deprecated v1 compatibility field. The Canvas renderer intentionally ignores it. */
   bottom: {
     open: boolean;
     height: number;
@@ -359,7 +366,7 @@ export interface CreativeProjectDetail {
   document: CreativeProjectDocument;
 }
 
-export interface CreativeProjectAgentKickoff {
+interface CreativeProjectAgentKickoff {
   prompt: string;
   model: CreativeChatModelReference;
 }
@@ -385,10 +392,6 @@ export interface CreativeProjectListResponse {
 export interface CreativeProjectResponse {
   project: CreativeProjectSummary;
 }
-
-export interface CreativeProjectDetailResponse extends CreativeProjectDetail {}
-
-export type SaveCreativeProjectResponse = CreativeProjectResponse;
 
 export const DEFAULT_CREATIVE_STUDIO_PANELS: CreativeStudioPanelState = {
   left: { open: false, width: 280, activeView: 'canvas' },

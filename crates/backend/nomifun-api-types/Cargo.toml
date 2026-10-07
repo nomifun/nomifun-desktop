@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 nomifun-common.workspace = true
+nomifun-agent-contracts.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # no-serde-warnings: this crate's DTOs carry serde attrs ts-rs cannot parse

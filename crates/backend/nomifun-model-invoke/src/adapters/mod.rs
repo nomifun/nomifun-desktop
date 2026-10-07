@@ -11,6 +11,9 @@
 //!   and sync JSON→binary `/audio/speech` (`"openai.audio_speech"`).
 //!
 //! Platform-specific protocols:
+//! - [`agnes`] — Agnes Image 2.1 Flash JSON generation/editing
+//!   (`"agnes.images"`) and Agnes Video v2.0 async jobs
+//!   (`"agnes.video_jobs"`).
 //! - [`gemini`] — Google `:generateContent` images
 //!   (`"gemini.generate_content"`). Chat protocols execute through the agent
 //!   stack and are intentionally absent from this request-adapter registry.
@@ -38,6 +41,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use nomifun_api_types::{MODEL_CONTEXT_LIMIT_KIND_PARAM, MODEL_GATEWAY_CATALOG_BASELINE_PARAM};
 use serde_json::{Map, Value};
 
 use crate::adapter::ProtocolAdapter;
@@ -81,6 +85,12 @@ pub fn is_reserved_local_transport_param_key(key: &str) -> bool {
     LOCAL_TRANSPORT_PARAM_KEYS.contains(&key)
 }
 
+/// Persisted configuration metadata is accepted by save-time validation but
+/// never forms part of a provider request, including multipart/query fields.
+pub(crate) fn is_local_provider_metadata_param_key(key: &str) -> bool {
+    matches!(key, MODEL_CONTEXT_LIMIT_KIND_PARAM | MODEL_GATEWAY_CATALOG_BASELINE_PARAM)
+}
+
 /// All locally owned transport/auth keys, for exhaustive save-time validation
 /// tests and schema tooling. The returned slice is the same source consumed by
 /// [`is_reserved_local_transport_param_key`] and [`provider_body_fields`].
@@ -89,7 +99,7 @@ pub fn reserved_local_transport_param_keys() -> &'static [&'static str] {
 }
 
 /// Iterate the top-level provider payload fields in `source`, excluding all
-/// local transport/credential metadata. Non-object values yield no fields.
+/// local transport/credential and catalog metadata. Non-object values yield no fields.
 ///
 /// Filtering is intentionally top-level: nested provider-native objects may
 /// legitimately use generic names such as `headers` or `endpoint`.
@@ -99,7 +109,10 @@ pub(crate) fn provider_body_fields(source: &Value) -> impl Iterator<Item = (&Str
         .map(serde_json::Map::iter)
         .into_iter()
         .flatten()
-        .filter(|(key, _)| !is_reserved_local_transport_param_key(key))
+        .filter(|(key, _)| {
+            !is_reserved_local_transport_param_key(key)
+                && !is_local_provider_metadata_param_key(key)
+        })
 }
 
 fn provider_object<'a>(
@@ -219,12 +232,14 @@ pub(crate) fn scalar_request_fields(
     Ok(fields)
 }
 
+pub mod agnes;
 pub mod ark;
 pub mod dashscope;
 pub mod deepgram;
 pub mod gemini;
 pub mod generic_rerank;
 pub mod minimax;
+pub mod minimax_music;
 pub mod mimo;
 pub mod openai_audio;
 pub mod openai_embeddings;
@@ -243,6 +258,8 @@ pub mod zhipu;
 /// invoke service layer.
 pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
     vec![
+        Arc::new(agnes::AgnesImagesAdapter),
+        Arc::new(agnes::AgnesVideoJobsAdapter),
         Arc::new(openai_images::OpenAiImagesAdapter),
         Arc::new(openai_videos::OpenAiVideosAdapter),
         Arc::new(openai_embeddings::OpenAiEmbeddingsAdapter),
@@ -259,6 +276,7 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(dashscope::DashScopeImagesAdapter),
         Arc::new(dashscope::DashScopeEmbeddingsAdapter),
         Arc::new(minimax::MiniMaxT2aAdapter),
+        Arc::new(minimax_music::MiniMaxMusicAdapter),
         Arc::new(mimo::MiMoChatAsrAdapter),
         Arc::new(mimo::MiMoChatTtsAdapter),
         Arc::new(siliconflow::SiliconFlowAudioSpeechAdapter),
@@ -406,6 +424,33 @@ mod tests {
     }
 
     #[test]
+    fn catalog_metadata_never_enters_json_or_scalar_provider_requests() {
+        let configured = json!({
+            MODEL_GATEWAY_CATALOG_BASELINE_PARAM: {
+                "alias": "Catalog name", "context_window": 128000,
+                "provider_params": {"nested": [1, 2, 3]}
+            },
+            MODEL_CONTEXT_LIMIT_KIND_PARAM: "input_only",
+            "temperature": 0.2
+        });
+        let extra = json!({
+            MODEL_GATEWAY_CATALOG_BASELINE_PARAM: {"alias": "Per-call local metadata"},
+            "temperature": 0.4
+        });
+        let body = json_request_body(&configured, &extra, json!({"model": "test-model"})).unwrap();
+        assert_eq!(body, json!({"temperature": 0.4, "model": "test-model"}));
+
+        let fields = scalar_request_fields(&configured, &extra).unwrap();
+        assert_eq!(fields, BTreeMap::from([("temperature".to_owned(), "0.4".to_owned())]));
+        // Preserve provider-native nested objects; only top-level metadata is local.
+        let nested = json_request_body(
+            &json!({"provider_options": {MODEL_GATEWAY_CATALOG_BASELINE_PARAM: "native"}}),
+            &json!({}), json!({}),
+        ).unwrap();
+        assert_eq!(nested["provider_options"][MODEL_GATEWAY_CATALOG_BASELINE_PARAM], "native");
+    }
+
+    #[test]
     fn scalar_request_fields_preserve_scalars_and_reject_complex_values() {
         let fields = scalar_request_fields(
             &json!({
@@ -435,6 +480,9 @@ mod tests {
     fn default_adapters_register_the_openai_family() {
         let registry = AdapterRegistry::new(default_adapters());
         for (protocol, task) in [
+            ("agnes.images", ModelTask::ImageGeneration),
+            ("agnes.images", ModelTask::ImageEdit),
+            ("agnes.video_jobs", ModelTask::VideoGeneration),
             ("openai.images", ModelTask::ImageGeneration),
             ("openai.images", ModelTask::ImageEdit),
             ("openai.videos", ModelTask::VideoGeneration),
@@ -454,6 +502,7 @@ mod tests {
             ("dashscope.images", ModelTask::ImageGeneration),
             ("dashscope.embeddings", ModelTask::Embedding),
             ("minimax.t2a", ModelTask::SpeechSynthesis),
+            ("minimax.music", ModelTask::MusicGeneration),
             ("mimo.chat_asr", ModelTask::SpeechRecognition),
             ("mimo.chat_tts", ModelTask::SpeechSynthesis),
             ("siliconflow.audio_speech", ModelTask::SpeechSynthesis),
@@ -474,8 +523,10 @@ mod tests {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
         }
-        assert_eq!(default_adapters().len(), 29);
+        assert_eq!(default_adapters().len(), 32);
         // Tasks outside an adapter's declared support are refused.
+        assert!(registry.get("agnes.images", ModelTask::Chat).is_err());
+        assert!(registry.get("agnes.video_jobs", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("openai.images", ModelTask::Chat).is_err());
         assert!(registry.get("openai.videos", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("openai.embeddings", ModelTask::Chat).is_err());

@@ -24,6 +24,7 @@ import {
 } from './canvasVideoComposerCanvas';
 import { creativeStudioProductText } from './i18n';
 import { creativeNodeFromHistoricalAsset } from './nodeFactory';
+import { canvasMediaNodeSize } from '../core/mediaNodeSize';
 
 export type CanvasVideoComposerEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -78,7 +79,7 @@ export function reconcileCanvasVideoComposeTask(input: {
 /**
  * Project a terminal task into real video assets and graph edges. The current
  * t2v/i2v contract owns an empty video node: the first result fills that node,
- * while any additional results become config-linked derived video nodes.
+ * while additional results or parallel tasks become config-linked video nodes.
  * Repeating an interrupted terminal CAS is idempotent.
  */
 export async function settleCanvasVideoComposeTask(input: {
@@ -157,18 +158,6 @@ export async function settleCanvasVideoComposeTask(input: {
         )
       );
     }
-    if (
-      sourceBeforeAssets.data.assetId !== null &&
-      sourceBeforeAssets.data.assetId !== resultIds[0]
-    ) {
-      throw new Error(
-        creativeStudioProductText(
-          'creativeStudio.canvas.errors.video.sourceOccupied',
-          '空视频节点在任务完成前已关联其他素材，已停止覆盖。'
-        )
-      );
-    }
-
     const resultAssets = await Promise.all(resultIds.map((assetId) => input.assets.get(assetId)));
     if (
       resultAssets.some((asset, index) => asset.id !== resultIds[index] || asset.kind !== 'video')
@@ -181,7 +170,6 @@ export async function settleCanvasVideoComposeTask(input: {
       );
     }
 
-    const resultNodeIds: string[] = [];
     const at = Date.now();
     const mergeKey = `video-compose:${initialConfig.id}:${input.task.taskId}`;
     for (const [index, asset] of resultAssets.entries()) {
@@ -201,17 +189,10 @@ export async function settleCanvasVideoComposeTask(input: {
       }
 
       let resultNode: Extract<CreativeCanvasNode, { type: 'video' }> | undefined;
-      if (index === 0) {
-        if (source.data.assetId !== null && source.data.assetId !== asset.id) {
-          throw new Error(
-            creativeStudioProductText(
-              'creativeStudio.canvas.errors.video.sourceOccupied',
-              '空视频节点在任务完成前已关联其他素材，已停止覆盖。'
-            )
-          );
-        }
+      if (index === 0 && (source.data.assetId === null || source.data.assetId === asset.id)) {
         const reconciledSource = clearCanvasVideoComposeDraftModel({
           ...source,
+          size: canvasMediaNodeSize(asset, source.size),
           data: { ...source.data, assetId: asset.id },
         });
         if (source.data.assetId !== asset.id || Boolean(source.data.composer?.model)) {
@@ -237,9 +218,8 @@ export async function settleCanvasVideoComposeTask(input: {
               )
             );
           }
-          const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize, {
-            position: canvasVideoComposeResultPosition(state.document.nodes, config),
-          });
+          const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize);
+          created.position = canvasVideoComposeResultPosition(state.document.nodes, config, created.size);
           if (created.type !== 'video') {
             throw new Error(
               creativeStudioProductText(
@@ -249,7 +229,7 @@ export async function settleCanvasVideoComposeTask(input: {
             );
           }
           resultNode = created;
-          input.editor.dispatch(canvasCommands.addNode(resultNode, { at, mergeKey }));
+          input.editor.dispatch(canvasCommands.addNode(resultNode, { at, mergeKey, select: false }));
           state = input.editor.getState();
         }
         const connected = state.document.connections.some(
@@ -280,13 +260,12 @@ export async function settleCanvasVideoComposeTask(input: {
               targetHandle: 'target',
               at,
               mergeKey,
+              select: false,
             })
           );
         }
       }
-      resultNodeIds.push(resultNode.id);
     }
-    input.editor.dispatch(canvasCommands.setSelection(resultNodeIds));
   }
 
   await input.editor.removePendingTask(input.task.taskId);

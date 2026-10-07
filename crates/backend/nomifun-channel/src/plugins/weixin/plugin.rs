@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use reqwest::Client;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -92,16 +91,17 @@ impl ChannelPlugin for WeixinPlugin {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_BASE_URL);
 
-        let http_client = Client::builder()
-            .timeout(Duration::from_secs(WEIXIN_POLL_TIMEOUT.as_secs() + 10))
-            .build()
+        let api = WeixinApi::new(
+            base_url,
+            bot_token,
+            Duration::from_secs(WEIXIN_POLL_TIMEOUT.as_secs() + 10),
+        )
             .map_err(|e| {
                 self.status.set(PluginStatus::Error);
                 self.last_error = Some(format!("HTTP client init failed: {e}"));
                 ChannelError::ConnectionFailed(format!("HTTP client init failed: {e}"))
             })?;
-
-        let api = Arc::new(WeixinApi::new(http_client, base_url, bot_token));
+        let api = Arc::new(api);
 
         self.bot_info = Some(BotInfo {
             id: account_id.to_string(),

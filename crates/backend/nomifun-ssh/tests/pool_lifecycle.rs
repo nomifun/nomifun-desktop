@@ -16,7 +16,6 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_common::OnConversationDelete;
 use nomifun_ai_agent::{SshBackendProvider, SshLeaseRelease};
 use nomifun_ssh::dto::CreateSshHostRequest;
 use nomifun_ssh::{PoolTuning, SshDialError, SshLinkKey, SshLinkPhase, SshTeardown};
@@ -212,6 +211,54 @@ async fn reconnect_replays_the_last_proven_cwd() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_pty_search_keeps_grep_and_ripgrep_output_shapes() {
+    const NAME: &str = "real_pty_search_keeps_grep_and_ripgrep_output_shapes";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let id = harness.add_fixture_host(&sshd).await;
+    let Some(link) = harness.open_or_skip(NAME, "grep-shape", &id, "/tmp").await else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let fixture = format!("/tmp/nomifun-ssh-grep-{}", nomifun_common::generate_id());
+    let setup = format!(
+        "mkdir -p {root}/nested {root}/bin && cd {root} && export PATH=/usr/bin:/bin && ln -s /usr/bin/grep ./bin/grep && printf 'first\\nsecond\\nthird\\n' > ./- && printf \"it's here\\n\" > {quoted} && printf 'needle\\n' > nested/match.txt",
+        root = shell_path(&fixture),
+        quoted = shell_path("a'b"),
+    );
+    let setup_result = backend.run_command(&setup, 15_000).await;
+    let rg_available = backend.run_command("command -v rg >/dev/null 2>&1", 15_000).await.expect("probe ripgrep").exit_code == 0;
+    let ripgrep = if rg_available { Some(backend.grep("needle", ".").await) } else { None };
+    // The owned PATH contains only grep. Linux often has rg in /usr/bin, so
+    // merely removing Homebrew's prefix never proved the fallback ran there.
+    backend.run_command(&format!("export PATH={}", shell_path(&format!("{fixture}/bin"))), 15_000).await.expect("force grep fallback");
+    let dash = backend.grep("first|second", "-").await;
+    let quoted = backend.grep("it's", "a'b").await;
+    let recursive = backend.grep("needle", ".").await;
+    // Clean before assertions so a shape mismatch leaves no remote fixture.
+    let cleanup = format!("export PATH=/usr/bin:/bin; cd /tmp && rm -rf -- {}", shell_path(&fixture));
+    let cleanup_result = backend.run_command(&cleanup, 15_000).await;
+    harness.pool.shutdown_all().await;
+
+    setup_result.expect("create isolated remote grep fixture");
+    cleanup_result.expect("remove isolated remote grep fixture");
+    assert_eq!(dash.expect("grep literal dash file"), "1:first\n2:second");
+    assert_eq!(quoted.expect("grep quoted file"), "1:it's here");
+    let recursive = recursive.expect("grep recursive directory");
+    assert!(
+        recursive
+            .lines()
+            .any(|line| line.ends_with("nested/match.txt:1:needle")),
+        "recursive fallback lost the path: {recursive:?}"
+    );
+    if let Some(output) = ripgrep {
+        let output = output.expect("ripgrep recursive directory");
+        assert!(output.lines().any(|line| line.ends_with("nested/match.txt:1:needle")),
+            "ripgrep's PTY default headings must be disabled: {output:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unrecoverable_shell_is_recycled_without_redialling() {
     const NAME: &str = "an_unrecoverable_shell_is_recycled_without_redialling";
     let sshd = sshd_or_skip!(NAME);
@@ -259,6 +306,50 @@ async fn an_unrecoverable_shell_is_recycled_without_redialling() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_command_retires_then_recycles_the_shell_without_replay() {
+    const NAME: &str = "a_cancelled_command_retires_then_recycles_the_shell_without_replay";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let id = harness.add_fixture_host(&sshd).await;
+
+    let Some(link) = harness.open_or_skip(NAME, "conv-1", &id, "/tmp").await else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let marker = format!("/tmp/nomifun-ssh-cancel-{}", nomifun_common::generate_id());
+    let execution = {
+        let backend = Arc::clone(&backend);
+        let command = format!("printf started >> {marker}; sleep 30; printf finished >> {marker}", marker = shell_path(&marker));
+        tokio::spawn(async move { backend.run_command(&command, 30_000).await })
+    };
+    let started_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        if backend.read_file(&marker).await.is_ok_and(|bytes| bytes == b"started") { break; }
+        assert!(tokio::time::Instant::now() < started_deadline, "cancel fixture never reached the host");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    execution.abort();
+    assert!(execution.await.unwrap_err().is_cancelled());
+
+    let first_after = backend.run_command("echo first_explicit_command", 15_000).await.expect("preflight recovers before submitting a new explicit command");
+    assert_eq!(first_after.stdout, "first_explicit_command");
+    harness
+        .events
+        .await_phases_in_order(&["degraded", "connected"], SETTLE)
+        .await;
+
+    let recovered = backend
+        .run_command("echo recovered_after_cancel", 15_000)
+        .await
+        .expect("the replacement shell accepts the next explicit command");
+    assert!(recovered.stdout.contains("recovered_after_cancel"));
+    let executed = backend.read_file(&marker).await.expect("read cancelled command marker");
+    backend.run_command(&format!("rm -- {}", shell_path(&marker)), 15_000).await.expect("clean marker");
+    assert_eq!(executed, b"started", "the cancelled command must neither finish nor be replayed");
+    harness.pool.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_link_publishes_closed_with_a_reaped_teardown() {
     const NAME: &str = "close_link_publishes_closed_with_a_reaped_teardown";
     let sshd = sshd_or_skip!(NAME);
@@ -287,6 +378,79 @@ async fn close_link_publishes_closed_with_a_reaped_teardown() {
         harness.pool.subscribe(&link_key).is_none(),
         "a closed link must not linger in the pool"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_close_waiters_share_the_process_owned_receipt_after_cancellation() {
+    const NAME: &str =
+        "concurrent_close_waiters_share_the_process_owned_receipt_after_cancellation";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let id = harness.add_fixture_host(&sshd).await;
+    let Some(link) = harness.open_or_skip(NAME, "close-race", &id, "/").await else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let marker = format!("/tmp/nomifun-ssh-close-{}", nomifun_common::generate_id());
+    let command = format!(
+        "printf started > {marker}; sleep 2; printf done >> {marker}",
+        marker = shell_path(&marker),
+    );
+    let execution = {
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move { backend.run_command(&command, 15_000).await })
+    };
+    let marker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if backend
+            .read_file(&marker)
+            .await
+            .is_ok_and(|bytes| bytes.starts_with(b"started"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < marker_deadline,
+            "the admitted command never published its marker"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let link_key = key("close-race", &id);
+    let mut cancelled_waiter = {
+        let pool = harness.pool.clone();
+        let key = link_key.clone();
+        tokio::spawn(async move { pool.close_link(&key).await })
+    };
+    let concurrent_waiter = {
+        let pool = harness.pool.clone();
+        let key = link_key.clone();
+        tokio::spawn(async move { pool.close_link(&key).await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut cancelled_waiter)
+            .await
+            .is_err(),
+        "teardown must wait for the admitted action"
+    );
+    cancelled_waiter.abort();
+    cancelled_waiter
+        .await
+        .expect_err("cancelling one request waiter must not own teardown");
+
+    execution
+        .await
+        .expect("the command task should not panic")
+        .expect("the admitted command should complete");
+    let teardown = tokio::time::timeout(SETTLE, concurrent_waiter)
+        .await
+        .expect("the concurrent waiter should observe terminal teardown")
+        .expect("the concurrent waiter should not panic");
+    assert!(
+        matches!(teardown, SshTeardown::Reaped { .. }),
+        "all live waiters must receive the process-owned close receipt: {teardown:?}"
+    );
+    assert_eq!(harness.pool.active_link_count(), 0);
 }
 
 /// The seam the agent factory calls, against a real host: one pooled link, tools
@@ -417,6 +581,100 @@ async fn close_conversation_closes_every_host_link() {
     harness.pool.shutdown_all().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_retirement_drains_the_admitted_exec_and_rejects_later_actions_and_links() {
+    const NAME: &str =
+        "session_retirement_drains_the_admitted_exec_and_rejects_later_actions_and_links";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let first_host = harness.add_fixture_host(&sshd).await;
+    let second_host = harness.add_fixture_host(&sshd).await;
+    let Some(link) = harness
+        .open_or_skip(NAME, "session-retire", &first_host, "/")
+        .await
+    else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let marker = format!("/tmp/nomifun-ssh-retire-{}", nomifun_common::generate_id());
+    let command = format!(
+        "printf started > {marker}; sleep 2; printf done >> {marker}",
+        marker = shell_path(&marker),
+    );
+    let execution = {
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move { backend.run_command(&command, 15_000).await })
+    };
+
+    // The SFTP marker proves the command passed action admission and reached the
+    // remote shell. Retirement after this point must wait for that exact winner.
+    let marker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if backend
+            .read_file(&marker)
+            .await
+            .is_ok_and(|bytes| bytes.starts_with(b"started"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < marker_deadline,
+            "the admitted command never published its marker"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    harness.pool.retire_agent_session("session-retire");
+    let mut cleanup = {
+        let pool = harness.pool.clone();
+        tokio::spawn(async move { pool.close_conversation("session-retire").await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut cleanup)
+            .await
+            .is_err(),
+        "cleanup returned before the admitted exec reached a terminal result"
+    );
+
+    let post_retire = backend
+        .write_file(&marker, b"must-not-publish".to_vec())
+        .await
+        .expect_err("post-retire SFTP work must be denied");
+    assert!(post_retire.contains("retired"), "{post_retire}");
+    let acquire = harness
+        .pool
+        .acquire(
+            &harness.user_id,
+            "session-retire",
+            &second_host,
+            "/",
+        )
+        .await
+        .expect_err("a retired Session must not publish another host link");
+    assert!(matches!(acquire, SshDialError::SessionRetired), "{acquire:?}");
+
+    let output = tokio::time::timeout(SETTLE, execution)
+        .await
+        .expect("the admitted exec should reach a terminal result")
+        .expect("the exec task should not panic")
+        .expect("the admitted exec should complete");
+    assert!(output.exit_code == 0 && !output.timed_out, "{output:?}");
+    let teardowns = tokio::time::timeout(SETTLE, cleanup)
+        .await
+        .expect("cleanup should finish after the action drains")
+        .expect("the cleanup task should not panic");
+    assert_eq!(teardowns.len(), 1, "{teardowns:?}");
+    assert!(
+        matches!(&teardowns[0], SshTeardown::Reaped { .. }),
+        "cleanup must retain exact positive teardown evidence: {teardowns:?}"
+    );
+    assert_eq!(harness.pool.active_link_count(), 0);
+}
+
+fn shell_path(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\"'\"'"))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_all_refuses_new_acquires_and_counts_reaped() {
     const NAME: &str = "shutdown_all_refuses_new_acquires_and_counts_reaped";
@@ -438,25 +696,6 @@ async fn shutdown_all_refuses_new_acquires_and_counts_reaped() {
         .await
         .expect_err("a shut-down pool must not open new sockets");
     assert!(matches!(err, SshDialError::ShuttingDown), "{err:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_conversation_deleted_closes_the_link() {
-    const NAME: &str = "on_conversation_deleted_closes_the_link";
-    let sshd = sshd_or_skip!(NAME);
-    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
-    let id = harness.add_fixture_host(&sshd).await;
-
-    if harness.open_or_skip(NAME, "conv-1", &id, "/").await.is_none() {
-        return;
-    }
-    // Through the trait object, because that is how the conversation service will
-    // reach the pool.
-    let hook: Arc<dyn OnConversationDelete> = Arc::new(harness.pool.clone());
-    hook.on_conversation_deleted(&harness.user_id, "conv-1")
-        .await;
-
-    assert_eq!(harness.pool.active_link_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

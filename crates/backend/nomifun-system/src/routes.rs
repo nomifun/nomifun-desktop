@@ -2,27 +2,25 @@ use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, post};
 use std::path::PathBuf;
 
 use nomifun_api_types::{
     ApiResponse, ClientPreferencesResponse, CloneProviderRequest, CreateProviderRequest,
-    FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ManagedModel,
-    ManagedModelHealthBatchResult, ModelTask,
-    ManagedModelHealthResult, ManagedModelServiceStatus, SaveProviderConnectionRequest,
+    FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ModelTask,
+    SaveProviderConnectionRequest,
     ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
     ProbeProviderConnectionResponse,
     ProviderConnectionResponse,
     ProviderModelKeyRequest, ProviderModelResponse, ProviderResponse, SaveProviderModelRequest,
-    SetManagedModelEnabledRequest,
-    SetManagedModelServiceEnabledRequest, SystemInfoResponse, SystemSettingsResponse, UpdateCheckRequest,
+    SystemInfoResponse, SystemSettingsResponse, UpdateCheckRequest,
     UpdateCheckResult, UpdateClientPreferencesRequest, UpdateProviderRequest, UpdateSettingsRequest,
     UpdateWorkDirRequest,
 };
 use nomifun_common::AppError;
+use nomifun_api_types::{ModelGatewayMetaRequest, ModelGatewayCatalogRequest, ModelGatewayMetaResponse, ModelGatewayCatalogResponse, ModelGatewayAccountResponse, CreateModelGatewayRequest, UpdateModelGatewayConnectionRequest, SyncModelGatewayResponse};
 
 use crate::client_pref::ClientPrefService;
-use crate::managed_model::ManagedModelService;
 use crate::model_fetcher::ModelFetchService;
 use crate::provider::ProviderService;
 use crate::provider_connection::ProviderConnectionService;
@@ -39,7 +37,6 @@ pub struct SystemRouterState {
     pub provider_connection_service: ProviderConnectionService,
     pub model_fetch_service: ModelFetchService,
     pub provider_model_service: ProviderModelService,
-    pub managed_model_service: Option<std::sync::Arc<ManagedModelService>>,
     pub version_check_service: VersionCheckService,
     /// Data directory root — used to arm the v3 reset request consumed by the
     /// next boot. See `nomifun_common::factory_reset`.
@@ -91,23 +88,14 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         // provider id.
         .route("/api/providers/fetch-models", post(fetch_models_anonymous))
         .route("/api/providers/probe-connection", post(probe_connection_anonymous))
+        .route("/api/providers/model-gateway/meta", post(gateway_meta_anonymous))
+        .route("/api/providers/model-gateway/catalog", post(gateway_catalog_anonymous))
+        .route("/api/providers/model-gateway/create", post(create_model_gateway))
         .route("/api/model-protocols", get(list_model_protocols))
-        .route("/api/model-services/free/status", get(get_free_model_status))
-        .route("/api/model-services/free/models", get(get_free_models))
-        .route("/api/model-services/free/refresh", post(refresh_free_models))
-        .route(
-            "/api/model-services/free/health",
-            get(get_free_model_health).post(check_all_free_model_health),
-        )
-        .route("/api/model-services/free/activate", post(activate_free_models))
-        .route(
-            "/api/model-services/free/models/{model_id}/health",
-            post(check_free_model_health),
-        )
-        .route(
-            "/api/model-services/free/models/{model_id}",
-            patch(set_free_model_enabled),
-        )
+        .route("/api/providers/{provider_id}/model-gateway/meta", get(gateway_meta))
+        .route("/api/providers/{provider_id}/model-gateway/account", get(gateway_account))
+        .route("/api/providers/{provider_id}/model-gateway/sync", post(sync_model_gateway))
+        .route("/api/providers/{provider_id}/model-gateway/connection", axum::routing::put(update_model_gateway_connection))
         .route(
             "/api/providers/{provider_id}",
             delete(delete_provider).put(update_provider),
@@ -222,7 +210,7 @@ mod protocol_manifest_tests {
         .await
         .expect("manifest response");
         let data = response.data.expect("manifest data");
-        assert_eq!(data.tasks.len(), 9);
+        assert_eq!(data.tasks.len(), 10);
         assert_eq!(data.platform, "stepfun-plan");
         assert_eq!(data.protocols.len(), 1);
         assert_eq!(data.protocols[0].protocol_id, "stepfun.realtime_s2s");
@@ -307,6 +295,34 @@ async fn list_providers(
 ) -> Result<Json<ApiResponse<Vec<ProviderResponse>>>, AppError> {
     let providers = state.provider_service.list().await?;
     Ok(Json(ApiResponse::ok(providers)))
+}
+
+async fn gateway_meta_anonymous(Json(req): Json<ModelGatewayMetaRequest>) -> Result<Json<ApiResponse<ModelGatewayMetaResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(crate::model_gateway::fetch_meta(&req.base_url).await?)))
+}
+
+async fn gateway_catalog_anonymous(Json(req): Json<ModelGatewayCatalogRequest>) -> Result<Json<ApiResponse<ModelGatewayCatalogResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(crate::model_gateway::fetch_catalog(&req.base_url, &req.api_key).await?)))
+}
+
+async fn create_model_gateway(State(state): State<SystemRouterState>, Json(req): Json<CreateModelGatewayRequest>) -> Result<(StatusCode, Json<ApiResponse<ProviderResponse>>), AppError> {
+    Ok((StatusCode::CREATED, Json(ApiResponse::ok(state.provider_service.create_gateway(req).await?))))
+}
+
+async fn gateway_meta(State(state): State<SystemRouterState>, Path(id): Path<String>) -> Result<Json<ApiResponse<ModelGatewayMetaResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.gateway_meta(&id).await?)))
+}
+
+async fn gateway_account(State(state): State<SystemRouterState>, Path(id): Path<String>) -> Result<Json<ApiResponse<ModelGatewayAccountResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.gateway_account(&id).await?)))
+}
+
+async fn sync_model_gateway(State(state): State<SystemRouterState>, Path(id): Path<String>) -> Result<Json<ApiResponse<SyncModelGatewayResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.sync_gateway_catalog(&id).await?)))
+}
+
+async fn update_model_gateway_connection(State(state): State<SystemRouterState>, Path(id): Path<String>, Json(req): Json<UpdateModelGatewayConnectionRequest>) -> Result<Json<ApiResponse<ProviderResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.update_gateway_connection(&id, req).await?)))
 }
 
 async fn create_provider(
@@ -451,90 +467,6 @@ async fn delete_provider_connection(
         .delete(&provider_id, &role)
         .await?;
     Ok(Json(ApiResponse::success()))
-}
-
-// ===========================================================================
-// Managed model services
-// ===========================================================================
-
-fn managed_service(
-    state: &SystemRouterState,
-) -> Result<std::sync::Arc<ManagedModelService>, AppError> {
-    state.managed_model_service.clone().ok_or_else(|| {
-        AppError::ProviderUnavailable("managed model service is not available in this process".into())
-    })
-}
-
-async fn get_free_model_status(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<ManagedModelServiceStatus>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        managed_service(&state)?.free_status().await,
-    )))
-}
-
-async fn get_free_models(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<Vec<ManagedModel>>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        managed_service(&state)?.free_models().await,
-    )))
-}
-
-async fn refresh_free_models(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<ManagedModelServiceStatus>>, AppError> {
-    let status = managed_service(&state)?.refresh_free_models().await?;
-    Ok(Json(ApiResponse::ok(status)))
-}
-
-async fn get_free_model_health(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<Vec<ManagedModelHealthResult>>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        managed_service(&state)?.free_health_snapshot().await?,
-    )))
-}
-
-async fn check_free_model_health(
-    State(state): State<SystemRouterState>,
-    Path(model_id): Path<String>,
-) -> Result<Json<ApiResponse<ManagedModelHealthResult>>, AppError> {
-    let service = managed_service(&state)?;
-    let result = service.check_free_model_health(&model_id).await?;
-    Ok(Json(ApiResponse::ok(result)))
-}
-
-async fn check_all_free_model_health(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<ManagedModelHealthBatchResult>>, AppError> {
-    let service = managed_service(&state)?;
-    Ok(Json(ApiResponse::ok(
-        service.check_all_free_model_health().await,
-    )))
-}
-
-async fn activate_free_models(
-    State(state): State<SystemRouterState>,
-    body: Result<Json<SetManagedModelServiceEnabledRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<ManagedModelServiceStatus>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let status = managed_service(&state)?
-        .set_free_enabled(req.enabled)
-        .await?;
-    Ok(Json(ApiResponse::ok(status)))
-}
-
-async fn set_free_model_enabled(
-    State(state): State<SystemRouterState>,
-    Path(model_id): Path<String>,
-    body: Result<Json<SetManagedModelEnabledRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<ManagedModelServiceStatus>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let status = managed_service(&state)?
-        .set_free_model_enabled(&model_id, req.enabled)
-        .await?;
-    Ok(Json(ApiResponse::ok(status)))
 }
 
 // ===========================================================================

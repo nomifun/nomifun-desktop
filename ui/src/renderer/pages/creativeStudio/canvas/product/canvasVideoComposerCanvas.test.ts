@@ -10,12 +10,10 @@ import type { IProvider, ModelTask } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
 
 import type { CreativeAsset } from '../../assets';
-import { createEmptyCreativeProjectDocument } from '../../domain';
+import { createEmptyCreativeProjectDocument, parseCreativeProjectDocument } from '../../domain';
 import type { CreativeTask } from '../../tasks';
-import type {
-  CreativeWorkbenchReferences,
-  VideoWorkbenchOperation,
-} from '../../workbenches/runtime';
+import type { GenerationReferences, CanvasVideoOperation } from '../generation';
+
 import { createInitialCanvasState } from '../core';
 import { testNode, testUuid } from '../core/testFixtures';
 import {
@@ -102,14 +100,14 @@ const asset = (
   updatedAt: 1,
 });
 
-const noReferences = (): CreativeWorkbenchReferences => ({
+const noReferences = (): GenerationReferences => ({
   assets: [],
   bindings: [],
 });
 
 const operation = (
-  capability: VideoWorkbenchOperation['capability']
-): VideoWorkbenchOperation => ({ task: 'video_generation', capability });
+  capability: CanvasVideoOperation['capability']
+): CanvasVideoOperation => ({ task: 'video_generation', capability });
 
 const thrownMessage = (action: () => void): string => {
   try {
@@ -123,8 +121,8 @@ const thrownMessage = (action: () => void): string => {
 const prepareFixture = (overrides: {
   source?: ReturnType<typeof testNode<'video'>>;
   sourceAsset?: CreativeAsset | null;
-  operation?: VideoWorkbenchOperation;
-  references?: CreativeWorkbenchReferences;
+  operation?: CanvasVideoOperation;
+  references?: GenerationReferences;
   prompt?: string;
   resolution?: string;
   aspectRatio?: string;
@@ -177,6 +175,27 @@ const taskFor = (
 });
 
 describe('canvas video composer product model', () => {
+  test('restores video mention identity after document round-trip without aliasing the editor draft', () => {
+    const source = testNode('video', 1);
+    const draft = {
+      prompt: '🎬 @图片1 动起来',
+      mentions: [{
+        id: 'video-mention', sourceNodeId: testUuid(10), fallbackLabel: '图片1', start: 3, end: 7,
+      }],
+      settings: { model: null, resolution: '1080p', aspectRatio: '16:9', seconds: 5 },
+    };
+    const persisted = withCanvasVideoComposeDraft(source, draft);
+    const document = parseCreativeProjectDocument({
+      ...createEmptyCreativeProjectDocument(testUuid(404)), nodes: [persisted],
+    });
+    const restored = canvasVideoComposeDraftFromState(createInitialCanvasState({ document }), source.id);
+    expect(restored).toEqual(draft);
+    restored.mentions![0]!.fallbackLabel = 'mutated';
+    expect(persisted.data.composer?.mentions?.[0]?.fallbackLabel).toBe('图片1');
+    const cleared = withCanvasVideoComposeDraft(persisted, { ...draft, prompt: '', mentions: [] });
+    expect(cleared.data.composer?.mentions ?? []).toEqual([]);
+  });
+
   test('prepares exact t2v owner, protocol parameters and source edge', () => {
     const { document, prepared, source } = prepareFixture();
 
@@ -256,6 +275,22 @@ describe('canvas video composer product model', () => {
     });
   });
 
+  test('preserves all ordered references in the request, persisted config and recovery', () => {
+    const ids = [testUuid(412), IMAGE_ASSET_ID, testUuid(411)];
+    const { prepared, document } = prepareFixture({
+      operation: operation('i2v'),
+      references: {
+        assets: ids.map((id) => asset(id, 'image')).reverse(),
+        bindings: ids.map((assetId) => ({ assetId, kind: 'image', role: 'reference' })),
+      },
+    });
+    expect(prepared.plan.input.inputs.map((input) => input.assetId)).toEqual(ids);
+    expect(prepared.configNode.data.inputAssetIds).toEqual(ids);
+    document.nodes.push(prepared.configNode);
+    const restored = canvasVideoComposeConfigFromTask(document, taskFor(prepared));
+    expect(restored.data.inputAssetIds).toEqual(ids);
+  });
+
   test('rejects unsupported reference contracts, v2v and non-empty targets', () => {
     const image = asset(IMAGE_ASSET_ID, 'image');
     const video = asset(UPSTREAM_VIDEO_ASSET_ID, 'video');
@@ -271,21 +306,21 @@ describe('canvas video composer product model', () => {
             ],
           },
         })
-      ).includes('一张 role=reference')
+      ).includes('需要有效的图片引用')
     ).toBe(true);
     expect(
       thrownMessage(() =>
         prepareFixture({
           operation: operation('i2v'),
           references: {
-            assets: [image, asset(testUuid(405), 'image')],
+            assets: [image, asset(testUuid(405), 'video')],
             bindings: [
               { assetId: image.id, kind: 'image', role: 'reference' },
               { assetId: testUuid(405), kind: 'image', role: 'reference' },
             ],
           },
         })
-      ).includes('一张 role=reference')
+      ).includes('需要有效的图片引用')
     ).toBe(true);
     expect(
       thrownMessage(() =>
@@ -356,7 +391,7 @@ describe('canvas video composer product model', () => {
     }];
     expect(canvasVideoComposeMode(document, source.id)).toEqual({
       kind: 'i2v',
-      assetId: IMAGE_ASSET_ID,
+      assetIds: [IMAGE_ASSET_ID],
     });
     document.connections.push({
       id: testUuid(407),
@@ -365,7 +400,14 @@ describe('canvas video composer product model', () => {
       sourceHandle: null,
       targetHandle: null,
     });
-    expect(canvasVideoComposeMode(document, source.id).kind).toBe('unsupported');
+    expect(canvasVideoComposeMode(document, source.id)).toEqual({
+      kind: 'i2v', assetIds: [IMAGE_ASSET_ID, testUuid(404)],
+    });
+    document.nodes.reverse();
+    expect(canvasVideoComposeMode(document, source.id)).toEqual({
+      kind: 'i2v', assetIds: [IMAGE_ASSET_ID, testUuid(404)],
+    });
+    document.nodes.reverse();
 
     document.connections = [{
       id: testUuid(408),
@@ -418,6 +460,7 @@ describe('canvas video composer product model', () => {
       )
     ).toEqual({
       prompt: '尚未提交的竖屏草稿',
+      mentions: [],
       settings: {
         model: { providerId: PROVIDER_ID, model: 'video-v1' },
         resolution: '720p',

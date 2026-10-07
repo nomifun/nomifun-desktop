@@ -11,9 +11,9 @@ import type {
 } from '../../domain';
 import type { CanvasState } from '../core';
 
-export type CanvasImageReferenceNodeKind = Extract<
+type CanvasImageReferenceNodeKind = Extract<
   CreativeCanvasNodeKind,
-  'image' | 'panorama'
+  'image'
 >;
 
 /** Product-level decoded input budget; the backend enforces the same ceiling. */
@@ -50,7 +50,7 @@ export interface CanvasTextReference {
   text: string;
 }
 
-export type CanvasImageReferenceIssue =
+type CanvasImageReferenceIssue =
   | { code: 'source_text_empty'; connectionId: string; sourceNodeId: string }
   | {
       code: 'target_node_missing';
@@ -122,7 +122,7 @@ export interface CanvasImageReferenceResolution {
 
 const isReferenceNode = (
   node: CanvasState['document']['nodes'][number]
-): node is CanvasImageReferenceNode => node.type === 'image' || node.type === 'panorama';
+): node is CanvasImageReferenceNode => node.type === 'image';
 
 const sourceAssetId = (node: CanvasImageReferenceNode): string | null => {
   const value = node.data.assetId;
@@ -136,9 +136,9 @@ export function canvasImageReferenceAssetIds(
 ): string[] {
   const nodesById = new Map(state.document.nodes.map((node) => [node.id, node]));
   const target = nodesById.get(targetNodeId);
-  if (!target || target.type !== 'image') return [];
+  if (!target || (target.type !== 'image' && target.type !== 'video')) return [];
   const ids: string[] = [];
-  const ownAssetId = sourceAssetId(target);
+  const ownAssetId = target.type === 'image' ? sourceAssetId(target) : null;
   if (ownAssetId) ids.push(ownAssetId);
   for (const connection of state.document.connections) {
     if (connection.targetNodeId !== targetNodeId) continue;
@@ -151,7 +151,7 @@ export function canvasImageReferenceAssetIds(
 }
 
 /**
- * Resolve the target image node's direct inbound references without creating
+ * Resolve an image or video generation node's direct inbound references without creating
  * attachment state outside the canonical canvas graph.
  *
  * The active node's own image is pinned first; valid inbound references then
@@ -175,7 +175,7 @@ export function resolveCanvasImageReferences(
       issues: [{ code: 'target_node_missing', targetNodeId }],
     };
   }
-  if (target.type !== 'image') {
+  if (target.type !== 'image' && target.type !== 'video') {
     return {
       targetNodeId,
       inboundConnectionCount: 0,
@@ -201,7 +201,7 @@ export function resolveCanvasImageReferences(
   const issues: CanvasImageReferenceIssue[] = [];
   const firstReferenceByAssetId = new Map<string, CanvasImageReference>();
 
-  const targetAssetId = sourceAssetId(target);
+  const targetAssetId = target.type === 'image' ? sourceAssetId(target) : null;
   if (targetAssetId) {
     const asset = assetsById.get(targetAssetId);
     if (!asset || isCreativeAssetDeleted(asset)) {
@@ -349,7 +349,7 @@ export interface AuthoredCanvasImagePromptMention {
   tokenText: string;
 }
 
-export type CanvasImagePromptCompilationIssue =
+type CanvasImagePromptCompilationIssue =
   | {
       code: 'mention_range_invalid';
       mentionIndex: number;

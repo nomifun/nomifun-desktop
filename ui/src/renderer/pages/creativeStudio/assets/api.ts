@@ -30,7 +30,7 @@ export interface WorkshopAssetDto {
   deleted_at?: number | null;
 }
 
-export interface WorkshopAssetListDto {
+interface WorkshopAssetListDto {
   items: WorkshopAssetDto[];
   total: number;
 }
@@ -54,26 +54,21 @@ export interface WorkshopAssetUploadMetadata {
   in_library?: boolean;
 }
 
-export interface WorkshopTextAssetInput {
+interface WorkshopTextAssetInput {
   kind: 'text';
   title: string;
   text_content: string;
   collection?: string;
   tags?: string[];
   in_library?: boolean;
-  origin?:
-    | {
-        prompt_library_source: 'catalog';
-        prompt_library_id: string;
-        prompt_catalog_id: string;
-        source_url?: string;
-        license?: string;
-        license_url?: string;
-      }
-    | {
-        prompt_library_source: 'preset';
-        prompt_library_id: string;
-      };
+  origin?: {
+    prompt_library_source: 'catalog';
+    prompt_library_id: string;
+    prompt_catalog_id: string;
+    source_url?: string;
+    license?: string;
+    license_url?: string;
+  };
 }
 
 export interface WorkshopAssetPatch {
@@ -84,8 +79,8 @@ export interface WorkshopAssetPatch {
   in_library?: boolean;
 }
 
-export interface WorkshopPromptAssetIdentity {
-  prompt_library_source: 'catalog' | 'preset';
+interface WorkshopPromptAssetIdentity {
+  prompt_library_source: 'catalog';
   prompt_library_id: string;
 }
 

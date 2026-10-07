@@ -4,56 +4,60 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
+import {
+  ConversationCreationTaskCards,
+  useConversationCreationTaskOwnerMessageIds,
+} from '@/renderer/creation/ConversationCreationTasks';
 import type {
   IMessageText,
   IMessageToolCall,
   IMessageToolGroup,
   TMessage,
 } from '@/common/chat/chatLib';
+import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
+import { useThinkingDisplayPreferences } from '@/renderer/hooks/config/useThinkingDisplayPreferences';
 import { iconColors } from '@/renderer/styles/colors';
 import { CHAT_MESSAGE_JUMP_EVENT, type ChatMessageJumpDetail } from '@/renderer/utils/chat/chatMinimapEvents';
 import { Image } from '@arco-design/web-react';
 import { Down } from '@icon-park/react';
-import MessagePermission from './components/MessagePermission';
 import classNames from 'classnames';
 import React, { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import { uuid } from '@renderer/utils/common';
 import './messages.css';
+import contentStyles from '../components/ConversationContentColumn.module.css';
+import { useConversationColumnRef } from '../components/useConversationColumnRef';
 import HOC from '@renderer/utils/ui/HOC';
 import type { FileChangeInfo } from './MessageFileChanges';
-import { parseDiff } from './MessageFileChanges';
-import { useConversationArtifacts } from './artifacts';
-import { useKnowledgeWritebackEvents, useMessageList, useMessageListLoading } from './hooks';
+import { useMessageList, useMessageListLoading } from './hooks';
 import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
 import MessageToolCall from './components/MessageToolCall';
 import MessageToolGroup from './components/MessageToolGroup';
-import { isSuccessfulWriteFileResult } from './components/toolGroupArtifactVisibility';
-import MessageCronTrigger from './components/MessageCronTrigger';
-import MessageSkillSuggest from './components/MessageSkillSuggest';
 import MessageText from './components/MessageText';
 import MessageThinking from './components/MessageThinking';
 import MessageListSkeleton from './components/MessageListSkeleton';
 import TurnProcessDisclosure from './components/TurnProcessDisclosure';
 import TurnProcessReceipt, { type TurnProcessReceiptIcon } from './components/TurnProcessReceipt';
 import {
+  buildToolReceiptDetailRows,
   buildToolReceiptSummaryParts,
-  buildToolSummaryDescriptor,
+  countBoundedSearchResults,
+  countNonFatalToolFailures,
   getToolReceiptIconFromSummaryParts,
   type ToolReceiptSummaryPart,
 } from './components/toolGroupSummaryModel';
-import ProcessTraceItem, { type ProcessTraceItemExpansionControls } from './components/ProcessTraceItem';
+import ProcessTraceItem from './components/ProcessTraceItem';
 import { isContextCompressionTip } from './processTipModel';
-import { formatFileTargetPreview, splitToolReceiptTargets } from './processFileTargetLabel';
-import type { WriteFileResult } from './types';
+import {
+  selectJournalProcessItems,
+} from './processTraceDisplayModel';
+import { formatFileTargetPreview } from './processFileTargetLabel';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
-import { useAutoPreviewMiniApp } from '@/renderer/hooks/file/useAutoPreviewMiniApp';
 import SelectionReplyButton from './components/SelectionReplyButton';
 import ConversationQuestionLocator from '../components/ConversationTitleMinimap/ConversationQuestionLocator';
 import {
@@ -64,7 +68,6 @@ import {
   type TurnDisclosureOutputItem,
 } from './turnDisclosureModel';
 import { getProcessItemState } from './turnProcessState';
-import { planTurnLiveStep } from './turnLiveStepModel';
 import {
   collectTurnDeliverables,
   type TurnDeliverableCandidate,
@@ -72,9 +75,13 @@ import {
   type TurnGateInfo,
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
-import { isSupersededPlanToolFailure } from './planToolVisibility';
+import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from './toolMessageVisibility';
 import type { MessageId } from '@/common/types/ids';
-import { ExplicitToolRetryReceiptIndex } from './toolRetryReceiptModel';
+import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
+import { useExecutionSafe } from '../execution/ExecutionContext';
+import { delegatedTurnPresentation, resolveConversationDelegation } from './conversationDelegationModel';
+import DelegationProgress from './components/DelegationProgress';
+import { conversationPauseErrorMessage } from '../utils/conversationPauseError';
 
 type SourceMessageId = MessageId;
 
@@ -99,10 +106,11 @@ type IMessageVO =
       created_at: number;
     };
 type ToolSummaryVO = Extract<IMessageVO, { type: 'tool_summary' }>;
-type IArtifactVO = { type: 'artifact'; id: string; artifact: IConversationArtifact; created_at: number };
-type IRenderableItem = IMessageVO | IArtifactVO;
+type IRenderableItem = IMessageVO;
 type ITurnProcessDisclosureVO = {
   type: 'turn_process_disclosure';
+  finalAnswer?: string;
+  hasInterruptedReply?: boolean;
   id: string;
   msg_id: MessageId;
   processItems: IRenderableItem[];
@@ -127,6 +135,7 @@ type IProcessReceiptVO = {
   icon: TurnProcessReceiptIcon;
   defaultExpanded: boolean;
   hasDetail?: boolean;
+  recovered?: boolean;
 };
 type ITurnDeliverablesVO = {
   type: 'turn_deliverables';
@@ -144,13 +153,11 @@ type ITurnActionsVO = {
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
-type ITurnLiveStepVO = {
-  type: 'turn_live_step';
+type ITurnCreationTasksVO = {
+  type: 'turn_creation_tasks';
   id: string;
-  msg_id: MessageId;
-  label: string;
-  state: 'running' | 'waiting';
-  icon: TurnProcessReceiptIcon;
+  turn_id: MessageId;
+  message_id: MessageId;
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
@@ -160,7 +167,7 @@ type IProcessedItem =
   | IProcessReceiptVO
   | ITurnDeliverablesVO
   | ITurnActionsVO
-  | ITurnLiveStepVO;
+  | ITurnCreationTasksVO;
 
 type ConversationLocationState = {
   targetMessageId?: MessageId;
@@ -174,11 +181,10 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
       item.type === 'process_receipt' ||
       item.type === 'turn_deliverables' ||
       item.type === 'turn_actions' ||
-      item.type === 'turn_live_step')
+      item.type === 'turn_creation_tasks')
   ) {
     return item.sourceMessageIds;
   }
-  if ('type' in item && item.type === 'artifact') return [];
   if ('type' in item && item.type === 'tool_summary') {
     return item.sourceMessageIds;
   }
@@ -210,12 +216,11 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
     [
       'file_summary',
       'tool_summary',
-      'artifact',
       'turn_process_disclosure',
       'process_receipt',
       'turn_deliverables',
       'turn_actions',
-      'turn_live_step',
+      'turn_creation_tasks',
     ].includes(item.type)
   ) {
     // `includes` doesn't narrow the union, so `created_at` is still typed
@@ -242,18 +247,40 @@ const getProcessedItemProcessEndedAt = (item: IRenderableItem): number => {
   return createdAt + duration;
 };
 
+const getProcessedItemTurnStartedAt = (item: IRenderableItem): number | undefined => {
+  if (item.type === 'agent_status' && item.content.turn_summary) {
+    return item.content.started_at_ms;
+  }
+  if (item.type === 'tips') return item.content.started_at_ms;
+  return undefined;
+};
+
+const getProcessedItemTurnEndedAt = (item: IRenderableItem): number | undefined => {
+  if (item.type === 'agent_status' && item.content.turn_summary) {
+    return item.content.finished_at_ms;
+  }
+  if (item.type === 'tips') return item.content.finished_at_ms;
+  return undefined;
+};
+
+const isTerminalAssistantItem = (item: IRenderableItem): boolean =>
+  item.type === 'tips' && item.content.type === 'error' && !item.content.idmm_notice;
+
+const isHiddenProcessItem = (item: IRenderableItem): boolean => {
+  if (item.type !== 'thinking' && item.type !== 'text') return false;
+  const text = toDisplayText(item.content.content).trim();
+  if (!text) return true;
+  return item.type === 'thinking' && /^\[Private reasoning omitted(?: from replay)?\]$/i.test(text);
+};
+
 const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => {
   if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
     return item.msg_id;
-  }
-  if ('type' in item && item.type === 'artifact') {
-    return undefined;
   }
   return item.msg_id;
 };
 
 const getProcessedItemTurnId = (item: IRenderableItem): MessageId | undefined => {
-  if ('type' in item && item.type === 'artifact') return undefined;
   return item.turn_id;
 };
 
@@ -261,23 +288,20 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
   if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
     return 'process';
   }
-  if ('type' in item && item.type === 'artifact') {
-    return 'other';
-  }
-
   switch (item.type) {
     case 'text':
       return item.position === 'right' ? 'user' : 'assistant';
     case 'tips':
+      if (item.content.agent_transition || item.content.idmm_notice) return 'other';
       if (isContextCompressionTip(item)) return 'process';
       return 'assistant';
     case 'thinking':
       return 'process_content';
     case 'tool_call':
     case 'tool_group':
-    case 'agent_status':
-    case 'permission':
       return 'process';
+    case 'agent_status':
+      return item.content.turn_summary ? 'metadata' : 'process';
     default:
       return 'other';
   }
@@ -285,114 +309,91 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
 
 type TranslationFn = ReturnType<typeof useTranslation>['t'];
 
-const defaultToolSummaryByState: Record<TurnDisclosureProcessState, string> = {
-  completed: 'Ran {{target}}',
-  running: 'Running {{target}}',
-  waiting: 'Waiting to confirm {{target}}',
-  failed: 'Failed {{target}}',
-  canceled: 'Canceled {{target}}',
-};
-
 const compactReceiptText = (value: unknown, fallback: string): string => {
   if (typeof value !== 'string') return fallback;
   const compacted = value.replace(/\s+/g, ' ').trim();
   return compacted || fallback;
 };
 
-const getToolReceiptDisplayTarget = (part: ToolReceiptSummaryPart, workspaceRoots: string[]): string | undefined => {
-  if (!part.target) return undefined;
-  if (part.action !== 'read_files' && part.action !== 'edit_files') return part.target;
-  const targets = splitToolReceiptTargets(part.target);
-  return targets.length ? formatFileTargetPreview(targets, { workspaceRoots }) : part.target;
-};
-
 const formatToolReceiptPart = (
   part: ToolReceiptSummaryPart,
-  t: TranslationFn,
-  workspaceRoots: string[]
+  t: TranslationFn
 ): string => {
-  const displayTarget = getToolReceiptDisplayTarget(part, workspaceRoots);
-
   if (part.skipped) {
-    return t('messages.toolSummary.skipped', {
-      target:
-        displayTarget ??
-        t('messages.processReceipt.tools', {
-          count: part.count,
-          defaultValue: '{{count}} tools',
-        }),
-      defaultValue: 'Skipped {{target}}',
+    return t('messages.processReceipt.skippedAfterFailure', {
+      defaultValue: 'Skipped after an earlier failed operation',
     });
   }
 
   if (part.notExecutedReason === 'invalid_arguments') {
-    return t('messages.toolSummary.invalidArguments', {
-      target: displayTarget ?? t('messages.processReceipt.tool', { defaultValue: 'tool' }),
-      defaultValue: 'Arguments did not pass validation; {{target}} was not run',
+    return t('messages.processReceipt.invalidArguments', {
+      defaultValue: 'Invalid arguments; operation not run',
     });
   }
 
-  if ((part.state === 'failed' || part.state === 'canceled') && displayTarget) {
-    return t(`messages.toolSummary.${part.state}`, {
-      target: displayTarget,
-      defaultValue: defaultToolSummaryByState[part.state],
+  if (part.notExecutedReason === 'runtime_preflight') {
+    return part.action === 'run_commands'
+      ? t('messages.processReceipt.commandNotExecuted', { defaultValue: 'Command not run' })
+      : t('messages.processReceipt.operationNotExecuted', { defaultValue: 'Operation not run' });
+  }
+  if (part.notExecutedReason === 'process_reference') {
+    return t('messages.processReceipt.processReferenceInvalid', {
+      defaultValue: 'Process not found in this execution; operation not run',
     });
+  }
+
+  if (part.commandNotStarted) {
+    return t('messages.processReceipt.commandNotStarted', {
+      count: part.count,
+      defaultValue: '{{count}} commands did not start',
+    });
+  }
+
+  if (part.commandTimedOut) {
+    return t('messages.processReceipt.commandTimedOut', {
+      count: part.count,
+      defaultValue: '{{count}} commands reached their time limit; process cleanup completed',
+    });
+  }
+
+  if (part.state === 'failed') {
+    return t('messages.processReceipt.failedOperations', {
+      count: part.count,
+      defaultValue: '{{count}} operations did not complete',
+    });
+  }
+  if (part.commandExitCode !== undefined && part.commandExitCode !== 0) {
+    return t('messages.processReceipt.commandNonzero', {
+      count: part.count, code: part.commandExitCode,
+      defaultValue: '{{count}} commands ended with exit code {{code}}',
+    });
+  }
+  if (part.state === 'canceled') {
+    return t('messages.processReceipt.canceledOperation', { defaultValue: 'Operation canceled' });
   }
 
   switch (part.action) {
     case 'read_files':
-      if (displayTarget) {
-        return part.state === 'running'
-          ? t('messages.processReceipt.readingTargets', {
-              count: part.count,
-              target: displayTarget,
-              defaultValue: 'Reading {{count}} files: {{target}}',
-            })
-          : t('messages.processReceipt.readTargets', {
-              count: part.count,
-              target: displayTarget,
-              defaultValue: 'Read {{count}} files: {{target}}',
-            });
-      }
       return part.state === 'running'
-        ? t('messages.processReceipt.readingFiles', {
+        ? t('messages.processReceipt.readingFileOperations', {
             count: part.count,
-            defaultValue: 'Reading {{count}} files',
+            defaultValue: 'File reads in progress: {{count}}',
           })
-        : t('messages.processReceipt.readFiles', {
+        : t('messages.processReceipt.fileReadOperations', {
             count: part.count,
-            defaultValue: 'Read {{count}} files',
+            defaultValue: 'File reads completed: {{count}}',
           });
     case 'edit_files':
-      if (displayTarget) {
-        return part.state === 'running'
-          ? t('messages.processReceipt.editingFileTargets', {
-              count: part.count,
-              target: displayTarget,
-              defaultValue: 'Editing {{count}} files: {{target}}',
-            })
-          : t('messages.processReceipt.fileEditTargets', {
-              count: part.count,
-              target: displayTarget,
-              defaultValue: 'Edited {{count}} files: {{target}}',
-            });
-      }
       return part.state === 'running'
-        ? t('messages.processReceipt.editingFiles', {
+        ? t('messages.processReceipt.editingFileOperations', {
             count: part.count,
-            defaultValue: 'Editing {{count}} files',
+            defaultValue: 'File edits in progress: {{count}}',
           })
-        : t('messages.processReceipt.fileEdits', {
+        : t('messages.processReceipt.fileEditOperations', {
             count: part.count,
-            defaultValue: 'Edited {{count}} files',
+            defaultValue: 'File edits completed: {{count}}',
           });
     case 'run_commands':
-      if (part.count === 1 && part.target) {
-        return t(`messages.toolSummary.${part.state}`, {
-          target: part.target,
-          defaultValue: defaultToolSummaryByState[part.state],
-        });
-      }
       return part.state === 'running'
         ? t('messages.processReceipt.runningCommands', {
             count: part.count,
@@ -422,12 +423,6 @@ const formatToolReceiptPart = (
           });
     case 'generic':
     default:
-      if (displayTarget) {
-        return t(`messages.toolSummary.${part.state}`, {
-          target: displayTarget,
-          defaultValue: defaultToolSummaryByState[part.state],
-        });
-      }
       return t('messages.processReceipt.tools', {
         count: part.count,
         defaultValue: '{{count}} tools',
@@ -444,9 +439,9 @@ const getToolReceiptIcon = (
   if (latestMessage.type === 'tool_group') {
     if (!Array.isArray(latestMessage.content)) return 'tool';
     const latestTool = latestMessage.content.findLast(Boolean);
-    const confirmationType = latestTool?.confirmationDetails?.type;
-    if (confirmationType === 'edit') return 'edit';
-    if (confirmationType === 'info') return 'file';
+    const latestToolName = `${latestTool?.name ?? ''} ${latestTool?.description ?? ''}`.toLowerCase();
+    if (/\b(write|edit|patch|update|modify)\b/.test(latestToolName)) return 'edit';
+    if (/\b(read|list|ls|glob|search|grep|find)\b/.test(latestToolName)) return 'file';
     return 'tool';
   }
 
@@ -456,23 +451,58 @@ const getToolReceiptIcon = (
   return 'tool';
 };
 
+type ProcessReceiptSummary = {
+  label: string;
+  icon: TurnProcessReceiptIcon;
+  defaultExpanded: boolean;
+  hasDetail?: boolean;
+  recovered?: boolean;
+};
+
+const countRecoveredToolFailures = (
+  tools: ReturnType<typeof normalizeToolMessages>
+): number => {
+  const retryFailures = buildToolReceiptDetailRows(tools).reduce(
+    (count, row) => count + (row.attempts?.filter((attempt) => attempt.state === 'failed').length ?? 0),
+    0
+  );
+  return retryFailures + countNonFatalToolFailures(tools);
+};
+
 const buildProcessReceiptSummary = (
   item: IRenderableItem,
   state: TurnDisclosureProcessState,
   t: TranslationFn,
-  workspaceRoots: string[] = []
-): { label: string; icon: TurnProcessReceiptIcon; defaultExpanded: boolean; hasDetail?: boolean } => {
+  workspaceRoots: string[] = [],
+  options: { recovered?: boolean; language?: string } = {}
+): ProcessReceiptSummary => {
   if ('type' in item && item.type === 'tool_summary') {
     const tools = normalizeToolMessages(item.messages);
-    const receiptParts = buildToolReceiptSummaryParts(tools, state);
-    const descriptor = buildToolSummaryDescriptor(tools, state);
-    const label = receiptParts.length
-      ? receiptParts.map((part) => formatToolReceiptPart(part, t, workspaceRoots)).join(' ')
-      : descriptor
-        ? t(`messages.toolSummary.${state}`, {
-            target: descriptor.target,
-            defaultValue: defaultToolSummaryByState[state],
+    const receiptParts = buildToolReceiptSummaryParts(tools, state, options.language);
+    const summarySeparator = t('messages.processReceipt.summarySeparator', { defaultValue: ', ' });
+    const boundedSearchCount = countBoundedSearchResults(tools);
+    const recoveredFailureCount = options.recovered
+      ? buildToolReceiptDetailRows(tools).filter((row) => row.state === 'failed').length
+      : countRecoveredToolFailures(tools);
+    const recovered = recoveredFailureCount > 0;
+    const nativeOutcomeParts = options.recovered ? receiptParts.filter((part) => part.commandNotStarted || part.commandTimedOut) : [];
+    const otherRecoveredCount = recoveredFailureCount - nativeOutcomeParts.reduce((count, part) => count + part.count, 0);
+    const label = recovered
+      ? [
+          ...nativeOutcomeParts.map((part) => formatToolReceiptPart(part, t)),
+          ...(otherRecoveredCount > 0
+            ? [t('messages.processReceipt.recoveredOperations', {
+                count: otherRecoveredCount,
+                defaultValue: '{{count}} operations encountered an error',
+              })]
+            : []),
+        ].join(summarySeparator)
+      : boundedSearchCount > 0
+        ? t('messages.processReceipt.searchResultsLimited', {
+            defaultValue: 'Search results limited; full reconciliation required',
           })
+      : receiptParts.length
+        ? receiptParts.map((part) => formatToolReceiptPart(part, t)).join(summarySeparator)
         : t('messages.processReceipt.tools', {
             count: item.messages.length,
             defaultValue: '{{count}} tools',
@@ -480,8 +510,9 @@ const buildProcessReceiptSummary = (
     return {
       label,
       icon: getToolReceiptIconFromSummaryParts(receiptParts) ?? getToolReceiptIcon(item.messages),
-      defaultExpanded: state === 'waiting',
+      defaultExpanded: false,
       hasDetail: true,
+      ...(recovered || boundedSearchCount > 0 ? { recovered: true } : {}),
     };
   }
 
@@ -507,47 +538,32 @@ const buildProcessReceiptSummary = (
     };
   }
 
-  if ('type' in item && item.type === 'artifact') {
-    const target =
-      item.artifact.kind === 'cron_trigger' ? item.artifact.payload.cron_job_name : item.artifact.payload.name;
-    return {
-      label: t('messages.processReceipt.status', { target, defaultValue: '{{target}}' }),
-      icon: 'status',
-      defaultExpanded: false,
-      hasDetail: false,
-    };
-  }
-
   switch (item.type) {
-    case 'permission':
-      return {
-        label: t('messages.processReceipt.waitingPermission', {
-          target: compactReceiptText(item.content.title || item.content.description, t('messages.permissionRequest')),
-          defaultValue: 'Waiting to confirm {{target}}',
-        }),
-        icon: 'permission',
-        defaultExpanded: true,
-        hasDetail: true,
-      };
     case 'agent_status':
       return {
         label:
-          item.content.status === 'preparing'
+          options.recovered
+            ? t('messages.processReceipt.recoveredOperations', {
+                count: 1,
+                defaultValue: '{{count}} operations encountered an error',
+              })
+            : item.content.status === 'preparing'
             ? t('messages.processReceipt.preparingAction', { defaultValue: 'Preparing next action' })
             : item.content.status === 'prepared'
               ? t('messages.processReceipt.preparedAction', { defaultValue: 'Prepared next action' })
-            : state === 'failed'
-            ? t('messages.processReceipt.agentFailed', {
-                target: item.content.agent_name || item.content.backend,
-                defaultValue: '{{target}} failed',
-              })
-            : t('messages.processReceipt.agentConnecting', {
-                target: item.content.agent_name || item.content.backend,
-                defaultValue: 'Connecting {{target}}',
-              }),
+              : state === 'failed'
+                ? t('messages.processReceipt.agentFailed', {
+                    target: item.content.agent_name || item.content.backend,
+                    defaultValue: '{{target}} failed',
+                  })
+                : t('messages.processReceipt.agentConnecting', {
+                    target: item.content.agent_name || item.content.backend,
+                    defaultValue: 'Connecting {{target}}',
+                  }),
         icon: 'status',
         defaultExpanded: false,
         hasDetail: false,
+        ...(options.recovered ? { recovered: true } : {}),
       };
     case 'tips':
       if (isContextCompressionTip(item)) {
@@ -559,13 +575,19 @@ const buildProcessReceiptSummary = (
         };
       }
       return {
-        label: compactReceiptText(
-          item.content.content,
-          t('messages.processReceipt.status', { target: t('messages.processing'), defaultValue: '{{target}}' })
-        ),
-        icon: state === 'failed' ? 'permission' : 'status',
+        label: options.recovered
+          ? t('messages.processReceipt.recoveredOperations', {
+              count: 1,
+              defaultValue: '{{count}} operations encountered an error',
+            })
+          : compactReceiptText(
+              item.content.content,
+              t('messages.processReceipt.status', { target: t('messages.processing'), defaultValue: '{{target}}' })
+            ),
+        icon: 'status',
         defaultExpanded: state === 'failed',
         hasDetail: false,
+        ...(options.recovered ? { recovered: true } : {}),
       };
     case 'tool_call':
     case 'tool_group':
@@ -580,17 +602,24 @@ const buildProcessReceiptSummary = (
         },
         state,
         t,
-        workspaceRoots
+        workspaceRoots,
+        options
       );
     default:
       return {
-        label: t('messages.processReceipt.status', {
-          target: t('messages.processing'),
-          defaultValue: '{{target}}',
-        }),
+        label: options.recovered
+          ? t('messages.processReceipt.recoveredOperations', {
+              count: 1,
+              defaultValue: '{{count}} operations encountered an error',
+            })
+          : t('messages.processReceipt.status', {
+              target: t('messages.processing'),
+              defaultValue: '{{target}}',
+            }),
         icon: 'status',
         defaultExpanded: false,
         hasDetail: false,
+        ...(options.recovered ? { recovered: true } : {}),
       };
   }
 };
@@ -614,19 +643,16 @@ const renderProcessTraceItem = (
   variant: 'list' | 'receipt' = 'list',
   workspaceRoots: string[] = [],
   stateOverride?: TurnDisclosureProcessState,
-  thinkingExpansion?: ProcessTraceItemExpansionControls
+  recoverFailures = false
 ) => (
   <ProcessTraceItem
     item={item}
     variant={variant}
     workspaceRoots={workspaceRoots}
     stateOverride={stateOverride}
-    thinkingExpansion={thinkingExpansion}
+    recoverFailures={recoverFailures}
   />
 );
-
-const isCompletedThinkingProcessItem = (item: IRenderableItem): boolean =>
-  'type' in item && item.type === 'thinking' && item.content.status === 'done';
 
 const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   if ('type' in item && item.type === 'text') return 'text';
@@ -637,10 +663,14 @@ const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   ) {
     return 'tool';
   }
-  if ('type' in item && item.type === 'permission') return 'permission';
-  if ('type' in item && (item.type === 'agent_status' || item.type === 'tips' || item.type === 'artifact')) return 'status';
+  if ('type' in item && (item.type === 'agent_status' || item.type === 'tips')) return 'status';
   return 'other';
 };
+
+const isPrivateJournalActivity = (item: IRenderableItem): boolean =>
+  item.type === 'agent_status' &&
+    item.content.turn_summary !== true &&
+    (item.content.status === 'preparing' || item.content.status === 'prepared');
 
 const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActions?: boolean }> = React.memo(
   HOC((props) => {
@@ -653,9 +683,11 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         data-message-type={message.type}
         data-message-position={message.position}
         className={classNames(
-          'min-w-0 flex items-start message-item [&>div]:max-w-full px-8px m-t-10px max-w-full md:max-w-780px mx-auto',
+          'min-w-0 flex items-start message-item [&>div]:max-w-full',
           message.type,
           {
+            'm-t-6px': message.type === 'tips' && message.content.type === 'error',
+            'm-t-10px': message.type !== 'tips' || message.content.type !== 'error',
             'justify-center': message.position === 'center',
             'justify-end': message.position === 'right',
             'justify-start': message.position === 'left',
@@ -679,13 +711,6 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         return <MessageToolGroup message={message}></MessageToolGroup>;
       case 'agent_status':
         return <MessageAgentStatus message={message}></MessageAgentStatus>;
-      case 'permission':
-        return <MessagePermission message={message}></MessagePermission>;
-      case 'plan':
-        // Plans render in the docked PinnedPlan bar, not inline — they're
-        // filtered out of processedList above. This guard keeps the switch
-        // exhaustive (the `never` default below would otherwise error).
-        return null;
       case 'thinking':
         return <MessageThinking message={message}></MessageThinking>;
       case 'available_commands':
@@ -709,83 +734,54 @@ const MessageList: React.FC<{
   /** Windowed-history paging (nomi surfaces): prepend the next older message
    *  window when the user scrolls to the top. Omitted on chats that still load
    *  their whole transcript at once. */
-  onLoadOlder?: () => void | Promise<void>;
+  onLoadOlder?: () => void | boolean | Promise<void | boolean>;
   hasMoreOlder?: boolean;
   loadingOlder?: boolean;
 }> = ({ emptySlot, onLoadOlder, hasMoreOlder, loadingOlder }) => {
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
-  const artifacts = useConversationArtifacts();
   const conversationContext = useConversationContextSafe();
-  useKnowledgeWritebackEvents(conversationContext?.conversation_id);
+  const pauseError = useMemo(() => {
+    const pause = conversationContext?.executionPause;
+    if (!pause || !conversationContext?.conversation_id) return null;
+    // A canonical error closes this Turn. A stale pause snapshot must not
+    // mask that failure while its lifecycle notification is being delivered.
+    const alreadyShown = list.some(message => message.type === 'tips' && message.content.type === 'error'
+      && message.turn_id === pause.turnId && message.content.error
+      && !message.content.idmm_notice);
+    return alreadyShown ? null : conversationPauseErrorMessage(conversationContext.conversation_id, pause);
+  }, [list, conversationContext?.executionPause, conversationContext?.conversation_id]);
+  const execution = useExecutionSafe();
+  const creationTaskOwnerMessageIds = useConversationCreationTaskOwnerMessageIds();
+  const thinkingDisplay = useThinkingDisplayPreferences();
   useAutoPreviewOfficeFiles(conversationContext);
-  useAutoPreviewMiniApp(conversationContext);
   const workspaceRoots = useMemo(
     () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
     [conversationContext?.workspace]
   );
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const location = useLocation();
+  const toolLanguage = i18n.resolvedLanguage ?? i18n.language;
   const locationState = (location.state || {}) as ConversationLocationState;
   const targetMessageId = locationState.targetMessageId;
   const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | undefined>();
   const handledTargetKeyRef = useRef<string>('');
+  const [pendingQuestionJump, setPendingQuestionJump] = useState<ChatMessageJumpDetail | null>(null);
+  const [loadingQuestionPage, setLoadingQuestionPage] = useState(false);
 
   // Pre-process message list to group tool outputs into summary cards
   const processedList = useMemo(() => {
+    // Reasoning and public narration both separate adjacent tool stages.
+    // Only routine model lifecycle activity is omitted from the journal.
+    const journalSources = selectJournalProcessItems(list, {
+      running: conversationContext?.isProcessing === true,
+      isPrivateActivity: isPrivateJournalActivity,
+      isRunning: (message) => getProcessItemState(message) === 'running',
+    });
     const result: Array<IMessageVO> = [];
-    let diffsChanges: FileChangeInfo[] = [];
-    let diffsSourceMessageIds: SourceMessageId[] = [];
-    let diffsTurnId: MessageId | undefined;
     let toolList: Array<IMessageToolGroup | IMessageToolCall> = [];
     let toolSourceMessageIds: SourceMessageId[] = [];
-    const retrySummaries = new ExplicitToolRetryReceiptIndex<ToolSummaryVO>();
-
-    const pushFileDffChanges = (
-      changes: FileChangeInfo,
-      sourceMessageId: SourceMessageId,
-      created_at: number,
-      msg_id?: MessageId,
-      turn_id?: MessageId
-    ) => {
-      if (diffsChanges.length && diffsTurnId && turn_id && diffsTurnId !== turn_id) {
-        diffsChanges = [];
-        diffsSourceMessageIds = [];
-      }
-      if (!diffsChanges.length) {
-        diffsSourceMessageIds = [];
-        diffsTurnId = turn_id;
-        result.push({
-          type: 'file_summary',
-          id: `summary-${sourceMessageId}`,
-          msg_id,
-          turn_id,
-          diffs: diffsChanges,
-          sourceMessageIds: diffsSourceMessageIds,
-          created_at,
-        });
-      }
-      diffsChanges.push(changes);
-      diffsSourceMessageIds.push(sourceMessageId);
-      toolList = [];
-      toolSourceMessageIds = [];
-    };
     const pushToolList = (message: IMessageToolGroup | IMessageToolCall) => {
-      const existingRetry = message.type === 'tool_call' ? retrySummaries.takeContinuation(message) : undefined;
-      if (message.type === 'tool_call' && existingRetry) {
-        existingRetry.messages.push(message);
-        const sourceMessageId = getMessageBusinessIdentity(message);
-        if (sourceMessageId) existingRetry.sourceMessageIds.push(sourceMessageId);
-        // A retry can be separated from its first attempt by thinking/text.
-        // Keep the durable summary reference above, but do not accidentally
-        // append an unrelated following tool to that earlier receipt.
-        toolList = [];
-        toolSourceMessageIds = [];
-        diffsChanges = [];
-        diffsSourceMessageIds = [];
-        diffsTurnId = undefined;
-        return;
-      }
       const groupedTurnId = toolList.find((tool) => tool.turn_id)?.turn_id;
       if (groupedTurnId && message.turn_id && groupedTurnId !== message.turn_id) {
         // A delayed event from another explicit turn must start a new receipt;
@@ -810,44 +806,21 @@ const MessageList: React.FC<{
       toolList.push(message);
       const sourceMessageId = getMessageBusinessIdentity(message);
       if (sourceMessageId) toolSourceMessageIds.push(sourceMessageId);
-      if (message.type === 'tool_call') {
-        const summary = result.findLast(
-          (item): item is ToolSummaryVO => item.type === 'tool_summary' && item.messages === toolList
-        );
-        if (summary) {
-          retrySummaries.rememberFirst(message, summary);
-        }
-      }
-      diffsChanges = [];
-      diffsSourceMessageIds = [];
-      diffsTurnId = undefined;
     };
 
-    for (let i = 0, len = list.length; i < len; i++) {
-      const message = list[i];
+    for (let i = 0, len = journalSources.length; i < len; i++) {
+      const message = journalSources[i];
       // Skip hidden and available_commands messages
       if (message.hidden) continue;
-      if (
-        message.type === 'tool_call' &&
-        message.content.name === 'update_plan' &&
-        isSupersededPlanToolFailure(message, list.slice(i + 1))
-      ) {
+      if (isInternalInstructionToolCall(message)) continue;
+      // A progress declaration closes the preceding group without adding a
+      // duplicate plan card or merging unrelated operations across it.
+      if (isTaskPlanControlReceipt(message)) {
+        toolList = [];
+        toolSourceMessageIds = [];
         continue;
       }
       if (message.type === 'available_commands') continue;
-      // Plans are no longer rendered inline — they surface in the docked
-      // PinnedPlan bar above the composer, which reads the raw list directly.
-      // A plan also closes the preceding tool receipt. Without this boundary,
-      // update_plan and the next unrelated file operation are merged and a
-      // failure can be labelled with the later operation's target.
-      if (message.type === 'plan') {
-        toolList = [];
-        toolSourceMessageIds = [];
-        diffsChanges = [];
-        diffsSourceMessageIds = [];
-        diffsTurnId = undefined;
-        continue;
-      }
       // Connection-handshake status banners (connecting/connected/authenticated/
       // session_active) are implementation noise: never render them as chat
       // items, and never let them fragment the tool-execution trace below.
@@ -859,22 +832,6 @@ const MessageList: React.FC<{
         }
       }
       if (message.type === 'tool_group') {
-        if (message.content.length === 1) {
-          const writeFileResults = message.content
-            .filter(isSuccessfulWriteFileResult)
-            .map((item) => item.result_display as WriteFileResult);
-          const sourceMessageId = getMessageBusinessIdentity(message);
-          if (writeFileResults.length && writeFileResults[0].file_diff && sourceMessageId) {
-            pushFileDffChanges(
-              parseDiff(writeFileResults[0].file_diff, writeFileResults[0].file_name),
-              sourceMessageId,
-              message.created_at ?? 0,
-              message.msg_id,
-              message.turn_id
-            );
-            continue;
-          }
-        }
         pushToolList(message);
         continue;
       }
@@ -884,34 +841,24 @@ const MessageList: React.FC<{
       }
       toolList = [];
       toolSourceMessageIds = [];
-      diffsChanges = [];
-      diffsSourceMessageIds = [];
-      diffsTurnId = undefined;
+      if (message.type === 'thinking' && !thinkingDisplay.visible) continue;
       result.push(message);
     }
-    const visibleArtifacts = artifacts
-      .filter((artifact) => {
-        if (artifact.kind === 'cron_trigger') return artifact.status === 'active';
-        if (artifact.kind === 'skill_suggest') return artifact.status === 'pending';
-        return false;
-      })
-      .map<IArtifactVO>((artifact) => ({
-        type: 'artifact',
-        id: `conversation-artifact:${artifact.conversation_artifact_id}`,
-        artifact,
-        created_at: artifact.created_at,
-      }));
+    return result;
+  }, [list, thinkingDisplay.visible, conversationContext?.isProcessing]);
 
-    if (visibleArtifacts.length === 0) {
-      // Common streaming case: nothing to interleave, and `result` is already in
-      // arrival (created_at) order — skip the O(n log n) re-sort that otherwise
-      // runs on every streamed token and janks long conversations.
-      return result;
-    }
-    return [...result, ...visibleArtifacts].toSorted(
-      (a, b) => getProcessedItemCreatedAt(a) - getProcessedItemCreatedAt(b)
-    );
-  }, [artifacts, list]);
+  const delegation = useMemo(() => resolveConversationDelegation(conversationContext?.conversation_id, execution,
+    assignTurnIdsFromUserRequests(list.map(message => {
+      const role = getProcessedItemRole(message);
+      return { id: message.id, turnId: role === 'user' ? message.msg_id : message.turn_id, role,
+        createdAt: message.created_at ?? 0,
+        displayAt: message.type === 'text' ? message.content.display_at_ms : undefined,
+        sourceMessageIds: getProcessedItemSourceMessageIds(message),
+        turnStartedAt: getProcessedItemTurnStartedAt(message) };
+    }), {
+      activeTurnId: conversationContext?.activeTurnId,
+      activeRequestMessageId: conversationContext?.activeRequestMessageId,
+    })), [conversationContext?.conversation_id, conversationContext?.activeTurnId, conversationContext?.activeRequestMessageId, execution, list]);
 
   const displayList = useMemo<IProcessedItem[]>(() => {
     const itemById = new Map<string, IRenderableItem>();
@@ -924,16 +871,40 @@ const MessageList: React.FC<{
         turnId: role === 'user' ? getProcessedItemMsgId(item) : getProcessedItemTurnId(item),
         role,
         createdAt: getProcessedItemCreatedAt(item),
+        displayAt: item.type === 'text' ? item.content.display_at_ms : undefined,
         processState: getProcessItemState(item),
         processStartedAt: getProcessedItemProcessStartedAt(item),
         processEndedAt: getProcessedItemProcessEndedAt(item),
+        turnStartedAt: getProcessedItemTurnStartedAt(item),
+        turnEndedAt: getProcessedItemTurnEndedAt(item),
+        terminal: isTerminalAssistantItem(item),
         sourceMessageIds: getProcessedItemSourceMessageIds(item),
+        continuationOfMessageId: item.type === 'text' ? item.content.continuation_of_message_id : undefined,
+        publicText: item.type === 'text' && item.position === 'left',
       };
     });
     const modelInput = assignTurnIdsFromUserRequests(rawModelInput, {
       activeTurnId: conversationContext?.activeTurnId,
       activeRequestMessageId: conversationContext?.activeRequestMessageId,
     });
+    const creationOwnerMessageIdByTurn = new Map<MessageId, MessageId>();
+    for (const entry of modelInput) {
+      if (!entry.turnId || entry.role !== 'user') continue;
+      const ownerMessageId = entry.sourceMessageIds?.find(messageId =>
+        creationTaskOwnerMessageIds.has(messageId)
+      );
+      if (ownerMessageId) creationOwnerMessageIdByTurn.set(entry.turnId, ownerMessageId);
+    }
+    const finalAssistantTextByTurn = new Map<MessageId, IMessageText>();
+    for (const entry of modelInput) {
+      if (!entry.turnId || entry.role !== 'assistant') continue;
+      const item = itemById.get(entry.id);
+      if (item?.type !== 'text' || item.position !== 'left') continue;
+      const current = finalAssistantTextByTurn.get(entry.turnId);
+      if (!current || entry.createdAt >= getProcessedItemCreatedAt(current)) {
+        finalAssistantTextByTurn.set(entry.turnId, item);
+      }
+    }
 
     const disclosureItems = buildTurnDisclosureItems(modelInput, {
       tailClosed: conversationContext?.isProcessing !== true,
@@ -949,7 +920,7 @@ const MessageList: React.FC<{
           const item = itemById.get(entry.itemId);
           if (!item) return undefined;
           const state = getProcessItemState(item);
-          const summary = buildProcessReceiptSummary(item, state, t, workspaceRoots);
+          const summary = buildProcessReceiptSummary(item, state, t, workspaceRoots, { language: toolLanguage });
           return {
             type: 'process_receipt',
             id: entry.id,
@@ -962,15 +933,25 @@ const MessageList: React.FC<{
             icon: summary.icon,
             defaultExpanded: summary.defaultExpanded,
             hasDetail: summary.hasDetail,
+            recovered: summary.recovered,
           };
         }
 
+        const finalTextMessage = finalAssistantTextByTurn.get(entry.turnId);
+        const finalAnswer = finalTextMessage && !entry.processItemIds.includes(getProcessedItemAnchorId(finalTextMessage))
+          ? toDisplayText(finalTextMessage.content.content)
+          : undefined;
         const processItems = entry.processItemIds
           .map((id) => itemById.get(id))
-          .filter((item): item is IRenderableItem => Boolean(item));
+          .filter((item): item is IRenderableItem =>
+            item !== undefined &&
+            !isHiddenProcessItem(item)
+          );
 
         return {
           type: 'turn_process_disclosure',
+          finalAnswer,
+          hasInterruptedReply: entry.state === 'canceled' && !entry.running && Boolean(finalAnswer?.trim()),
           id: entry.id,
           msg_id: entry.turnId,
           processItems,
@@ -985,75 +966,6 @@ const MessageList: React.FC<{
         };
       })
       .filter((item): item is IProcessedItem => Boolean(item));
-
-    // ── Live current-step strip: while the tail turn is still producing
-    // output, append one synthetic row after the newest content so the user
-    // can tell the task is running (the header reads "processed" throughout
-    // the lifecycle). It disappears as soon as the turn settles. ──
-    const isStreamingReplyText = (entry: IProcessedItem | undefined): boolean =>
-      !!entry && 'type' in entry && entry.type === 'text' && (entry as IMessageText).position === 'left';
-
-    const buildTurnLiveStep = (items: IProcessedItem[]): ITurnLiveStepVO | undefined => {
-      if (conversationContext?.isProcessing !== true) return undefined;
-      const tailDisclosure = items.findLast(
-        (entry): entry is ITurnProcessDisclosureVO => 'type' in entry && entry.type === 'turn_process_disclosure'
-      );
-      if (!tailDisclosure) return undefined;
-      const plan = planTurnLiveStep({
-        isProcessing: true,
-        disclosure: {
-          running: tailDisclosure.running,
-          processItems: tailDisclosure.processItems.map((processItem) => {
-            const anchorId = getProcessedItemAnchorId(processItem);
-            return {
-              id: anchorId,
-              state: tailDisclosure.processItemStates[anchorId] ?? getProcessItemState(processItem),
-            };
-          }),
-        },
-        hasStreamingReplyText: isStreamingReplyText(items.at(-1)),
-      });
-      if (!plan) return undefined;
-
-      let label: string;
-      let icon: TurnProcessReceiptIcon;
-      if (plan.kind === 'item') {
-        const processItem = tailDisclosure.processItems.find(
-          (candidate) => getProcessedItemAnchorId(candidate) === plan.itemId
-        );
-        if (processItem && 'type' in processItem && processItem.type === 'thinking') {
-          label = t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' });
-          icon = 'thinking';
-        } else if (processItem) {
-          const summary = buildProcessReceiptSummary(processItem, plan.state, t, workspaceRoots);
-          label = summary.label;
-          icon = summary.icon;
-        } else {
-          label = t('messages.processReceipt.preparingAction', { defaultValue: 'Preparing next action' });
-          icon = 'status';
-        }
-      } else if (plan.kind === 'composing') {
-        label = t('messages.turnLiveStep.composing', { defaultValue: 'Composing the reply' });
-        icon = 'status';
-      } else if (plan.kind === 'analyzing') {
-        label = t('messages.turnLiveStep.analyzing', { defaultValue: 'Analyzing the request' });
-        icon = 'thinking';
-      } else {
-        label = t('messages.processReceipt.preparingAction', { defaultValue: 'Preparing next action' });
-        icon = 'status';
-      }
-
-      return {
-        type: 'turn_live_step',
-        id: `turn-live-step-${tailDisclosure.msg_id}`,
-        msg_id: tailDisclosure.msg_id,
-        label,
-        state: plan.state,
-        icon,
-        sourceMessageIds: [],
-        created_at: tailDisclosure.endAt,
-      };
-    };
 
     // ── Turn deliverables: aggregate each successfully closed turn's verified
     // file artifacts and surface them as one card below that turn's last item
@@ -1084,26 +996,14 @@ const MessageList: React.FC<{
     }
 
     const deliverablesByTurn = collectTurnDeliverables(candidates, { workspaceRoots, turnGates });
-    const liveStepForDisclosures = buildTurnLiveStep(disclosureItems);
-    if (deliverablesByTurn.size === 0) {
-      return liveStepForDisclosures ? [...disclosureItems, liveStepForDisclosures] : disclosureItems;
-    }
-
     const turnIdByAnchorId = new Map<string, MessageId | undefined>();
     for (const entry of modelInput) turnIdByAnchorId.set(entry.id, entry.turnId);
-    const finalAssistantTextByTurn = new Map<MessageId, IMessageText>();
-    for (const entry of modelInput) {
-      if (!entry.turnId || entry.role !== 'assistant') continue;
-      const item = itemById.get(entry.id);
-      if (item?.type === 'text' && item.position === 'left') {
-        finalAssistantTextByTurn.set(entry.turnId, item);
-      }
-    }
     const getDisplayItemTurnId = (entry: IProcessedItem): MessageId | undefined => {
       if ('type' in entry && entry.type === 'turn_process_disclosure') return entry.msg_id;
       if ('type' in entry && entry.type === 'process_receipt') return undefined;
       if ('type' in entry && entry.type === 'turn_deliverables') return entry.turn_id;
       if ('type' in entry && entry.type === 'turn_actions') return entry.turn_id;
+      if ('type' in entry && entry.type === 'turn_creation_tasks') return entry.turn_id;
       return turnIdByAnchorId.get(getProcessedItemAnchorId(entry));
     };
 
@@ -1113,27 +1013,49 @@ const MessageList: React.FC<{
       if (turnId && deliverablesByTurn.has(turnId)) lastIndexByTurn.set(turnId, index);
     });
 
-    const withDeliverables: IProcessedItem[] = [];
+    const creationTaskPlacements = creationTaskPlacementAfterIndices(
+      disclosureItems.map(getDisplayItemTurnId),
+      creationOwnerMessageIdByTurn
+    );
+    if (deliverablesByTurn.size === 0 && creationTaskPlacements.size === 0) return disclosureItems;
+
+    // A turn's products belong inside its response, before the shared copy /
+    // time footer. Decorate files and media together so neither can land after
+    // turn_actions, and keep the original user bubble's actions independent.
+    const withOutputs: IProcessedItem[] = [];
     disclosureItems.forEach((entry, index) => {
-      withDeliverables.push(entry);
+      withOutputs.push(entry);
       const turnId = getDisplayItemTurnId(entry);
-      if (!turnId || lastIndexByTurn.get(turnId) !== index) return;
-      const items = deliverablesByTurn.get(turnId);
-      if (!items) return;
-      withDeliverables.push({
-        type: 'turn_deliverables',
-        id: `turn-deliverables-${turnId}`,
-        turn_id: turnId,
-        items,
-        sourceMessageIds: Array.from(
-          new Set(items.flatMap((item) => item.sources.flatMap((source) => source.sourceMessageIds)))
-        ),
-        created_at: getProcessedItemCreatedAt(entry),
-      });
+      if (!turnId) return;
+      const items = lastIndexByTurn.get(turnId) === index ? deliverablesByTurn.get(turnId) : undefined;
+      const placement = creationTaskPlacements.get(index);
+      if (!items && !placement) return;
+      if (items) {
+        withOutputs.push({
+          type: 'turn_deliverables',
+          id: `turn-deliverables-${turnId}`,
+          turn_id: turnId,
+          items,
+          sourceMessageIds: Array.from(
+            new Set(items.flatMap((item) => item.sources.flatMap((source) => source.sourceMessageIds)))
+          ),
+          created_at: getProcessedItemCreatedAt(entry),
+        });
+      }
+      if (placement) {
+        withOutputs.push({
+          type: 'turn_creation_tasks',
+          id: `turn-creation-tasks-${placement.turnId}`,
+          turn_id: placement.turnId,
+          message_id: placement.messageId,
+          sourceMessageIds: [placement.messageId],
+          created_at: getProcessedItemCreatedAt(entry),
+        });
+      }
       const actionMessage = finalAssistantTextByTurn.get(turnId);
       const actionMessageId = actionMessage ? getMessageBusinessIdentity(actionMessage) : undefined;
-      if (actionMessage) {
-        withDeliverables.push({
+      if (actionMessage && turnGates.get(turnId)?.running !== true) {
+        withOutputs.push({
           type: 'turn_actions',
           id: `turn-actions-${turnId}`,
           turn_id: turnId,
@@ -1143,16 +1065,16 @@ const MessageList: React.FC<{
         });
       }
     });
-
-    const liveStep = buildTurnLiveStep(withDeliverables);
-    return liveStep ? [...withDeliverables, liveStep] : withDeliverables;
+    return withOutputs;
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
     conversationContext?.isProcessing,
     conversationContext?.stopNotice,
+    creationTaskOwnerMessageIds,
     processedList,
     t,
+    toolLanguage,
     workspaceRoots,
   ]);
 
@@ -1161,7 +1083,7 @@ const MessageList: React.FC<{
       displayList.findLastIndex(
         (item) =>
           !('type' in item &&
-            ['turn_process_disclosure', 'process_receipt', 'artifact', 'turn_live_step'].includes(item.type)) &&
+            ['turn_process_disclosure', 'process_receipt'].includes(item.type)) &&
           (item as TMessage).type === 'text' &&
           (item as TMessage).position === 'right'
       ),
@@ -1173,7 +1095,7 @@ const MessageList: React.FC<{
       conversationContext?.isProcessing === true &&
       index > lastUserTextIndex &&
       !('type' in item &&
-        ['turn_process_disclosure', 'process_receipt', 'artifact', 'turn_live_step'].includes(item.type)) &&
+        ['turn_process_disclosure', 'process_receipt'].includes(item.type)) &&
       (item as TMessage).type === 'text' &&
       (item as TMessage).position === 'left',
     [conversationContext?.isProcessing, lastUserTextIndex]
@@ -1195,14 +1117,16 @@ const MessageList: React.FC<{
     handleScroll,
     handleWheel,
     handlePointerDown,
+    handleKeyDown,
     showScrollButton,
     scrollToBottom,
     scrollElementIntoView,
     hideScrollButton,
   } = useAutoScroll({
     messages: list,
-    itemCount: displayList.length,
+    itemCount: displayList.length + (pauseError ? 1 : 0),
   });
+  const handleColumnRef = useConversationColumnRef(handleContentRef);
 
   // ── Windowed history: load older messages on scroll-up with a scroll-anchor ──
   const scrollerElRef = useRef<HTMLDivElement | null>(null);
@@ -1303,7 +1227,11 @@ const MessageList: React.FC<{
         if (detail.msgId && sourceMessageIds.includes(detail.msgId)) return true;
         return false;
       });
-      if (targetIndex < 0) return;
+      if (targetIndex < 0) {
+        if (detail.loadOlder) setPendingQuestionJump(detail);
+        return;
+      }
+      setPendingQuestionJump(null);
 
       hideScrollButton();
       requestAnimationFrame(() => {
@@ -1323,6 +1251,34 @@ const MessageList: React.FC<{
     };
   }, [conversationContext?.conversation_id, displayList, hideScrollButton, scrollElementIntoView]);
 
+  useEffect(() => {
+    if (!pendingQuestionJump) return;
+    if (pendingQuestionJump.conversation_id !== conversationContext?.conversation_id) {
+      setPendingQuestionJump(null);
+      return;
+    }
+    const found = displayList.some((item) => {
+      const ids = getProcessedItemSourceMessageIds(item);
+      return Boolean((pendingQuestionJump.messageId && ids.includes(pendingQuestionJump.messageId))
+        || (pendingQuestionJump.msgId && ids.includes(pendingQuestionJump.msgId)));
+    });
+    if (found) {
+      window.dispatchEvent(new CustomEvent<ChatMessageJumpDetail>(CHAT_MESSAGE_JUMP_EVENT, {
+        detail: { ...pendingQuestionJump, loadOlder: false },
+      }));
+    } else if (!loadingQuestionPage && !loadingOlder && hasMoreOlder && onLoadOlder) {
+      const attemptedJump = pendingQuestionJump;
+      setLoadingQuestionPage(true);
+      void Promise.resolve(onLoadOlder()).then((advanced) => {
+        if (advanced === false) setPendingQuestionJump(current => current === attemptedJump ? null : current);
+      }).catch(() => {
+        setPendingQuestionJump(current => current === attemptedJump ? null : current);
+      }).finally(() => setLoadingQuestionPage(false));
+    } else if (!loadingOlder && !hasMoreOlder) {
+      setPendingQuestionJump(null);
+    }
+  }, [conversationContext?.conversation_id, displayList, hasMoreOlder, loadingOlder, loadingQuestionPage, onLoadOlder, pendingQuestionJump]);
+
   // Click scroll button
   const handleScrollButtonClick = () => {
     hideScrollButton();
@@ -1330,26 +1286,79 @@ const MessageList: React.FC<{
   };
 
   const renderTurnDisclosure = (item: ITurnProcessDisclosureVO, highlighted: boolean) => {
+    const linkedDelegation = delegation?.turnId === item.msg_id ? delegation : undefined;
+    const presentation = delegatedTurnPresentation(item, linkedDelegation);
     const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
       item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
+    const visibleProcessItems = selectJournalProcessItems(item.processItems, {
+      running: item.running,
+      isPrivateActivity: isPrivateJournalActivity,
+      isRunning: (processItem) => getDisclosureProcessItemState(processItem) === 'running',
+      textOf: (processItem) => processItem.type === 'text' ? toDisplayText(processItem.content.content) : undefined,
+      finalText: item.finalAnswer,
+    });
+    const renderJournalProcessItem = (processItem: IRenderableItem) => {
+      const processState = getDisclosureProcessItemState(processItem);
+      const layoutKind = getProcessItemLayoutKind(processItem);
+
+      if (layoutKind === 'text' || layoutKind === 'thinking' || layoutKind === 'tool') {
+        return renderProcessTraceItem(
+          processItem,
+          layoutKind === 'tool' ? 'receipt' : 'list',
+          workspaceRoots,
+          layoutKind === 'thinking' || !item.running ? processState : undefined,
+          processState === 'failed' && item.state !== 'failed'
+        );
+      }
+
+      const recoveredByTurn = processState === 'failed' && item.state !== 'failed';
+      const summary = buildProcessReceiptSummary(
+        processItem,
+        processState,
+        t,
+        workspaceRoots,
+        { recovered: recoveredByTurn, language: toolLanguage }
+      );
+      const recovered = recoveredByTurn || summary.recovered === true;
+      return (
+        <TurnProcessReceipt
+          receipt={{
+            id: `journal-receipt-${getProcessedItemAnchorId(processItem)}`,
+            item: processItem,
+            label: summary.label,
+            state: processState,
+            icon: summary.icon,
+            defaultExpanded: summary.defaultExpanded,
+            hasDetail: summary.hasDetail,
+            recovered,
+          }}
+          highlighted={highlighted}
+          renderProcessItem={(detailItem) =>
+            renderProcessTraceItem(
+              detailItem,
+              'receipt',
+              workspaceRoots,
+              item.running ? undefined : processState,
+              recovered
+            )
+          }
+        />
+      );
+    };
 
     return (
       <TurnProcessDisclosure
-        item={item}
+        item={{ ...presentation, processItems: visibleProcessItems }}
+        activityLabel={linkedDelegation ? linkedDelegation.detail
+          ? t('messages.delegation.activity', { status: t(`agentExecution.status.execution.${linkedDelegation.detail.execution.status}`) })
+          : t('messages.delegation.syncing') : undefined}
+        processFooter={linkedDelegation && execution ? <DelegationProgress delegation={linkedDelegation}
+          projectStep={execution.projectStep} refetch={execution.refetch} /> : undefined}
         highlighted={highlighted}
-        renderProcessItem={(processItem, expansionControls) =>
-          renderProcessTraceItem(
-            processItem,
-            'list',
-            workspaceRoots,
-            getDisclosureProcessItemState(processItem),
-            expansionControls
-          )
-        }
+        renderProcessItem={renderJournalProcessItem}
         getProcessItemKey={getProcessedItemAnchorId}
         getProcessItemState={getDisclosureProcessItemState}
         getProcessItemLayoutKind={getProcessItemLayoutKind}
-        getProcessItemCanExpandAll={isCompletedThinkingProcessItem}
       />
     );
   };
@@ -1359,7 +1368,9 @@ const MessageList: React.FC<{
       <TurnProcessReceipt
         receipt={item}
         highlighted={highlighted}
-        renderProcessItem={(processItem) => renderProcessTraceItem(processItem, 'receipt', workspaceRoots)}
+        renderProcessItem={(processItem) =>
+          renderProcessTraceItem(processItem, 'receipt', workspaceRoots, undefined, item.recovered === true)
+        }
       />
     );
   };
@@ -1372,7 +1383,7 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-process-disclosure'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_process_disclosure'
+          className='min-w-0 message-item m-t-10px turn_process_disclosure'
           style={highlighted ? highlightStyle : undefined}
         >
           {renderTurnDisclosure(item, highlighted)}
@@ -1385,28 +1396,10 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-process-receipt'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto process_receipt'
+          className='min-w-0 message-item m-t-10px process_receipt'
           style={highlighted ? highlightStyle : undefined}
         >
           {renderProcessReceipt(item, highlighted)}
-        </div>
-      );
-    }
-    if ('type' in item && item.type === 'artifact') {
-      return (
-        <div
-          key={item.id}
-          id={`message-${getProcessedItemAnchorId(item)}`}
-          data-conversation-artifact-kind={item.artifact.kind}
-          data-testid={`conversation-artifact-${item.artifact.kind}`}
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto'
-          style={highlighted ? highlightStyle : undefined}
-        >
-          {item.artifact.kind === 'cron_trigger' ? (
-            <MessageCronTrigger artifact={item.artifact} />
-          ) : (
-            <MessageSkillSuggest artifact={item.artifact} />
-          )}
         </div>
       );
     }
@@ -1416,7 +1409,7 @@ const MessageList: React.FC<{
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-deliverables'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_deliverables'
+          className='min-w-0 message-item m-t-10px turn_deliverables'
           style={highlighted ? highlightStyle : undefined}
         >
           <TurnDeliverablesCard
@@ -1427,41 +1420,19 @@ const MessageList: React.FC<{
         </div>
       );
     }
+    if ('type' in item && item.type === 'turn_creation_tasks') {
+      return <ConversationCreationTaskCards messageId={item.message_id} />;
+    }
     if ('type' in item && item.type === 'turn_actions') {
       return (
         <div
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
           data-testid='turn-actions'
-          className='min-w-0 message-item px-8px max-w-full md:max-w-780px mx-auto turn_actions'
+          className='min-w-0 message-item turn_actions'
           style={highlighted ? highlightStyle : undefined}
         >
           <MessageText message={item.message} actionsOnly />
-        </div>
-      );
-    }
-    if ('type' in item && item.type === 'turn_live_step') {
-      return (
-        <div
-          key={item.id}
-          id={`message-${getProcessedItemAnchorId(item)}`}
-          data-testid='turn-live-step'
-          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_live_step'
-        >
-          <div className='turn-live-step'>
-            <TurnProcessReceipt
-              receipt={{
-                id: item.id,
-                item,
-                label: item.label,
-                state: item.state,
-                icon: item.icon,
-                defaultExpanded: false,
-                hasDetail: false,
-              }}
-              renderProcessItem={() => null}
-            />
-          </div>
         </div>
       );
     }
@@ -1470,14 +1441,25 @@ const MessageList: React.FC<{
         <div
           key={item.id}
           id={`message-${getProcessedItemAnchorId(item)}`}
-          className={'min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto ' + item.type}
+          className={'min-w-0 message-item m-t-10px ' + item.type}
           style={highlighted ? highlightStyle : undefined}
         >
           {renderProcessTraceItem(item, 'list', workspaceRoots)}
         </div>
       );
     }
+    const continuation = item.type === 'text' ? item.content.continuation_of_message_id : undefined;
+    const sourceLoaded = !continuation || processedList.some(source =>
+      source.type === 'text' && source.position === 'left' && source.turn_id === item.turn_id &&
+      getProcessedItemSourceMessageIds(source).includes(continuation));
     return (
+      <React.Fragment key={(item as TMessage).id}>
+      {!sourceLoaded && <div role='status' data-testid='missing-reply-continuation' className='text-t-tertiary text-sm m-t-10px'>
+        {t('messages.missingReplyContinuation')}
+        {hasMoreOlder && onLoadOlder && <button type='button' disabled={loadingOlder} onClick={() => void onLoadOlder()}>
+          {t('messages.loadEarlierReply')}
+        </button>}
+      </div>}
       <MessageItem
         message={item as TMessage}
         key={(item as TMessage).id}
@@ -1487,6 +1469,7 @@ const MessageList: React.FC<{
           movedActionMessageIds.has((item as TMessage).id)
         }
       ></MessageItem>
+      </React.Fragment>
     );
   };
 
@@ -1494,7 +1477,7 @@ const MessageList: React.FC<{
     return <MessageListSkeleton />;
   }
 
-  if (displayList.length === 0 && emptySlot) {
+  if (displayList.length === 0 && !pauseError && emptySlot && conversationContext?.isProcessing !== true) {
     return <div className='relative flex-1 h-full flex items-center justify-center'>{emptySlot}</div>;
   }
 
@@ -1503,22 +1486,27 @@ const MessageList: React.FC<{
       <ConversationQuestionLocator conversation_id={conversationContext?.conversation_id} />
 
       {/* Use PreviewGroup to wrap all messages for cross-message image preview */}
-      <Image.PreviewGroup actionsLayout={['zoomIn', 'zoomOut', 'originalSize', 'rotateLeft', 'rotateRight']}>
+      <Image.PreviewGroup
+        className='conversation-image-preview'
+        actionsLayout={['zoomIn', 'zoomOut', 'originalSize', 'rotateLeft', 'rotateRight']}
+      >
         <ImagePreviewContext.Provider value={{ inPreviewGroup: true }}>
           <div
             ref={handleScrollerRef}
             data-testid='message-list-scroller'
-            className='flex-1 h-full overflow-y-auto pb-10px box-border'
+            className={`flex-1 h-full overflow-y-auto pb-10px box-border ${contentStyles.scroller}`}
             style={{ overflowAnchor: 'none' }}
             onPointerDown={handlePointerDown}
+            onKeyDown={handleKeyDown}
             onScroll={handleScrollWithPaging}
             onWheel={handleWheel}
           >
-            <div ref={handleContentRef} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
+            <div ref={handleColumnRef} className={contentStyles.column} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
               {displayList.map((item, index) => (
                 <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
               ))}
+              {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
               <div className='h-20px' />
             </div>
           </div>
@@ -1530,15 +1518,17 @@ const MessageList: React.FC<{
           {/* Gradient mask */}
           <div className='absolute bottom-0 left-0 right-0 h-100px pointer-events-none' />
           {/* Scroll button */}
-          <div className='absolute bottom-20px left-50% transform -translate-x-50% z-100'>
-            <div
+          <div className='absolute bottom-20px right-16px z-100'>
+            <button
+              type='button'
               className='flex items-center justify-center w-40px h-40px rd-full bg-base shadow-lg cursor-pointer hover:bg-1 transition-all hover:scale-110 border-1px border-solid border-3'
               onClick={handleScrollButtonClick}
               title={t('messages.scrollToBottom')}
+              aria-label={t('messages.scrollToBottom')}
               style={{ lineHeight: 0 }}
             >
               <Down theme='filled' size='20' fill={iconColors.secondary} style={{ display: 'block' }} />
-            </div>
+            </button>
           </div>
         </>
       )}

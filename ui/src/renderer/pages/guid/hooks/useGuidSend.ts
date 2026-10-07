@@ -5,41 +5,48 @@
  * Based on AionUi (https://github.com/iOfficeAI/AionUi)
  */
 
+import { ipcBridge } from '@/common';
+import type { TProviderWithModel } from '@/common/config/storage';
 import {
   conversationTarget,
+  parseConversationId,
   type ConversationId,
-  type ExecutionTemplateId,
-  type McpServerId,
 } from '@/common/types/ids';
-import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils';
-import { ipcBridge } from '@/common';
-import type { IMcpServer, TProviderWithModel } from '@/common/config/storage';
-import { buildAgentConversationParams } from '@/common/utils/buildAgentConversationParams';
-import { toSessionMcpServer } from '@/renderer/hooks/mcp/catalog';
-import { emitter } from '@/renderer/utils/emitter';
-import { Message } from '@arco-design/web-react';
-import { useCallback, useRef } from 'react';
-import { type TFunction } from 'i18next';
-import type { NavigateFunction } from 'react-router-dom';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
+import type { PendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
+import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
-import type { PendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
-import { planGuidEntry, isAutoWorkEntry } from './autoWorkEntry';
-import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
-import type { AvailableAgent, EffectiveAgentInfo } from '../types';
+import { emitter } from '@/renderer/utils/emitter';
+import { Message } from '@arco-design/web-react';
+import type { TFunction } from 'i18next';
+import { useCallback, useRef } from 'react';
+import type { NavigateFunction } from 'react-router-dom';
 import type {
-  TDecisionPolicy,
-  TDelegationPolicy,
-  TExecutionModelPool,
-} from '@/common/types/agentExecution/agentExecutionTypes';
+  ExecutableAgentPreset,
+  GuidAgentSelection,
+} from '../types';
+import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
+import type {
+  AgentResourceSelection,
+  CreateAgentSessionRequest,
+  OfficialPresetTemplate,
+} from '@/common/types/agentPlatform';
+import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
+import type { GuidCollaborationConfig } from './useGuidCollaboration';
 import {
-  assertCreatedConversationPreset,
-  presetIdFromSelectionKey,
-} from './presetConversationContract';
+  WorkspaceDirectoryUnavailableError,
+  validateExistingWorkspaceDirectory,
+} from '@/renderer/components/workspace';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
+import type { PluginDeliveryRequirement } from '@/common/types/pluginDevelopment';
 
 export type GuidSendDeps = {
-  // Input state
+  requiredModules?: string[];
+  pluginDelivery?: PluginDeliveryRequirement;
+  beforeSend?: () => Promise<void>;
+  afterSend?: () => void;
   input: string;
   setInput: React.Dispatch<React.SetStateAction<string>>;
   files: string[];
@@ -48,57 +55,30 @@ export type GuidSendDeps = {
   setDir: React.Dispatch<React.SetStateAction<string>>;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   loading: boolean;
-
-  // Agent state
-  selectedAgent: string;
-  selectedAgentKey: string;
-  selectedAgentInfo: AvailableAgent | undefined;
-  selectedMode: string;
-
+  selection: GuidAgentSelection;
+  selectedPreset: ExecutableAgentPreset | undefined;
+  selectedTemplate?: OfficialPresetTemplate;
   current_model: TProviderWithModel | undefined;
-
-  // Agent helpers
-  findAgentByKey: (key: string) => AvailableAgent | undefined;
-  getEffectiveAgentType: (
-    agentInfo: { agent_type: string; backend?: string } | undefined,
-  ) => EffectiveAgentInfo;
-  guidDisabledBuiltinSkills: string[] | undefined;
-  guidEnabledSkills: string[] | undefined;
-  availableMcpServers: IMcpServer[];
-  selectedMcpServerIds: McpServerId[] | undefined;
-
-  /** Applies the Guid page's advanced drafts (knowledge/AutoWork/IDMM) onto the
-   * freshly created conversation, before navigation. Never throws. */
+  reasoningEffort?: SessionReasoningEffort;
   applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
-
-  /** Current AutoWork draft. When enabled with a tag, the entry starts an
-   * AutoWork session (no initial message) instead of a normal chat send —
-   * sending a first message would race the AutoWork turn and surface
-   * "conversation N is already running". */
   autoWork: AutoWorkDraftValue;
-
-  delegationPolicy: TDelegationPolicy;
-  executionModelPool?: TExecutionModelPool;
-  decisionPolicy: TDecisionPolicy;
-  /** Optional reusable collaboration input selected in the composer. It is an
-   * entry default only; the created Execution copies it and keeps no live FK. */
-  executionTemplateId?: ExecutionTemplateId;
-
-  // Mention state reset
+  /** Whether the selected target may receive the staged workspace resource. */
+  workspaceEnabled: boolean;
+  /** Stable preset capability/resource resolution must finish before launch. */
+  resourceResolutionReady: boolean;
+  /** Product-selected resources. The backend derives ownership and operations. */
+  resourceSelections: AgentResourceSelection[];
+  /** Session-scoped behavior for the exact selected Knowledge resources. */
+  knowledgePolicy?: NonNullable<CreateAgentSessionRequest['knowledge_policy']>;
+  sessionCapabilities?: CreateAgentSessionRequest['session_capabilities'];
+  collaboration?: GuidCollaborationConfig;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
   setMentionSelectorOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionActiveIndex: React.Dispatch<React.SetStateAction<number>>;
-
-  // Navigation
   navigate: NavigateFunction;
   t: TFunction;
-
-  /** Show the instant "creating conversation" loading overlay the moment the
-   * user sends, before the create round-trip resolves. Optional so callers
-   * outside the conversation shell degrade gracefully. */
   beginPending?: (payload: PendingConversation) => void;
-  /** Tear the loading overlay down (on success after navigate, or on failure). */
   endPending?: () => void;
 };
 
@@ -109,35 +89,93 @@ export type GuidSendResult = {
 };
 
 /**
- * Hook that manages the send logic for conversation creation.
+ * A collaboration draft owns the first piece of work when it selects more than
+ * one model, a saved collaboration plan, or an explicit non-default policy. A
+ * single-model automatic policy is the ordinary chat default: it grants later
+ * delegation but must not invent an AgentExecution before the lead Agent has
+ * handled the user's message.
  */
+export const shouldStartGuidCollaboration = (
+  collaboration: GuidCollaborationConfig | undefined
+): collaboration is GuidCollaborationConfig =>
+  Boolean(
+    collaboration &&
+      (collaboration.execution_model_pool.mode === 'range' ||
+        collaboration.execution_template_id !== null ||
+        collaboration.delegation_policy !== 'automatic' ||
+        collaboration.decision_policy !== 'automatic')
+  );
+
+const startGuidCollaboration = async (
+  conversationId: ConversationId,
+  goal: string,
+  workspace: string,
+  model: TProviderWithModel,
+  collaboration: GuidCollaborationConfig
+): Promise<void> => {
+  const shared = {
+    goal: goal.trim(),
+    ...(workspace.trim() ? { work_dir: workspace.trim() } : {}),
+    delegation_policy: collaboration.delegation_policy,
+    decision_policy: collaboration.decision_policy,
+    lead_conversation_id: conversationId,
+    lead_model: {
+      provider_id: model.id,
+      model: model.use_model,
+    },
+  };
+
+  if (collaboration.execution_template_id !== null) {
+    await ipcBridge.agentExecutionTemplate.createExecution.invoke({
+      execution_template_id: collaboration.execution_template_id,
+      request: shared,
+    });
+    return;
+  }
+
+  await ipcBridge.agentExecution.create.invoke({
+    ...shared,
+    model_pool: collaboration.execution_model_pool,
+  });
+};
+
+const discardFailedGuidSession = async (conversationId: ConversationId): Promise<void> => {
+  try {
+    await ipcBridge.agentPlatform.sessions.delete.invoke({
+      agent_session_id: conversationId,
+    });
+  } catch (cleanupError) {
+    // Preserve the admission error shown to the user. Cleanup failures remain
+    // diagnostic: the backend deletion saga is the only authority that can
+    // decide whether a late execution admission made this Session non-empty.
+    console.error('[useGuidSend] Failed to discard incomplete AgentSession:', cleanupError);
+  }
+};
+
+/** Creates a frozen AgentPreset Session from a workbench Agent selection. */
 export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const {
     input,
     setInput,
     files,
     setFiles,
-    dir,
     setDir,
     setLoading,
     loading,
-    selectedAgent,
-    selectedAgentKey,
-    selectedAgentInfo,
-    selectedMode,
+    selection,
+    selectedPreset,
+    selectedTemplate,
     current_model,
-    findAgentByKey,
-    getEffectiveAgentType,
-    guidDisabledBuiltinSkills,
-    guidEnabledSkills,
-    availableMcpServers,
-    selectedMcpServerIds,
+    reasoningEffort,
     applyAdvancedConfig,
     autoWork,
-    delegationPolicy,
-    executionModelPool,
-    decisionPolicy,
-    executionTemplateId,
+    collaboration,
+    dir,
+    workspaceEnabled,
+    resourceResolutionReady,
+    resourceSelections,
+    knowledgePolicy,
+    sessionCapabilities,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -146,227 +184,182 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
     beginPending,
     endPending,
+    requiredModules,
+    pluginDelivery,
+    beforeSend,
+    afterSend,
   } = deps;
   const sendingRef = useRef(false);
 
   const handleSend = useCallback(async () => {
-    const isCustomWorkspace = !!dir;
-    const finalWorkspace = dir || '';
-
-    // AutoWork entry (switch on + tag) creates the session and lets the backend
-    // requirement loop drive it — it must NOT also send a first message, which
-    // would start a second turn that races the AutoWork turn and loses with
-    // "conversation N is already running".
+    await beforeSend?.();
     const entryPlan = planGuidEntry(input, autoWork);
-
-    const agentInfo = selectedAgentInfo;
-    const preset_id = presetIdFromSelectionKey(selectedAgentKey);
-    const is_preset = preset_id !== undefined;
-    if (is_preset && (!agentInfo || agentInfo.preset_id !== preset_id)) {
-      throw new TypeError(
-        'The selected preset is no longer available. Refresh the preset catalog or choose another preset.',
-      );
+    if (!current_model) throw new Error('MODEL_REQUIRED');
+    if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
+    const startsCollaboration =
+      !entryPlan.autoWorkEntry && shouldStartGuidCollaboration(collaboration);
+    if (startsCollaboration && files.length > 0) {
+      throw new Error(t('guid.collaboration.attachmentsUnsupported'));
     }
+    const selectedWorkspace = workspaceEnabled ? dir.trim() : '';
+    const canonicalWorkspace = selectedWorkspace
+      ? await validateExistingWorkspaceDirectory(selectedWorkspace)
+      : '';
+    let conversationId: ConversationId;
+    let conversation;
 
-    const { agent_type: effectiveAgentType } = getEffectiveAgentType(agentInfo);
-
-    // Presets are resolved exclusively by the backend from `preset_id`.
-    // Guid-local skill controls remain valid only for bare Agent launches.
-    const enabled_skills_to_send = !is_preset && guidEnabledSkills?.length ? guidEnabledSkills : undefined;
-    const excludeBuiltinSkills = !is_preset ? guidDisabledBuiltinSkills : undefined;
-    const selectedMcpServerIdSet = new Set(selectedMcpServerIds ?? []);
-    const selectedUserMcpServerIds = availableMcpServers
-      .filter((server) => selectedMcpServerIdSet.has(server.mcp_server_id) && server.builtin !== true)
-      .map((server) => server.mcp_server_id);
-    const selectedAllSessionMcpServers = availableMcpServers
-      .filter((server) => selectedMcpServerIdSet.has(server.mcp_server_id))
-      .map((server) => toSessionMcpServer(server));
-    const selectedSessionMcpServers = availableMcpServers
-      .filter((server) => selectedMcpServerIdSet.has(server.mcp_server_id) && server.builtin === true)
-      .map((server) => toSessionMcpServer(server));
-
-    const finalEffectiveAgentType = effectiveAgentType;
-
-    // Nomi path (direct selection or preset preset with nomi as main agent)
-    if (selectedAgent === 'nomi' || (is_preset && finalEffectiveAgentType === 'nomi')) {
-      if (!current_model) {
-        Message.warning(t('conversation.noModelConfigured'));
-        return;
+    let launchPreset = selectedPreset;
+    if (selection.kind === 'template') {
+      if (!selectedTemplate || selectedTemplate.template_key !== selection.templateKey) {
+        throw new Error('AGENT_PRESET_REQUIRED');
       }
-
       try {
-        const conversation = await ipcBridge.conversation.create.invoke({
-          type: 'nomi',
-          name: entryPlan.conversationName,
-          model: current_model,
-          preset_id,
-          delegation_policy: delegationPolicy,
-          execution_model_pool: executionModelPool,
-          decision_policy: decisionPolicy,
-          execution_template_id: executionTemplateId,
-          extra: {
-            default_files: files,
-            workspace: finalWorkspace,
-            custom_workspace: isCustomWorkspace,
-            preset_enabled_skills: enabled_skills_to_send,
-            exclude_auto_inject_skills: excludeBuiltinSkills,
-            selected_mcp_server_ids: selectedUserMcpServerIds,
-            // Nomi consumes the authoritative session snapshot instead of
-            // reloading only user servers from the global MCP repository.
-            selected_session_mcp_servers: selectedAllSessionMcpServers,
-            session_mode: selectedMode,
-          },
-        });
-
-        if (!conversation || !conversation.id) {
-          Message.error(t('conversation.createFailed'));
-          return;
-        }
-        assertCreatedConversationPreset(conversation, preset_id);
-
-        // Push the Guid page's advanced drafts (knowledge/AutoWork/IDMM) onto
-        // the new conversation before navigating, so they are live when the
-        // conversation page consumes the initial message.
-        await applyAdvancedConfig?.(conversation.id);
-
-        emitter.emit('chat.history.refresh');
-
-        const initialMessage = {
-          conversation_id: conversation.id,
-          initial_admission_epoch: 0,
-          input,
-          files: files.length > 0 ? files : undefined,
-          idempotency_key: uuidv7(),
-        };
-        if (entryPlan.sendInitialMessage) {
-          sessionStorage.setItem(
-            sessionStorageKey('initial-message-nomi', conversationTarget(conversation.id)),
-            JSON.stringify(initialMessage)
-          );
-        }
-
-        seedConversationCache(conversation);
-        await navigate(`/conversation/${conversation.id}`);
-      } catch (error: unknown) {
-        console.error('Failed to create Nomi conversation:', error);
-        throw error;
+        launchPreset = await prepareOfficialAgent(
+          selectedTemplate,
+          current_model,
+        );
+      } catch (error) {
+        throw new Error(officialAgentLaunchError(error, t));
       }
+    }
+    if (
+      !launchPreset?.current_stable_revision ||
+      (selection.kind === 'preset' && launchPreset.preset_id !== selection.presetId)
+    ) {
+      throw new Error('AGENT_PRESET_REQUIRED');
+    }
+    const session = await ipcBridge.agentPlatform.sessions.create.invoke({
+      ...(requiredModules?.length ? { required_modules: requiredModules } : {}),
+      preset_id: launchPreset.preset_id,
+      title: entryPlan.conversationName,
+      model: {
+        provider_id: current_model.id,
+        model: current_model.use_model,
+      },
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
+      ...(knowledgePolicy ? { knowledge_policy: knowledgePolicy } : {}),
+      ...(sessionCapabilities ? { session_capabilities: sessionCapabilities } : {}),
+      ...(canonicalWorkspace ? { workspace: canonicalWorkspace } : {}),
+    });
+    conversationId = parseConversationId(session.agent_session_id);
+    try {
+      conversation = await ipcBridge.conversation.get.invoke({
+        conversation_id: conversationId,
+      });
+      if (!conversation?.id) {
+        throw new Error(
+          'AgentSession was created without a Conversation projection'
+        );
+      }
+      await applyAdvancedConfig?.(conversationId);
+
+      if (startsCollaboration) {
+        try {
+          await startGuidCollaboration(
+            conversationId,
+            input,
+            conversation.extra?.workspace ?? canonicalWorkspace,
+            current_model,
+            collaboration
+          );
+        } catch (error) {
+          // A lost HTTP response must not discard a Session whose Execution
+          // was already committed. Recover through the canonical link before
+          // treating admission as failed.
+          const recovered = await ipcBridge.conversation.get
+            .invoke({ conversation_id: conversationId })
+            .catch(() => null);
+          if (!recovered?.linked_execution_id) throw error;
+          conversation = recovered;
+        }
+        const linked = await ipcBridge.conversation.get
+          .invoke({ conversation_id: conversationId })
+          .catch((error) => {
+            console.error('[useGuidSend] Collaboration started but link refresh failed:', error);
+            return null;
+          });
+        if (linked) conversation = linked;
+      } else if (entryPlan.sendInitialMessage) {
+        sessionStorage.setItem(
+          sessionStorageKey(
+            'initial-message-nomi',
+            conversationTarget(conversationId)
+          ),
+          JSON.stringify({
+            conversation_id: conversationId,
+            initial_admission_epoch: 0,
+            input,
+            files: files.length > 0 ? files : undefined,
+            idempotency_key: uuidv7(),
+            ...(pluginDelivery ? { plugin_delivery: pluginDelivery } : {}),
+          })
+        );
+      }
+
+    } catch (error) {
+      await discardFailedGuidSession(conversationId);
+      throw error;
+    }
+    emitter.emit('chat.history.refresh');
+    seedConversationCache(conversation);
+    await navigate(`/conversation/${conversationId}`);
+  }, [
+    applyAdvancedConfig,
+    autoWork,
+    current_model,
+    reasoningEffort,
+    collaboration,
+    dir,
+    files,
+    input,
+    navigate,
+    selection,
+    selectedPreset,
+    selectedTemplate,
+    resourceResolutionReady,
+    resourceSelections,
+    knowledgePolicy,
+    sessionCapabilities,
+    workspaceEnabled,
+    t,
+    requiredModules,
+    pluginDelivery,
+    beforeSend,
+  ]);
+
+  const launch = useCallback(() => {
+    if (loading || sendingRef.current) return;
+    if (!resourceResolutionReady) return;
+    if (!current_model) {
+      Message.warning(t('conversation.noModelConfigured'));
+      return;
+    }
+    if (selection.kind === 'template' && selectedTemplate?.template_key !== selection.templateKey) return;
+    if (
+      selection.kind === 'preset' &&
+      (!selectedPreset?.current_stable_revision ||
+        selectedPreset.preset_id !== selection.presetId)
+    ) {
+      Message.warning(
+        t('guid.agentPresetRequired', {
+          defaultValue: 'Select a saved Agent from Agent Workbench first',
+        })
+      );
       return;
     }
 
-    // Remaining agent path (custom rows, including preset fallbacks)
-    {
-      // Agent-type fallback only applies to presets whose primary agent was
-      // unavailable and got switched. For non-preset agents we must keep the
-      // original selectedAgent so the correct backend/cli_path is used.
-      const agent_typeChanged = is_preset && selectedAgent !== finalEffectiveAgentType;
-      const resolvedBackend: string | undefined = is_preset ? finalEffectiveAgentType : selectedAgent;
-
-      const resolvedAgentInfo = agent_typeChanged
-        ? findAgentByKey(resolvedBackend as string)
-        : agentInfo || findAgentByKey(selectedAgentKey);
-
-      if (!resolvedAgentInfo && !is_preset) {
-        console.warn(`${resolvedBackend} agent not found, but proceeding to let conversation panel handle it.`);
-      }
-      const agentBackend = resolvedBackend || selectedAgent;
-      const agentConversationParams = buildAgentConversationParams({
-        backend: agentBackend,
-        name: entryPlan.conversationName,
-        // For row-scoped rows the backend factory needs the actual catalog
-        // id — `backend` collapses to the `custom` slot so it cannot
-        // discriminate between rows on its own.
-        agent_id: resolvedAgentInfo?.id,
-        agent_name: resolvedAgentInfo?.name,
-        preset_id,
-        workspace: finalWorkspace,
-        model: current_model!,
-        cli_path: resolvedAgentInfo?.cli_path,
-        custom_workspace: isCustomWorkspace,
-        is_preset,
-        session_mode: selectedMode,
-        extra: {
-          default_files: files,
-          exclude_auto_inject_skills: excludeBuiltinSkills,
-          selected_mcp_server_ids: selectedUserMcpServerIds,
-          selected_session_mcp_servers: selectedSessionMcpServers,
-          // Bare Agents may still carry a one-off skill selection.
-          ...(is_preset ? {} : guidEnabledSkills?.length ? { preset_enabled_skills: guidEnabledSkills } : {}),
-        },
-      });
-
-      try {
-        const conversation = await ipcBridge.conversation.create.invoke(agentConversationParams);
-        if (!conversation || !conversation.id) {
-          console.error('Failed to create agent conversation - conversation object is null or missing id');
-          return;
-        }
-        assertCreatedConversationPreset(conversation, preset_id);
-
-        await applyAdvancedConfig?.(conversation.id);
-
-        emitter.emit('chat.history.refresh');
-
-        const initialMessage = {
-          conversation_id: conversation.id,
-          initial_admission_epoch: 0,
-          input,
-          files: files.length > 0 ? files : undefined,
-          idempotency_key: uuidv7(),
-        };
-        if (entryPlan.sendInitialMessage) {
-          const target = conversationTarget(conversation.id);
-          const initialMessageKey = sessionStorageKey('initial-message-nomi', target);
-          sessionStorage.setItem(initialMessageKey, JSON.stringify(initialMessage));
-        }
-
-        seedConversationCache(conversation);
-        await navigate(`/conversation/${conversation.id}`);
-      } catch (error: unknown) {
-        console.error('Failed to create agent conversation:', error);
-        throw error;
-      }
-    }
-  }, [
-    input,
-    files,
-    dir,
-    selectedAgent,
-    selectedAgentKey,
-    selectedAgentInfo,
-    selectedMode,
-    current_model,
-    findAgentByKey,
-    getEffectiveAgentType,
-    guidDisabledBuiltinSkills,
-    guidEnabledSkills,
-    availableMcpServers,
-    selectedMcpServerIds,
-    applyAdvancedConfig,
-    autoWork,
-    delegationPolicy,
-    executionModelPool,
-    decisionPolicy,
-    executionTemplateId,
-    navigate,
-    t,
-  ]);
-
-  const sendMessageHandler = useCallback(() => {
-    if (loading || sendingRef.current) return;
     sendingRef.current = true;
     setLoading(true);
-    // Instant feedback: switch the content region to a conversation-shaped
-    // loading overlay (echoed message + "creating…") the moment the user sends,
-    // BEFORE the create round-trip resolves. Captured here because `.then` below
-    // clears `input`. AutoWork entries send no first message → different caption.
     beginPending?.({
       input,
       files: files.length > 0 ? files : undefined,
       sendsInitialMessage: !isAutoWorkEntry(autoWork),
     });
+
     handleSend()
       .then(() => {
+        afterSend?.();
         setInput('');
         setMentionOpen(false);
         setMentionQuery(null);
@@ -376,38 +369,56 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         setDir('');
       })
       .catch((error) => {
-        console.error('Failed to send message:', error);
-        Message.error(getConversationCreateErrorMessage(error, t));
+        console.error('Failed to create Guid conversation:', error);
+        Message.error(
+          error instanceof WorkspaceDirectoryUnavailableError
+            ? t('guid.workspace.unavailable', { workspacePath: error.workspacePath })
+            : getConversationCreateErrorMessage(error, t)
+        );
       })
       .finally(() => {
         sendingRef.current = false;
         setLoading(false);
-        // Tear down the overlay: on success the real conversation page has
-        // already been navigated to (deferred one frame inside `end`); on
-        // failure we uncover the composer with the input preserved.
         endPending?.();
       });
   }, [
-    loading,
-    handleSend,
-    setLoading,
-    setInput,
-    setMentionOpen,
-    setMentionQuery,
-    setMentionSelectorOpen,
-    setMentionActiveIndex,
-    setFiles,
-    setDir,
-    t,
-    input,
-    files,
     autoWork,
     beginPending,
     endPending,
+    files,
+    handleSend,
+    input,
+    loading,
+    current_model,
+    resourceResolutionReady,
+    selection,
+    selectedPreset,
+    selectedTemplate,
+    setDir,
+    setFiles,
+    setInput,
+    setLoading,
+    setMentionActiveIndex,
+    setMentionOpen,
+    setMentionQuery,
+    setMentionSelectorOpen,
+    t,
+    afterSend,
   ]);
 
-  // Calculate button disabled state
-  const isButtonDisabled = loading || !input.trim();
+  const hasAgentLaunchTarget = selection.kind === 'template'
+    ? Boolean(
+        selectedTemplate?.template_key === selection.templateKey &&
+          resourceResolutionReady
+      )
+    : Boolean(
+        selectedPreset?.current_stable_revision &&
+          selectedPreset.preset_id === selection.presetId &&
+          resourceResolutionReady
+      );
+  const hasLaunchTarget = hasAgentLaunchTarget && Boolean(current_model);
+  const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
+  const sendMessageHandler = useCallback(() => launch(), [launch]);
 
   return {
     handleSend,

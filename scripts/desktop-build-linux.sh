@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # 打 Linux 桌面端安装包(.deb / .AppImage / .rpm),汇总到 dist/desktop/。
+# 每个真实 package 同时生成并验证 Host/package/legal release lock。
 # 仅能在 Linux 上运行。
 #
 #   bun run build:linux               # 默认打当前机器架构(x64 或 arm64)
@@ -11,6 +12,8 @@
 #                                     # 未知 --xxx 选项会原样透传给 tauri build
 #   bun run build:linux -- --bundles deb
 #                                     # `--` 之后的参数也会原样透传给 tauri build
+#   此入口固定生成 release lock；debug/custom profile 请直接使用 tauri build，
+#   不允许透传 --debug / --profile / --target 改变待收集的 Host/package 路径。
 #
 # 架构别名:
 #   x64   / x86_64        -> x86_64-unknown-linux-gnu
@@ -35,8 +38,21 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT"
 CONF="apps/desktop/tauri.conf.json"
 DIST="$ROOT/dist/desktop"
+RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
+
+for tool in bun git rustup node; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "❌ Linux packaging requires '$tool'." >&2
+    exit 1
+  }
+done
+[[ -f "$RELEASE_LOCK_TOOL" ]] || {
+  echo "❌ missing release-lock tool: $RELEASE_LOCK_TOOL" >&2
+  exit 1
+}
 
 require_linux_build_deps() {
   local missing=()
@@ -44,6 +60,8 @@ require_linux_build_deps() {
   if ! command -v pkg-config >/dev/null 2>&1; then
     missing+=("pkg-config")
   else
+    pkg-config --exists gtk+-3.0 || missing+=("libgtk-3-dev (pkg-config: gtk+-3.0)")
+    pkg-config --exists webkit2gtk-4.1 || missing+=("libwebkit2gtk-4.1-dev (pkg-config: webkit2gtk-4.1)")
     pkg-config --exists gbm || missing+=("libgbm-dev (pkg-config: gbm)")
     pkg-config --exists librsvg-2.0 || missing+=("librsvg2-dev (pkg-config: librsvg-2.0)")
     if ! pkg-config --exists ayatana-appindicator3-0.1 && ! pkg-config --exists appindicator3-0.1; then
@@ -60,7 +78,7 @@ require_linux_build_deps() {
     cat >&2 <<'EOF'
 
 Debian/Ubuntu 可先安装:
-  sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev librsvg2-dev
+  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
 说明:
   - libgbm-dev 提供 -lgbm 链接名与 gbm.pc。
@@ -97,6 +115,20 @@ for arg in "$@"; do
   fi
 done
 
+# Host/package release locks below are deliberately rooted in the selected
+# triple's release directory. Reject output overrides before cleaning bundles;
+# otherwise a successful debug/custom-profile build cleans the wrong directory
+# and then reports missing packages because collection still looks in release.
+for arg in "${PASSTHRU[@]}"; do
+  case "$arg" in
+    --debug|-d|--profile|--profile=*|--target|--target=*|-t|-t?*)
+      echo "❌ build:linux requires release output for its selected architecture; unsupported override: $arg" >&2
+      echo "   使用 x64/arm64 选择架构；debug/custom profile 请直接运行 bun x tauri build。" >&2
+      exit 1
+      ;;
+  esac
+done
+
 resolve_triple() {
   case "$1" in
     x64|x86_64|x86_64-unknown-linux-gnu)              echo "x86_64-unknown-linux-gnu" ;;
@@ -129,6 +161,35 @@ ensure_target() {
   fi
 }
 
+validate_release_host() {
+  local host="$1"
+  [[ -f "$host" && ! -L "$host" && -x "$host" ]] || {
+    echo "❌ expected a regular executable Linux Host: $host" >&2
+    exit 1
+  }
+}
+
+write_release_lock() {
+  local target="$1"
+  local host="$2"
+  local package="$3"
+  local output="$4"
+  validate_release_host "$host"
+  [[ -f "$package" && ! -L "$package" ]] || {
+    echo "❌ cannot lock missing/non-regular Linux package: $package" >&2
+    exit 1
+  }
+  bun "$RELEASE_LOCK_TOOL" create \
+    --root "$ROOT" \
+    --platform "$target" \
+    --host "$host" \
+    --package "$package" \
+    --legal "$ROOT/LICENSE" \
+    --legal "$ROOT/NOTICE" \
+    --output "$output" >/dev/null
+  bun "$RELEASE_LOCK_TOOL" verify --root "$ROOT" --lock "$output" >/dev/null
+}
+
 mkdir -p "$DIST"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -137,6 +198,7 @@ echo "产物汇总目录: $DIST"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 COLLECTED=()
+COLLECTED_LOCKS=()
 for t in "${TRIPLES[@]}"; do
   ensure_target "$t"
   if [[ "$t" != "$HOST_TRIPLE" ]]; then
@@ -145,15 +207,38 @@ for t in "${TRIPLES[@]}"; do
   fi
   echo ""
   echo "▶▶▶ 构建 $t ..."
+  # A previous --bundles run may have left packages for other formats or
+  # versions. Never bind those bytes to this build's Host/source release lock.
+  # Only remove generated Linux bundles for this target; keep other platforms
+  # and the already collected dist artifacts untouched.
+  bundle_dir="$ROOT/target/$t/release/bundle"
+  if [[ -d "$bundle_dir" ]]; then
+    find "$bundle_dir" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.sig' \) -delete
+  fi
   CI=true bun x tauri build --config "$CONF" --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 
   # Linux 产物在 target/<triple>/release/bundle/{deb,appimage,rpm}/
-  bundle_dir="$ROOT/target/$t/release/bundle"
+  host="$ROOT/target/$t/release/nomifun-desktop"
+  target_package_count=0
   while IFS= read -r -d '' pkg; do
-    cp -f "$pkg" "$DIST/"
-    COLLECTED+=("$DIST/$(basename "$pkg")")
+    package="$DIST/$(basename "$pkg")"
+    lock="$package.release-lock.json"
+    cp -f "$pkg" "$package"
+    write_release_lock "$t" "$host" "$package" "$lock"
+    COLLECTED+=("$package")
+    COLLECTED_LOCKS+=("$lock")
+    target_package_count=$((target_package_count + 1))
   done < <(find "$bundle_dir" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) -print0 2>/dev/null)
+  if [[ "$target_package_count" -eq 0 ]]; then
+    echo "❌ Tauri did not produce any Linux Desktop package for $t." >&2
+    exit 1
+  fi
 done
+
+if [[ "${#COLLECTED[@]}" -eq 0 ]]; then
+  echo "❌ Tauri did not produce any Linux Desktop package." >&2
+  exit 1
+fi
 
 echo ""
 echo "▶ 清理 Linux 构建后 debug/flycheck 中间产物(保留 release 安装包与 updater 签名)..."
@@ -165,5 +250,9 @@ echo "✅ 全部完成,安装包已汇总到 $DIST :"
 for f in "${COLLECTED[@]}"; do
   size="$(du -h "$f" | cut -f1)"
   printf "   %-44s %s\n" "$(basename "$f")" "$size"
+done
+echo "Release locks:"
+for f in "${COLLECTED_LOCKS[@]}"; do
+  printf "   %s\n" "$(basename "$f")"
 done
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

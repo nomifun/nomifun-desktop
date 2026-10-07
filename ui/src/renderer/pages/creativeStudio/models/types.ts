@@ -52,7 +52,7 @@ export interface CreativeModelGroup {
   models: readonly CreativeModelOption[];
 }
 
-export type CreativeModelCatalogLoadState = 'loading' | 'ready' | 'error';
+type CreativeModelCatalogLoadState = 'loading' | 'ready' | 'error';
 
 /**
  * Controlled catalog input. The NomiFun adapter produces this shape, while

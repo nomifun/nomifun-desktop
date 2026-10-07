@@ -64,10 +64,16 @@ describe('TurnDeliverablesCard structure', () => {
     expect(imageCardSource.includes('https://')).toBe(false);
   });
 
-  test('uses compact padding across the card header, file rows and reveal control', () => {
-    expect(cardSource.includes('gap-8px px-12px py-8px select-none')).toBe(true);
+  test('uses an inline multimodal gallery instead of an enclosing result card', () => {
+    expect(cardSource.includes("className='turn-deliverables'" )).toBe(true);
+    expect(cardSource.includes("className='turn-deliverables__media-layout'" )).toBe(true);
+    expect(cardSource.includes("className='turn-deliverables__thumbnail-rail'" )).toBe(true);
+    expect(cardSource.includes("variant='thumbnail'")).toBe(true);
+    expect(cardSource.includes('onSelect={() => setSelectedImageId(item.artifactId)}')).toBe(true);
+    expect(imageCardSource.includes("className='turn-deliverable-image__preview'" )).toBe(true);
+    expect(imageCardSource.includes("data-testid='verified-image-artifact-thumbnail'" )).toBe(true);
     expect(cardSource.includes('gap-8px px-12px py-6px hover:bg-3 transition-colors')).toBe(true);
-    expect(cardSource.includes('gap-8px px-12px py-6px text-13px text-t-secondary')).toBe(true);
+    expect(cardSource.includes("className='turn-deliverables__more'")).toBe(true);
   });
 
   test('renders one relative path with muted directories and a primary filename', () => {

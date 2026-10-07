@@ -7,12 +7,15 @@
 //! integration concepts.
 
 mod attempt_runner;
-mod artifact_contract;
+mod automation;
+mod canonical_output;
 mod control_steps;
 mod conversation_effect;
+mod delivery;
 mod domain_mapper;
 mod engine;
 mod event_publisher;
+mod lifecycle;
 mod participant_resolver;
 mod participant_router;
 mod plan_materializer;
@@ -22,7 +25,17 @@ mod routes;
 mod scheduler;
 mod template_routes;
 
+pub use attempt_runner::AgentExecutionSessionPort;
+pub use canonical_output::{canonical_turn_delivery, canonical_turn_output_files};
+pub use automation::{
+    AgentExecutionAutomationPort, AutomationExecutionAdmission, AutomationExecutionReceipt,
+    AutomationExecutionRequest, AutomationExecutionSource, admit_frozen_automation_workspace,
+    admit_frozen_session_workspace, resolve_frozen_automation_workspace,
+    resolve_frozen_session_workspace,
+};
+pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput};
 pub use engine::AgentExecutionEngine;
+pub use lifecycle::AgentExecutionLifecycle;
 pub use production::AgentExecutionEngineConfig;
 pub use routes::agent_execution_routes;
 pub use template_routes::agent_execution_template_routes;

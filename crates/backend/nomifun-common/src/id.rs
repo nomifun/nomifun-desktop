@@ -194,17 +194,8 @@ define_entity_id!(
     /// Globally unique SSH host identifier.
     ///
     /// Identifies a saved, reusable SSH connection profile in the `ssh_hosts`
-    /// table. Referenced from `conversations.extra.$.ssh_host_id`.
+    /// table. Canonical Agent bindings reference it as an `ssh_host` resource.
     SshHostId
-);
-define_entity_id!(
-    /// Globally unique mini-app identifier.
-    ///
-    /// Identifies a solidified single-file web tool in the `miniapps` table. It
-    /// is also the capability in the auth-exempt
-    /// `GET /api/miniapps/{miniapp_id}/serve` URL, so it must stay unguessable —
-    /// which a bare UUIDv7 is.
-    MiniAppId
 );
 define_entity_id!(
     /// Globally unique user identifier.
@@ -283,13 +274,6 @@ define_entity_id!(
     PreviewSnapshotId
 );
 define_entity_id!(
-    /// Globally unique IDMM intervention audit-record identifier.
-    ///
-    /// This is the product-facing business ID. The SQLite row `id` remains
-    /// an implementation-only autoincrement key for ordering and eviction.
-    IdmmInterventionId
-);
-define_entity_id!(
     /// Globally unique requirement identifier.
     RequirementId
 );
@@ -297,8 +281,8 @@ define_entity_id!(
     /// Globally unique receipt identifier for a durable tool artifact.
     ///
     /// This identifies a tool-output receipt embedded in a message and is
-    /// distinct from the UUIDv7 `conversation_artifact_id` of a row in
-    /// `conversation_artifacts`. Neither identity is a SQLite technical key.
+    /// distinct from any UUIDv7 business identity stored by a product domain.
+    /// Neither identity is a SQLite technical key.
     PersistedArtifactId
 );
 define_entity_id!(
@@ -424,6 +408,14 @@ define_entity_id!(
     CsNoteId
 );
 define_entity_id!(
+    /// Globally unique durable customer-service handoff identifier.
+    CsHandoffId
+);
+define_entity_id!(
+    /// Globally unique customer-service Agent capability receipt identifier.
+    CsAgentCapabilityReceiptId
+);
+define_entity_id!(
     /// Globally unique workshop-asset identifier.
     WorkshopAssetId
 );
@@ -438,10 +430,6 @@ define_entity_id!(
 define_entity_id!(
     /// Globally unique webhook configuration identifier.
     WebhookId
-);
-define_entity_id!(
-    /// Globally unique conversation-artifact identifier.
-    ConversationArtifactId
 );
 define_entity_id!(
     /// Globally unique preset-tag identifier.

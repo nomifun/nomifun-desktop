@@ -16,9 +16,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TMessage } from '@/common/chat/chatLib';
 
-const PROGRAMMATIC_SCROLL_GUARD_MS = 150;
 const USER_LAYOUT_CHANGE_GUARD_MS = 600;
-const AT_BOTTOM_THRESHOLD_PX = 100;
+const AT_BOTTOM_THRESHOLD_PX = 24;
 // Must absorb sub-pixel scroll rounding on HiDPI/fractional-DPR displays, where
 // scrollTop can settle ~1-3px off an integer "bottom"; too small a threshold
 // (was 4) makes auto-follow intermittently think the user scrolled away and
@@ -41,6 +40,7 @@ interface UseAutoScrollReturn {
   handleScroll: (e: React.UIEvent<HTMLDivElement>) => void;
   handleWheel: (e: React.WheelEvent<HTMLDivElement>) => void;
   handlePointerDown: () => void;
+  handleKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   showScrollButton: boolean;
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   scrollElementIntoView: (element: HTMLElement | null, options?: ScrollElementIntoViewOptions) => void;
@@ -60,15 +60,10 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
   const lastScrollTopRef = useRef(0);
   const previousListLengthRef = useRef(messages.length);
   const previousLastIdRef = useRef<string | undefined>(messages[messages.length - 1]?.id);
-  const lastProgrammaticScrollTimeRef = useRef(0);
   const initialScrollDoneRef = useRef(false);
   const pendingAutoFollowFrameRef = useRef<number | null>(null);
   const userInputActiveRef = useRef(false);
   const resizeAutoFollowBlockedUntilRef = useRef(0);
-
-  const markProgrammaticScroll = useCallback(() => {
-    lastProgrammaticScrollTimeRef.current = Date.now();
-  }, []);
 
   const updateBottomState = useCallback((element: HTMLDivElement) => {
     const bottomGap = getBottomGap(element);
@@ -79,7 +74,6 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
     if (pinnedToBottom) {
       userScrolledRef.current = false;
       userInputActiveRef.current = false;
-      lastProgrammaticScrollTimeRef.current = Date.now() - (PROGRAMMATIC_SCROLL_GUARD_MS - 50);
     }
 
     return pinnedToBottom;
@@ -89,7 +83,6 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
     (behavior: ScrollBehavior = 'smooth') => {
       if (itemCount <= 0 || !scrollerEl) return;
 
-      markProgrammaticScroll();
       scrollerEl.scrollTo({
         top: scrollerEl.scrollHeight - scrollerEl.clientHeight,
         behavior,
@@ -97,7 +90,7 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
       userScrolledRef.current = false;
       setShowScrollButton(false);
     },
-    [itemCount, markProgrammaticScroll, scrollerEl]
+    [itemCount, scrollerEl]
   );
 
   const scheduleAutoFollow = useCallback(() => {
@@ -133,21 +126,19 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
 
       userScrolledRef.current = false;
       setShowScrollButton(false);
-      markProgrammaticScroll();
       element.scrollIntoView({
         behavior: options?.behavior ?? 'smooth',
         block: options?.block ?? 'start',
         inline: 'nearest',
       });
     },
-    [markProgrammaticScroll]
+    []
   );
 
   const handleScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
       const target = e.currentTarget;
       const currentScrollTop = target.scrollTop;
-      const timeSinceGuard = Date.now() - lastProgrammaticScrollTimeRef.current;
       const delta = currentScrollTop - lastScrollTopRef.current;
       const bottomGap = getBottomGap(target);
       const pinnedToBottom = bottomGap <= FOLLOW_BOTTOM_THRESHOLD_PX;
@@ -155,7 +146,7 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
       if (
         !pinnedToBottom &&
         Math.abs(delta) > 2 &&
-        (userInputActiveRef.current || timeSinceGuard >= PROGRAMMATIC_SCROLL_GUARD_MS)
+        userInputActiveRef.current
       ) {
         userScrolledRef.current = true;
       }
@@ -181,6 +172,12 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
   const handlePointerDown = useCallback(() => {
     userInputActiveRef.current = true;
     resizeAutoFollowBlockedUntilRef.current = Date.now() + USER_LAYOUT_CHANGE_GUARD_MS;
+  }, []);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) {
+      userInputActiveRef.current = true;
+    }
   }, []);
 
   useEffect(() => {
@@ -251,6 +248,7 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
     handleScroll,
     handleWheel,
     handlePointerDown,
+    handleKeyDown,
     showScrollButton,
     scrollToBottom,
     scrollElementIntoView,

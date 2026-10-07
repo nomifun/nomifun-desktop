@@ -68,11 +68,63 @@
   "tabs": {
     "overview": "Overview",
     "memory": "Memory & Knowledge",
-    "remote": "Remote control",
+    "remote": "Connections & Devices",
     "evolution": "Evolution",
     "skills": "Skills",
     "history": "Chat History",
-    "other": "Other"
+    "other": "Transfer & Delete"
+  },
+  "workspace": {
+    "cohabit": "Cohabit",
+    "manage": "Manage",
+    "modeLabel": "Companion mode",
+    "showRoster": "Show companion list",
+    "hideRoster": "Hide companion list",
+    "showInfoPanel": "Show companion info",
+    "hideInfoPanel": "Hide companion info",
+    "quickWindow": "Desktop quick window",
+    "switchCompanion": "Switch companion",
+    "needsAttention": "Needs attention",
+    "refresh": "Refresh",
+    "sections": {
+      "profile": "Companion profile",
+      "growth": "Growth & abilities",
+      "reach": "Reach",
+      "records": "Records & safety"
+    }
+  },
+  "cohabit": {
+    "title": "Spend time with {{name}}",
+    "subtitle": "Share everyday moments and ideas, with your companion truly by your side.",
+    "composerPlaceholder": "Say something to {{name}}…",
+    "emptyTitle": "Start with your first hello to {{name}}",
+    "emptyHint": "Desktop, messaging channels, and robots all continue the same shared history here.",
+    "infoTitle": "Companion info",
+    "currentState": "Current state",
+    "desktopVisible": "Visible on desktop",
+    "desktopHidden": "Hidden from desktop",
+    "manageState": "Manage figure & state",
+    "mind": "Mind configuration",
+    "agent": "Companion Agent",
+    "manageMind": "Manage persona & models",
+    "longMemory": "Long-term memory",
+    "memoryCount": "{{count}} memories",
+    "knowledgeReady": "Dedicated knowledge mounts on demand",
+    "manageMemory": "View memory & knowledge",
+    "connections": "Connections",
+    "robotOnline": "{{count}} robots bound",
+    "noRobot": "No robot bound",
+    "channelsHint": "Configure messaging channels and MCP in Manage",
+    "manageConnections": "Manage connections & devices",
+    "growth": "Growth",
+    "modelRequired": "Configure the main chat model first",
+    "modelRequiredHint": "Then desktop, IM, and robot entry points can continue the same shared history here.",
+    "configureModel": "Configure model",
+    "sessionFailed": "The companion conversation cannot open right now",
+    "sessionFailedHint": "Check the model and Agent configuration, then try again."
+  },
+  "remote": {
+    "showAllPlatforms": "View all {{count}} channels"
   },
   "skills": {
     "sectionTitle": "Skills",
@@ -87,7 +139,6 @@
     "noDescription": "This skill has no description yet",
     "catalogSourceBuiltin": "Built-in",
     "catalogSourceCustom": "Custom",
-    "catalogSourceExtension": "Extension",
     "filterAll": "All",
     "filterEmpty": "No skills match this filter",
     "sourceCatalog": "Granted",
@@ -179,6 +230,8 @@
     "personaTitle": "Character intro",
     "modelSection": "Model configuration",
     "modelSectionHint": "Which model it thinks and replies with",
+    "modelMissingShort": "Not configured",
+    "fixedAgentHint": "Desktop, IM, and robot entry points share the official Companion Agent. Channels and robots are optional connections.",
     "mainChatModel": "Main chat model",
     "modelMissing": "No chat model configured for {{companionName}} yet — it can't learn or chat.",
     "fallbackChatModel": "Fallback chat model",
@@ -362,8 +415,15 @@
     "model": "Learning model"
   },
   "chat": {
+    "modelSaveFailed": "Could not save the conversation model. Please retry.",
+    "fixedAgentAria": "Fixed Agent: {{agent}}",
+    "fixedAgentHint": "Companion conversations always use the official Companion Agent.",
+    "skillsScopeHint": "Default skills for future companion conversations. An existing AgentSession keeps its frozen Skill snapshot.",
+    "mcpScopeHint": "Select MCP servers before launch; the exact resources are frozen into the new companion conversation.",
+    "mcpFrozenHint": "MCP resources are frozen for this companion conversation. Configure the Agent and start a new conversation to change them.",
+    "mcpAgentRequired": "This Agent does not allow MCP connections. Choose the Companion preset or configure the Agent in the workbench.",
     "modelConfig": "Chat model",
-    "modelConfigHint": "This companion's chat model. Applies everywhere (local chat and remote connections); switching updates all its sessions.",
+    "modelConfigHint": "Default model for new companion conversations and rebuilt remote connections. An existing local conversation keeps its frozen model.",
     "modelProvider": "Provider",
     "modelName": "Model",
     "modelMissing": "Configure a chat model for this companion first",
@@ -390,6 +450,13 @@
     "retry": "Retry"
   },
   "robot": {
+    "controlTarget": "Device controlled from this conversation",
+    "chooseDevice": "Choose a device",
+    "playLastReply": "Play latest reply on this device",
+    "playbackFailed": "Playback failed",
+    "playbackPermissionHint": "Allow desktop playback in device settings. Text replies stay silent by default.",
+    "speechSource": "Robot voice",
+    "visualObservation": "Visual observation",
     "title": "Robot connection",
     "hint": "Attach a physical robot to {{companionName}}: it speaks with this companion's persona, models and memories.",
     "add": "Add a robot",
@@ -423,18 +490,24 @@
     "removeConfirm": "Deleting revokes the device token immediately; the robot has to report in and be bound again.",
     "removeFailed": "Failed to delete",
     "loadFailed": "Could not read the robot list — check that the robot service is running.",
-    "sessionGroup": "Robot sessions",
-    "group": {
-      "deviceUnknown": "Unknown robot",
-      "deviceMissing": "Removed robot",
-      "deviceTooltip": "Robot: {{robot}}"
-    },
     "status": {
       "offline": "Offline",
       "idle": "Online",
       "listening": "Listening",
       "speaking": "Speaking"
-    }
+    },
+    "inheritHint": "Continue {{companionName}}’s conversation, settings, memory and knowledge on this device.",
+    "permissionSaveFailed": "Could not save device permissions",
+    "permissions": {
+      "vision": "Allow photos on request",
+      "motion": "Allow movement",
+      "display": "Allow display controls",
+      "device_tools": "Allow device extensions",
+      "proactive_speech": "Allow desktop playback",
+      "continuous_vision": "Allow continuous observation"
+    },
+    "devices": "Connected devices",
+    "manageDevices": "Manage devices"
   },
   "settings": {
     "name": "Name",
@@ -512,18 +585,29 @@
       "observe": "{{name}} is looking at the page…",
       "screenshot": "{{name}} is taking a screenshot…",
       "read": "{{name}} is reading the page…",
-      "search": "{{name}} is searching the page for \"{{query}}\"…",
       "download": "{{name}} is downloading a file…",
       "busy": "{{name}} is browsing the web…"
     },
-    "needsConfirm": "Action needs confirmation — open the chat tab",
     "done": "Done!",
     "menuOpenChat": "Open chat",
     "expand": "Expand input",
     "collapse": "Collapse",
     "dismiss": "Dismiss",
     "interrupt": "Stop reply",
-    "attachImage": "Add image"
+    "attachImage": "Add image",
+    "quickEmpty": "Say something to {{name}} — your recent time together will appear here.",
+    "quickEmptyTitle": "Say hello to {{name}}",
+    "quickEmptyHint": "Your recent moments stay here, ready whenever you want to continue.",
+    "openFullCohabit": "Open full cohabit view",
+    "manage": "Manage companion",
+    "windowUnavailable": "The desktop quick window could not be opened",
+    "switchCompanion": "Switch companion",
+    "switchLabel": "Switch",
+    "switchTo": "Switch to {{name}}",
+    "showAll": "View all {{count}} companions",
+    "openQuickPanel": "Open recent conversations",
+    "switchFailed": "Couldn't switch companions, so the full cohabit view was opened instead.",
+    "moveWindow": "Drag an empty area to move the window"
   },
   "characters": {
     "mochi": {

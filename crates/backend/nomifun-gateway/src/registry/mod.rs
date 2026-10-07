@@ -2,7 +2,7 @@
 //! operable platform capability, keyed by MCP tool name.
 //!
 //! - The in-process [`crate::server`] dispatches tool calls through
-//!   [`Registry::dispatch_opt`] (with real `GatewayDeps`).
+//!   [`Registry::dispatch_opt`] (with real `CompatibilityCapabilityHost`).
 //! - The `mcp-gateway-stdio` bridge answers `tools/list` from
 //!   [`Registry::tool_specs`] (schema only, no deps).
 //!
@@ -12,8 +12,8 @@
 mod capability;
 
 pub use capability::{
-    AccessScope, Capability, CapabilityMeta, DangerTier, Decision, ProgressSink,
-    StreamingHandler, Surface, decide, default_decision,
+    Capability, CapabilityMeta, EffectClass, OwnershipScope, ProgressSink, StreamingHandler,
+    Surface,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 
 /// Enforce the one gateway outcome protocol before a capability result reaches
 /// any transport adapter. Keeping this at the shared dispatch boundary means
@@ -36,17 +36,7 @@ fn validate_dispatch_outcome(value: Value) -> Value {
 
     let has_result = object.contains_key("result");
     let has_error = object.contains_key("error");
-    let is_confirmation = object
-        .get("needs_confirmation")
-        .and_then(Value::as_bool)
-        == Some(true);
-
-    if is_confirmation && (has_result || has_error) {
-        return json!({
-            "error": "invalid capability response envelope: confirmation cannot be mixed with result or error"
-        });
-    }
-    if has_result ^ has_error || is_confirmation {
+    if has_result ^ has_error {
         return value;
     }
 
@@ -94,6 +84,30 @@ const RETIRED_COLLABORATION_TOOL_NAMES: &[&str] = &[
     "nomi_agent_result",
 ];
 
+/// Platform lifecycle/supervision operations that were historically projected
+/// as extra Agent tools. Schedule authoring now has exactly
+/// list/create/update/delete, and Agent-path IDMM has been removed.
+const RETIRED_PLATFORM_SERVICE_TOOL_NAMES: &[&str] = &[
+    "nomi_cron_get_job",
+    "nomi_cron_run_now",
+    "nomi_set_idmm",
+    "nomi_get_idmm",
+    "nomi_idmm_get_log",
+    "nomi_idmm_get_activity",
+    "nomi_idmm_intervene",
+    "nomi_idmm_clear_log",
+    "nomi_requirement_list",
+    "nomi_requirement_create",
+    "nomi_requirement_update",
+    "nomi_requirement_delete",
+    "nomi_requirement_get",
+    "nomi_requirement_list_tags",
+    "nomi_requirement_get_board",
+    "nomi_requirement_resume_tag",
+    "nomi_set_autowork",
+    "nomi_get_autowork",
+];
+
 fn retired_collaboration_name_rule(name: &str) -> Option<&'static str> {
     if RETIRED_COLLABORATION_TOOL_NAMES.contains(&name) {
         return Some("exact retired name");
@@ -112,6 +126,11 @@ fn validate_registered_tool_names<'a>(
 ) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for name in names {
+        if RETIRED_PLATFORM_SERVICE_TOOL_NAMES.contains(&name) {
+            return Err(format!(
+                "retired platform-service capability name '{name}' matched exact retired name"
+            ));
+        }
         if let Some(rule) = retired_collaboration_name_rule(name) {
             return Err(format!(
                 "retired collaboration capability name '{name}' matched {rule}"
@@ -135,7 +154,7 @@ fn register_instance_owner_domain(
     let first = out.len();
     register(out);
     for capability in &mut out[first..] {
-        capability.meta.access_scope = AccessScope::InstanceOwner;
+        capability.meta.ownership_scope = OwnershipScope::InstanceOwner;
     }
 }
 
@@ -157,35 +176,24 @@ impl Registry {
         //   1. create `caps_<domain>.rs` with `pub(crate) fn register(out: &mut Vec<Capability>)`
         //   2. add `mod caps_<domain>;` to lib.rs
         //   3. add the domain HERE through the direct or instance-owner path
-        //   4. if it needs a NEW service: add a field to deps.rs::GatewayDeps and
+        //   4. if it needs a NEW service: add a field to deps.rs::CompatibilityCapabilityHost and
         //      wire it in nomifun-app/src/router/routes.rs::inject_gateway_deps.
         // Adding a tool to an EXISTING domain is just one more `out.push(...)` — no wiring.
         register_instance_owner_domain(&mut caps, crate::caps_memory::register);
         register_instance_owner_domain(&mut caps, crate::caps_agent_execution::register);
-        crate::caps_confirmation::register(&mut caps);
         crate::caps_conversation::register(&mut caps);
         register_instance_owner_domain(&mut caps, crate::caps_provider::register);
-        crate::caps_cron::register(&mut caps);
-        register_instance_owner_domain(&mut caps, crate::caps_requirement::register);
-        register_instance_owner_domain(&mut caps, crate::caps_autowork::register);
-        register_instance_owner_domain(&mut caps, crate::caps_idmm::register);
         register_instance_owner_domain(&mut caps, crate::caps_terminal::register);
         register_instance_owner_domain(&mut caps, crate::caps_knowledge::register);
         register_instance_owner_domain(&mut caps, crate::caps_knowledge_ext::register);
         register_instance_owner_domain(&mut caps, crate::caps_system::register);
         register_instance_owner_domain(&mut caps, crate::caps_companion::register);
         register_instance_owner_domain(&mut caps, crate::caps_channel::register);
-        crate::caps_scheduling_ext::register(&mut caps);
         register_instance_owner_domain(&mut caps, crate::caps_terminal_ext::register);
         register_instance_owner_domain(&mut caps, crate::caps_files::register);
         register_instance_owner_domain(&mut caps, crate::caps_mcp::register);
         register_instance_owner_domain(&mut caps, crate::caps_agent::register);
         register_instance_owner_domain(&mut caps, crate::caps_creative_studio::register);
-        #[cfg(feature = "browser-use")]
-        register_instance_owner_domain(&mut caps, crate::caps_browser::register);
-        #[cfg(feature = "computer-use")]
-        register_instance_owner_domain(&mut caps, crate::caps_computer::register);
-
         validate_registered_tool_names(caps.iter().map(|capability| capability.meta.name))
             .unwrap_or_else(|error| panic!("gateway capability registration rejected: {error}"));
         let by_name = caps
@@ -205,10 +213,8 @@ impl Registry {
         self.by_name.len()
     }
 
-    /// The tools visible on a surface: everything except the hard-denied set.
-    /// Confirm-gated tools ARE listed (they are usable with `confirm=true`);
-    /// passing `confirmed = true` to [`decide`] collapses `Confirm → Allow`, so
-    /// only `Deny` outcomes are filtered out.
+    /// The tools visible on a surface. C1 no longer filters by effect class;
+    /// the surface remains transport context only.
     pub fn tool_specs(&self, surface: Surface) -> Vec<ToolSpec> {
         self.tool_specs_for_caller(surface, None, true)
     }
@@ -219,7 +225,7 @@ impl Registry {
     /// dispatch independently enforces the same scope.
     pub fn tool_specs_for_caller(
         &self,
-        surface: Surface,
+        _surface: Surface,
         domains: Option<&[&str]>,
         is_instance_owner: bool,
     ) -> Vec<ToolSpec> {
@@ -227,9 +233,8 @@ impl Registry {
             .values()
             .filter(|c| domains.is_none_or(|domains| domains.contains(&c.meta.domain)))
             .filter(|c| {
-                c.meta.access_scope != AccessScope::InstanceOwner || is_instance_owner
+                c.meta.ownership_scope != OwnershipScope::InstanceOwner || is_instance_owner
             })
-            .filter(|c| decide(&c.meta, surface, true) != Decision::Deny)
             .map(|c| ToolSpec {
                 name: c.meta.name,
                 domain: c.meta.domain,
@@ -255,15 +260,14 @@ impl Registry {
 
     pub fn tool_visible_for_caller(
         &self,
-        surface: Surface,
+        _surface: Surface,
         domains: Option<&[&str]>,
         is_instance_owner: bool,
         name: &str,
     ) -> bool {
         self.by_name.get(name).is_some_and(|c| {
             domains.is_none_or(|domains| domains.contains(&c.meta.domain))
-                && (c.meta.access_scope != AccessScope::InstanceOwner || is_instance_owner)
-                && decide(&c.meta, surface, true) != Decision::Deny
+                && (c.meta.ownership_scope != OwnershipScope::InstanceOwner || is_instance_owner)
         })
     }
 
@@ -271,7 +275,7 @@ impl Registry {
     /// invoking its handler. `None` means the tool name is unknown.
     ///
     /// This is intentionally the same validator used by the capability
-    /// handler, including removal of the cross-cutting `confirm` field.
+    /// handler.
     pub fn validate_arguments(
         &self,
         name: &str,
@@ -286,13 +290,13 @@ impl Registry {
     /// registered tool.
     pub async fn dispatch_opt(
         &self,
-        deps: Arc<GatewayDeps>,
+        deps: Arc<CompatibilityCapabilityHost>,
         ctx: CallerCtx,
         name: &str,
         args: &Value,
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
-        if cap.meta.access_scope == AccessScope::InstanceOwner
+        if cap.meta.ownership_scope == OwnershipScope::InstanceOwner
             && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
             return Some(validate_dispatch_outcome(json!({
@@ -300,23 +304,7 @@ impl Registry {
                 "tool": name,
             })));
         }
-        let surface = ctx.surface();
-        let confirmed = args
-            .get("confirm")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let result = match decide(&cap.meta, surface, confirmed) {
-            Decision::Deny => json!({
-                "error": format!("'{name}' is not permitted on the {surface:?} surface")
-            }),
-            Decision::Confirm => json!({
-                "needs_confirmation": true,
-                "tool": name,
-                "danger": format!("{:?}", cap.meta.danger),
-                "note": "This action is destructive or sensitive. Restate the exact action and its target to the user, get explicit agreement, then call again with confirm=true."
-            }),
-            Decision::Allow => (cap.handler)(deps, ctx, args.clone()).await,
-        };
+        let result = (cap.handler)(deps, ctx, args.clone()).await;
         Some(validate_dispatch_outcome(result))
     }
 
@@ -328,14 +316,14 @@ impl Registry {
     /// `None` means the tool name is unknown.
     pub async fn dispatch_stream(
         &self,
-        deps: Arc<GatewayDeps>,
+        deps: Arc<CompatibilityCapabilityHost>,
         ctx: CallerCtx,
         name: &str,
         args: &Value,
         progress: ProgressSink,
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
-        if cap.meta.access_scope == AccessScope::InstanceOwner
+        if cap.meta.ownership_scope == OwnershipScope::InstanceOwner
             && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
             return Some(validate_dispatch_outcome(json!({
@@ -343,25 +331,9 @@ impl Registry {
                 "tool": name,
             })));
         }
-        let surface = ctx.surface();
-        let confirmed = args
-            .get("confirm")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let result = match decide(&cap.meta, surface, confirmed) {
-            Decision::Deny => json!({
-                "error": format!("'{name}' is not permitted on the {surface:?} surface")
-            }),
-            Decision::Confirm => json!({
-                "needs_confirmation": true,
-                "tool": name,
-                "danger": format!("{:?}", cap.meta.danger),
-                "note": "This action is destructive or sensitive. Restate the exact action and its target to the user, get explicit agreement, then call again with confirm=true."
-            }),
-            Decision::Allow => match &cap.stream {
-                Some(stream) => stream(deps, ctx, args.clone(), progress).await,
-                None => (cap.handler)(deps, ctx, args.clone()).await,
-            },
+        let result = match &cap.stream {
+            Some(stream) => stream(deps, ctx, args.clone(), progress).await,
+            None => (cap.handler)(deps, ctx, args.clone()).await,
         };
         Some(validate_dispatch_outcome(result))
     }
@@ -374,11 +346,7 @@ mod tests {
 
     #[test]
     fn dispatch_outcome_protocol_is_fail_closed() {
-        for valid in [
-            json!({"result": null}),
-            json!({"error": "failed"}),
-            json!({"needs_confirmation": true, "tool": "nomi_delete"}),
-        ] {
+        for valid in [json!({"result": null}), json!({"error": "failed"})] {
             assert_eq!(validate_dispatch_outcome(valid.clone()), valid);
         }
 
@@ -387,8 +355,7 @@ mod tests {
             json!(["bare"]),
             json!({"ok": true}),
             json!({"result": "ok", "error": "failed"}),
-            json!({"result": "ok", "needs_confirmation": true}),
-            json!({"error": "failed", "needs_confirmation": true}),
+            json!({"deferred": true}),
         ] {
             let outcome = validate_dispatch_outcome(invalid);
             assert!(outcome.get("error").is_some());
@@ -447,15 +414,15 @@ mod tests {
 
     /// Floor on the registered-capability count. A drop below this almost always
     /// means a `caps_*` module's `register()` call was accidentally removed from
-    /// `build()` (or a domain module deleted). Bump the floor when capabilities
-    /// are intentionally removed. Default build (no `browser-use`) sits just
-    /// below the feature-on count, so the floor allows for the gated module.
+    /// `build()` (or a domain module deleted). Bump or lower the floor only when
+    /// capabilities are intentionally changed. The retired legacy management
+    /// tools are no longer part of the Gateway registry.
     #[test]
     fn registry_capability_count_floor() {
         let n = Registry::global().len();
         assert!(
-            n >= 129,
-            "capability count fell to {n} (floor 129) — a caps_* module may have lost its \
+            n >= 101,
+            "capability count fell to {n} (floor 101) — a caps_* module may have lost its \
              register() call in Registry::build(), or a domain was removed. If intentional, lower the floor."
         );
     }
@@ -463,7 +430,7 @@ mod tests {
     #[test]
     fn gateway_surfaces_do_not_advertise_team_tools() {
         let reg = Registry::global();
-        for surface in [Surface::Desktop, Surface::Remote, Surface::Channel] {
+        for surface in [Surface::Desktop, Surface::Channel] {
             let team_tools: Vec<&str> = reg
                 .tool_specs(surface)
                 .iter()
@@ -521,11 +488,20 @@ mod tests {
             "nomi_process_spawn",
             "nomi_spawn_process",
             "nomi_cron_run",
-            "nomi_requirement_list",
             "nomi_teamwork_summarize",
             "nomi_clustered_search",
         ])
         .expect("precise retired-name rules must not reject unrelated capabilities");
+    }
+
+    #[test]
+    fn retired_platform_services_cannot_reenter_the_agent_gateway() {
+        for name in RETIRED_PLATFORM_SERVICE_TOOL_NAMES {
+            let error = validate_registered_tool_names([*name])
+                .expect_err("retired platform service must fail closed");
+            assert!(error.contains(name), "{error}");
+            assert!(!Registry::global().contains(name));
+        }
     }
 
     #[test]
@@ -546,52 +522,43 @@ mod tests {
                 .get(name)
                 .unwrap_or_else(|| panic!("missing capability {name}"))
                 .meta
-                .access_scope
+                .ownership_scope
         };
 
         // User-owned aggregates keep their own repository/service owner checks.
-        assert_eq!(scope("nomi_list_conversations"), AccessScope::User);
-        assert_eq!(scope("nomi_cron_list"), AccessScope::User);
+        assert_eq!(scope("nomi_list_conversations"), OwnershipScope::User);
 
         // Installation-wide control planes are rejected centrally before their
         // handlers can observe or mutate shared state.
         assert_eq!(
             scope("nomi_system_get_settings"),
-            AccessScope::InstanceOwner
-        );
-        assert_eq!(
-            scope("nomi_requirement_list"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
         assert_eq!(
             scope("nomi_knowledge_list_bases"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
         assert_eq!(
             scope("nomi_companion_list"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
         assert_eq!(
             scope("nomi_channel_list_plugins"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
-        assert_eq!(scope("nomi_delegate"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_execution_get"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_execution_update"), AccessScope::InstanceOwner);
-        // Every IDMM capability is target-scoped and user-owned, and every
-        // handler verifies the target owner (there are no global IDMM settings
-        // for an installation owner to hold).
-        assert_eq!(scope("nomi_idmm_get_log"), AccessScope::User);
-        assert_eq!(scope("nomi_create_terminal"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_terminal_get"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_fs_read_file"), AccessScope::InstanceOwner);
+        assert_eq!(scope("nomi_delegate"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_execution_get"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_execution_update"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_create_terminal"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_terminal_get"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_fs_read_file"), OwnershipScope::InstanceOwner);
         for name in [
             "nomi_creative_studio_list_canvases",
             "nomi_creative_studio_get_canvas",
             "nomi_creative_studio_list_projects",
             "nomi_creative_studio_get_project",
         ] {
-            assert_eq!(scope(name), AccessScope::InstanceOwner, "{name}");
+            assert_eq!(scope(name), OwnershipScope::InstanceOwner, "{name}");
         }
     }
 
@@ -604,10 +571,8 @@ mod tests {
             .map(|spec| spec.name)
             .collect();
         assert!(names.contains(&"nomi_list_conversations"));
-        assert!(names.contains(&"nomi_cron_list"));
         assert!(!names.contains(&"nomi_delegate"));
         assert!(!names.contains(&"nomi_system_get_settings"));
-        assert!(!names.contains(&"nomi_requirement_list"));
         assert!(!names.contains(&"nomi_knowledge_list_bases"));
         assert!(!names.contains(&"nomi_creative_studio_list_canvases"));
         assert!(!names.contains(&"nomi_creative_studio_get_canvas"));
@@ -637,16 +602,16 @@ mod tests {
     fn tool_specs_for_filters_to_domains() {
         let reg = Registry::global();
         let agentish = reg.tool_specs_for(
-            Surface::Remote,
+            Surface::Desktop,
             &["agent_execution", "agent", "remote", "conversation"],
         );
         assert!(
             !agentish.is_empty(),
             "agent/conversation domains must expose tools"
         );
-        // strict subset of the full Remote surface
+        // strict subset of the full internal Gateway catalog
         let all: std::collections::BTreeSet<&str> = reg
-            .tool_specs(Surface::Remote)
+            .tool_specs(Surface::Desktop)
             .iter()
             .map(|s| s.name)
             .collect();
@@ -664,7 +629,7 @@ mod tests {
         );
         // unknown domain yields nothing
         assert!(
-            reg.tool_specs_for(Surface::Remote, &["does_not_exist"])
+            reg.tool_specs_for(Surface::Desktop, &["does_not_exist"])
                 .is_empty()
         );
     }

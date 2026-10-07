@@ -1,9 +1,7 @@
 import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBridge';
-import type { SkillTagFilterState } from './skillFilter';
 
 export const SKILL_MARKET_SOURCES: SkillMarketSource[] = ['clawhub', 'loophub', 'skillhub'];
 export const MCP_MARKET_SOURCES: SkillMarketSource[] = ['skillhub_mcp', 'mcpworld'];
-export const PLUGIN_MARKET_SOURCES: SkillMarketSource[] = ['clawhub_plugins'];
 
 const MARKET_SOURCE_LABELS: Record<SkillMarketSource, string> = {
   clawhub: 'ClawHub',
@@ -54,7 +52,7 @@ const MAX_NAME_LENGTH = 96;
 const MAX_DESCRIPTION_LENGTH = 220;
 const MAX_COMMAND_LENGTH = 320;
 
-export const isSkillMarketSource = (value: unknown): value is SkillMarketSource =>
+const isSkillMarketSource = (value: unknown): value is SkillMarketSource =>
   value === 'clawhub' ||
   value === 'skillhub' ||
   value === 'loophub' ||
@@ -209,8 +207,7 @@ export const translateMarketDescription = (
 export const filterSkillMarketItems = (
   items: ISkillMarketItem[],
   source: SkillMarketSource,
-  query: string,
-  tagFilter: SkillTagFilterState
+  query: string
 ): ISkillMarketItem[] => {
   const q = query.trim().toLowerCase();
   return items.filter((item) => {
@@ -226,14 +223,6 @@ export const filterSkillMarketItems = (
         .join(' ')
         .toLowerCase();
       if (!haystack.includes(q)) return false;
-    }
-    if (tagFilter.audience.length > 0) {
-      const itemTags = new Set(item.audience_tags ?? []);
-      if (!tagFilter.audience.some((tag) => itemTags.has(tag))) return false;
-    }
-    if (tagFilter.scenario.length > 0) {
-      const itemTags = new Set(item.scenario_tags ?? []);
-      if (!tagFilter.scenario.some((tag) => itemTags.has(tag))) return false;
     }
     return true;
   });

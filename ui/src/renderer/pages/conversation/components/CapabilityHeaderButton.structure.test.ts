@@ -28,17 +28,15 @@ describe('conversation capability header buttons', () => {
 
   test('all desktop header capability triggers opt into the shared active style', () => {
     const autoWork = readSource(new URL('./AutoWorkControl.tsx', import.meta.url));
-    const idmm = readSource(new URL('./IdmmControl.tsx', import.meta.url));
     const knowledge = readSource(new URL('./KnowledgeControl.tsx', import.meta.url));
 
-    for (const source of [autoWork, idmm, knowledge]) {
+    for (const source of [autoWork, knowledge]) {
       expect(source.includes("from './CapabilityHeaderButton'")).toBe(true);
       expect(source.includes('capabilityHeaderButtonClass(')).toBe(true);
       expect(source.includes('capabilityHeaderButtonStyle(dotColor)')).toBe(true);
     }
 
     expect(autoWork.includes('capabilityHeaderButtonClass(enabled')).toBe(true);
-    expect(idmm.includes('capabilityHeaderButtonClass(enabled')).toBe(true);
     expect(knowledge.includes('capabilityHeaderButtonClass(binding.enabled')).toBe(true);
   });
 });

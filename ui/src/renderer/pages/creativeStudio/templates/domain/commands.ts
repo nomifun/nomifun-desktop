@@ -13,7 +13,7 @@ import type {
   CreativeTemplateVariable,
 } from './types';
 
-export type CreativeTemplateMetadataPatch = Partial<
+type CreativeTemplateMetadataPatch = Partial<
   Pick<CreativeTemplateMetadata, 'name' | 'description' | 'category' | 'visibility' | 'tags'>
 >;
 
@@ -70,10 +70,3 @@ export type CreativeTemplateCommand =
     }
   | { type: 'run/fail'; requestId: string; code: string; message: string; completedAt: number }
   | { type: 'run/cancel'; requestId: string; completedAt: number };
-
-export const templateCommands = {
-  create: (template: CreativeTemplateDefinitionV1): CreativeTemplateCommand => ({ type: 'template/create', template }),
-  delete: (templateId: string): CreativeTemplateCommand => ({ type: 'template/delete', templateId }),
-  requestRun: (input: Omit<Extract<CreativeTemplateCommand, { type: 'run/request' }>, 'type'>): CreativeTemplateCommand => ({ type: 'run/request', ...input }),
-  queueRun: (requestId: string, queuedAt: number): CreativeTemplateCommand => ({ type: 'run/queue', requestId, queuedAt }),
-} as const;

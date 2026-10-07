@@ -17,7 +17,7 @@
  * in flight.
  */
 
-import React, { useCallback, useLayoutEffect, useMemo, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Form, Input, Select } from '@arco-design/web-react';
 import type {
@@ -91,6 +91,8 @@ const RequirementForm: React.FC<RequirementFormProps> = ({
   const [newAttachments, setNewAttachments] = useState<INewAttachmentRef[]>([]);
   const [removeAttachmentIds, setRemoveAttachmentIds] = useState<AttachmentId[]>([]);
   const [uploading, setUploading] = useState(false);
+  const draftVersion = useRef(0);
+  const saving = useRef(false);
 
   // Existing attachments still shown (i.e. not queued for removal).
   const existing = useMemo<IAttachment[]>(() => {
@@ -112,6 +114,8 @@ const RequirementForm: React.FC<RequirementFormProps> = ({
   }, [isEdit, initial]);
 
   useLayoutEffect(() => {
+    ++draftVersion.current;
+    saving.current = false;
     const nextValues: FormValues = {
       title: undefined,
       content: undefined,
@@ -125,6 +129,9 @@ const RequirementForm: React.FC<RequirementFormProps> = ({
     setNewAttachments([]);
     setRemoveAttachmentIds([]);
     setUploading(false);
+    return () => {
+      ++draftVersion.current;
+    };
   }, [form, initialValues, resetSignal]);
 
   const tagOptions = useMemo(() => tags.map((tg) => ({ label: tg.tag, value: tg.tag })), [tags]);
@@ -134,30 +141,35 @@ const RequirementForm: React.FC<RequirementFormProps> = ({
   }, []);
 
   const handleSave = useCallback(async () => {
-    let values: FormValues;
+    if (saving.current || submitting || uploading) return;
+    saving.current = true;
+    const version = draftVersion.current;
     try {
-      values = await form.validate();
-    } catch {
-      // arco surfaces the per-field validation messages itself.
-      return;
+      let values: FormValues;
+      try {
+        values = await form.validate();
+      } catch {
+        // Arco surfaces the per-field validation messages itself.
+        return;
+      }
+      if (version !== draftVersion.current) return;
+      const payload: RequirementFormPayload = {
+        title: (values.title ?? '').trim(),
+        content: values.content ?? '',
+        tag: values.tag ?? '',
+        order_key: values.order_key,
+        newAttachments,
+        removeAttachmentIds,
+      };
+      // Status is execution authority, not ordinary form metadata. Omit the
+      // unchanged snapshot so metadata edits cannot replay a stale verdict.
+      if (isEdit && !isExecutionOwnedStatus && values.status !== initial?.status) {
+        payload.status = values.status;
+      }
+      await onSubmit(payload);
+    } finally {
+      if (version === draftVersion.current) saving.current = false;
     }
-    const payload: RequirementFormPayload = {
-      title: (values.title ?? '').trim(),
-      content: values.content ?? '',
-      tag: values.tag ?? '',
-      order_key: values.order_key,
-      newAttachments,
-      removeAttachmentIds,
-    };
-    // Status is execution authority, not ordinary form metadata.  Sending the
-    // value that merely seeded this form can race an AutoWork verdict and
-    // replay a stale `in_progress`/`pending` value after the row is already
-    // terminal.  Omit unchanged status so the backend's dedicated status CAS
-    // is entered only for an explicit user transition.
-    if (isEdit && !isExecutionOwnedStatus && values.status !== initial?.status) {
-      payload.status = values.status;
-    }
-    await onSubmit(payload);
   }, [
     form,
     initial?.status,
@@ -166,6 +178,8 @@ const RequirementForm: React.FC<RequirementFormProps> = ({
     newAttachments,
     removeAttachmentIds,
     onSubmit,
+    submitting,
+    uploading,
   ]);
 
   return (

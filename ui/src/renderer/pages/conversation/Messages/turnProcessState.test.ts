@@ -8,17 +8,18 @@ import { describe, expect, test } from 'bun:test';
 import { getProcessItemState, getToolMessagesProcessState } from './turnProcessState';
 
 describe('turn process state', () => {
-  test('treats tool confirmations as waiting for user input', () => {
-    expect(
-      getToolMessagesProcessState([
-        {
-          type: 'tool_group',
-          content: [{ call_id: 'call-1', name: 'Edit', description: '', render_output_as_markdown: false, status: 'Confirming' }],
-        } as any,
-      ])
-    ).toBe('waiting');
+  test('uses explicit canonical cancellation without hiding ordinary agent errors', () => {
+    expect(getProcessItemState({type:'agent_status',content:{status:'error',turn_summary:true,turn_state:'cancelled'}} as any)).toBe('canceled');
+    expect(getProcessItemState({type:'agent_status',content:{status:'error',turn_state:'cancelled'}} as any)).toBe('failed');
   });
-
+  test('does not mark unparsed tool-call text as completed work', () => {
+    expect(getProcessItemState({
+      type: 'text', position: 'left', content: { content: '<tool_call>\n<function=write_file>\ncontent' },
+    } as any)).toBe('failed');
+    expect(getProcessItemState({
+      type: 'text', position: 'left', content: { content: '```xml\n<tool_call>\n<function=write_file>\n```' },
+    } as any)).toBe('completed');
+  });
   test('surfaces failed and canceled tool states', () => {
     expect(
       getToolMessagesProcessState([
@@ -29,10 +30,27 @@ describe('turn process state', () => {
       getToolMessagesProcessState([
         {
           type: 'tool_group',
-          content: [{ call_id: 'call-1', name: 'Edit', description: '', render_output_as_markdown: false, status: 'Canceled' }],
+          content: [{ call_id: 'call-1', name: 'Edit', description: '', status: 'Canceled' }],
         } as any,
       ])
     ).toBe('canceled');
+  });
+
+  test('keeps an exact bounded search result from failing the turn receipt', () => {
+    expect(getToolMessagesProcessState([{
+      type: 'tool_call',
+      content: {
+        call_id: 'call-search',
+        name: 'search_files',
+        status: 'error',
+        output: JSON.stringify({
+          kind: 'search_context_withheld',
+          search_executed: true,
+          snippets_withheld: true,
+          notice: 'Narrow the search before using snippets.',
+        }),
+      },
+    } as any])).toBe('completed');
   });
 
   test('keeps the root error failed while classifying barrier-skipped commands as canceled', () => {
@@ -160,31 +178,7 @@ describe('turn process state', () => {
     ).toBe('failed');
   });
 
-  test('does not let a failed confirmed shell command group fail the whole process receipt', () => {
-    expect(
-      getToolMessagesProcessState([
-        {
-          type: 'tool_group',
-          content: [
-            {
-              call_id: 'call-shell',
-              name: 'Bash',
-              status: 'Error',
-              description: 'Run a validation command',
-              confirmationDetails: {
-                type: 'exec',
-                title: 'Run command',
-                command: 'node test.js',
-              },
-            },
-          ],
-        } as any,
-      ])
-    ).toBe('completed');
-  });
-
-  test('keeps permission and active thinking steps open', () => {
-    expect(getProcessItemState({ type: 'permission' } as any)).toBe('waiting');
+  test('keeps active thinking steps open', () => {
     expect(getProcessItemState({ type: 'thinking', content: { status: 'thinking' } } as any)).toBe('running');
   });
 

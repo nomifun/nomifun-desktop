@@ -5,29 +5,21 @@
  */
 
 import {
-  creativeCanvasDetailToLegacyProject,
-  creativeCanvasSummaryToLegacyProject,
-  legacyProjectDocumentToCreativeCanvas,
-  type CreateCreativeProjectRequest,
-  type CreativeProjectDetail,
-  type CreativeProjectSummary,
-  type RenameCreativeProjectRequest,
-  type SaveCreativeProjectRequest,
+creativeCanvasDetailToLegacyProject,
+creativeCanvasSummaryToLegacyProject,
+legacyProjectDocumentToCreativeCanvas,
+type CreateCreativeProjectRequest,
+type CreativeProjectDetail,
+type CreativeProjectSummary,
+type RenameCreativeProjectRequest,
+type SaveCreativeProjectRequest,
 } from '../domain';
 import {
-  CREATIVE_STUDIO_CANVASES_ENDPOINT,
-  createCreativeStudioCanvasApi,
-  creativeStudioCanvasApi,
-  type CreativeStudioCanvasApi,
-  type CreativeStudioHttpRequest,
+createCreativeStudioCanvasApi,
+creativeStudioCanvasApi,
+type CreativeStudioCanvasApi,
+type CreativeStudioHttpRequest
 } from './canvasApi';
-
-/**
- * @deprecated Historical export retained for canvas/editor modules that have
- * not migrated their in-process names. It intentionally targets `/canvases`.
- */
-export const CREATIVE_STUDIO_PROJECTS_ENDPOINT =
-  CREATIVE_STUDIO_CANVASES_ENDPOINT;
 
 export type { CreativeStudioHttpRequest };
 

@@ -66,7 +66,37 @@ describe('initial message durable delivery identity', () => {
     expect(storage.getItem('initial')).not.toBeNull();
   });
 
-  test('quarantines a Finished persisted Guid payload before any POST can start', async () => {
+  test('authorizes a newly-ready canonical Session projected as idle Finished', async () => {
+    const storage = createStorage();
+    const delivery = {
+      conversation_id: CONVERSATION_ID,
+      initial_admission_epoch: 0 as const,
+      input: 'canonical ready handoff',
+      files: [],
+      idempotency_key: 'ready-delivery-key',
+    };
+    storage.setItem('initial', JSON.stringify(delivery));
+
+    const result = await readAuthorizedInitialMessageDelivery(
+      storage,
+      'initial',
+      CONVERSATION_ID,
+      {
+        getConversation: async () =>
+          ({
+            id: CONVERSATION_ID,
+            status: 'finished',
+            runtime: { state: 'idle', active_turn_id: undefined, is_processing: false },
+          }) as TChatConversation,
+        getTranscriptSummary: async () => ({ items: [], total: 0 }),
+      }
+    );
+
+    expect(result).toEqual(delivery);
+    expect(storage.getItem('initial')).not.toBeNull();
+  });
+
+  test('quarantines a non-idle Finished persisted Guid payload before any POST can start', async () => {
     const storage = createStorage();
     storage.setItem(
       'initial',
@@ -86,7 +116,11 @@ describe('initial message durable delivery identity', () => {
       CONVERSATION_ID,
       {
         getConversation: async () =>
-          ({ id: CONVERSATION_ID, status: 'finished' }) as TChatConversation,
+          ({
+            id: CONVERSATION_ID,
+            status: 'finished',
+            runtime: { state: 'running', active_turn_id: 'active-turn', is_processing: true },
+          }) as TChatConversation,
         getTranscriptSummary: async () => {
           transcriptReads += 1;
           return { items: [{}], total: 1 };

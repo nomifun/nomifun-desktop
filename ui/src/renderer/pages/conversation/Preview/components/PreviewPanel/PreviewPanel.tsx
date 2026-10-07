@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import { downloadFileFromPath, downloadTextContent } from '@/renderer/utils/file/download';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { PreviewToolbarExtrasProvider, type PreviewToolbarExtras } from '../../context/PreviewToolbarExtrasContext';
 import { usePreviewContext } from '../../context/PreviewContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
@@ -19,12 +18,10 @@ import HTMLRenderer from '../renderers/HTMLRenderer';
 import ImagePreview from '../viewers/ImageViewer';
 import MarkdownEditor from '../editors/MarkdownEditor';
 import MarkdownPreview from '../viewers/MarkdownViewer';
-import MiniAppViewer from '../viewers/MiniAppViewer';
 import PDFPreview from '../viewers/PDFViewer';
 import OfficeDocPreview from '../viewers/OfficeDocViewer';
 import PptViewer from '../viewers/PptViewer';
 import TextEditor from '../editors/TextEditor';
-import URLViewer from '../viewers/URLViewer';
 import {
   PreviewTabs,
   PreviewToolbar,
@@ -65,8 +62,8 @@ const PreviewPanel: React.FC = () => {
     closePreview,
     updateContent,
     saveContent,
+    refreshFile,
   } = usePreviewContext();
-  const layout = useLayoutContext();
 
   // 视图状态 / View states
   const [viewMode, setViewMode] = useState<'source' | 'preview'>('preview');
@@ -409,20 +406,6 @@ const PreviewPanel: React.FC = () => {
     if (isMarkdown) {
       // 分屏模式：左右分割（编辑器 + 预览）/ Split-screen mode: Editor + Preview
       if (isSplitScreenEnabled) {
-        // 移动端：全屏显示预览，隐藏编辑器 / Mobile: Full-screen preview, hide editor
-        if (layout?.isMobile) {
-          return (
-            <div className='flex-1 overflow-hidden'>
-              <MarkdownPreview
-                content={content}
-                hideToolbar
-                file_path={metadata?.file_path}
-                workspace={metadata?.workspace}
-              />
-            </div>
-          );
-        }
-
         // 桌面端：左右分割布局 / Desktop: Split layout
         return (
           <div className='flex flex-1 relative overflow-hidden'>
@@ -482,15 +465,6 @@ const PreviewPanel: React.FC = () => {
     if (isHTML) {
       // 分屏模式：左右分割（编辑器 + 预览）/ Split-screen mode: Editor + Preview
       if (isSplitScreenEnabled) {
-        // 移动端：全屏显示预览，隐藏编辑器 / Mobile: Full-screen preview, hide editor
-        if (layout?.isMobile) {
-          return (
-            <div className='flex-1 overflow-hidden'>
-              <HTMLRenderer content={content} file_path={metadata?.file_path} workspace={metadata?.workspace} />
-            </div>
-          );
-        }
-
         // 桌面端：左右分割布局 / Desktop: Split layout
         return (
           <div className='flex flex-1 relative overflow-hidden'>
@@ -630,20 +604,6 @@ const PreviewPanel: React.FC = () => {
           workspace={metadata?.workspace}
         />
       );
-    } else if (content_type === 'url') {
-      // URL 预览模式 / URL preview mode
-      return <URLViewer url={content} title={metadata?.title} />;
-    } else if (content_type === 'miniapp') {
-      // 小程序：沙箱 iframe 实时渲染 + 「发布为小程序」工具栏
-      // Mini-app: sandboxed live render with the publish toolbar
-      return (
-        <MiniAppViewer
-          content={content}
-          file_path={metadata?.file_path}
-          workspace={metadata?.workspace}
-          conversation_id={metadata?.conversation_id}
-        />
-      );
     }
 
     return null;
@@ -686,8 +646,7 @@ const PreviewPanel: React.FC = () => {
           onClosePanel={closePreview}
         />
 
-        {/* 工具栏（URL 类型不显示工具栏，因为不需要下载/编辑等功能）/ Toolbar (hidden for URL type as it doesn't need download/edit features) */}
-        {content_type !== 'url' && (
+        {/* Document preview toolbar */}
           <PreviewToolbar
             content_type={content_type}
             isMarkdown={isMarkdown}
@@ -720,6 +679,19 @@ const PreviewPanel: React.FC = () => {
             leftExtra={toolbarExtras?.left}
             rightExtra={toolbarExtras?.right}
           />
+
+        {activeTab.fileReadError && (
+          <div role='alert' className='px-16px py-10px text-12px bg-warning-1 text-warning-7 flex items-center gap-12px'>
+            <span>{t('preview.fileRefreshFailed')}</span>
+            <button
+              type='button'
+              className='px-10px py-4px rounded-6px border border-solid border-warning-3 shrink-0 cursor-pointer'
+              disabled={activeTab.fileRefreshing || activeTab.isDirty}
+              onClick={() => { void refreshFile(); }}
+            >
+              {t('common.retry')}
+            </button>
+          </div>
         )}
 
         {metadata?.truncated && (

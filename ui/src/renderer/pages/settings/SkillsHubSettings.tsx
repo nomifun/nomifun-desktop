@@ -1,33 +1,21 @@
 /**
  * SkillsHubSettings — The Skills Hub page. Every skill (built-in, custom,
- * extension, auto-injected) lives in ONE responsive card grid, filtered by a
- * shared two-row tag bar (Audience / Skill Scenario) over the preset tag
- * vocabulary. Cards open a SkillTagModal to assign tags; the "Manage Tags" chip
- * opens the shared TagManagementModal for vocabulary CRUD.
+ * extension, auto-injected) lives in one responsive searchable card grid.
  *
- * Visual language mirrors the preset page: an outlined library surface, a
- * PresetTagFilterBar, and PresetCard-style grid items (see SkillCard).
+ * The page owns import, inspection, and deletion. Saved Agent authoring stays
+ * in the Agent Workbench.
  * Theme variables only; `<div onClick>`/Arco controls (no <button>).
  */
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { resolveLocaleKey } from '@/common/utils';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-// Shared tag UI + vocabulary — reused verbatim from the preset page so the
-// skill and preset surfaces share one chip language and one tag vocabulary.
-import { usePresetTags } from '@/renderer/hooks/preset';
-import PresetTagFilterBar from './PresetSettings/PresetTagFilterBar';
-import type { TagFilterState } from './PresetSettings/presetUtils';
-import TagManagementModal from './PresetSettings/TagManagementModal';
-import type { SkillInfo } from './PresetSettings/types';
+import type { SkillInfo } from '@/common/types/skill';
 import AgentSkillImportDrawer from './skill/AgentSkillImportDrawer';
 import type { ExternalAgentSkillSource } from './skill/agentSkillImportUtils';
 import SkillCard from './skill/SkillCard';
 import SkillDetailDrawer from './skill/SkillDetailDrawer';
-import SkillTagModal from './skill/SkillTagModal';
 import { resolveSkillDisplay } from './skill/skillDisplay';
-import { filterSkillsByTags, type SkillTagFilterState } from './skill/skillFilter';
 import {
   ENHANCED_TOOLS_EMPTY_STATE_CLASS,
   ENHANCED_TOOLS_GRID_CLASS,
@@ -55,8 +43,6 @@ const IMPORT_ACTION_BUTTON_CLASS =
 const SkillsHubSettings: React.FC = () => {
   const { t, i18n } = useTranslation();
   const localeKey = resolveLocaleKey(i18n.language);
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [message, messageContext] = useArcoMessage({ maxCount: 10 });
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -71,13 +57,7 @@ const SkillsHubSettings: React.FC = () => {
 
   const [search_query, setSearchQuery] = useState('');
   const [searchExpanded, setSearchExpanded] = useState(false);
-  const [tagFilter, setTagFilter] = useState<TagFilterState>({ audience: [], scenario: [] });
   const [agentImportVisible, setAgentImportVisible] = useState(false);
-
-  // Shared preset tag vocabulary.
-  const tags = usePresetTags();
-  const [tagMgmtVisible, setTagMgmtVisible] = useState(false);
-  const [tagModalSkill, setTagModalSkill] = useState<SkillInfo | null>(null);
   const [detailSkill, setDetailSkill] = useState<SkillInfo | null>(null);
 
   // Name set of built-in auto-inject skills → drives the "Auto" badge.
@@ -109,39 +89,16 @@ const SkillsHubSettings: React.FC = () => {
     void fetchData();
   }, [fetchData]);
 
-  const skillTagFilter = useMemo<SkillTagFilterState>(() => {
-    const keyById = new Map(
-      [...tags.audienceTags, ...tags.scenarioTags].map((tag) => [tag.preset_tag_id, tag.key] as const)
-    );
-    return {
-      audience: tagFilter.audience.flatMap((presetTagId) => {
-        const key = keyById.get(presetTagId);
-        return key ? [key] : [];
-      }),
-      scenario: tagFilter.scenario.flatMap((presetTagId) => {
-        const key = keyById.get(presetTagId);
-        return key ? [key] : [];
-      }),
-    };
-  }, [tagFilter, tags.audienceTags, tags.scenarioTags]);
-
   const filteredSkills = useMemo(() => {
-    return filterSkillsByTags(availableSkills, search_query, skillTagFilter, localeKey);
-  }, [availableSkills, search_query, skillTagFilter, localeKey]);
-
-  // Self-heal the tag filter against the current vocabulary: dropping a tag in
-  // the management modal must not leave a stale key invisibly constraining a
-  // facet. Mirrors PresetListPanel's guard.
-  useEffect(() => {
-    const audienceIds = new Set(tags.audienceTags.map((tag) => tag.preset_tag_id));
-    const scenarioIds = new Set(tags.scenarioTags.map((tag) => tag.preset_tag_id));
-    setTagFilter((prev) => {
-      const audience = prev.audience.filter((presetTagId) => audienceIds.has(presetTagId));
-      const scenario = prev.scenario.filter((presetTagId) => scenarioIds.has(presetTagId));
-      if (audience.length === prev.audience.length && scenario.length === prev.scenario.length) return prev;
-      return { audience, scenario };
+    const query = search_query.trim().toLowerCase();
+    if (!query) return availableSkills;
+    return availableSkills.filter((skill) => {
+      const display = resolveSkillDisplay(skill, localeKey);
+      return `${skill.name} ${skill.description} ${display.name} ${display.description}`
+        .toLowerCase()
+        .includes(query);
     });
-  }, [tags.audienceTags, tags.scenarioTags]);
+  }, [availableSkills, search_query, localeKey]);
 
   // Scroll to and highlight a skill when navigated with ?highlight=skillName.
   useEffect(() => {
@@ -267,7 +224,7 @@ const SkillsHubSettings: React.FC = () => {
           <div className={ENHANCED_TOOLS_HEADER_CLASS}>
             <div
               data-testid='skills-library-header-row'
-              className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
+              className='flex items-center justify-between gap-12px'
             >
               <div className='min-w-0'>
                 <p
@@ -276,13 +233,13 @@ const SkillsHubSettings: React.FC = () => {
                 >
                   {t('settings.skillsHub.gridDescription', {
                     defaultValue:
-                      'Reusable skill packages your presets can call on. Tag them so they surface under the right filters.',
+                      'Reusable Skill packages that Agents can use during a Session.',
                   })}
                 </p>
               </div>
               <div
                 data-testid='skills-library-actions'
-                className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'flex-shrink-0'}`}
+                className='flex flex-shrink-0 items-center gap-10px'
               >
                 <Button
                   type={isSearchVisible ? 'secondary' : 'text'}
@@ -329,50 +286,38 @@ const SkillsHubSettings: React.FC = () => {
               />
             )}
 
-            {/* Shared tag filter bar — vocab from usePresetTags */}
-            <PresetTagFilterBar
-              audienceTags={tags.audienceTags}
-              scenarioTags={tags.scenarioTags}
-              value={tagFilter}
-              onChange={setTagFilter}
-              localeKey={localeKey}
-              onManageTags={() => setTagMgmtVisible(true)}
-              manageTagsInlineIcon
-              actions={(
-                <div
-                  data-testid='skills-import-actions'
-                  className={`flex items-center gap-8px ${isMobile ? 'w-full flex-wrap' : 'ml-auto flex-none justify-end'}`}
-                >
-                  <Button
-                    size='small'
-                    data-testid='btn-import-agent-skills'
-                    className={IMPORT_ACTION_BUTTON_CLASS}
-                    icon={<FolderOpen size={14} fill='currentColor' />}
-                    onClick={() => setAgentImportVisible(true)}
-                  >
-                    {t('settings.agentSkillImport.shortAction', { defaultValue: 'Import from Agent' })}
-                  </Button>
-                  <Button
-                    size='small'
-                    data-testid='btn-manual-import'
-                    className={IMPORT_ACTION_BUTTON_CLASS}
-                    icon={<FolderOpen size={14} fill='currentColor' />}
-                    onClick={handleImportFolder}
-                  >
-                    {t('settings.skillsHub.manualImport', { defaultValue: 'Import Skills' })}
-                  </Button>
-                  <Button
-                    size='small'
-                    data-testid='btn-import-zip'
-                    className={IMPORT_ACTION_BUTTON_CLASS}
-                    icon={<FileZip size={14} fill='currentColor' />}
-                    onClick={handleImportZip}
-                  >
-                    {t('settings.skillsHub.importZip', { defaultValue: 'Import .zip' })}
-                  </Button>
-                </div>
-              )}
-            />
+            <div
+              data-testid='skills-import-actions'
+              className='flex items-center justify-end gap-8px'
+            >
+              <Button
+                size='small'
+                data-testid='btn-import-agent-skills'
+                className={IMPORT_ACTION_BUTTON_CLASS}
+                icon={<FolderOpen size={14} fill='currentColor' />}
+                onClick={() => setAgentImportVisible(true)}
+              >
+                {t('settings.agentSkillImport.shortAction', { defaultValue: 'Import from Agent' })}
+              </Button>
+              <Button
+                size='small'
+                data-testid='btn-manual-import'
+                className={IMPORT_ACTION_BUTTON_CLASS}
+                icon={<FolderOpen size={14} fill='currentColor' />}
+                onClick={handleImportFolder}
+              >
+                {t('settings.skillsHub.manualImport', { defaultValue: 'Import Skills' })}
+              </Button>
+              <Button
+                size='small'
+                data-testid='btn-import-zip'
+                className={IMPORT_ACTION_BUTTON_CLASS}
+                icon={<FileZip size={14} fill='currentColor' />}
+                onClick={handleImportZip}
+              >
+                {t('settings.skillsHub.importZip', { defaultValue: 'Import .zip' })}
+              </Button>
+            </div>
           </div>
 
           {/* Single card grid for all skills */}
@@ -382,11 +327,9 @@ const SkillsHubSettings: React.FC = () => {
                 <SkillCard
                   key={skill.name}
                   skill={skill}
-                  tagByKey={tags.tagByKey}
                   localeKey={localeKey}
-                  isAutoInjected={skill.source !== 'extension' && autoInjectedNames.has(skill.name)}
+                  isAutoInjected={autoInjectedNames.has(skill.name)}
                   onOpenDetails={setDetailSkill}
-                  onEditTags={setTagModalSkill}
                   onDelete={confirmDelete}
                   highlighted={highlightedSkill === skill.name}
                   cardRef={(el) => {
@@ -431,42 +374,12 @@ const SkillsHubSettings: React.FC = () => {
       <SkillDetailDrawer
         visible={detailSkill !== null}
         skill={detailSkill}
-        tagByKey={tags.tagByKey}
         localeKey={localeKey}
         isAutoInjected={
           detailSkill !== null &&
-          detailSkill.source !== 'extension' &&
           autoInjectedNames.has(detailSkill.name)
         }
         onClose={() => setDetailSkill(null)}
-        onEditTags={(skill) => {
-          setDetailSkill(null);
-          setTagModalSkill(skill);
-        }}
-      />
-
-      <SkillTagModal
-        visible={tagModalSkill !== null}
-        skill={tagModalSkill}
-        onClose={() => setTagModalSkill(null)}
-        audienceTags={tags.audienceTags}
-        scenarioTags={tags.scenarioTags}
-        onCreateTag={tags.createTag}
-        localeKey={localeKey}
-        onSaved={fetchData}
-        message={message}
-      />
-
-      <TagManagementModal
-        visible={tagMgmtVisible}
-        onClose={() => setTagMgmtVisible(false)}
-        audienceTags={tags.audienceTags}
-        scenarioTags={tags.scenarioTags}
-        localeKey={localeKey}
-        onCreate={tags.createTag}
-        onRename={tags.renameTag}
-        onDelete={tags.deleteTag}
-        message={message}
       />
 
       <AgentSkillImportDrawer

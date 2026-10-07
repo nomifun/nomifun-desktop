@@ -1,9 +1,6 @@
-//! 重水合原语（design 2026-06-23 采集接缝重构）。
-//!
-//! 技能起草需要"真实做法"，但采集器只存候选索引（工具形状 + 锚点，无内容）。
-//! 内容的**唯一事实源**是会话库（`nomifun-conversation` 的 messages 表，永久 durable）。
-//! 起草时按 [`TranscriptAnchor`] 定向拉取"那一段"转录，脱敏后喂给 drafter，**用完即弃，
-//! 绝不落 companion 库**。会话被删 → `window` 返回 `None`，调用方降级回工具名步骤。
+//! Bounded Companion transcript views over canonical AgentSession content.
+//! The host supplies the same Store projection used by the product.
+//! Companion anchors identify source content; they do not duplicate a transcript.
 
 use async_trait::async_trait;
 use nomifun_common::AppError;

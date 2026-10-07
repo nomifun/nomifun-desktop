@@ -27,7 +27,7 @@ import PersonaSection from './PersonaSection';
  */
 const OverviewTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAttentionChange }) => {
   const { t } = useTranslation();
-  const { profile, status, loading, patchCompanion, refresh } = companion;
+  const { profile, status, loading, patchCompanion } = companion;
   const [figurePaneOpen, setFigurePaneOpen] = useState(false);
 
   // A pane opened for one companion must not survive a switch to another.
@@ -75,7 +75,7 @@ const OverviewTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAt
           figurePaneOpen={figurePaneOpen}
           onEditFigure={() => setFigurePaneOpen((open) => !open)}
         />
-        <PersonaSection profile={profile} patchCompanion={patchCompanion} refresh={refresh} />
+        <PersonaSection profile={profile} patchCompanion={patchCompanion} />
         <ModelsSection companion={companion} status={status} companionName={profile.name} />
       </div>
     );

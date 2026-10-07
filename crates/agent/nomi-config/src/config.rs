@@ -94,19 +94,6 @@ pub struct ProjectInstructionsConfigFile {
 }
 
 impl ProjectInstructionsConfigFile {
-    pub fn merge(global: Self, project: Self) -> Self {
-        Self {
-            project_doc_fallback_filenames: project
-                .project_doc_fallback_filenames
-                .or(global.project_doc_fallback_filenames),
-            project_doc_max_bytes: project
-                .project_doc_max_bytes
-                .or(global.project_doc_max_bytes),
-            project_root_markers: project
-                .project_root_markers
-                .or(global.project_root_markers),
-        }
-    }
 
     pub fn resolve(self) -> ProjectInstructionsConfig {
         ProjectInstructionsConfig {
@@ -237,27 +224,8 @@ pub struct ProfileConfig {
     pub compat: Option<ProviderCompat>,
 }
 
-/// Per-skill deny/allow rule lists loaded from `[tools.skills]` in config.toml.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct SkillsPermissionConfig {
-    #[serde(default)]
-    pub deny: Vec<String>,
-    #[serde(default)]
-    pub allow: Vec<String>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolsConfig {
-    #[serde(default)]
-    pub auto_approve: bool,
-    /// Exact provider-visible tool names that bypass per-call confirmation.
-    /// MCP entries must use their canonical `mcp__...__<hash>` names; an
-    /// original server-local tool name is informational and grants no authority.
-    #[serde(default = "default_allow_list")]
-    pub allow_list: Vec<String>,
-    /// Skill-level deny/allow rules. Merged by concatenation across global + project configs.
-    #[serde(default)]
-    pub skills: SkillsPermissionConfig,
     /// How many individual recent tool-result images remain in history.
     /// Older/excess attachments are stripped (text kept), and the engine also
     /// enforces the supported-provider ceiling of 20 images per request.
@@ -265,8 +233,6 @@ pub struct ToolsConfig {
     pub max_recent_images: usize,
     #[serde(default)]
     pub computer: ComputerConfig,
-    #[serde(default)]
-    pub browser: BrowserConfig,
     /// Opt-in (default empty = off): restrict Write/Edit/ApplyPatch to writes
     /// within this directory. Accidental/buggy out-of-root writes are rejected.
     /// NOT a security sandbox (the agent has Bash) — that needs OS-level
@@ -295,6 +261,12 @@ pub struct ToolsConfig {
     /// 空（默认）= 不限制。
     #[serde(default)]
     pub builtin_allowlist: Vec<String>,
+    #[serde(skip)]
+    pub enforce_builtin_allowlist: bool,
+    /// Host-owned deferred subset of `builtin_allowlist`. It is intentionally
+    /// excluded from user config serialization.
+    #[serde(skip)]
+    pub deferred_allowlist: Vec<String>,
 }
 
 /// One language-server entry for the `Lsp` tool (§3.3).
@@ -311,17 +283,15 @@ pub struct LspServerConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            auto_approve: false,
-            allow_list: default_allow_list(),
-            skills: SkillsPermissionConfig::default(),
             max_recent_images: default_max_recent_images(),
             computer: ComputerConfig::default(),
-            browser: BrowserConfig::default(),
             write_root: String::new(),
             lsp_servers: Vec::new(),
             delegation_token_budget: None,
             bash_sandbox: false,
             builtin_allowlist: Vec::new(),
+            enforce_builtin_allowlist: false,
+            deferred_allowlist: Vec::new(),
         }
     }
 }
@@ -342,81 +312,6 @@ impl Default for ComputerConfig {
         Self {
             enabled: false,
             max_screenshot_edge: default_max_screenshot_edge(),
-        }
-    }
-}
-
-/// Browser-use tool-client settings.
-///
-/// In production these values configure the Hub-backed Browser tool adapter.
-/// The application main process owns the sole `BrowserSessionHub`; Agent
-/// runtimes receive a `BrowserLaneClient` and never own Chromium or a profile.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BrowserConfig {
-    /// Off by default: driving a browser is opt-in.
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub headless: bool,
-    /// **F1-sec: evaluate「全权模式」开关**（E3 裁决⑨，default-deny）。`false`（默认）→ 引擎的
-    /// `evaluate` 动作返 `Unsupported`（最高危逃生舱默认封死）。`true` → evaluate 放行（仍受「与持久
-    /// 登录互斥」约束）。上层（backend factory）把用户在 System Settings 显式 opt-in 的
-    /// `client_preferences` `agent.browserUse.fullPower` LIVE 值写到这里（与 `computer_use`/`browser_use`
-    /// 启用开关同范式，每会话构造时读最新值），bootstrap 将该策略交给 Hub-backed Browser
-    /// tool adapter；最终操作仍通过 `BrowserLaneClient` 进入主进程 Hub。
-    /// **绝不看 session_mode**——yolo/companion 无从豁免（不变量⑧）。
-    #[serde(default)]
-    pub full_power: bool,
-    /// **SD-6: 持久登录开关**（DESIGN §16/§27 互斥约束）。`true`（产品默认）→ 与全权互斥（evaluate
-    /// 动作在两者皆 true 时 Blocked）。上层（backend factory）把用户在 System Settings 的
-    /// `client_preferences` `agent.browserUse.persistentLogin` LIVE 值写到这里（与 `full_power`
-    /// 同范式，每会话构造时读最新值），bootstrap 将该约束交给 Hub-backed Browser tool
-    /// adapter。Primary 实时身份由 Hub 的应用管理 profile 提供。
-    /// **代码级 Default = `false`**（default-deny 基线；产品 ON 由 factory host_default=true 实现）。
-    #[serde(default)]
-    pub persistent_login: bool,
-    /// **Site memory（P7A 站点记忆）开关**（opt-in）。`false`（默认/代码级 Default）→
-    /// Hub-backed Browser tool adapter 不挂 site-memory sink：不持久化、不向 observe 注入
-    /// per-domain hints（零行为变化）。`true` → bootstrap 注入文件型 `SiteMemorySink`
-    /// （Agent 跨会话记住站点结构）。上层 factory 把
-    /// `client_preferences` `agent.browserUse.siteMemory` LIVE 值写到这里（与 full_power/persistent_login
-    /// 同范式，host_default=false=OFF——记录站点交互到磁盘是隐私相关行为，须用户显式 opt-in）。
-    #[serde(default)]
-    pub site_memory: bool,
-    /// **Visual fallback（P7B 视觉兜底点击）开关**（opt-in）。`false`（默认/代码级 Default）→
-    /// Hub-backed Browser tool adapter 不挂 vision locator：DOM/aria 锚定失败时不做截图+
-    /// 视觉模型定位（零行为变化，仅返回原始锚定错误）。`true` → bootstrap 注入会话模型的
-    /// `VisualLocator` 适配器并置位
-    /// `visual_fallback_enabled`（锚定 stale/detached 时截图交视觉模型定位再点）。上层 factory 把
-    /// `client_preferences` `agent.browserUse.visualFallback` LIVE 值写到这里（与 site_memory/full_power
-    /// 同范式，host_default=false=OFF——视觉兜底每次都过一遍视觉模型，有额外 token 成本，须用户显式 opt-in）。
-    #[serde(default)]
-    pub visual_fallback: bool,
-    /// Explicit Browser Use approval bypass. Default false; host settings may set
-    /// this from `agent.browserUse.unrestrictedApproval`.
-    #[serde(default)]
-    pub unrestricted_approval: bool,
-    /// **浏览器来源**（Browser Host 可执行文件偏好，与 `headless` 正交）。`"managed"`（默认）=
-    /// 内置/下载的 Chrome for Testing；`"system"` = 系统安装的 Chrome/Edge 本体优先
-    /// （未探到回退 managed）。该值不会授予 runtime 浏览器所有权：主进程唯一
-    /// `BrowserSessionHub` 创建和共享 Browser Host，Primary 使用应用管理的稳定 profile，
-    /// Crawl Host 使用临时 profile，绝不读取用户真实 Chrome/Edge profile。上层 factory
-    /// 每会话读取 `agent.browserUse.source`；坏值静默退回 managed。
-    #[serde(default = "default_browser_source")]
-    pub source: String,
-}
-
-impl Default for BrowserConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            headless: false,
-            full_power: false,
-            persistent_login: false,
-            site_memory: false,
-            visual_fallback: false,
-            unrestricted_approval: false,
-            source: default_browser_source(),
         }
     }
 }
@@ -446,18 +341,11 @@ impl Default for SessionConfig {
 fn default_provider() -> String {
     "anthropic".to_string()
 }
-fn default_allow_list() -> Vec<String> {
-    vec!["Read".into(), "Grep".into(), "Glob".into()]
-}
 fn default_max_recent_images() -> usize {
     3
 }
 fn default_max_screenshot_edge() -> u32 {
     1568
-}
-/// 浏览器来源默认值：`"managed"`（内置/下载 CfT）。`"system"` = 用户系统 Chrome/Edge。
-fn default_browser_source() -> String {
-    "managed".to_owned()
 }
 fn default_true() -> bool {
     true
@@ -567,15 +455,18 @@ pub struct CliArgs {
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
     pub profile: Option<String>,
-    pub auto_approve: bool,
     pub project_dir: Option<PathBuf>,
 }
 
 impl Config {
     /// Load and merge config from all sources
     pub fn resolve(cli: &CliArgs) -> anyhow::Result<Self> {
+        Self::resolve_with_global(cli, &global_config_path())
+    }
+
+    fn resolve_with_global(cli: &CliArgs, global_path: &Path) -> anyhow::Result<Self> {
         // 1. Load global config
-        let global = load_config_file(&global_config_path())?;
+        let global = load_config_file(global_path)?;
 
         // 2. Load project config (from project_dir if specified, else CWD)
         let project_path = cli
@@ -586,7 +477,7 @@ impl Config {
         let project = load_config_file(&project_path)?;
 
         // 3. Merge: global <- project
-        let mut merged = merge_config_files(global, project);
+let mut merged = merge_config_files(global, project)?;
 
         // 4. If --profile specified, overlay profile settings
         if let Some(profile_name) = &cli.profile {
@@ -630,11 +521,8 @@ impl Config {
             provider,
         )?;
 
-        // 7. Apply auto_approve from CLI
-        let mut tools = merged.tools;
-        if cli.auto_approve {
-            tools.auto_approve = true;
-        }
+        // 7. Resolve the merged tool configuration.
+        let tools = merged.tools;
 
         // Resolve prompt_caching: default true for Anthropic
         let prompt_caching = provider_config
@@ -826,19 +714,6 @@ pub fn app_data_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("nomi"))
 }
 
-/// Browser platform storage namespace for regenerable assets, caches, and
-/// ephemeral profiles.
-///
-/// The main-process `BrowserSessionHub` owns the actual Host/profile lifecycle.
-/// Durable identity/workspace roots remain siblings under [`app_data_dir`]
-/// (`browser-state`, `browser-profiles`, `login-profile`) so
-/// backup can include managed identity data without copying Chromium caches or
-/// downloaded binaries. This helper does not grant an Agent runtime browser
-/// ownership.
-pub fn browser_data_dir() -> PathBuf {
-    app_data_dir().join("browser-data")
-}
-
 // --- Config file loading and merging ---
 
 pub fn global_config_path() -> PathBuf {
@@ -975,7 +850,7 @@ fn persist_config_migration(path: &Path, expected: &str, migrated: &str) -> io::
     Ok(())
 }
 
-fn load_config_file(path: &Path) -> anyhow::Result<ConfigFile> {
+fn load_config_file(path: &Path) -> anyhow::Result<toml::Table> {
     load_config_file_with_persist(path, persist_config_migration)
 }
 
@@ -985,19 +860,14 @@ fn load_config_file(path: &Path) -> anyhow::Result<ConfigFile> {
 /// document must first be atomically replaced and read back from disk. If that
 /// write fails, configuration resolution fails visibly instead of keeping a
 /// permanent runtime alias alive.
-fn load_config_file_with_persist<F>(path: &Path, persist: F) -> anyhow::Result<ConfigFile>
+fn load_config_file_with_persist<F>(path: &Path, persist: F) -> anyhow::Result<toml::Table>
 where
     F: FnOnce(&Path, &str, &str) -> io::Result<()>,
 {
     match std::fs::read_to_string(path) {
         Ok(content) => {
-            let canonical = match canonicalize_legacy_agent_delegation_settings(&content) {
-                Ok(canonical) => canonical,
-                Err(error) => {
-                    tracing::warn!(target: "nomi_config", path = %path.display(), error = %error, "failed to inspect config for legacy Agent delegation settings");
-                    None
-                }
-            };
+            let canonical = canonicalize_legacy_agent_delegation_settings(&content)
+                .with_context(|| format!("failed to parse config file {}", path.display()))?;
             let source = if let Some(migrated) = canonical {
                 // Validate before replacing the user's file. This preserves the
                 // previous fail-safe for malformed legacy values without ever
@@ -1032,261 +902,83 @@ where
             } else {
                 content
             };
-            match parse_config_file_content(&source) {
-                Ok(config) => Ok(config),
-                Err(error) => {
-                    tracing::warn!(target: "nomi_config", path = %path.display(), error = %error, "failed to parse config file");
-                    Ok(ConfigFile::default())
-                }
+            // Validate each source independently, but retain explicit fields
+            // until layering is complete. An overlay must not hide bad config.
+            parse_config_file_content(&source)
+                .with_context(|| format!("failed to parse config file {}", path.display()))?;
+            toml::from_str(&source)
+                .with_context(|| format!("failed to parse config file {}", path.display()))
+        }
+Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(toml::Table::new()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read config file {}", path.display())),
+    }
+}
+
+/// Merge explicit file fields before deserialization fills in defaults.
+/// Ordinary scalars/arrays override; the existing additive policies below are
+/// intentionally retained (notably sandbox and tool authorization settings).
+fn merge_config_files(mut global: toml::Table, project: toml::Table) -> anyhow::Result<ConfigFile> {
+    merge_config_tables(&mut global, project, &[]);
+    global.try_into().context("failed to deserialize merged config")
+}
+
+fn merge_config_tables(global: &mut toml::Table, project: toml::Table, path: &[&str]) {
+    use toml::Value;
+
+    // Named profiles and MCP servers are complete per-name replacements.
+    if matches!(path, ["profiles"] | ["mcp", "servers"]) {
+        global.extend(project);
+        return;
+    }
+    for (key, incoming) in project {
+        let mut field = path.to_vec();
+        field.push(&key);
+        match (field.as_slice(), global.get_mut(&key), incoming) {
+            (["bedrock" | "vertex"] | ["providers", _, "compat", "extra_body"], _, incoming) => {
+                global.insert(key, incoming);
+            }
+            (["tools", "lsp_servers"]
+                | ["hooks", "pre_tool_use" | "post_tool_use" | "stop"],
+                Some(Value::Array(base)), Value::Array(overlay)) => base.extend(overlay),
+            (["tools", "bash_sandbox"] | ["tools", "computer", "enabled"],
+                Some(Value::Boolean(base)), Value::Boolean(overlay)) => *base |= overlay,
+            (["session", "enabled"], Some(Value::Boolean(base)), Value::Boolean(overlay)) => {
+                *base &= overlay;
+            }
+            (["tools", "write_root"], Some(_), Value::String(overlay)) if overlay.is_empty() => {}
+            (["tools", "builtin_allowlist"], Some(_), Value::Array(overlay)) if overlay.is_empty() => {}
+            (_, Some(Value::Table(base)), Value::Table(overlay)) => {
+                merge_config_tables(base, overlay, &field);
+            }
+            (_, _, incoming) => {
+                global.insert(key, incoming);
             }
         }
-        Err(_) => Ok(ConfigFile::default()),
     }
 }
 
-/// Merge two config files. Project overrides global.
-fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
-    let project_instructions = ProjectInstructionsConfigFile::merge(
-        global.project_instructions,
-        project.project_instructions,
-    );
-
-    let default = DefaultConfig {
-        provider: if project.default.provider != default_provider() {
-            project.default.provider
-        } else {
-            global.default.provider
-        },
-        model: project.default.model.or(global.default.model),
-        max_tokens: project.default.max_tokens.or(global.default.max_tokens),
-        max_turns: project.default.max_turns.or(global.default.max_turns),
-        system_prompt: project
-            .default
-            .system_prompt
-            .or(global.default.system_prompt),
-    };
-
-    // Merge providers: global as base, project overrides
-    let mut providers = global.providers;
-    for (k, v) in project.providers {
-        let base = providers.remove(&k).unwrap_or_default();
-        providers.insert(k, merge_provider_configs(base, v));
-    }
-
-    // Merge profiles: global as base, project overrides
-    let mut profiles = global.profiles;
-    profiles.extend(project.profiles);
-
-    // Tools: project overrides global for scalar fields; skills deny/allow are concatenated
-    // (global first, then project) — consistent with the hooks merge strategy.
-    // Computer/browser: enabling in either scope enables; project non-default scalars win.
-    let computer = ComputerConfig {
-        enabled: global.tools.computer.enabled || project.tools.computer.enabled,
-        max_screenshot_edge: if project.tools.computer.max_screenshot_edge != default_max_screenshot_edge() {
-            project.tools.computer.max_screenshot_edge
-        } else {
-            global.tools.computer.max_screenshot_edge
-        },
-    };
-    let browser = BrowserConfig {
-        enabled: global.tools.browser.enabled || project.tools.browser.enabled,
-        headless: global.tools.browser.headless || project.tools.browser.headless,
-        // F1-sec: 全权模式——任一层开启即开（与 enabled/headless 同 OR 合并语义）。运行时由 backend
-        // factory 经 client_preferences LIVE 覆写（config.tools.browser.full_power），这里只是 toml 合并。
-        full_power: global.tools.browser.full_power || project.tools.browser.full_power,
-        // SD-6: 持久登录——任一层开启即开（与 full_power 同 OR 合并语义）。运行时由 backend factory 经
-        // client_preferences LIVE 覆写，这里只是 toml 合并。
-        persistent_login: global.tools.browser.persistent_login || project.tools.browser.persistent_login,
-        // P7A site-memory——任一层开启即开（与 full_power 同 OR 合并语义）。运行时由 backend factory 经
-        // client_preferences LIVE 覆写（host_default=false），这里只是 toml 合并。
-        site_memory: global.tools.browser.site_memory || project.tools.browser.site_memory,
-        // P7B visual-fallback——任一层开启即开（与 full_power 同 OR 合并语义）。运行时由 backend factory 经
-        // client_preferences LIVE 覆写（host_default=false），这里只是 toml 合并。
-        visual_fallback: global.tools.browser.visual_fallback || project.tools.browser.visual_fallback,
-        unrestricted_approval: global.tools.browser.unrestricted_approval
-            || project.tools.browser.unrestricted_approval,
-        // 浏览器来源——project 非默认（显式设了 "system"/其它）则覆盖 global，否则用 global（与
-        // write_root 同「project 非默认优先」语义）。运行时由 backend factory 经 client_preferences
-        // LIVE 覆写（config.tools.browser.source），这里只是 toml 合并。
-        source: if project.tools.browser.source != default_browser_source() {
-            project.tools.browser.source
-        } else {
-            global.tools.browser.source
-        },
-    };
-    let max_recent_images = if project.tools.max_recent_images != default_max_recent_images() {
-        project.tools.max_recent_images
-    } else {
-        global.tools.max_recent_images
-    };
-    let tools = if project.tools.allow_list != default_allow_list() || project.tools.auto_approve {
-        ToolsConfig {
-            auto_approve: global.tools.auto_approve || project.tools.auto_approve,
-            allow_list: project.tools.allow_list,
-            skills: SkillsPermissionConfig {
-                deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
-                allow: [global.tools.skills.allow, project.tools.skills.allow].concat(),
-            },
-            max_recent_images,
-            computer,
-            browser,
-            write_root: if !project.tools.write_root.is_empty() {
-                project.tools.write_root
-            } else {
-                global.tools.write_root
-            },
-            lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
-            delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
-            bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
-            // 项目层非空则覆盖全局（与 write_root 同模式）。
-            builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
-                project.tools.builtin_allowlist
-            } else {
-                global.tools.builtin_allowlist
-            },
-        }
-    } else {
-        ToolsConfig {
-            auto_approve: global.tools.auto_approve || project.tools.auto_approve,
-            allow_list: global.tools.allow_list,
-            skills: SkillsPermissionConfig {
-                deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
-                allow: [global.tools.skills.allow, project.tools.skills.allow].concat(),
-            },
-            max_recent_images,
-            computer,
-            browser,
-            write_root: if !project.tools.write_root.is_empty() {
-                project.tools.write_root
-            } else {
-                global.tools.write_root
-            },
-            lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
-            delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
-            bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
-            // 项目层非空则覆盖全局（与 write_root 同模式）。
-            builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
-                project.tools.builtin_allowlist
-            } else {
-                global.tools.builtin_allowlist
-            },
-        }
-    };
-
-    // Session: project overrides global
-    let session = if project.session.directory != default_session_dir() {
-        project.session
-    } else {
-        SessionConfig {
-            enabled: global.session.enabled && project.session.enabled,
-            directory: if project.session.directory != default_session_dir() {
-                project.session.directory
-            } else {
-                global.session.directory
-            },
-            max_sessions: if project.session.max_sessions != default_max_sessions() {
-                project.session.max_sessions
-            } else {
-                global.session.max_sessions
-            },
-        }
-    };
-
-    // Hooks: combine hooks from both configs (project hooks appended after global)
-    let hooks = HooksConfig {
-        pre_tool_use: [global.hooks.pre_tool_use, project.hooks.pre_tool_use].concat(),
-        post_tool_use: [global.hooks.post_tool_use, project.hooks.post_tool_use].concat(),
-        stop: [global.hooks.stop, project.hooks.stop].concat(),
-    };
-
-    // MCP: merge servers from both configs, project overrides global
-    let mut mcp_servers = global.mcp.servers;
-    mcp_servers.extend(project.mcp.servers);
-    let mcp = McpConfig {
-        servers: mcp_servers,
-    };
-
-    // Plan: project overrides global if any field differs from default
-    let plan = if !project.plan.enabled
-        || project.plan.plan_directory != PlanConfig::default().plan_directory
-    {
-        project.plan
-    } else {
-        global.plan
-    };
-
-    // File cache: project overrides global if any field differs from default.
-    let file_cache = if !project.file_cache.enabled
-        || project.file_cache.max_entries != FileCacheConfig::default().max_entries
-        || project.file_cache.max_size_bytes != FileCacheConfig::default().max_size_bytes
-    {
-        project.file_cache
-    } else {
-        global.file_cache
-    };
-
-    // Bedrock/Vertex: project overrides global
-    let bedrock = project.bedrock.or(global.bedrock);
-    let vertex = project.vertex.or(global.vertex);
-
-    // Compact: project overrides global for any non-default field.
-    // Since CompactConfig uses serde defaults, a fully-default project config
-    // is indistinguishable from "absent". We use project if its context_window
-    // differs from the default, otherwise fall back to global.
-    let compact = if project.compact.context_window != CompactConfig::default().context_window
-        || !project.compact.enabled
-    {
-        project.compact
-    } else {
-        global.compact
-    };
-
-    let logging = LoggingConfig::merge(global.logging, project.logging);
-
-    ConfigFile {
-        project_instructions,
-        default,
-        providers,
-        profiles,
-        tools,
-        session,
-        compact,
-        plan,
-        file_cache,
-        hooks,
-        bedrock,
-        vertex,
-        mcp,
-        logging,
-    }
-}
-
-/// Resolve a profile with inheritance chain (with cycle detection)
+/// Resolve inheritance iteratively so a long acyclic chain cannot exhaust the stack.
 fn resolve_profile(
     profiles: &HashMap<String, ProfileConfig>,
     name: &str,
-    visited: &mut Vec<String>,
 ) -> anyhow::Result<ProfileConfig> {
-    if visited.contains(&name.to_string()) {
-        anyhow::bail!(
-            "Circular profile inheritance detected: {} -> {}",
-            visited.join(" -> "),
-            name
-        );
+    let mut visited = std::collections::HashSet::new();
+    let mut chain = Vec::new();
+    let mut current = name;
+    loop {
+        if !visited.insert(current) {
+            anyhow::bail!("Circular profile inheritance detected at '{}'", current);
+        }
+        let profile = profiles.get(current)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", current))?;
+        chain.push(profile);
+        match profile.extends.as_deref() {
+            Some(parent) => current = parent,
+            None => break,
+        }
     }
-    visited.push(name.to_string());
-
-    let profile = profiles
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", name))?
-        .clone();
-
-    if let Some(parent_name) = &profile.extends {
-        let parent = resolve_profile(profiles, parent_name, visited)?;
-        Ok(merge_profiles(parent, profile))
-    } else {
-        Ok(profile)
-    }
+    Ok(chain.into_iter().rev().cloned().fold(ProfileConfig::default(), merge_profiles))
 }
 
 /// Merge two profiles: overlay takes precedence over base
@@ -1300,19 +992,21 @@ fn merge_profiles(base: ProfileConfig, overlay: ProfileConfig) -> ProfileConfig 
         max_turns: overlay.max_turns.or(base.max_turns),
         extends: None, // already resolved
         mcp_servers: overlay.mcp_servers.or(base.mcp_servers),
-        compat: overlay.compat.or(base.compat),
+        compat: match (base.compat, overlay.compat) {
+            (Some(base), Some(overlay)) => Some(ProviderCompat::merge(base, overlay)),
+            (base, overlay) => overlay.or(base),
+        },
     }
 }
 
 fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<ConfigFile> {
-    let mut visited = Vec::new();
-    let profile = resolve_profile(&config.profiles, profile_name, &mut visited)?;
+    let profile = resolve_profile(&config.profiles, profile_name)?;
 
     if let Some(provider) = profile.provider {
         config.default.provider = provider;
     }
-    if let Some(model) = profile.model {
-        config.default.model = Some(model);
+    if let Some(model) = &profile.model {
+        config.default.model = Some(model.clone());
     }
     if let Some(max_tokens) = profile.max_tokens {
         config.default.max_tokens = Some(max_tokens);
@@ -1321,9 +1015,12 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
         config.default.max_turns = Some(max_turns);
     }
 
-    // Profile can override api_key, base_url, and compat for the active provider
+    // Profile overrides the active provider's own defaults, including its model.
     let provider_name = config.default.provider.clone();
     let entry = config.providers.entry(provider_name).or_default();
+    if let Some(model) = profile.model {
+        entry.model = Some(model);
+    }
     if let Some(api_key) = profile.api_key {
         entry.api_key = Some(api_key);
     }
@@ -1351,16 +1048,22 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
 // --- Init config command ---
 
 pub fn init_config() -> anyhow::Result<()> {
-    let path = global_config_path();
-    if path.exists() {
-        tracing::info!(target: "nomi_config", path = %path.display(), "config file already exists");
-        return Ok(());
+    init_config_at(&global_config_path())
+}
+
+fn init_config_at(path: &Path) -> anyhow::Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(DEFAULT_CONFIG_TEMPLATE.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => tracing::info!(target: "nomi_config", path = %path.display(), "config file created"),
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+            tracing::info!(target: "nomi_config", path = %path.display(), "config file already exists");
+        }
+        Err(error) => return Err(error.error.into()),
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, DEFAULT_CONFIG_TEMPLATE)?;
-    tracing::info!(target: "nomi_config", path = %path.display(), "config file created");
     Ok(())
 }
 
@@ -1440,12 +1143,6 @@ provider = "anthropic"            # built-in provider or custom alias from [prov
 # provider = "vertex"
 # model = "claude-sonnet-4@20250514"
 
-# Tool confirmation settings
-[tools]
-auto_approve = false             # --auto-approve overrides
-# Tools that skip confirmation even when auto_approve = false
-allow_list = ["Read", "Grep", "Glob"]
-
 # Context compaction settings
 # [compact]
 # context_window = 200000        # context window size in tokens
@@ -1475,13 +1172,13 @@ max_sessions = 20                # auto-cleanup oldest
 # name = "rustfmt"
 # tool_match = ["Write", "Edit"]
 # file_match = ["*.rs"]
-# command = "rustfmt ${TOOL_INPUT_FILE_PATH}"
+# command = 'rustfmt "${TOOL_INPUT_FILE_PATH}"'
 
 # [[hooks.post_tool_use]]
 # name = "prettier"
 # tool_match = ["Write", "Edit"]
 # file_match = ["*.ts", "*.tsx"]
-# command = "npx prettier --write ${TOOL_INPUT_FILE_PATH}"
+# command = 'npx prettier --write "${TOOL_INPUT_FILE_PATH}"'
 
 # [[hooks.stop]]
 # name = "final-lint"
@@ -1491,7 +1188,7 @@ max_sessions = 20                # auto-cleanup oldest
 # [logging]
 # enabled = true                   # enable file logging (default: false)
 # level = "info"                   # log level filter (default: "info")
-# dir = "~/Library/Logs/nomi"    # log directory (default: platform-specific)
+# dir = "/path/to/logs"        # log directory (default: platform-specific)
 
 # MCP (Model Context Protocol) servers
 # [mcp.servers.filesystem]
@@ -1516,15 +1213,12 @@ max_sessions = 20                # auto-cleanup oldest
 "#;
 
 #[cfg(test)]
+#[path = "config_audit_tests.rs"]
+mod audit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn browser_config_default_source_is_managed() {
-        // 默认来源 = "managed"（内置/下载 CfT）——新装/未配置即现行为，零回归。
-        // Browser Host source parsing maps "managed" to Managed.
-        assert_eq!(BrowserConfig::default().source, "managed");
-    }
 
     // -------------------------------------------------------------------------
     // parse_builtin_provider tests
@@ -1696,30 +1390,18 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_merge_config_cli_overrides_file() {
-        // Project config sets a non-default provider; it should win over global.
-        let global = ConfigFile {
-            default: DefaultConfig {
-                provider: "anthropic".to_string(),
-                model: Some("global-model".to_string()),
-                max_tokens: Some(4096),
-                max_turns: Some(10),
-                system_prompt: Some("global prompt".to_string()),
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            default: DefaultConfig {
-                provider: "openai".to_string(), // non-default -> overrides global
-                model: Some("project-model".to_string()),
-                max_tokens: Some(2048), // explicit -> overrides global
-                max_turns: Some(5), // non-default -> overrides global
-                system_prompt: Some("project prompt".to_string()),
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+    fn test_merge_config_project_overrides_global() {
+        let merged = audit_tests::merge_sources(r#"[default]
+provider = "anthropic"
+model = "global-model"
+max_tokens = 4096
+max_turns = 10
+system_prompt = "global prompt""#, r#"[default]
+provider = "openai"
+model = "project-model"
+max_tokens = 2048
+max_turns = 5
+system_prompt = "project prompt""#);
 
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("project-model".to_string()));
@@ -1733,23 +1415,14 @@ mod tests {
 
     #[test]
     fn test_merge_config_file_provides_defaults() {
-        // Project config is default; global values should be preserved.
-        let global = ConfigFile {
-            default: DefaultConfig {
-                provider: "openai".to_string(),
-                model: Some("global-model".to_string()),
-                max_tokens: Some(1024),
-                max_turns: Some(5),
-                system_prompt: Some("global prompt".to_string()),
-            },
-            ..Default::default()
-        };
-        // Project stays at built-in defaults (provider = "anthropic", max_tokens = None).
-        let project = ConfigFile::default();
+        let merged = audit_tests::merge_sources(r#"[default]
+provider = "openai"
+model = "global-model"
+max_tokens = 1024
+max_turns = 5
+system_prompt = "global prompt""#, r#""#);
 
-        let merged = merge_config_files(global, project);
-
-        // provider: project default "anthropic" == default_provider() -> use global "openai"
+        // An omitted provider preserves the explicit global setting.
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("global-model".to_string()));
         assert_eq!(merged.default.max_tokens, Some(1024));
@@ -1762,8 +1435,7 @@ mod tests {
 
     #[test]
     fn test_merge_config_empty_file() {
-        // Two default ConfigFiles merged should yield defaults.
-        let merged = merge_config_files(ConfigFile::default(), ConfigFile::default());
+        let merged = audit_tests::merge_sources(r#""#, r#""#);
 
         assert_eq!(merged.default.provider, default_provider());
         assert_eq!(merged.default.max_tokens, None);
@@ -1784,18 +1456,14 @@ mod tests {
 
     #[test]
     fn project_instruction_project_layer_can_clear_global_values() {
-        let global = ProjectInstructionsConfigFile {
-            project_doc_fallback_filenames: Some(vec!["TEAM.md".into()]),
-            project_doc_max_bytes: Some(65_536),
-            project_root_markers: Some(vec![".git".into(), ".hg".into()]),
-        };
-        let project = ProjectInstructionsConfigFile {
-            project_doc_fallback_filenames: Some(Vec::new()),
-            project_doc_max_bytes: Some(0),
-            project_root_markers: Some(Vec::new()),
-        };
-
-        let resolved = ProjectInstructionsConfigFile::merge(global, project).resolve();
+        let resolved = audit_tests::merge_sources(
+            r#"project_doc_fallback_filenames = ["TEAM.md"]
+project_doc_max_bytes = 65536
+project_root_markers = [".git", ".hg"]"#,
+            r#"project_doc_fallback_filenames = []
+project_doc_max_bytes = 0
+project_root_markers = []"#,
+        ).project_instructions.resolve();
 
         assert!(resolved.project_doc_fallback_filenames.is_empty());
         assert_eq!(resolved.project_doc_max_bytes, 0);
@@ -1848,8 +1516,7 @@ project_root_markers = [".git", ".hg"]
             },
         );
 
-        let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "child", &mut visited).unwrap();
+        let result = resolve_profile(&profiles, "child").unwrap();
 
         // Child's model wins
         assert_eq!(result.model, Some("claude-4".to_string()));
@@ -1880,8 +1547,7 @@ project_root_markers = [".git", ".hg"]
             },
         );
 
-        let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "a", &mut visited);
+        let result = resolve_profile(&profiles, "a");
 
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1891,8 +1557,7 @@ project_root_markers = [".git", ".hg"]
     #[test]
     fn test_profile_not_found() {
         let profiles: HashMap<String, ProfileConfig> = HashMap::new();
-        let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "nonexistent", &mut visited);
+        let result = resolve_profile(&profiles, "nonexistent");
 
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1956,102 +1621,6 @@ project_root_markers = [".git", ".hg"]
         // Vertex uses GCP credentials, so an empty key is the expected success value.
         let result = resolve_api_key(None, None, ProviderType::Vertex).unwrap();
         assert_eq!(result, "");
-    }
-
-    // -------------------------------------------------------------------------
-    // P5-14: SkillsPermissionConfig TOML deserialization
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge_config_global_auto_approve_preserved_with_project_allow_list() {
-        let global = ConfigFile {
-            tools: ToolsConfig {
-                auto_approve: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            tools: ToolsConfig {
-                allow_list: vec!["Bash".into()], // non-default, triggers if branch
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let merged = merge_config_files(global, project);
-        assert!(
-            merged.tools.auto_approve,
-            "global auto_approve=true should be preserved"
-        );
-    }
-
-    #[test]
-    fn p5_14_skills_deny_allow_deserialized() {
-        let toml_str = r#"
-[tools]
-auto_approve = false
-allow_list = ["Read"]
-
-[tools.skills]
-deny = ["dangerous-skill", "admin:*"]
-allow = ["commit", "review-pr", "db:*"]
-"#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(
-            config.tools.skills.deny,
-            vec!["dangerous-skill".to_string(), "admin:*".to_string()]
-        );
-        assert_eq!(
-            config.tools.skills.allow,
-            vec![
-                "commit".to_string(),
-                "review-pr".to_string(),
-                "db:*".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn p5_14_skills_defaults_to_empty() {
-        // When [tools.skills] is absent, deny and allow default to empty vecs.
-        let config: ConfigFile = toml::from_str("").unwrap();
-        assert!(config.tools.skills.deny.is_empty());
-        assert!(config.tools.skills.allow.is_empty());
-    }
-
-    #[test]
-    fn p5_14_merge_skills_concat() {
-        // global and project skills lists are concatenated.
-        let global = ConfigFile {
-            tools: ToolsConfig {
-                skills: SkillsPermissionConfig {
-                    deny: vec!["global-deny".to_string()],
-                    allow: vec!["global-allow".to_string()],
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            tools: ToolsConfig {
-                skills: SkillsPermissionConfig {
-                    deny: vec!["project-deny".to_string()],
-                    allow: vec!["project-allow".to_string()],
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
-        assert_eq!(
-            merged.tools.skills.deny,
-            vec!["global-deny".to_string(), "project-deny".to_string()]
-        );
-        assert_eq!(
-            merged.tools.skills.allow,
-            vec!["global-allow".to_string(), "project-allow".to_string()]
-        );
     }
 
     // -------------------------------------------------------------------------
@@ -2459,23 +2028,11 @@ enabled = false
 
     #[test]
     fn merge_file_cache_project_overrides_global() {
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 200,
-                max_size_bytes: 50 * 1024 * 1024,
-                enabled: true,
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 50,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+max_entries = 200
+max_size_bytes = 52428800
+enabled = true"#, r#"[file_cache]
+max_entries = 50"#);
         assert_eq!(
             merged.file_cache.max_entries, 50,
             "project non-default max_entries should override global"
@@ -2484,17 +2041,10 @@ enabled = false
 
     #[test]
     fn merge_file_cache_global_preserved_when_project_default() {
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 200,
-                max_size_bytes: 50 * 1024 * 1024,
-                enabled: true,
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile::default();
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+max_entries = 200
+max_size_bytes = 52428800
+enabled = true"#, r#""#);
         assert_eq!(
             merged.file_cache.max_entries, 200,
             "global should be preserved when project is all-default"
@@ -2504,25 +2054,11 @@ enabled = false
 
     #[test]
     fn merge_file_cache_project_max_size_bytes_overrides_global() {
-        // R-5.5-01: project changes only max_size_bytes (enabled=true, max_entries=default).
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 100,
-                max_size_bytes: 50 * 1024 * 1024,
-                enabled: true,
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 100,                 // default
-                max_size_bytes: 10 * 1024 * 1024, // non-default
-                enabled: true,                    // default
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+max_entries = 100
+max_size_bytes = 52428800
+enabled = true"#, r#"[file_cache]
+max_size_bytes = 10485760"#);
         assert_eq!(
             merged.file_cache.max_size_bytes,
             10 * 1024 * 1024,
@@ -2532,22 +2068,9 @@ enabled = false
 
     #[test]
     fn merge_file_cache_disabled_overrides_global() {
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                enabled: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            file_cache: FileCacheConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+enabled = true"#, r#"[file_cache]
+enabled = false"#);
         assert!(
             !merged.file_cache.enabled,
             "project enabled=false should override global"
@@ -2580,11 +2103,10 @@ max_tokens = 1234
             max_turns: None,
             system_prompt: None,
             profile: None,
-            auto_approve: false,
             project_dir: Some(tmp.path().to_path_buf()),
         };
 
-        let config = Config::resolve(&cli_args).unwrap();
+        let config = Config::resolve_with_global(&cli_args, &tmp.path().join("global.toml")).unwrap();
         assert_eq!(config.output_max_tokens, Some(1234));
         assert_eq!(
             config.project_instructions.project_doc_fallback_filenames,
@@ -2598,22 +2120,9 @@ max_tokens = 1234
     }
 
     #[test]
-    fn test_resolve_without_project_dir_uses_cwd() {
-        let cli_args = CliArgs {
-            provider: Some("anthropic".into()),
-            api_key: Some("test-key".into()),
-            base_url: None,
-            model: None,
-            max_tokens: None,
-            max_turns: None,
-            system_prompt: None,
-            profile: None,
-            auto_approve: false,
-            project_dir: None,
-        };
-
-        let config = Config::resolve(&cli_args);
-        assert!(config.is_ok());
+    fn default_project_config_path_uses_cwd() {
+        // The filesystem resolves this relative path against the caller CWD.
+        assert_eq!(project_config_path(), PathBuf::from(".nomi.toml"));
     }
 
     #[test]
@@ -2718,7 +2227,7 @@ in_process_spawn = false
         )
         .unwrap();
 
-        let config = load_config_file(&path).unwrap();
+let config: ConfigFile = load_config_file(&path).unwrap().try_into().unwrap();
         assert_eq!(config.tools.delegation_token_budget, Some(4321));
 
         let persisted = std::fs::read_to_string(&path).unwrap();
@@ -2734,7 +2243,7 @@ in_process_spawn = false
             "a second load must not have another migration to perform"
         );
 
-        let second = load_config_file(&path).unwrap();
+let second: ConfigFile = load_config_file(&path).unwrap().try_into().unwrap();
         assert_eq!(second.tools.delegation_token_budget, Some(4321));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), persisted);
     }

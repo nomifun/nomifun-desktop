@@ -19,12 +19,15 @@ use std::time::Duration;
 use nomifun_db::models::ChannelPendingPromptRow;
 use nomifun_db::{IChannelRepository, PENDING_PROMPT_EXPIRY_MS};
 use nomifun_realtime::UserEventEnvelope;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::group_policy::GroupPolicyFence;
 use crate::message_service::ChannelMessageService;
 use crate::session::SessionManager;
+use crate::session_port::ChannelTurnReceiptState;
 use crate::stream_relay::{ChannelSender, ChannelStreamRelay, RelayConfig};
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
@@ -55,6 +58,8 @@ pub struct QueueDrain {
     /// sweep backstop covers it) so one queued prompt can never be dispatched
     /// twice concurrently with two relays racing on the same chat.
     draining: Mutex<HashSet<String>>,
+    shutdown: CancellationToken,
+    child_tasks: Arc<AsyncMutex<Vec<JoinHandle<()>>>>,
 }
 
 impl QueueDrain {
@@ -74,6 +79,8 @@ impl QueueDrain {
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
             retry_not_before: Mutex::new(HashMap::new()),
             draining: Mutex::new(HashSet::new()),
+            shutdown: CancellationToken::new(),
+            child_tasks: Arc::new(AsyncMutex::new(Vec::new())),
         }
     }
 
@@ -95,7 +102,19 @@ impl QueueDrain {
     ///
     /// `events` is a `BroadcastEventBus::subscribe_user()` receiver; only
     /// `turn.completed` envelopes are consumed.
-    pub async fn run(self, mut events: broadcast::Receiver<UserEventEnvelope>) {
+    pub async fn run(self, events: broadcast::Receiver<UserEventEnvelope>) {
+        self.run_with_shutdown(events, CancellationToken::new()).await;
+    }
+
+    /// Production variant with an explicit process-lifetime cancellation
+    /// boundary. Child relay tasks are retained and joined before this loop
+    /// returns so they cannot continue querying repositories after shutdown.
+    pub async fn run_with_shutdown(
+        mut self,
+        mut events: broadcast::Receiver<UserEventEnvelope>,
+        shutdown: CancellationToken,
+    ) {
+        self.shutdown = shutdown;
         let drain = Arc::new(self);
         info!("channel queue drain started");
 
@@ -109,6 +128,7 @@ impl QueueDrain {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = drain.shutdown.cancelled() => break,
                 envelope = events.recv() => match envelope {
                     Ok(envelope) if envelope.event.name == "turn.completed" => {
                         if let Some(conversation_id) = envelope
@@ -133,7 +153,33 @@ impl QueueDrain {
                 }
             }
         }
+        drain.shutdown.cancel();
+        drain.join_child_tasks().await;
         info!("channel queue drain stopped (event bus closed)");
+    }
+
+    async fn track_child_task(&self, task: JoinHandle<()>) {
+        let mut tasks = self.child_tasks.lock().await;
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
+    }
+
+    async fn join_child_tasks(&self) {
+        let tasks = std::mem::take(&mut *self.child_tasks.lock().await);
+        for mut task in tasks {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if !error.is_cancelled() => {
+                    warn!(error = %error, "channel queue child task failed during shutdown");
+                }
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    warn!("channel queue child task exceeded shutdown deadline and was aborted");
+                }
+            }
+        }
     }
 
     /// Expire every queued prompt older than 30 minutes and tell its chat.
@@ -245,13 +291,13 @@ impl QueueDrain {
                 .turn_outcome(conversation_id, &attempt_key)
                 .await
             {
-                Ok(nomifun_conversation::PublicTurnDeliveryState::Missing) => {}
-                Ok(nomifun_conversation::PublicTurnDeliveryState::Accepted { .. }) => {
+                Ok(ChannelTurnReceiptState::Missing) => {}
+                Ok(ChannelTurnReceiptState::Accepted { .. }) => {
                     // In flight (or quarantined after a crash) — judged by its
                     // completion event / a later sweep.
                     return;
                 }
-                Ok(nomifun_conversation::PublicTurnDeliveryState::Completed(delivery)) => {
+                Ok(ChannelTurnReceiptState::Completed(delivery)) => {
                     if delivery.result_ok == Some(true) {
                         self.settle(&head, "delivered").await;
                         continue;
@@ -411,10 +457,17 @@ impl QueueDrain {
                             conversation_id: send_result.conversation_id.clone(),
                         },
                         Arc::clone(&self.sender),
-                        self.message_service.pending_decisions(),
+                        self.message_service.stop_confirmations(),
                         self.message_service.asset_resolver(),
                     );
-                    tokio::spawn(relay.run(rx));
+                    let shutdown = self.shutdown.clone();
+                    self.track_child_task(tokio::spawn(async move {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => {}
+                            _ = relay.run(rx) => {}
+                        }
+                    }))
+                    .await;
                 }
                 // Deliberately NOT settled here: the durable receipt outcome
                 // (observed on the turn's completion) settles delivered /

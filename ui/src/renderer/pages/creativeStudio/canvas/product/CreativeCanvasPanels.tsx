@@ -9,12 +9,9 @@ import {
   Group,
   Info,
   Lock,
-  Magic,
-  PanoramaHorizontal,
   Pic,
-  Redo,
   Robot,
-  Undo,
+  Timeline,
   VideoTwo,
   Voice,
   Workbench,
@@ -44,20 +41,18 @@ const iconProps = {
 const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasUserNodeKind, string> = {
   text: 'creativeStudio.canvas.nodeKinds.text',
   image: 'creativeStudio.canvas.nodeKinds.image',
-  panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
-  director: 'creativeStudio.canvas.nodeKinds.director',
+  timeline: 'creativeStudio.canvas.nodeKinds.timeline',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
 const NODE_KIND_LABEL_FALLBACKS: Record<CreativeCanvasUserNodeKind, string> = {
   text: '文本',
   image: '图片',
-  panorama: '全景图',
   video: '视频',
   audio: '音频',
-  director: '导演台',
+  timeline: '时间线',
   group: '分组',
 };
 
@@ -80,14 +75,12 @@ function nodeKindIcon(kind: CreativeCanvasUserNodeKind): React.ReactNode {
       return <FileText {...iconProps} />;
     case 'image':
       return <Pic {...iconProps} />;
-    case 'panorama':
-      return <PanoramaHorizontal {...iconProps} />;
     case 'video':
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
-    case 'director':
-      return <Magic {...iconProps} />;
+    case 'timeline':
+      return <Timeline {...iconProps} />;
     case 'group':
       return <Group {...iconProps} />;
   }
@@ -104,6 +97,8 @@ export function creativeCanvasNodeDisplayName(
   node: CreativeCanvasUserNode,
   t: TFunction = fallbackTranslate as TFunction
 ): string {
+  const customName = compactText(node.name ?? '');
+  if (customName) return customName;
   switch (node.type) {
     case 'text':
       return (
@@ -114,12 +109,6 @@ export function creativeCanvasNodeDisplayName(
       );
     case 'image':
       return compactText(node.data.caption || node.data.alt) || nodeKindLabel('image', t);
-    case 'panorama':
-      return node.data.assetId
-        ? t('creativeStudio.canvas.nodes.connectedPanorama', {
-            defaultValue: '已连接全景素材',
-          })
-        : nodeKindLabel('panorama', t);
     case 'video':
       return node.data.assetId
         ? t('creativeStudio.canvas.nodes.connectedVideo', {
@@ -128,8 +117,8 @@ export function creativeCanvasNodeDisplayName(
         : nodeKindLabel('video', t);
     case 'audio':
       return compactText(node.data.title) || nodeKindLabel('audio', t);
-    case 'director':
-      return compactText(node.data.sceneId ?? '') || nodeKindLabel('director', t);
+    case 'timeline':
+      return compactText(node.data.title) || nodeKindLabel('timeline', t);
     case 'group':
       return (
         compactText(node.data.title) ||
@@ -423,41 +412,6 @@ const NodeDataProperties: React.FC<{ node: CreativeCanvasUserNode; memberCount: 
           />
         </>
       );
-    case 'panorama':
-      return (
-        <>
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.assetId', {
-              defaultValue: '素材 ID',
-            })}
-            value={optionalValue(node.data.assetId, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.projection', {
-              defaultValue: '投影',
-            })}
-            value={t('creativeStudio.canvas.editor.projectionEquirectangular', {
-              defaultValue: '等距柱状投影',
-            })}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.viewAngle', {
-              defaultValue: '视角',
-            })}
-            value={t('creativeStudio.canvas.nodes.panorama.orientation', {
-              yaw: node.data.yaw,
-              pitch: node.data.pitch,
-              defaultValue: '偏航 {{yaw}}° · 俯仰 {{pitch}}°',
-            })}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.fieldOfView', {
-              defaultValue: '视野',
-            })}
-            value={`${node.data.fieldOfView}°`}
-          />
-        </>
-      );
     case 'video':
       return (
         <>
@@ -540,32 +494,29 @@ const NodeDataProperties: React.FC<{ node: CreativeCanvasUserNode; memberCount: 
           />
         </>
       );
-    case 'director':
+    case 'timeline':
       return (
         <>
           <PropertyRow
-            label={t('creativeStudio.canvas.properties.sceneId', {
-              defaultValue: '场景 ID',
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
             })}
-            value={optionalValue(node.data.sceneId, t)}
+            value={node.data.title}
           />
           <PropertyRow
-            label={t('creativeStudio.canvas.properties.cameraId', {
-              defaultValue: '机位 ID',
+            label={t('creativeStudio.canvas.properties.clipCount', {
+              defaultValue: '片段',
             })}
-            value={optionalValue(node.data.cameraId, t)}
+            value={t('creativeStudio.canvas.values.clipCount', {
+              count: node.data.clips.length,
+              defaultValue: '{{count}} 个片段',
+            })}
           />
           <PropertyRow
-            label={t('creativeStudio.canvas.properties.currentTime', {
-              defaultValue: '当前时间',
+            label={t('creativeStudio.canvas.properties.muted', {
+              defaultValue: '静音',
             })}
-            value={milliseconds(node.data.timelineMs, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.duration', {
-              defaultValue: '时长',
-            })}
-            value={milliseconds(node.data.durationMs, t)}
+            value={booleanValue(node.data.muted, t)}
           />
         </>
       );
@@ -818,63 +769,6 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
           </PropertyEditorField>
         </>
       );
-    case 'panorama':
-      return (
-        <>
-          {([
-            [
-              t('creativeStudio.canvas.editor.horizontalAngle', {
-                defaultValue: '水平视角',
-              }),
-              'yaw',
-              -360,
-              360,
-            ],
-            [
-              t('creativeStudio.canvas.editor.verticalAngle', {
-                defaultValue: '垂直视角',
-              }),
-              'pitch',
-              -90,
-              90,
-            ],
-            [
-              t('creativeStudio.canvas.properties.fieldOfView', {
-                defaultValue: '视野',
-              }),
-              'fieldOfView',
-              10,
-              150,
-            ],
-          ] as const).map(([label, field, min, max]) => (
-            <PropertyEditorField key={field} label={label}>
-              <input
-                type='number'
-                min={min}
-                max={max}
-                value={node.data[field]}
-                onChange={(event) =>
-                  onUpdate(
-                    {
-                      ...node,
-                      data: {
-                        ...node.data,
-                        [field]: finiteNumber(
-                          event.currentTarget.valueAsNumber,
-                          node.data[field],
-                          min,
-                          max
-                        ),
-                      },
-                    },
-                    field
-                  )
-                }
-              />
-            </PropertyEditorField>
-          ))}
-        </>
-      );
     case 'video':
       return (
         <>
@@ -980,65 +874,38 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
           </PropertyEditorField>
         </>
       );
-    case 'director':
+    case 'timeline':
       return (
         <>
           <PropertyEditorField
-            label={t('creativeStudio.canvas.editor.currentTimeMs', {
-              defaultValue: '当前时间 (ms)',
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
             })}
           >
             <input
-              type='number'
-              min={0}
-              max={node.data.durationMs}
-              value={node.data.timelineMs}
+              value={node.data.title}
               onChange={(event) =>
                 onUpdate(
-                  {
-                    ...node,
-                    data: {
-                      ...node.data,
-                      timelineMs: finiteNumber(
-                        event.currentTarget.valueAsNumber,
-                        node.data.timelineMs,
-                        0,
-                        node.data.durationMs
-                      ),
-                    },
-                  },
-                  'timelineMs'
+                  { ...node, data: { ...node.data, title: event.currentTarget.value } },
+                  'title'
                 )
               }
             />
           </PropertyEditorField>
           <PropertyEditorField
-            label={t('creativeStudio.canvas.editor.durationMs', {
-              defaultValue: '时长 (ms)',
+            label={t('creativeStudio.canvas.properties.muted', {
+              defaultValue: '静音',
             })}
           >
             <input
-              type='number'
-              min={0}
-              value={node.data.durationMs}
-              onChange={(event) => {
-                const durationMs = finiteNumber(
-                  event.currentTarget.valueAsNumber,
-                  node.data.durationMs,
-                  0
-                );
+              type='checkbox'
+              checked={node.data.muted}
+              onChange={(event) =>
                 onUpdate(
-                  {
-                    ...node,
-                    data: {
-                      ...node.data,
-                      durationMs,
-                      timelineMs: Math.min(node.data.timelineMs, durationMs),
-                    },
-                  },
-                  'durationMs'
-                );
-              }}
+                  { ...node, data: { ...node.data, muted: event.currentTarget.checked } },
+                  'muted'
+                )
+              }
             />
           </PropertyEditorField>
         </>
@@ -1281,93 +1148,6 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
           );
         })()
       )}
-    </section>
-  );
-};
-
-export interface CreativeCanvasHistoryPanelProps {
-  state: CanvasState;
-  onUndo(): void;
-  onRedo(): void;
-  className?: string;
-}
-
-/** Shows only reducer snapshot counts; no fabricated action names or timestamps. */
-export const CreativeCanvasHistoryPanel: React.FC<CreativeCanvasHistoryPanelProps> = ({
-  state,
-  onUndo,
-  onRedo,
-  className,
-}) => {
-  const { t } = useTranslation();
-  return (
-    <section
-      className={classNames(styles.panel, styles.historyPanel, className)}
-      data-canvas-product-panel='history'
-      aria-label={t('creativeStudio.canvas.history.label', {
-        defaultValue: '编辑历史',
-      })}
-    >
-      <header className={styles.panelHeader}>
-        <div>
-          <h2>
-            {t('creativeStudio.canvas.history.title', {
-              defaultValue: '编辑历史',
-            })}
-          </h2>
-          <p>
-            {t('creativeStudio.canvas.history.subtitle', {
-              defaultValue: '当前会话的 reducer 快照',
-            })}
-          </p>
-        </div>
-      </header>
-      <div className={styles.historySummary}>
-        <div>
-          <span>
-            {t('creativeStudio.canvas.history.undoable', {
-              defaultValue: '可撤销',
-            })}
-          </span>
-          <strong>{state.history.past.length}</strong>
-        </div>
-        <div>
-          <span>
-            {t('creativeStudio.canvas.history.redoable', {
-              defaultValue: '可重做',
-            })}
-          </span>
-          <strong>{state.history.future.length}</strong>
-        </div>
-        <div className={styles.historyActions}>
-          <button
-            type='button'
-            disabled={state.history.past.length === 0}
-            onClick={onUndo}
-          >
-            <Undo {...iconProps} />
-            {t('creativeStudio.canvas.history.undo', {
-              defaultValue: '撤销',
-            })}
-          </button>
-          <button
-            type='button'
-            disabled={state.history.future.length === 0}
-            onClick={onRedo}
-          >
-            <Redo {...iconProps} />
-            {t('creativeStudio.canvas.history.redo', {
-              defaultValue: '重做',
-            })}
-          </button>
-        </div>
-      </div>
-      <p className={styles.historyDisclosure}>
-        {t('creativeStudio.canvas.history.disclosure', {
-          defaultValue:
-            '核心只保存文档快照，没有操作名称和时间戳；本面板不会臆造历史记录。',
-        })}
-      </p>
     </section>
   );
 };

@@ -5,7 +5,9 @@
  */
 
 import ThinkingProcessDisplay from '@renderer/components/chat/ThinkingProcessDisplay';
-import { CheckOne, Error, MagicWand, Refresh, Robot } from '@icon-park/react';
+import ConversationErrorNote from '@/renderer/pages/conversation/Messages/components/ConversationErrorNote';
+import { conversationPauseError } from '@/renderer/pages/conversation/utils/conversationPauseError';
+import { CheckOne, MagicWand, Refresh, Robot } from '@icon-park/react';
 import { Button } from '@arco-design/web-react';
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -19,6 +21,7 @@ import type {
 import styles from './CreativeStudioAgentPanel.module.css';
 
 interface CreativeStudioAgentMessagesProps {
+  conversationId?: string;
   messages: readonly CreativeStudioAgentMessage[];
   proposals: readonly CreativeStudioAgentProposal[];
   proposalApplyDisabled: boolean;
@@ -27,6 +30,7 @@ interface CreativeStudioAgentMessagesProps {
 }
 
 const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = ({
+  conversationId,
   messages,
   proposals,
   proposalApplyDisabled,
@@ -80,11 +84,31 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
             )}
 
             {message.status === 'failed' && (
-              <div className={styles.messageError} role='alert'>
-                <Error theme='outline' size='15' />
-                <span>{message.errorMessage}</span>
-              </div>
+              <ConversationErrorNote
+                error={message.error ?? { message: message.errorMessage, code: 'CONVERSATION_SEND_FAILED' }}
+                rawDetail={message.error?.detail || message.errorMessage}
+                timestamp={message.timestamp}
+                turnId={message.turnId}
+                sessionId={conversationId}
+                feedback={false}
+                recoveryAction={message.id === messages.at(-1)?.id && onRetryMessage && message.error?.retryable !== false ? (
+                  <button type='button' className='message-error-note__retry'
+                    aria-label={t('creativeStudio.agent.retryMessage', { defaultValue: 'Retry this message' })}
+                    onClick={() => onRetryMessage(message.id)}>
+                    <Refresh theme='outline' size='14' aria-hidden='true' />
+                    {t('creativeStudio.agent.retryMessage', { defaultValue: 'Retry this message' })}
+                  </button>
+                ) : null}
+              />
             )}
+
+            {message.status === 'paused' && <ConversationErrorNote
+              error={conversationPauseError(message.pause)}
+              timestamp={message.pause.pausedAt}
+              turnId={message.pause.turnId}
+              sessionId={conversationId}
+              feedback={false}
+            />}
 
             {message.status === 'stopped' && (
               <div className={styles.stoppedLabel} role='status'>
@@ -146,19 +170,6 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
               </section>
             ) : null}
 
-            {isAssistant && message.status !== 'running' && onRetryMessage && (
-              <Button
-                className={styles.retryMessageButton}
-                type='text'
-                shape='circle'
-                size='mini'
-                aria-label={t('creativeStudio.agent.retryMessage', {
-                  defaultValue: 'Retry this message',
-                })}
-                icon={<Refresh theme='outline' size='14' />}
-                onClick={() => onRetryMessage(message.id)}
-              />
-            )}
           </article>
         );
       })}

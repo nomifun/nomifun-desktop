@@ -32,6 +32,8 @@ export type ConversationCommandQueueItem = {
   input: string;
   files: string[];
   created_at: number;
+  /** Unconfirmed steering is retained as a draft, never an automatic new turn. */
+  requires_review?: boolean;
 };
 
 export type ConversationCommandQueueState = {
@@ -134,6 +136,7 @@ const normalizeQueueItem = (item: unknown): ConversationCommandQueueItem | null 
     input: candidate.input,
     files: uniqueFiles(candidate.files),
     created_at: candidate.created_at,
+    ...(candidate.requires_review === true ? { requires_review: true } : {}),
   };
 
   if (
@@ -174,20 +177,23 @@ export const normalizeQueueState = (state: unknown): ConversationCommandQueueSta
 
   return {
     items,
-    isPaused: items.length > 0 ? Boolean(candidate.isPaused) : false,
+    isPaused: items.some((item) => item.requires_review) || (items.length > 0 && Boolean(candidate.isPaused)),
   };
 };
 
 export const createQueuedCommandItem = ({
   input,
   files,
-}: Pick<ConversationCommandQueueItem, 'input' | 'files'>): ConversationCommandQueueItem => ({
+  requires_review,
+}: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
+  Partial<Pick<ConversationCommandQueueItem, 'requires_review'>>): ConversationCommandQueueItem => ({
   // This identifier is also the durable HTTP idempotency key. It must survive
   // dequeue restoration, remounts, and accepted-response loss unchanged.
   id: uuidv7(),
   input,
   files: uniqueFiles(files),
   created_at: Date.now(),
+  ...(requires_review ? { requires_review: true } : {}),
 });
 
 const getQueueValidationFailureReason = (state: ConversationCommandQueueState): QueueValidationFailureReason | null => {
@@ -360,7 +366,8 @@ export type ConversationCommandQueueExecution = {
   isCurrent: () => boolean;
 };
 
-type EnqueueCommandInput = Pick<ConversationCommandQueueItem, 'input' | 'files'>;
+type EnqueueCommandInput = Pick<ConversationCommandQueueItem, 'input' | 'files'> &
+  Partial<Pick<ConversationCommandQueueItem, 'requires_review'>>;
 type UpdateCommandInput = Pick<ConversationCommandQueueItem, 'input'>;
 
 const getQueueValidationMessage = (
@@ -660,13 +667,13 @@ export const useConversationCommandQueue = ({
   );
 
   const enqueue = useCallback(
-    ({ input, files }: EnqueueCommandInput) => {
+    (input: EnqueueCommandInput) => {
       if (!enabled) {
         return null;
       }
 
       const currentState = normalizeQueueState(stateRef.current);
-      const item = createQueuedCommandItem({ input, files });
+      const item = createQueuedCommandItem(input);
       const validation = validateQueuedCommandItem(item, currentState);
 
       if (isQueueValidationFailure(validation)) {
@@ -881,6 +888,9 @@ export const useConversationCommandQueue = ({
     }
 
     const [nextCommand] = data.items;
+    // Resume/reorder/remount cannot convert a possibly delivered steer into
+    // another execution. The user must review and remove/edit the held draft.
+    if (data.items.some((item) => item.requires_review)) return;
     const executionGeneration = executionGenerationRef.current + 1;
     executionGenerationRef.current = executionGeneration;
     const isExecutionCurrent = (): boolean =>

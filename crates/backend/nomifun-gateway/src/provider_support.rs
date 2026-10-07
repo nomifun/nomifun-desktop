@@ -6,11 +6,29 @@
 //! explicit args → calling companion's own profile model → first configured
 //! provider's first model → hard error with guidance.
 
+use std::sync::Arc;
+
+use nomifun_companion::CompanionService;
 use nomifun_common::ProviderWithModel;
 use nomifun_api_types::ModelTask;
+use nomifun_db::{
+    IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
+};
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::CallerCtx;
+
+/// The provider resolution chain intentionally sees only provider/model facts
+/// and the companion profile lookup it needs for its fallback order. Keeping
+/// this view separate prevents capability handlers from becoming a service
+/// locator by accident.
+#[derive(Clone)]
+pub(crate) struct ProviderSupportDeps {
+    pub provider_repo: Arc<dyn IProviderRepository>,
+    pub provider_model_repo: Arc<dyn IProviderModelRepository>,
+    pub provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
+    pub companion_service: Arc<CompanionService>,
+}
 
 /// A provider row reduced to what the listing tool + resolution chain need.
 #[derive(Debug, Clone)]
@@ -67,7 +85,9 @@ pub(crate) fn summarize_provider(
     }
 }
 
-pub(crate) async fn load_provider_summaries(deps: &GatewayDeps) -> Result<Vec<ProviderSummary>, Value> {
+pub(crate) async fn load_provider_summaries(
+    deps: &ProviderSupportDeps,
+) -> Result<Vec<ProviderSummary>, Value> {
     let rows = deps
         .provider_repo
         .list()
@@ -188,14 +208,14 @@ pub(crate) fn resolve_model_chain(
         });
     }
 
-    Err("no model available: no provider is configured/enabled on this desktop. Call nomi_list_providers to confirm, then ask the owner to configure one in Settings → Providers — do NOT create nomi sessions or cron jobs without a model.".to_owned())
+    Err("no model available: no provider is configured/enabled on this desktop. Call nomi_list_providers to verify, then ask the owner to configure one in Settings → Providers — do NOT create nomi sessions or cron jobs without a model.".to_owned())
 }
 
 /// Async wrapper around [`resolve_model_chain`]: loads the provider rows and
 /// the calling companion's profile model, returns a ready-to-persist
 /// `ProviderWithModel` plus the resolution source.
 pub(crate) async fn resolve_nomi_model(
-    deps: &GatewayDeps,
+    deps: &ProviderSupportDeps,
     ctx: &CallerCtx,
     explicit_model: Option<&ProviderWithModel>,
 ) -> Result<(ProviderWithModel, &'static str), Value> {
@@ -221,39 +241,16 @@ pub(crate) async fn resolve_nomi_model(
     }
 }
 
-/// Explicit-args-only resolution (no companion / first-provider fallback): used by
-/// `nomi_update_conversation`, where a model change is an explicit owner
-/// instruction that must not be silently substituted.
-pub(crate) async fn resolve_explicit_model(
-    deps: &GatewayDeps,
-    explicit_model: ProviderWithModel,
-) -> Result<ProviderWithModel, Value> {
-    let providers = load_provider_summaries(deps).await?;
-    match resolve_model_chain(Some(&explicit_model), None, &providers) {
-        Ok(r) => {
-            let model = r.model;
-            Ok(ProviderWithModel {
-                provider_id: r.provider_id,
-                model: model.clone(),
-                use_model: Some(model),
-            })
-        }
-        Err(msg) => Err(json!({"error": msg})),
-    }
-}
-
 /// The calling companion's configured profile model `(provider_id, model)`.
-/// An installation-owner Remote caller deliberately has no companion and must
-/// resolve from explicit input or the instance provider catalog instead.
-async fn companion_profile_model(deps: &GatewayDeps, ctx: &CallerCtx) -> Option<(String, String)> {
+async fn companion_profile_model(
+    deps: &ProviderSupportDeps,
+    ctx: &CallerCtx,
+) -> Option<(String, String)> {
     if let Some(id) = &ctx.companion_id
         && let Ok(p) = deps.companion_service.get_companion(id.as_str()).await
         && let Some(model) = p.model
     {
         return Some((model.provider_id, model.model));
-    }
-    if ctx.remote {
-        return None;
     }
     let default_id = deps.companion_service.default_companion_id().await?;
     let p = deps.companion_service.get_companion(&default_id).await.ok()?;
@@ -443,6 +440,7 @@ mod tests {
             provider_params: "{}".into(),
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
             health: None,
             health_checked_at: None,
             created_at: 0,

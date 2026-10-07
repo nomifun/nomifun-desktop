@@ -1,41 +1,39 @@
-//! Resolves a model pool and reusable presets into immutable, execution-scoped
-//! Agent participant snapshots.
+//! Resolves provider model capability catalog entries into immutable,
+//! execution-scoped Agent participant snapshots.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    ExecutionModelPool, ExecutionModelRef, ModelTask, ModelTrait, ParticipantCapability,
-    PresetOverrides, PresetTarget, ResolvedPresetSnapshot,
+    AgentResolvedSnapshot, CapabilityHealth, ExecutionModelPool, ExecutionModelRef, ModelTask,
+    ModelTechnicalCapability, ParticipantCapability,
 };
 use nomifun_common::{
-    AppError, MAX_AGENT_EXECUTION_MODELS, MAX_AGENT_EXECUTION_PARTICIPANTS, ProviderId,
-    NOMI_AGENT_ID,
+    AppError, MAX_AGENT_EXECUTION_MODELS, ProviderId, NOMI_AGENT_ID,
 };
 #[cfg(test)]
-use nomifun_common::generate_id;
+use nomifun_common::{generate_id, MAX_AGENT_EXECUTION_PARTICIPANTS};
 use nomifun_db::models::Provider;
 use nomifun_db::{
     IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
     NewAgentExecutionParticipant, ProviderModelCapabilityRow, ProviderModelRow,
 };
-use nomifun_preset::PresetService;
 
 #[derive(Debug, Clone)]
 struct ChatCatalogEntry {
     description: Option<String>,
-    traits: ChatTraitProjection,
+    traits: ChatCapabilityProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ChatTraitProjection {
+struct ChatCapabilityProjection {
     modalities: Vec<String>,
     function_calling: bool,
     reasoning: bool,
     web_search: bool,
 }
 
-impl ChatTraitProjection {
+impl ChatCapabilityProjection {
     fn apply_to(&self, capability: &mut ParticipantCapability) {
         capability.modalities.clone_from(&self.modalities);
         capability.tools = self.function_calling;
@@ -44,52 +42,43 @@ impl ChatTraitProjection {
     }
 }
 
-fn project_chat_traits(
+fn project_chat_capabilities(
     provider_id: &str,
     model: &str,
-    traits_json: &str,
-) -> Result<ChatTraitProjection, AppError> {
-    let traits: Vec<ModelTrait> = serde_json::from_str(traits_json).map_err(|error| {
+    protocol_id: &str,
+    health_json: Option<&str>,
+) -> Result<ChatCapabilityProjection, AppError> {
+    use nomifun_chat_model_broker::{ChatModelFeature, ChatProtocol, chat_protocol_for_id, protocol_features};
+    let protocol = chat_protocol_for_id(protocol_id).ok_or_else(|| {
         AppError::Internal(format!(
-            "stored Chat capability traits for {provider_id}/{model} are invalid: {error}"
+            "stored Chat capability protocol for {provider_id}/{model} is invalid: {protocol_id}"
         ))
     })?;
+    let representable = protocol_features(protocol);
     let mut modalities = Vec::new();
-    let mut function_calling = false;
-    let mut reasoning = false;
-    let mut web_search = false;
-    for model_trait in traits {
-        let modality = match model_trait {
-            ModelTrait::VisionInput => Some("vision"),
-            ModelTrait::VideoInput => Some("video"),
-            ModelTrait::AudioInput => Some("audio_input"),
-            ModelTrait::AudioOutput => Some("audio_output"),
-            ModelTrait::Realtime => Some("realtime"),
-            ModelTrait::Streaming => Some("streaming"),
-            ModelTrait::FunctionCalling => {
-                function_calling = true;
-                None
-            }
-            ModelTrait::Reasoning => {
-                reasoning = true;
-                None
-            }
-            ModelTrait::WebSearch => {
-                web_search = true;
-                None
-            }
-        };
-        if let Some(modality) = modality
-            && !modalities.iter().any(|value| value == modality)
-        {
+    for (feature, modality) in [
+        (ChatModelFeature::ImageInput, "vision"),
+        (ChatModelFeature::AudioInput, "audio_input"),
+    ] {
+        if representable.contains(&feature) {
             modalities.push(modality.to_owned());
         }
     }
-    Ok(ChatTraitProjection {
+    let unsupported = health_json
+        .map(serde_json::from_str::<CapabilityHealth>)
+        .transpose()
+        .map_err(|error| {
+            AppError::Internal(format!(
+                "stored Chat capability health for {provider_id}/{model} is invalid: {error}"
+            ))
+        })?
+        .map(|health| health.unsupported_technical_capabilities)
+        .unwrap_or_default();
+    Ok(ChatCapabilityProjection {
         modalities,
-        function_calling,
-        reasoning,
-        web_search,
+        function_calling: !unsupported.contains(&ModelTechnicalCapability::FunctionCalling),
+        reasoning: !unsupported.contains(&ModelTechnicalCapability::Reasoning),
+        web_search: protocol == ChatProtocol::OpenaiResponses,
     })
 }
 
@@ -168,7 +157,12 @@ fn build_chat_catalog(
             let key = (provider.provider_id.clone(), model);
             let entry = ChatCatalogEntry {
                 description: row.description.clone(),
-                traits: project_chat_traits(&key.0, &key.1, &chat_capability.traits)?,
+                traits: project_chat_capabilities(
+                    &key.0,
+                    &key.1,
+                    &chat_capability.protocol,
+                    chat_capability.health.as_deref(),
+                )?,
             };
             if catalog.insert(key.clone(), entry).is_none() {
                 catalog_order.push(ExecutionModelRef {
@@ -186,7 +180,6 @@ pub(crate) struct ParticipantResolver {
     provider_repo: Arc<dyn IProviderRepository>,
     provider_model_repo: Arc<dyn IProviderModelRepository>,
     provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
-    preset_service: Arc<PresetService>,
 }
 
 impl ParticipantResolver {
@@ -194,13 +187,11 @@ impl ParticipantResolver {
         provider_repo: Arc<dyn IProviderRepository>,
         provider_model_repo: Arc<dyn IProviderModelRepository>,
         provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
-        preset_service: Arc<PresetService>,
     ) -> Self {
         Self {
             provider_repo,
             provider_model_repo,
             provider_model_capability_repo,
-            preset_service,
         }
     }
 
@@ -300,7 +291,7 @@ impl ParticipantResolver {
                 .clone()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty());
-            let mut capability = derive_capability(&[], &[], None);
+            let mut capability = derive_capability(None);
             entry.traits.apply_to(&mut capability);
             snapshots.push(NewAgentExecutionParticipant {
                 participant_id:
@@ -308,7 +299,7 @@ impl ParticipantResolver {
                 source_agent_id: NOMI_AGENT_ID.to_owned(),
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 provider_id: Some(model.provider_id.clone()),
                 model: Some(model.model.clone()),
                 role: None,
@@ -325,111 +316,14 @@ impl ParticipantResolver {
             });
         }
 
-        // Presets enrich routing but never widen the caller's model pool.
-        let mut presets = match self.preset_service.list().await {
-            Ok(presets) => presets,
-            Err(error) => {
-                tracing::warn!(%error, "participant resolution continuing without presets");
-                return Ok(snapshots);
-            }
-        };
-        presets.sort_by(|left, right| left.preset_id.cmp(&right.preset_id));
-        for preset in presets
-            .into_iter()
-            .filter(|preset| preset.enabled && preset.auto_selectable)
-        {
-            if snapshots.len() >= MAX_AGENT_EXECUTION_PARTICIPANTS {
-                tracing::warn!(
-                    limit = MAX_AGENT_EXECUTION_PARTICIPANTS,
-                    "execution participant budget reached; remaining automatic presets were not materialized"
-                );
-                break;
-            }
-            let resolved = match self
-                .preset_service
-                .resolve(
-                    &preset.preset_id,
-                    PresetTarget::ExecutionStep,
-                    None,
-                    PresetOverrides::default(),
-                )
-                .await
-            {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    tracing::warn!(preset_id = %preset.preset_id, %error, "skipping unresolved execution preset");
-                    continue;
-                }
-            };
-            let Some(resolved_model) = resolved.resolved_model.as_ref() else {
-                continue;
-            };
-            let pair = models.iter().find(|candidate| {
-                candidate.model == resolved_model.model
-                    && resolved_model
-                        .provider_id
-                        .as_ref()
-                        .is_none_or(|expected| expected == &candidate.provider_id)
-            });
-            let Some(pair) = pair else {
-                continue;
-            };
-            let provider_id = pair.provider_id.clone();
-            let model = pair.model.clone();
-            let description = resolved
-                .routing_description
-                .clone()
-                .or(preset.description.clone());
-            let mut capability = derive_capability(
-                &preset.audience_tags,
-                &preset.scenario_tags,
-                description.as_deref(),
-            );
-            catalog
-                .get(&(provider_id.clone(), model.clone()))
-                .expect("preset model must remain in the immutable Chat catalog")
-                .traits
-                .apply_to(&mut capability);
-            snapshots.push(NewAgentExecutionParticipant {
-                participant_id:
-                    nomifun_common::AgentExecutionParticipantId::new().into_string(),
-                source_agent_id: resolved
-                    .resolved_agent_id
-                    .clone()
-                    .unwrap_or_else(|| NOMI_AGENT_ID.to_owned()),
-                preset_id: Some(preset.preset_id),
-                preset_revision: Some(resolved.preset_revision),
-                preset_snapshot: Some(serde_json::to_string(&resolved).map_err(|error| {
-                    AppError::Internal(format!("encode preset snapshot: {error}"))
-                })?),
-                provider_id: Some(provider_id),
-                model: Some(model),
-                role: Some(preset.name),
-                capability: Some(serde_json::to_string(&capability).map_err(|error| {
-                    AppError::Internal(format!("encode participant capability: {error}"))
-                })?),
-                constraints: None,
-                description,
-                system_prompt: (!resolved.instructions.trim().is_empty())
-                    .then_some(resolved.instructions.clone()),
-                enabled_skills: serde_json::to_string(&resolved.included_skills).map_err(
-                    |error| AppError::Internal(format!("encode participant skills: {error}")),
-                )?,
-                disabled_builtin_skills: serde_json::to_string(&resolved.excluded_auto_skills)
-                    .map_err(|error| {
-                        AppError::Internal(format!("encode participant exclusions: {error}"))
-                    })?,
-                sort_order: snapshots.len() as i64,
-            });
-        }
         Ok(snapshots)
     }
 
-    /// Preserve the authenticated caller's frozen preset as the first Agent
+    /// Copy the authenticated caller's frozen Agent snapshot into the first
     /// participant without widening the already-resolved model authority.
-    pub(crate) fn prepend_frozen_lead(
+    pub(crate) fn prepend_frozen_snapshot(
         participants: &mut Vec<NewAgentExecutionParticipant>,
-        snapshot: &ResolvedPresetSnapshot,
+        snapshot: &AgentResolvedSnapshot,
         lead_model: Option<&ExecutionModelRef>,
     ) -> Result<(), AppError> {
         if let Some(index) = participants.iter().position(|participant| {
@@ -452,7 +346,7 @@ impl ParticipantResolver {
             .or_else(|| {
                 let resolved = snapshot.resolved_model.as_ref()?;
                 Some(ExecutionModelRef {
-                    provider_id: resolved.provider_id.clone()?,
+                    provider_id: resolved.provider_id.clone(),
                     model: resolved.model.clone(),
                 })
             })
@@ -466,7 +360,7 @@ impl ParticipantResolver {
             })
             .ok_or_else(|| {
                 AppError::BadRequest(
-                    "the calling Agent preset has no model inside the execution authority"
+                    "the calling Agent snapshot has no model inside the execution authority"
                         .to_owned(),
                 )
             })?;
@@ -486,33 +380,29 @@ impl ParticipantResolver {
             )));
         };
 
-        // The authenticated frozen Agent is the concrete lead identity for
+        // The authenticated frozen Agent snapshot is the concrete lead identity for
         // this model. Replace the first matching template/base participant at
         // every size so participant count and model authority never widen.
         let inherited_model_capability = participants[matching_model_index]
             .capability
             .as_deref()
             .map(|raw| {
-                serde_json::from_str::<ParticipantCapability>(raw).map_err(|error| {
-                    AppError::Internal(format!(
-                        "decode matching participant capability for frozen preset: {error}"
-                    ))
-                })
+                    serde_json::from_str::<ParticipantCapability>(raw).map_err(|error| {
+                        AppError::Internal(format!(
+                        "decode matching participant capability for frozen Agent snapshot: {error}"
+                        ))
+                    })
             })
             .transpose()?;
         participants.remove(matching_model_index);
 
-        let mut lead_capability = derive_capability(
-            &[],
-            &[],
-            snapshot.routing_description.as_deref(),
-        );
+        let mut lead_capability = derive_capability(snapshot.routing_description.as_deref());
         if let Some(inherited) = inherited_model_capability.as_ref() {
             copy_model_trait_capability(inherited, &mut lead_capability);
         }
 
-        for participant in participants.iter_mut() {
-            participant.sort_order += 1;
+        for (index, participant) in participants.iter_mut().enumerate() {
+            participant.sort_order = index as i64 + 1;
         }
         participants.insert(
             0,
@@ -525,8 +415,8 @@ impl ParticipantResolver {
                     .unwrap_or_else(|| NOMI_AGENT_ID.to_owned()),
                 preset_id: Some(snapshot.preset_id.clone()),
                 preset_revision: Some(snapshot.preset_revision),
-                preset_snapshot: Some(serde_json::to_string(snapshot).map_err(|error| {
-                    AppError::Internal(format!("encode calling Agent preset snapshot: {error}"))
+                agent_snapshot: Some(serde_json::to_string(snapshot).map_err(|error| {
+                    AppError::Internal(format!("encode calling Agent snapshot: {error}"))
                 })?),
                 provider_id: Some(model.provider_id),
                 model: Some(model.model),
@@ -600,11 +490,7 @@ fn promote_model_to_front(
     Ok(())
 }
 
-fn derive_capability(
-    audience_tags: &[String],
-    scenario_tags: &[String],
-    description: Option<&str>,
-) -> ParticipantCapability {
+fn derive_capability(description: Option<&str>) -> ParticipantCapability {
     const KEYWORDS: &[(&str, &str)] = &[
         ("cod", "coding"),
         ("program", "coding"),
@@ -623,17 +509,10 @@ fn derive_capability(
         ("plan", "planning"),
         ("规划", "planning"),
     ];
-    let mut inputs: Vec<String> = audience_tags
-        .iter()
-        .chain(scenario_tags)
-        .map(|value| value.to_lowercase())
-        .collect();
-    if let Some(description) = description {
-        inputs.push(description.to_lowercase());
-    }
+    let description = description.unwrap_or_default().to_lowercase();
     let mut strengths = Vec::new();
     for (needle, strength) in KEYWORDS {
-        if inputs.iter().any(|value| value.contains(needle))
+        if description.contains(needle)
             && !strengths.iter().any(|value| value == strength)
         {
             strengths.push((*strength).to_owned());
@@ -663,7 +542,7 @@ fn copy_model_trait_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::{PresetKnowledgePolicy, PresetTarget};
+    use nomifun_api_types::AgentKnowledgePolicy;
 
     const PROVIDER_1: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_2: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -683,7 +562,7 @@ mod tests {
             source_agent_id: NOMI_AGENT_ID.to_owned(),
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             provider_id: Some(provider_id.to_owned()),
             model: Some(model.to_owned()),
             role: None,
@@ -697,12 +576,12 @@ mod tests {
         }
     }
 
-    fn snapshot() -> ResolvedPresetSnapshot {
-        ResolvedPresetSnapshot {
+    fn snapshot() -> AgentResolvedSnapshot {
+        AgentResolvedSnapshot {
+            canonical_binding: None,
             preset_id: LEAD_PRESET_ID.to_owned(),
             preset_revision: 7,
             preset_name: "Lead".to_owned(),
-            target: PresetTarget::ExecutionStep,
             routing_description: None,
             instructions: "lead instructions".to_owned(),
             resolved_agent_id: Some(NOMI_AGENT_ID.to_owned()),
@@ -711,8 +590,10 @@ mod tests {
             resolved_model: None,
             included_skills: vec![],
             excluded_auto_skills: vec![],
-            knowledge_policy: PresetKnowledgePolicy::default(),
-            knowledge_base_ids: vec![],
+            enabled_capabilities: vec![],
+            enabled_capability_actions: Default::default(),
+                        required_resource_kinds: Default::default(),
+            knowledge_policy: AgentKnowledgePolicy::default(),
             warnings: vec![],
         }
     }
@@ -765,7 +646,7 @@ mod tests {
             model: model.to_owned(),
             task: task.to_owned(),
             traits: traits.to_owned(),
-            protocol: "test.protocol".to_owned(),
+            protocol: "openai.chat_text".to_owned(),
             connection_role: "default".to_owned(),
             base_url_override: None,
             endpoint: None,
@@ -776,6 +657,7 @@ mod tests {
             provider_params: "{}".to_owned(),
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
             health: None,
             health_checked_at: None,
             created_at: 1,
@@ -813,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn participant_capability_comes_only_from_persisted_chat_traits() {
+    fn participant_capability_uses_protocol_inputs_and_optimistic_technical_defaults() {
         let providers = vec![provider(PROVIDER_1, true)];
         let models = vec![
             model_row(PROVIDER_1, "gpt-4o-vision-looking-name", true),
@@ -839,53 +721,69 @@ mod tests {
         let named_projection = &catalog
             [&(PROVIDER_1.to_owned(), "gpt-4o-vision-looking-name".to_owned())]
             .traits;
-        assert_eq!(named_projection.modalities, ["video"]);
-        assert!(!named_projection.modalities.iter().any(|value| value == "vision"));
-        let mut named_capability = derive_capability(&[], &[], None);
+        assert_eq!(named_projection.modalities, ["vision", "audio_input"]);
+        let mut named_capability = derive_capability(None);
         named_projection.apply_to(&mut named_capability);
         assert!(named_capability.tools);
-        assert!(named_capability.web_search);
+        assert!(!named_capability.web_search);
         assert_eq!(named_capability.reasoning, "high");
 
         let opaque_projection =
             &catalog[&(PROVIDER_1.to_owned(), "opaque-model".to_owned())].traits;
         assert_eq!(
             opaque_projection.modalities,
-            [
-                "vision",
-                "video",
-                "audio_input",
-                "audio_output",
-                "realtime",
-                "streaming",
-            ]
+            ["vision", "audio_input"]
         );
-        let mut opaque_capability = derive_capability(&[], &[], None);
+        let mut opaque_capability = derive_capability(None);
         opaque_projection.apply_to(&mut opaque_capability);
         assert!(opaque_capability.tools);
-        assert!(opaque_capability.web_search);
+        assert!(!opaque_capability.web_search);
         assert_eq!(opaque_capability.reasoning, "high");
 
-        let no_traits = project_chat_traits(PROVIDER_1, "plain", "[]").unwrap();
-        let mut plain_capability = derive_capability(&[], &[], None);
+        let no_traits = project_chat_capabilities(PROVIDER_1, "plain", "openai.chat_text", None).unwrap();
+        let mut plain_capability = derive_capability(None);
         no_traits.apply_to(&mut plain_capability);
-        assert!(plain_capability.modalities.is_empty());
-        assert!(!plain_capability.tools);
+        assert_eq!(plain_capability.modalities, ["vision", "audio_input"]);
+        assert!(plain_capability.tools);
         assert!(!plain_capability.web_search);
-        assert_eq!(plain_capability.reasoning, "low");
+        assert_eq!(plain_capability.reasoning, "high");
+
+        let observed = project_chat_capabilities(
+            PROVIDER_1,
+            "observed-limited",
+            "openai.chat_text",
+            Some(
+                r#"{"status":"unknown","unsupported_technical_capabilities":["function_calling","reasoning"]}"#,
+            ),
+        )
+        .unwrap();
+        assert!(!observed.function_calling);
+        assert!(!observed.reasoning);
     }
 
     #[test]
-    fn malformed_persisted_chat_traits_fail_closed() {
+    fn invalid_persisted_chat_protocol_fails_closed() {
+        let mut invalid = capability_row(PROVIDER_1, "broken", "chat", "[]");
+        invalid.protocol = "unknown.chat".to_owned();
         let error = build_chat_catalog(
             &[provider(PROVIDER_1, true)],
             &[model_row(PROVIDER_1, "broken", true)],
-            &[capability_row(PROVIDER_1, "broken", "chat", "not-json")],
+            &[invalid],
         )
         .unwrap_err();
 
         assert!(matches!(error, AppError::Internal(_)));
-        assert!(error.to_string().contains("traits"));
+        assert!(error.to_string().contains("protocol"));
+    }
+
+    #[test]
+    fn participant_inputs_and_native_search_respect_protocol_boundaries() {
+        let anthropic = project_chat_capabilities(PROVIDER_1, "anthropic", "anthropic.messages", None).unwrap();
+        assert_eq!(anthropic.modalities, ["vision"]);
+        assert!(!anthropic.web_search);
+        let responses = project_chat_capabilities(PROVIDER_1, "responses", "openai.responses", None).unwrap();
+        assert_eq!(responses.modalities, ["vision", "audio_input"]);
+        assert!(responses.web_search);
     }
 
     #[test]
@@ -971,9 +869,11 @@ mod tests {
                 ));
             }
 
-            ParticipantResolver::prepend_frozen_lead(
+            let mut caller_snapshot = snapshot();
+            caller_snapshot.routing_description = Some("CODING and research".to_owned());
+            ParticipantResolver::prepend_frozen_snapshot(
                 &mut participants,
-                &snapshot(),
+                &caller_snapshot,
                 Some(&ExecutionModelRef {
                     provider_id: LEAD_PROVIDER.to_owned(),
                     model: "lead-model".to_owned(),
@@ -986,9 +886,10 @@ mod tests {
                 participants[0].preset_id.as_deref(),
                 Some(LEAD_PRESET_ID)
             );
-            assert_eq!(participants[0].sort_order, 0);
+            assert_eq!(participants.iter().map(|p| p.sort_order).collect::<Vec<_>>(), (0..size as i64).collect::<Vec<_>>());
             let frozen_capability: ParticipantCapability =
                 serde_json::from_str(participants[0].capability.as_deref().unwrap()).unwrap();
+            assert_eq!(frozen_capability.strengths, ["coding", "research"]);
             assert_eq!(frozen_capability.modalities, ["vision"]);
             assert!(frozen_capability.tools);
             assert!(frozen_capability.web_search);
@@ -1021,7 +922,7 @@ mod tests {
                 2,
             ),
         ];
-        ParticipantResolver::prepend_frozen_lead(
+        ParticipantResolver::prepend_frozen_snapshot(
             &mut participants,
             &snapshot(),
             Some(&ExecutionModelRef {

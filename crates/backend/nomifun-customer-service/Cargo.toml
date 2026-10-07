@@ -10,6 +10,8 @@ nomifun-api-types.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-auth.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-agent-domain-wave4.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -21,3 +23,4 @@ dashmap.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 nomifun-realtime.workspace = true
+sqlx.workspace = true

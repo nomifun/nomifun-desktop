@@ -29,7 +29,6 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
         TEST_KEY,
         http.clone(),
         VersionCheckService::new(http, "0.1.0".into()),
-        None,
         std::env::temp_dir(),
         std::env::temp_dir(),
         false,
@@ -69,7 +68,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 fn chat_capability() -> Value {
     json!({
         "task": "chat",
-        "traits": ["streaming"],
+        "traits": [],
         "protocol": "openai.chat_text",
         "connection_role": "default",
         "provider_params": {}
@@ -101,6 +100,62 @@ async fn create_provider(db: &nomifun_db::Database, platform: &str, name: &str) 
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+#[tokio::test]
+async fn task_protocol_mismatches_cannot_create_or_replace_saved_model_configuration() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Task protocol contract").await;
+    let app = system_routes(build_state(&db));
+    let list_uri = format!("/api/provider-models?provider_id={provider_id}");
+    let before = body_json(app.clone().oneshot(request("GET", &list_uri, None)).await.unwrap()).await;
+
+    // Model IDs are intentionally arbitrary: validation is about the exact
+    // task/protocol contract, independent of names or catalog suggestions.
+    for (task, protocol) in [
+        (ModelTask::ImageGeneration, "openai.chat_text"),
+        (ModelTask::ImageEdit, "openai.chat_text"),
+        (ModelTask::VideoGeneration, "openai.chat_text"),
+        (ModelTask::MusicGeneration, "openai.chat_text"),
+        (ModelTask::SpeechRecognition, "openai.chat_text"),
+        (ModelTask::SpeechSynthesis, "openai.chat_text"),
+        (ModelTask::Embedding, "openai.chat_text"),
+        (ModelTask::Rerank, "openai.chat_text"),
+        (ModelTask::Chat, "openai.audio_speech"),
+        (ModelTask::SpeechRecognition, "openai.audio_speech"),
+        (ModelTask::SpeechSynthesis, "openai.audio_transcriptions"),
+    ] {
+        for model in ["new-unknown-model", "seed-chat"] {
+            let response = app.clone().oneshot(request(
+                "PUT",
+                "/api/provider-models",
+                Some(json!({
+                    "provider_id": provider_id,
+                    "model": {
+                        "model": model,
+                        "description": "must never persist",
+                        "capabilities": [{
+                            "task": task,
+                            "protocol": protocol,
+                            "connection_role": "default",
+                            "provider_params": {}
+                        }]
+                    }
+                })),
+            )).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{model}: {task:?}/{protocol}");
+            let error = body_json(response).await;
+            assert!(error.to_string().contains("task-incompatible"), "unexpected error: {error}");
+        }
+    }
+
+    let after = body_json(app.oneshot(request("GET", &list_uri, None)).await.unwrap()).await;
+    assert_eq!(after["data"], before["data"], "failed task/protocol validation must occur before any write");
+    let resolved = build_invoke(&db).resolve_task_config(
+        &ModelRef { provider_id, model: "seed-chat".into() },
+        ModelTask::Chat,
+    ).await.unwrap();
+    assert_eq!(resolved.protocol, "openai.chat_text");
 }
 
 #[tokio::test]
@@ -138,7 +193,7 @@ async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
         .oneshot(request(
             "PUT",
             "/api/provider-models",
-            Some(save(json!(["streaming", "function_calling"]))),
+            Some(save(json!(["vision_input", "web_search"]))),
         ))
         .await
         .unwrap();
@@ -156,15 +211,179 @@ async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
         .unwrap();
     assert_eq!(
         resolved.traits,
-        vec![ModelTrait::Streaming, ModelTrait::FunctionCalling]
+        vec![ModelTrait::VisionInput, ModelTrait::WebSearch]
     );
+}
+
+#[tokio::test]
+async fn chat_context_settings_round_trip_through_model_routes() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Context contract").await;
+    let app = system_routes(build_state(&db));
+    let save = |threshold: u8| json!({
+        "provider_id": provider_id,
+        "model": {
+            "model": "context-model",
+            "capabilities": [{
+                "task": "chat",
+                "protocol": "openai.chat_text",
+                "connection_role": "default",
+                "context_limit": 64_000,
+                "compaction_threshold_pct": threshold
+            }]
+        }
+    });
+    let invalid = app.clone().oneshot(request("PUT", "/api/provider-models", Some(save(49)))).await.unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let saved = app.clone().oneshot(request("PUT", "/api/provider-models", Some(save(60)))).await.unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let listed = app.oneshot(request(
+        "GET",
+        &format!("/api/provider-models?provider_id={provider_id}"),
+        None,
+    )).await.unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed = body_json(listed).await;
+    let capability = &listed["data"].as_array().unwrap().iter()
+        .find(|row| row["model"] == "context-model")
+        .unwrap()["capabilities"][0];
+    assert_eq!(capability["context_limit"], 64_000);
+    assert_eq!(capability["compaction_threshold_pct"], 60);
+}
+
+#[tokio::test]
+async fn model_token_limits_round_trip_custom_and_explicit_default_without_clamping() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Nullable budget contract").await;
+    let app = system_routes(build_state(&db));
+    for (context, output, explicit_null) in [
+        (Some(1_000_003_i64), Some(531_007_i64), false),
+        (Some(131_129), Some(31_007), false),
+        (None, None, true),
+        (Some(131_129), Some(31_007), false),
+        (None, None, false),
+    ] {
+        let mut capability = chat_capability();
+        if let Some(value) = context { capability["context_limit"] = json!(value); }
+        else if explicit_null { capability["context_limit"] = Value::Null; }
+        if let Some(value) = output { capability["output_limit"] = json!(value); }
+        else if explicit_null { capability["output_limit"] = Value::Null; }
+        let saved = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
+            "provider_id": provider_id, "model":{"model":"budget-roundtrip", "capabilities":[capability]}
+        })))).await.unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved = body_json(saved).await;
+        let capability = &saved["data"]["capabilities"][0];
+        assert_eq!(capability.get("context_limit").and_then(Value::as_i64), context);
+        assert_eq!(capability.get("output_limit").and_then(Value::as_i64), output);
+        let repository = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+        let row = nomifun_db::IProviderModelCapabilityRepository::get(
+            &repository, &provider_id, "budget-roundtrip", "chat"
+        ).await.unwrap().unwrap();
+        assert_eq!((row.context_limit, row.output_limit), (context, output));
+    }
+}
+
+#[tokio::test]
+async fn provider_clone_preserves_manual_and_default_model_token_limits() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Budget clone source").await;
+    let app = system_routes(build_state(&db));
+    for (model, context, output) in [("manual-model", Some(1_000_003_i64), Some(31_007_i64)), ("default-model", None, None)] {
+        let mut capability = chat_capability();
+        capability["context_limit"] = json!(context);
+        capability["output_limit"] = json!(output);
+        if model == "manual-model" {
+            capability["provider_params"] = json!({"_nomifun_context_limit_kind":"input_only"});
+        }
+        let response = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
+            "provider_id":provider_id,"model":{"model":model,"capabilities":[capability]}
+        })))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let repository = SqliteProviderRepository::new(db.pool().clone());
+    let cloned = nomifun_db::IProviderRepository::clone_graph(&repository, &provider_id, "Budget clone").await.unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    let source = nomifun_db::IProviderModelCapabilityRepository::list_for_provider(&capabilities, &provider_id)
+        .await.unwrap().into_iter().map(|row|(row.model,row.task,row.context_limit,row.output_limit,row.provider_params)).collect::<Vec<_>>();
+    let target = nomifun_db::IProviderModelCapabilityRepository::list_for_provider(&capabilities, &cloned.provider_id)
+        .await.unwrap().into_iter().map(|row|(row.model,row.task,row.context_limit,row.output_limit,row.provider_params)).collect::<Vec<_>>();
+    assert_eq!(target, source);
+}
+
+#[tokio::test]
+async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence() {
+    let db = init_database_memory().await.unwrap();
+    let app = system_routes(build_state(&db));
+    for platform in ["ArK", "VOLCENGINE"] {
+        let provider_id = create_provider(&db, platform, "Ark model validation").await;
+        let save = |model: &str| {
+            json!({
+                "provider_id": provider_id,
+                "model": {
+                    "model": model,
+                    "capabilities": [{
+                        "task": "video_generation",
+                        "protocol": "ark.video_jobs",
+                        "connection_role": "default"
+                    }]
+                }
+            })
+        };
+        for (model, expected_error) in [
+            ("doubao-seedance-1.5-pro", "console display name"),
+            ("doubao-seed-2-0-mini-260428", "Seed and Seedance"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request("PUT", "/api/provider-models", Some(save(model))))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{platform}/{model}");
+            let error = body_json(response).await;
+            assert!(error.to_string().contains(expected_error), "{error}");
+        }
+        let listed = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/provider-models?provider_id={provider_id}"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed = body_json(listed).await;
+        assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["data"][0]["model"], "seed-chat");
+
+        let model = "doubao-seedance-2-0-mini-260615";
+        let response = app
+            .clone()
+            .oneshot(request("PUT", "/api/provider-models", Some(save(model))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let resolved = build_invoke(&db)
+            .resolve_task_config(
+                &ModelRef { provider_id, model: model.to_owned() },
+                ModelTask::VideoGeneration,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.protocol, "ark.video_jobs");
+        assert_eq!(resolved.model, model);
+    }
 }
 
 #[tokio::test]
 async fn full_save_list_update_and_query_delete_roundtrip() {
     let db = init_database_memory().await.unwrap();
     let provider_id = create_provider(&db, "stepfun", "StepFun").await;
-    let model = "future-user-model-2026-08-11";
+    // Saving permits long natural keys; they must remain deletable as well.
+    let model_name = format!("future-user-model-{}", "x".repeat(513));
+    let model = model_name.as_str();
 
     let save = json!({
         "provider_id": provider_id.clone(),

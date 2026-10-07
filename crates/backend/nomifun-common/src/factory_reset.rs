@@ -28,9 +28,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::atomic_file::{publish_new_file, replace_file, sync_directory, write_new_and_publish};
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use crate::atomic_file::rename_noreplace;
 use crate::dataset_roots::{
     DatasetRootKind, WORK_ROOT_BINDING_FILE, WORK_ROOT_OWNER_FILE,
-    managed_dataset_roots, reset_managed_dataset_roots,
+    reset_managed_dataset_roots,
 };
 use crate::error::AppError;
 use crate::id::validate_uuidv7;
@@ -117,8 +120,6 @@ const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     // Legacy root of the retired public-agent domain (cleanup only).
     ("public-agents", ManagedRootKind::Directory),
     ("preview-history", ManagedRootKind::Directory),
-    ("nomi-sessions", ManagedRootKind::Directory),
-    ("nomi-health-check-sessions", ManagedRootKind::Directory),
     ("browser-profile", ManagedRootKind::Directory),
     ("browser-profiles", ManagedRootKind::Directory),
     ("browser-data", ManagedRootKind::Directory),
@@ -195,8 +196,6 @@ const RELEASED_V2_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("public-agents", ManagedRootKind::Directory),
     ("preview-history", ManagedRootKind::Directory),
     ("agent-process-registry.json", ManagedRootKind::File),
-    ("nomi-sessions", ManagedRootKind::Directory),
-    ("nomi-health-check-sessions", ManagedRootKind::Directory),
     ("browser-profile", ManagedRootKind::Directory),
     ("browser-profiles", ManagedRootKind::Directory),
     ("browser-data", ManagedRootKind::Directory),
@@ -262,29 +261,6 @@ fn lifecycle_managed_roots(
         ])
 }
 
-fn dataset_managed_roots(
-    preserve_host_control: bool,
-) -> Vec<(&'static str, ManagedRootKind)> {
-    let roots: Box<
-        dyn Iterator<Item = &'static crate::dataset_roots::ManagedDatasetRoot>,
-    > = if preserve_host_control {
-        Box::new(reset_managed_dataset_roots())
-    } else {
-        Box::new(managed_dataset_roots())
-    };
-    roots
-        .map(|root| {
-            (
-                root.path,
-                match root.kind {
-                    DatasetRootKind::File => ManagedRootKind::File,
-                    DatasetRootKind::Directory => ManagedRootKind::Directory,
-                },
-            )
-        })
-        .collect()
-}
-
 /// Everything about a persisted plan that is fixed by its version.
 ///
 /// A plan is a durable contract with older builds, so each released version
@@ -333,9 +309,17 @@ fn released_plan_shape(version: u32) -> Result<ReleasedPlanShape, AppError> {
 /// just built against the frozen shape, so a drifted registry fails before any
 /// data is moved rather than persisting a plan no reader accepts.
 fn current_writer_managed_roots() -> Vec<(&'static str, ManagedRootKind)> {
-    let mut roots = lifecycle_managed_roots().collect::<Vec<_>>();
-    roots.extend(dataset_managed_roots(true));
-    roots
+    lifecycle_managed_roots()
+        .chain(reset_managed_dataset_roots().map(|root| {
+            (
+                root.path,
+                match root.kind {
+                    DatasetRootKind::File => ManagedRootKind::File,
+                    DatasetRootKind::Directory => ManagedRootKind::Directory,
+                },
+            )
+        }))
+        .collect()
 }
 
 /// Compare a persisted plan's root list against a frozen registry.
@@ -2923,27 +2907,6 @@ fn sync_parent(path: &Path) -> std::io::Result<()> {
     sync_directory(parent)
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    OpenOptions::new().read(true).open(path)?.sync_all()
-}
-
-#[cfg(windows)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    // Windows does not support opening a directory with ordinary
-    // `CreateFile` flags through `std::fs::OpenOptions`.  Directory metadata
-    // is nevertheless protected by the atomic rename itself; use a no-op for
-    // the directory fsync step while still syncing every written file.
-    let _ = path;
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    let _ = path;
-    Ok(())
-}
-
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -2952,58 +2915,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
         Uuid::now_v7()
     ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file(&tmp, path)?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::rename(source, target)
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    write_new_and_publish(&tmp, path, bytes, replace_file)
 }
 
 fn write_atomic_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -3015,152 +2927,7 @@ fn write_atomic_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .unwrap_or("state"),
         Uuid::now_v7()
     ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        publish_new_file(&tmp, path)?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-#[cfg(target_os = "macos")]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "target path contains a NUL byte",
-            )
-        },
-    )?;
-    if unsafe {
-        libc::renamex_np(
-            source.as_ptr(),
-            target.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "target path contains a NUL byte",
-            )
-        },
-    )?;
-    if unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "macos"))
-))]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::hard_link(source, target)?;
-    fs::remove_file(source)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::hard_link(source, target)?;
-    fs::remove_file(source)
-}
-
-#[cfg(windows)]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    } != 0
-    {
-        return Ok(());
-    }
-
-    let error = std::io::Error::last_os_error();
-    // MoveFileExW may report either ERROR_FILE_EXISTS (80) or
-    // ERROR_ALREADY_EXISTS (183), depending on the filesystem. Normalize both
-    // so callers retain the create_new-style conflict contract.
-    if matches!(error.raw_os_error(), Some(80 | 183)) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            error,
-        ))
-    } else {
-        Err(error)
-    }
+    write_new_and_publish(&tmp, path, bytes, publish_new_file)
 }
 
 fn write_phase(data_dir: &Path, phase: &str) -> Result<(), AppError> {
@@ -3988,10 +3755,16 @@ pub fn apply_pending_v3_dataset_reset(
                     && error.kind() == std::io::ErrorKind::NotFound
                     && dest_error.kind() == std::io::ErrorKind::NotFound =>
             {
-                return Err(AppError::Internal(format!(
-                    "managed reset root disappeared from both active and retired locations: {}",
-                    root.relative_path
-                )));
+                if !is_ephemeral_database_sidecar(&root.relative_path) {
+                    return Err(AppError::Internal(format!(
+                        "managed reset root disappeared from both active and retired locations: {}",
+                        root.relative_path
+                    )));
+                }
+                // SQLite may checkpoint or remove a WAL/SHM/journal/lock
+                // between planning and applying the reset. These sidecars
+                // are recreated by SQLite and are not independent dataset
+                // facts; the main database remains a required managed root.
             }
             (Err(error), Ok(_))
                 if !root.initially_present
@@ -4073,6 +3846,16 @@ pub fn apply_pending_v3_dataset_reset(
     Ok(true)
 }
 
+fn is_ephemeral_database_sidecar(relative_path: &str) -> bool {
+    matches!(
+        relative_path,
+        "nomifun-backend.db-wal"
+            | "nomifun-backend.db-shm"
+            | "nomifun-backend.db-journal"
+            | "nomifun-backend.db.migrate.lock"
+    )
+}
+
 /// Record the v3 receipt after the fresh database has been opened and passed
 /// the database worker's contract checks.
 pub fn write_v3_dataset_receipt(
@@ -4083,7 +3866,7 @@ pub fn write_v3_dataset_receipt(
     // data directory.  During a pending reset the immutable plan contains
     // the authoritative resolved work root, so use it when available; a
     // standalone data-only dataset naturally binds to data_dir itself.
-    let work_dir = pending_plan_work_dir(data_dir)?.unwrap_or_else(|| data_dir.to_path_buf());
+    let work_dir = pending_v3_reset_work_dir(data_dir)?.unwrap_or_else(|| data_dir.to_path_buf());
     write_v3_dataset_receipt_for_work_dir(data_dir, &work_dir, generation)
 }
 
@@ -4362,10 +4145,6 @@ pub fn finalize_v3_dataset_reset(
         "v3 managed dataset reset finalized"
     );
     Ok(true)
-}
-
-fn pending_plan_work_dir(data_dir: &Path) -> Result<Option<PathBuf>, AppError> {
-    pending_v3_reset_work_dir(data_dir)
 }
 
 pub fn write_v3_dataset_bootstrap_binding(
@@ -5749,128 +5528,6 @@ fn archive_reset_request(
     })
 }
 
-#[cfg(target_os = "macos")]
-fn rename_noreplace(
-    source: &Path,
-    destination: &Path,
-) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let destination =
-        CString::new(destination.as_os_str().as_bytes()).map_err(
-            |_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "destination path contains a NUL byte",
-                )
-            },
-        )?;
-    if unsafe {
-        libc::renamex_np(
-            source.as_ptr(),
-            destination.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn rename_noreplace(
-    source: &Path,
-    destination: &Path,
-) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let destination =
-        CString::new(destination.as_os_str().as_bytes()).map_err(
-            |_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "destination path contains a NUL byte",
-                )
-            },
-        )?;
-    if unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn rename_noreplace(
-    source: &Path,
-    destination: &Path,
-) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    } != 0
-    {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(80 | 183)) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            error,
-        ))
-    } else {
-        Err(error)
-    }
-}
-
 #[cfg(not(any(
     target_os = "linux",
     target_os = "macos",
@@ -6121,10 +5778,30 @@ pub fn rebind_data_root_after_relocation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dataset_roots::AGENT_PROCESS_REGISTRY_FILE;
+    use crate::dataset_roots::{AGENT_PROCESS_REGISTRY_FILE, managed_dataset_roots};
 
     fn touch(path: &Path) {
         fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn only_sqlite_runtime_sidecars_may_disappear_during_reset_recovery() {
+        for path in [
+            "nomifun-backend.db-wal",
+            "nomifun-backend.db-shm",
+            "nomifun-backend.db-journal",
+            "nomifun-backend.db.migrate.lock",
+        ] {
+            assert!(is_ephemeral_database_sidecar(path));
+        }
+        for path in [
+            "nomifun-backend.db",
+            "storage-generation",
+            "conversations",
+            "browser-data",
+        ] {
+            assert!(!is_ephemeral_database_sidecar(path));
+        }
     }
 
     fn seed_managed_root(data_dir: &Path, relative_path: &str, kind: ManagedRootKind) {

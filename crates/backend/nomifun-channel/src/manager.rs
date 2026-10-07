@@ -14,6 +14,7 @@ use nomifun_db::{IChannelRepository, UpdatePluginStatusParams};
 use nomifun_realtime::UserEventSink;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{
@@ -207,19 +208,29 @@ impl ChannelManager {
         Arc::clone(&self.group_policy_fence)
     }
 
-    /// Returns the status of all registered plugins from the database.
+    /// Returns the status of all built-in plugins from the database.
     ///
-    /// Merges DB state with live runtime status for active plugins.
+    /// Merges DB state with live runtime status for active plugins. Rows that
+    /// do not name a built-in [`PluginType`] are legacy/unsupported channel
+    /// data and are intentionally omitted.
     pub async fn get_plugin_status(&self) -> Result<Vec<PluginStatusResponse>, ChannelError> {
         let rows = self.load_all_plugin_rows().await?;
         let statuses: Vec<PluginStatusResponse> = rows
             .into_iter()
-            .map(|row| {
+            .filter_map(|row| {
+                if PluginType::from_str_opt(&row.r#type).is_none() {
+                    debug!(
+                        plugin_id = %row.channel_plugin_id,
+                        plugin_type = %row.r#type,
+                        "omitting unsupported channel plugin from status"
+                    );
+                    return None;
+                }
                 let live_status = self
                     .plugins
                     .get(row.channel_plugin_id.as_str())
                     .map(|p| p.status().to_string());
-                self.row_to_status_response(&row, live_status)
+                Some(self.row_to_status_response(&row, live_status))
             })
             .collect();
         Ok(statuses)
@@ -540,89 +551,6 @@ impl ChannelManager {
         Ok(channel_plugin_id)
     }
 
-    /// Enables an extension-contributed plugin in metadata-only mode.
-    ///
-    /// The backend does not yet execute extension channel runtime JS, but we
-    /// still persist the plugin configuration and enabled flag so Settings UI
-    /// can behave consistently and survive restarts.
-    pub async fn enable_extension_plugin(
-        &self,
-        plugin_type: &str,
-        plugin_name: &str,
-        config: &PluginConfig,
-    ) -> Result<String, ChannelError> {
-        let matching_rows: Vec<_> = self
-            .load_all_plugin_rows()
-            .await?
-            .into_iter()
-            .filter(|row| row.r#type == plugin_type)
-            .collect();
-        if matching_rows.len() > 1 {
-            return Err(ChannelError::InvalidConfig(format!(
-                "extension plugin type '{plugin_type}' has multiple channel rows"
-            )));
-        }
-        let existing = matching_rows.into_iter().next();
-        if let Some(channel_plugin_id) = existing
-            .as_ref()
-            .map(|row| row.channel_plugin_id.as_str())
-            && self.plugins.contains_key(channel_plugin_id)
-        {
-            self.stop_plugin(channel_plugin_id).await;
-        }
-
-        let config_json = serde_json::to_string(config)?;
-        let encrypted_config = encrypt_string(&config_json, &self.encryption_key)
-            .map_err(|e| ChannelError::EncryptionFailed(e.to_string()))?;
-
-        let now = now_ms();
-        let row = if let Some(existing) = existing.as_ref() {
-            self.repo
-                .update_plugin(&ChannelPluginRow {
-                    channel_plugin_id: existing.channel_plugin_id.clone(),
-                    r#type: plugin_type.to_owned(),
-                    name: plugin_name.to_owned(),
-                    enabled: true,
-                    config: encrypted_config,
-                    status: Some(PluginStatus::Stopped.to_string()),
-                    last_connected: existing.last_connected,
-                    companion_id: existing.companion_id.clone(),
-                    bot_key: existing.bot_key.clone(),
-                    owner_domain: existing.owner_domain.clone(),
-                    group_access_mode: GroupAccessMode::from_persisted(Some(
-                        &existing.group_access_mode,
-                    ))
-                    .as_str()
-                    .to_owned(),
-                    created_at: existing.created_at,
-                    updated_at: now,
-                })
-                .await?
-        } else {
-            self.repo
-                .create_plugin(&NewChannelPluginRow {
-                    r#type: plugin_type.to_owned(),
-                    name: plugin_name.to_owned(),
-                    enabled: true,
-                    config: encrypted_config,
-                    status: Some(PluginStatus::Stopped.to_string()),
-                    last_connected: None,
-                    companion_id: None,
-                    bot_key: None,
-                    owner_domain: nomifun_db::models::default_owner_domain(),
-                    group_access_mode: GroupAccessMode::Allowlist.as_str().to_owned(),
-                    created_at: now,
-                    updated_at: now,
-                })
-                .await?
-        };
-        let channel_plugin_id = row.channel_plugin_id;
-
-        info!(plugin_id = %channel_plugin_id, plugin_type = %plugin_type, "extension plugin enabled (metadata-only mode)");
-        self.broadcast_status_change(&channel_plugin_id).await;
-        Ok(channel_plugin_id)
-    }
-
     /// Disables a plugin: stops the connection, updates DB, and removes
     /// the active instance.
     ///
@@ -899,6 +827,18 @@ impl ChannelManager {
     /// Errors on individual plugins are logged but don't prevent other
     /// plugins from starting.
     pub async fn restore_plugins(&self, factory: &PluginFactory) -> Result<(), ChannelError> {
+        self.restore_plugins_with_shutdown(factory, CancellationToken::new())
+            .await
+    }
+
+    /// Restore enabled plugins while observing a process-lifetime shutdown
+    /// token. This prevents a delayed startup restore from reviving a plugin
+    /// after the host has begun teardown.
+    pub async fn restore_plugins_with_shutdown(
+        &self,
+        factory: &PluginFactory,
+        shutdown: CancellationToken,
+    ) -> Result<(), ChannelError> {
         let rows = self.load_all_plugin_rows().await?;
 
         let enabled: Vec<ChannelPluginRow> = rows.into_iter().filter(|r| r.enabled).collect();
@@ -911,13 +851,15 @@ impl ChannelManager {
         info!(count = enabled.len(), "restoring enabled plugins");
 
         for row in enabled {
+            if shutdown.is_cancelled() {
+                break;
+            }
             if PluginType::from_str_opt(&row.r#type).is_none() {
                 info!(
                     plugin_id = %row.channel_plugin_id,
                     plugin_type = %row.r#type,
-                    "skipping extension plugin runtime restore; metadata-only mode"
+                    "skipping unsupported channel plugin runtime restore"
                 );
-                self.broadcast_status_change(&row.channel_plugin_id).await;
                 continue;
             }
             if let Err(e) = self.restore_single_plugin(&row, factory).await {
@@ -1022,6 +964,18 @@ impl ChannelManager {
     /// sweep it persists the real status, broadcasts
     /// `channel.plugin-status-changed`, and attempts a rate-limited restart.
     pub fn spawn_watchdog(self: &Arc<Self>, factory: Arc<PluginFactory>, config: WatchdogConfig) -> JoinHandle<()> {
+        self.spawn_watchdog_with_shutdown(factory, config, CancellationToken::new())
+    }
+
+    /// Spawn the watchdog with an explicit process-lifetime cancellation
+    /// boundary.  The legacy `spawn_watchdog` method remains for standalone
+    /// callers/tests that own the returned handle themselves.
+    pub fn spawn_watchdog_with_shutdown(
+        self: &Arc<Self>,
+        factory: Arc<PluginFactory>,
+        config: WatchdogConfig,
+        shutdown: CancellationToken,
+    ) -> JoinHandle<()> {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
             let mut state = WatchdogState::default();
@@ -1031,8 +985,12 @@ impl ChannelManager {
             // startup (restore_plugins may still be in flight).
             ticker.tick().await;
             loop {
-                ticker.tick().await;
-                manager.check_and_heal_plugins(&factory, &config, &mut state).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = ticker.tick() => {
+                        manager.check_and_heal_plugins(&factory, &config, &mut state).await;
+                    }
+                }
             }
         })
     }
@@ -2021,6 +1979,31 @@ mod tests {
         assert!(
             !statuses[0].connected,
             "a stale DB running value without a live instance is not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_status_omits_legacy_extension_rows() {
+        let (mgr, repo, _bc) = make_manager();
+        repo.plugins.lock().unwrap().push(ChannelPluginRow {
+            channel_plugin_id: test_channel_id(),
+            r#type: "legacy-channel".into(),
+            name: "Legacy Channel".into(),
+            enabled: true,
+            config: "opaque".into(),
+            status: Some("running".into()),
+            last_connected: Some(now_ms()),
+            companion_id: None,
+            bot_key: None,
+            owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        });
+
+        assert!(
+            mgr.get_plugin_status().await.unwrap().is_empty(),
+            "legacy extension rows must not be exposed by the Channel status API"
         );
     }
 

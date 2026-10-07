@@ -77,31 +77,12 @@
   }
 }
 
-@media (max-width: 640px) {
-  .root :global([data-creative-canvas-chrome]) {
-    grid-template-columns:
-      0
-      minmax(0, 1fr)
-      minmax(
-        240px,
-        min(
-          55vw,
-          clamp(240px, var(--creative-canvas-right-panel-width, 260px), 560px)
-        )
-      );
-  }
-}
 
 .root :global([data-creative-canvas-chrome][data-right-view='closed']) {
   grid-template-columns:
     0
     minmax(0, 1fr)
     0;
-}
-
-.root :global([data-creative-canvas-chrome] > section[aria-label='编辑历史']),
-.root :global([data-creative-canvas-chrome] > section[aria-label='时间线']) {
-  height: min(60vh, var(--creative-canvas-bottom-panel-height, 240px));
 }
 
 .canvasHost {
@@ -118,13 +99,13 @@
 
 .toolbarButton {
   display: grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
   place-items: center;
   border-radius: 8px;
   background: transparent;
-  color: var(--color-text-1);
+  color: var(--creative-canvas-control-ink, var(--color-text-1));
   cursor: pointer;
 }
 
@@ -144,8 +125,8 @@
 
 .toolbarButton :global(.i-icon) {
   display: grid;
-  width: 17px;
-  height: 17px;
+  width: 18px;
+  height: 18px;
   place-items: center;
   line-height: 0;
   vertical-align: middle;
@@ -210,19 +191,6 @@
 
 .spin {
   animation: creative-canvas-product-spin 0.9s linear infinite;
-}
-
-.panoramaDescription {
-  margin: 0;
-  color: var(--color-text-2);
-  font-size: 13px;
-  line-height: 1.75;
-}
-
-.panoramaActions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
 }
 
 @keyframes creative-canvas-product-spin {

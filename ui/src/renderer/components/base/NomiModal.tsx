@@ -98,7 +98,7 @@ export interface NomiModalProps extends Omit<ModalProps, 'title' | 'footer'> {
 
 // ==================== 样式常量 / Style Constants ====================
 
-const HEADER_BASE_CLASS = 'flex items-center justify-between pb-6px';
+const HEADER_BASE_CLASS = 'flex shrink-0 items-center justify-between pb-6px';
 const TITLE_BASE_CLASS = 'm-0 text-14px font-600 leading-20px text-t-primary';
 const CLOSE_BUTTON_CLASS =
   'h-24px w-24px flex shrink-0 items-center justify-center rd-6px border-0 bg-transparent p-0 text-t-tertiary transition-colors duration-200 cursor-pointer hover:bg-2 hover:text-t-primary focus:outline-none';
@@ -238,7 +238,7 @@ const NomiModal: React.FC<NomiModalProps> = ({
 
   const finalStyle: CSSProperties = {
     ...mergedStyle,
-    borderRadius: mergedStyle.borderRadius ?? '16px',
+    borderRadius: mergedStyle.borderRadius ?? 'var(--nomi-modal-radius)',
   };
 
   const bodyInlineStyle = React.useMemo<CSSProperties>(() => {

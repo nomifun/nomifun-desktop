@@ -28,8 +28,8 @@ pub fn terminal_routes(state: TerminalRouterState) -> Router {
     Router::new()
         .route("/api/terminals", get(list_terminals).post(create_terminal))
         .route(
-            "/api/conversations/{conversation_id}/terminals",
-            get(list_conversation_terminals),
+            "/api/agent-sessions/{agent_session_id}/terminals",
+            get(list_agent_session_terminals),
         )
         .route(
             "/api/terminals/{terminal_id}",
@@ -68,14 +68,14 @@ async fn list_terminals(
     Ok(Json(ApiResponse::ok(items)))
 }
 
-async fn list_conversation_terminals(
+async fn list_agent_session_terminals(
     State(state): State<TerminalRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(conversation_id): Path<ConversationId>,
+    Path(agent_session_id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<Vec<TerminalSessionResponse>>>, AppError> {
     let items = state
         .terminal_service
-        .list_for_conversation(&user.id, conversation_id.as_str())
+        .list_for_conversation(&user.id, agent_session_id.as_str())
         .await?;
     Ok(Json(ApiResponse::ok(items)))
 }

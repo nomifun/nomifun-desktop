@@ -1,4 +1,5 @@
 {
+  "fileRefreshFailed": "无法重新读取文件，当前预览可能已过期。",
   "historyVersions": "历史版本",
   "currentFile": "当前文件",
   "loading": "加载中...",

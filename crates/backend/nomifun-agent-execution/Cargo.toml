@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 nomifun-common.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-agent-session.workspace = true
+nomifun-agent-runtime.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 nomifun-auth.workspace = true
@@ -12,10 +15,10 @@ nomifun-file.workspace = true
 nomifun-realtime.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-model-invoke.workspace = true
-nomifun-conversation.workspace = true
-nomifun-preset.workspace = true
+nomifun-chat-model-broker.workspace = true
 axum.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

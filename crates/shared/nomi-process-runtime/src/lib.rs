@@ -6,6 +6,8 @@
 
 mod capability;
 mod command_builder;
+#[cfg(target_os = "macos")]
+mod darwin_registered;
 mod io;
 mod outcome;
 mod platform;
@@ -20,6 +22,11 @@ pub use command_builder::{
     kill_process_tree, managed_child_cleanup_metrics, merge_process_path, resolve_command_in,
     resolve_command_path,
 };
+#[cfg(target_os = "macos")]
+pub use darwin_registered::{
+    DarwinGenerationTerminationOutcome, DarwinRegisteredChildAuthority,
+    own_registered_child_process,
+};
 pub use platform::poller::{PlatformLifecycleMetrics, platform_lifecycle_metrics};
 pub use io::{OutputBuffer, OutputObserver};
 pub use outcome::{
@@ -32,11 +39,11 @@ pub use recovery::{
 };
 pub use request::{
     CommandSpec, ProcessError, ProcessOwner, ProcessPolicy, ProcessRequest,
-    NormalizedProcessRequest, ShellKind, Transport, normalize_request,
+    MAX_PTY_DIMENSION, NormalizedProcessRequest, ShellKind, Transport, normalize_request,
 };
 pub use supervisor::{
-    ProcessHandle, PollResult, ProcessSupervisor, QuiesceReport, QuiesceSessionReport,
-    ShutdownReport, ShutdownSessionReport, SupervisorConfig,
+    ProcessHandle, ProcessTerminalWitness, PollResult, ProcessSupervisor, QuiesceReport, QuiesceSessionReport,
+    ShutdownReport, ShutdownSessionReport, StartupCleanupReport, SupervisorConfig,
 };
 
 /// Returns true only when cleanup can no longer be retried safely because its
@@ -70,6 +77,7 @@ mod cleanup_authority_tests {
 #[cfg(windows)]
 pub use platform::windows::{
     WindowsExactProcess, WindowsProcessIdentity, WindowsProcessJob, WindowsRecoveryJob,
+    WindowsConPtyCloseMetrics, windows_conpty_close_metrics,
     windows_child_process_identity, windows_process_identity,
 };
 #[cfg(target_os = "linux")]

@@ -16,7 +16,7 @@ describe('TurnProcessReceipt expansion state', () => {
     expect(
       shouldResetTurnProcessReceiptExpansion(
         { receiptId: 'receipt-tool', canExpand: true },
-        { receiptId: 'receipt-permission', canExpand: true }
+        { receiptId: 'receipt-status', canExpand: true }
       )
     ).toBe(true);
   });

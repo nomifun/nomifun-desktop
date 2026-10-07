@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { Tabs } from '@arco-design/web-react';
+import { Alert, Spin, Tabs } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
@@ -13,12 +13,11 @@ import { ToolsModalContentWithState } from '@/renderer/components/settings/Setti
 import { useMcpServers } from '@/renderer/hooks/mcp';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import McpMarketSettings from './McpMarketSettings';
-import PluginSettingsPanel from './PluginSettingsPanel';
 
-type McpTab = 'servers' | 'market' | 'plugins' | 'plugin-market';
+type McpTab = 'servers' | 'market';
 
 const isMcpTab = (value: string | null): value is McpTab =>
-  value === 'servers' || value === 'market' || value === 'plugins' || value === 'plugin-market';
+  value === 'servers' || value === 'market';
 
 const McpPage: React.FC = () => {
   const { t } = useTranslation();
@@ -26,12 +25,12 @@ const McpPage: React.FC = () => {
   const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
   const {
     mcpServers,
-    extensionMcpServers,
     isMcpServersLoading,
     mcpServersLoadFailed,
     saveMcpServers,
     setMcpServers,
   } = useMcpServers();
+  const [headerActionHost, setHeaderActionHost] = React.useState<HTMLDivElement | null>(null);
   const tabParam = searchParams.get('tab');
   const activeTab: McpTab = isMcpTab(tabParam) ? tabParam : 'servers';
 
@@ -50,6 +49,11 @@ const McpPage: React.FC = () => {
         defaultValue: 'Register MCP servers, browse MCP markets, and manage plugins.',
       })}
       maxWidthClass='md:max-w-1200px'
+      actions={
+        activeTab === 'servers' ? (
+          <div ref={setHeaderActionHost} data-testid='mcp-page-header-actions' />
+        ) : undefined
+      }
     >
       <Tabs
         activeTab={activeTab}
@@ -59,27 +63,29 @@ const McpPage: React.FC = () => {
         className='flex flex-col flex-1 min-h-0 [&>.arco-tabs-content]:pt-0'
       >
         <Tabs.TabPane key='servers' title={t('settings.mcpPage.installedMcpTab', { defaultValue: 'Installed MCP' })}>
-          <ToolsModalContentWithState
-            mcpMessage={mcpMessage}
-            mcpMessageContext={mcpMessageContext}
-            mcpServers={mcpServers}
-            extensionMcpServers={extensionMcpServers}
-            saveMcpServers={saveMcpServers}
-            setMcpServers={setMcpServers}
-          />
+          {isMcpServersLoading ? (
+            <Spin tip={t('common.loading')} />
+          ) : mcpServersLoadFailed ? (
+            <Alert type='error' content={t('settings.mcpPage.loadFailed', {
+              defaultValue: 'Failed to load MCP servers. Reopen this page to retry.',
+            })} />
+          ) : (
+            <ToolsModalContentWithState
+              mcpMessage={mcpMessage}
+              mcpMessageContext={mcpMessageContext}
+              mcpServers={mcpServers}
+              saveMcpServers={saveMcpServers}
+              setMcpServers={setMcpServers}
+              headerActionHost={activeTab === 'servers' ? headerActionHost : null}
+            />
+          )}
         </Tabs.TabPane>
-        <Tabs.TabPane key='market' title={t('settings.mcpPage.mcpMarketTab', { defaultValue: 'MCP Market' })}>
+        <Tabs.TabPane key='market' destroyOnHide title={t('settings.mcpPage.mcpMarketTab', { defaultValue: 'MCP Market' })}>
           <McpMarketSettings
             saveMcpServers={saveMcpServers}
             mcpServers={mcpServers}
             addedStateLoading={isMcpServersLoading || mcpServersLoadFailed}
           />
-        </Tabs.TabPane>
-        <Tabs.TabPane key='plugins' title={t('settings.mcpPage.installedPluginsTab', { defaultValue: 'Installed Plugins' })}>
-          <PluginSettingsPanel section='installed' />
-        </Tabs.TabPane>
-        <Tabs.TabPane key='plugin-market' title={t('settings.mcpPage.pluginMarketTab', { defaultValue: 'Plugin Market' })}>
-          <PluginSettingsPanel section='market' />
         </Tabs.TabPane>
       </Tabs>
     </HubPageShell>

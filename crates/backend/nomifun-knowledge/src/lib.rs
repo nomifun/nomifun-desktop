@@ -18,6 +18,7 @@
 //! intentionally deferred (no code here depends on conversation or companion).
 
 pub mod autogen;
+pub mod agent_module;
 pub mod context;
 pub mod events;
 pub mod export;
@@ -36,6 +37,13 @@ mod workspace_binding;
 pub(crate) mod testutil;
 
 pub use autogen::KnowledgeCompleter;
+pub use agent_module::{
+    AgentKnowledgeAuthority, AgentKnowledgeAutogenResult, AgentKnowledgeResource,
+    AgentKnowledgeWriteRequest, AgentKnowledgeWriteResult, AuthorizedKnowledgeService, KnowledgeAction,
+    KnowledgeResourceOperation, KNOWLEDGE_ACTION_IDS, KNOWLEDGE_AUTOGEN_ACTION_ID,
+    KNOWLEDGE_MODULE_ID, KNOWLEDGE_READ_ACTION_ID, KNOWLEDGE_SEARCH_ACTION_ID,
+    KNOWLEDGE_WRITE_ACTION_ID, knowledge_document_handle,
+};
 pub use context::{KnowledgeContextFormat, KnowledgeContextOptions, WritebackEagerness, build_knowledge_context};
 pub use events::KnowledgeEventEmitter;
 pub use mcp_server::KnowledgeMcpServer;
@@ -44,12 +52,19 @@ pub use broker::{
 };
 pub use routes::knowledge_routes;
 pub use service::{
-    AutogenOutcome, ConsumerInfo, KnowledgeBinding, KnowledgeService, MountOutcome, PreparedMountPlan,
-    RefreshSourceSummary, TurnWritebackFailure, TurnWritebackReport, TurnWritebackPhase, TurnWritebackRequest,
-    TurnWritebackStatus, WriteMode, WriteOp, WriteOutcome, WritePolicy, WriteRequest, WriteResolution, WriteSurface,
-    WriteTargetSpec, decode_doc_handle, encode_doc_handle, resolve_write_policy,
+    AutogenOutcome, BoundKnowledgeBase, BoundKnowledgeDocument,
+    BoundKnowledgeReadService, BoundKnowledgeSearchHit, ConsumerInfo,
+    KnowledgeBinding, KnowledgeService, MountOutcome, PreparedMountPlan,
+    RefreshSourceSummary, TurnWritebackFailure, TurnWritebackReport,
+    TurnWritebackPhase, TurnWritebackRequest, TurnWritebackStatus, WriteMode,
+    WriteOp, WriteOutcome, WritePolicy, WriteRequest, WriteResolution,
+    WriteSurface, WriteTargetSpec, decode_doc_handle, encode_doc_handle,
+    resolve_write_policy,
 };
-pub use source_url::{HttpFetcher, PageFetcher};
+pub use source_url::{
+    BrowserRenderContent, BrowserRenderContentPort, BrowserRenderContentRequest, FetchedPage,
+    HttpFetcher, PageFetcher, UnavailableBrowserRenderContentPort,
+};
 pub use state::KnowledgeRouterState;
 pub use turn_writeback::{TurnWritebackCandidate, TurnWritebackOutput};
 pub use workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key, workpath_key};

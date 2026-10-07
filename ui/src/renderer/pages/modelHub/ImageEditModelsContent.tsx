@@ -10,6 +10,7 @@ import ModalityModelsPanel from './ModalityModelsPanel';
 const ImageEditModelsContent: React.FC = () => (
   <ModalityModelsPanel
     modality='image_edit'
+        defaultModelPreferenceKey='models.default.imageEdit'
     titleKey='settings.modelHub.modality.imageEditTitle'
     subtitleKey='settings.modelHub.modality.imageEditSubtitle'
   />

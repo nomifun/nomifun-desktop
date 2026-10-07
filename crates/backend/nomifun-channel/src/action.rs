@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, info, warn};
@@ -71,7 +70,6 @@ pub struct ActionExecutor {
     pairing: Arc<PairingService>,
     session_mgr: Arc<SessionManager>,
     settings: Arc<ChannelSettingsService>,
-    default_agent_type: String,
     /// Opt-in IM → requirement creator. `None` (default) keeps the normal AI
     /// dispatch path unchanged.
     requirement_creator: Option<Arc<dyn nomifun_common::RequirementCreator>>,
@@ -103,14 +101,12 @@ impl ActionExecutor {
         pairing: Arc<PairingService>,
         session_mgr: Arc<SessionManager>,
         settings: Arc<ChannelSettingsService>,
-        default_agent_type: &str,
     ) -> Self {
         let group_policy_fence = pairing.group_policy_fence();
         Self {
             pairing,
             session_mgr,
             settings,
-            default_agent_type: default_agent_type.to_owned(),
             requirement_creator: None,
             cs_routing: None,
             group_policy_fence,
@@ -331,13 +327,6 @@ impl ActionExecutor {
                 return Ok(MessageResult::Ignored {
                     reason: "customer_service_action_unsupported",
                 });
-            }
-            if auto_group_guest
-                && matches!(action.action.as_str(), "agent.show" | "agent.select")
-            {
-                return Err(ChannelError::UserNotAuthorized(
-                    "open-group guests cannot select host agents".into(),
-                ));
             }
             return self
                 .route_action(action, &internal_user_id, channel_plugin_id, msg.chat_kind)
@@ -645,7 +634,7 @@ impl ActionExecutor {
                 text: Some(
                     "Features:\n\
                          • AI chat with multiple backends\n\
-                         • Tool execution with auto-approval\n\
+                         • Tool execution within the selected capabilities\n\
                          • Session isolation per chat\n\
                          • Agent switching"
                         .into(),
@@ -698,54 +687,6 @@ impl ActionExecutor {
                 toast: None,
                 edit_message_id: None,
             }),
-            "agent.show" => Ok(ActionResponse {
-                text: Some("Available agents:".into()),
-                parse_mode: None,
-                buttons: Some(vec![vec![ActionButton {
-                    label: "ACP".into(),
-                    action: "agent.select".into(),
-                    params: Some(HashMap::from([("agentType".into(), "acp".into())])),
-                }]]),
-                keyboard: None,
-                behavior: ActionBehavior::Send,
-                toast: None,
-                edit_message_id: None,
-            }),
-            "agent.select" => {
-                let agent_type = action
-                    .params
-                    .as_ref()
-                    .and_then(|p| p.get("agentType"))
-                    .map(|s| s.as_str())
-                    .unwrap_or(&self.default_agent_type);
-
-                // Persist the agent_type change to the session
-                let chat_id = &action.context.chat_id;
-                let session = self
-                    .session_mgr
-                    .get_or_create_session_for_chat(
-                        internal_user_id,
-                        chat_id,
-                        channel_plugin_id,
-                        agent_type,
-                        chat_kind,
-                        None,
-                    )
-                    .await?;
-                self.session_mgr
-                    .update_agent_type(&session.channel_session_id, agent_type)
-                    .await?;
-
-                Ok(ActionResponse {
-                    text: Some(format!("Agent switched to: {agent_type}")),
-                    parse_mode: None,
-                    buttons: None,
-                    keyboard: None,
-                    behavior: ActionBehavior::Send,
-                    toast: Some(format!("Switched to {agent_type}")),
-                    edit_message_id: None,
-                })
-            }
             other => {
                 warn!(action = %other, "unknown system action");
                 Ok(build_unknown_action_response(other))
@@ -810,32 +751,6 @@ impl ActionExecutor {
                 toast: Some("Copied to clipboard".into()),
                 edit_message_id: None,
             })),
-            "system.confirm" => {
-                let call_id = action
-                    .params
-                    .as_ref()
-                    .and_then(|p| p.get("callId"))
-                    .cloned()
-                    .unwrap_or_default();
-                let value = action
-                    .params
-                    .as_ref()
-                    .and_then(|p| p.get("value"))
-                    .cloned()
-                    .unwrap_or_else(|| "true".into());
-
-                debug!(call_id = %call_id, value = %value, "tool confirmation received");
-
-                Ok(MessageResult::Action(ActionResponse {
-                    text: None,
-                    parse_mode: None,
-                    buttons: None,
-                    keyboard: None,
-                    behavior: ActionBehavior::Answer,
-                    toast: Some("Confirmed".into()),
-                    edit_message_id: None,
-                }))
-            }
             other => {
                 warn!(action = %other, "unknown chat action");
                 Ok(MessageResult::Action(build_unknown_action_response(other)))
@@ -961,11 +876,6 @@ fn build_help_response() -> ActionResponse {
                     params: None,
                 },
             ],
-            vec![ActionButton {
-                label: "Switch Agent".into(),
-                action: "agent.show".into(),
-                params: None,
-            }],
         ]),
         keyboard: None,
         behavior: ActionBehavior::Send,
@@ -1029,6 +939,7 @@ mod action_tests {
     };
     use nomifun_db::{DbError, IChannelRepository, IClientPreferenceRepository, UpdatePluginStatusParams};
     use nomifun_realtime::UserEventSink;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     const TEST_CHANNEL_PLUGIN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -1519,7 +1430,7 @@ mod action_tests {
         let session_mgr = Arc::new(SessionManager::new(repo.clone()));
         let pref_repo: Arc<dyn IClientPreferenceRepository> = Arc::new(MockPrefRepo);
         let settings = Arc::new(ChannelSettingsService::new(pref_repo));
-        let executor = ActionExecutor::new(pairing, session_mgr, settings, "acp");
+        let executor = ActionExecutor::new(pairing, session_mgr, settings);
         (executor, repo)
     }
 
@@ -1533,7 +1444,7 @@ mod action_tests {
         let session_mgr = Arc::new(SessionManager::new(repo.clone()));
         let pref_repo: Arc<dyn IClientPreferenceRepository> = Arc::new(SeededPrefRepo::new(entries));
         let settings = Arc::new(ChannelSettingsService::new(pref_repo));
-        let executor = ActionExecutor::new(pairing, session_mgr, settings, "acp");
+        let executor = ActionExecutor::new(pairing, session_mgr, settings);
         (executor, repo)
     }
 
@@ -1911,37 +1822,6 @@ mod action_tests {
     }
 
     #[tokio::test]
-    async fn auto_group_guest_cannot_switch_the_session_to_a_host_agent() {
-        let (executor, repo) = setup();
-        repo.add_channel_row_with_mode(
-            TEST_CHANNEL_PLUGIN_ID,
-            CHANNEL_GROUP_ACCESS_MODE_ALL_MEMBERS,
-        );
-        let mut msg = make_action_message(
-            "tg_stranger",
-            "group_1",
-            "agent.select",
-            ActionCategory::System,
-            PluginType::Telegram,
-            Some(HashMap::from([("agentType".into(), "acp".into())])),
-        );
-        msg.chat_kind = ChatKind::Group;
-        msg.mention_state = MentionState::Mentioned;
-
-        let error = executor
-            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
-            .await
-            .expect_err("open-group guests must not select a host-capable agent");
-
-        assert!(matches!(error, ChannelError::UserNotAuthorized(_)));
-        assert!(repo.sessions.lock().unwrap().is_empty());
-        assert_eq!(
-            repo.users.lock().unwrap()[0].authorization_kind,
-            CHANNEL_USER_AUTHORIZATION_AUTO_GROUP
-        );
-    }
-
-    #[tokio::test]
     async fn auto_group_identity_cannot_authorize_a_direct_message() {
         let (executor, repo) = setup();
         repo.add_user(
@@ -2185,10 +2065,10 @@ mod action_tests {
         let msg = make_action_message(
             "tg_approved",
             "chat_1",
-            "agent.select",
+            "session.status",
             ActionCategory::System,
             PluginType::Telegram,
-            Some(HashMap::from([("agentType".into(), "acp".into())])),
+            None,
         );
 
         let result = executor
@@ -2531,73 +2411,6 @@ mod action_tests {
         }
     }
 
-    #[tokio::test]
-    async fn agent_select_with_params() {
-        let (executor, repo) = setup();
-        repo.add_authorized_user("tg_42", "telegram");
-
-        let params = HashMap::from([("agentType".into(), "acp".into())]);
-        let msg = make_action_message(
-            "tg_42",
-            "chat_1",
-            "agent.select",
-            ActionCategory::System,
-            PluginType::Telegram,
-            Some(params),
-        );
-        let result = executor
-            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
-            .await
-            .unwrap();
-        match result {
-            MessageResult::Action(resp) => {
-                let text = resp.text.unwrap();
-                assert!(text.contains("acp"));
-                assert!(resp.toast.is_some());
-            }
-            _ => panic!("Expected Action result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_select_persists_agent_type() {
-        let (executor, repo) = setup();
-        repo.add_authorized_user("tg_42", "telegram");
-
-        // First: send a text to create a session (defaults to "nomi")
-        let text_msg = make_text_message("tg_42", "chat_1", "Hello", PluginType::Telegram);
-        executor
-            .handle_incoming_message(&text_msg, TEST_CHANNEL_PLUGIN_ID)
-            .await
-            .unwrap();
-
-        // Then: switch agent to "acp"
-        let params = HashMap::from([("agentType".into(), "acp".into())]);
-        let select_msg = make_action_message(
-            "tg_42",
-            "chat_1",
-            "agent.select",
-            ActionCategory::System,
-            PluginType::Telegram,
-            Some(params),
-        );
-        executor
-            .handle_incoming_message(&select_msg, TEST_CHANNEL_PLUGIN_ID)
-            .await
-            .unwrap();
-
-        // Verify session's agent_type was updated in the repo
-        let sessions = repo.sessions.lock().unwrap();
-        let session = sessions
-            .iter()
-            .find(|s| {
-                s.channel_user_id == TEST_CHANNEL_USER_ID
-                    && s.chat_id.as_deref() == Some("chat_1")
-            })
-            .expect("session should exist");
-        assert_eq!(session.agent_type, "acp");
-    }
-
     // ── Chat action tests ──────────────────────────────────────────────
 
     #[tokio::test]
@@ -2755,33 +2568,6 @@ mod action_tests {
                 assert_eq!(conversation_id, None);
             }
             other => panic!("Expected RegenerateRequested, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn system_confirm_returns_answer() {
-        let (executor, repo) = setup();
-        repo.add_authorized_user("tg_42", "telegram");
-
-        let params = HashMap::from([("callId".into(), "call_123".into()), ("value".into(), "true".into())]);
-        let msg = make_action_message(
-            "tg_42",
-            "chat_1",
-            "system.confirm",
-            ActionCategory::Chat,
-            PluginType::Telegram,
-            Some(params),
-        );
-        let result = executor
-            .handle_incoming_message(&msg, TEST_CHANNEL_PLUGIN_ID)
-            .await
-            .unwrap();
-        match result {
-            MessageResult::Action(resp) => {
-                assert_eq!(resp.behavior, ActionBehavior::Answer);
-                assert_eq!(resp.toast.as_deref(), Some("Confirmed"));
-            }
-            _ => panic!("Expected Action result"),
         }
     }
 

@@ -192,18 +192,35 @@ describe('Creative Canvas Agent document model', () => {
 
     expect(classifyCreativeCanvasAgentHistory(pending, [])).toBe('current');
     expect(classifyCreativeCanvasAgentHistory(pending, history)).toBe(
-      'completed-pending-turn'
+      'settled-pending-turn'
     );
     expect(
       classifyCreativeCanvasAgentHistory(
         { ...pending, pendingTurn: null },
         history
       )
-    ).toBe('completed-unreferenced-turns');
+    ).toBe('settled-unreferenced-turns');
     const invalidProjection = captureError(() =>
       classifyCreativeCanvasAgentHistory(pending, history.slice(0, 1))
     );
     expect(invalidProjection?.message.includes('invalid pending-turn')).toBe(true);
+  });
+
+  test('keeps failed and stopped history while clearing only the settled pending fence', () => {
+    const pending = creativeCanvasAgentSessionWithPendingTurn({
+      session: createCreativeCanvasAgentSession(sessionId, 10), model,
+      idempotencyKey, prompt: '制作一个分镜', now: 20,
+    });
+    for (const status of ['failed', 'stopped'] as const) {
+      const restored: CreativeStudioAgentMessage[] = [history[0]!, {
+        id: assistantMessageId, role: 'assistant', status, text: '',
+        ...(status === 'failed' ? { errorMessage: 'Skill is not selected' } : {}),
+      } as CreativeStudioAgentMessage];
+      const settled = creativeCanvasAgentSessionWithAuthoritativeHistory(pending, restored, 30);
+      expect(settled.pendingTurn).toBeNull();
+      expect(settled.messageIds).toEqual([userMessageId, assistantMessageId]);
+      expect(classifyCreativeCanvasAgentHistory(settled, restored)).toBe('current');
+    }
   });
 
   test('reconciles authoritative ids, clears fences, and replaces only the matching session', () => {

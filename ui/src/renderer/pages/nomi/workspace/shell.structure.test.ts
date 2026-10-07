@@ -111,6 +111,55 @@ describe('URL contract', () => {
   });
 });
 
+describe('companion roster ContentSider', () => {
+  test('persists collapse state and stays controllable from the titlebar', () => {
+    const shell = read('index.tsx');
+
+    expect(shell.includes('useContentSiderCollapse(SIDER_COLLAPSE_STORAGE_KEY, false)')).toBe(true);
+    expect(shell.includes('dispatchNomiSiderStateEvent(siderCollapsed)')).toBe(true);
+    expect(shell.includes("window.addEventListener(NOMI_SIDER_TOGGLE_EVENT, handleToggle)")).toBe(true);
+    expect(shell.includes('{!siderCollapsed && (')).toBe(true);
+  });
+});
+
+describe('cohabit density and companion-info panel', () => {
+  const shell = read('index.tsx');
+  const cohabit = read('workspace/CompanionCohabitView.tsx');
+  const cohabitStyles = read('workspace/CompanionCohabitView.module.css');
+  const header = read('workspace/WorkspaceHeader.tsx');
+  const headerStyles = read('workspace/WorkspaceHeader.module.css');
+
+  test('removes the repeated cohabit heading so chat owns the full content column', () => {
+    expect(cohabit.includes('styles.chatHeading')).toBe(false);
+    expect(cohabit.includes("t('nomi.cohabit.title'")).toBe(false);
+    expect(cohabit.includes("t('nomi.cohabit.subtitle'")).toBe(false);
+    expect(cohabitStyles.includes('.chatHeading')).toBe(false);
+  });
+
+  test('collapses the whole right panel and gives its width back to chat', () => {
+    expect(shell.includes('useContentSiderCollapse(INFO_PANEL_COLLAPSE_STORAGE_KEY, false)')).toBe(true);
+    expect(shell.includes('infoPanelCollapsed={infoPanelCollapsed}')).toBe(true);
+    expect(cohabit.includes("data-info-panel-collapsed={infoPanelCollapsed}")).toBe(true);
+    expect(cohabit.includes('{!infoPanelCollapsed && <aside')).toBe(true);
+    expect(cohabitStyles.includes(".layout[data-info-panel-collapsed='true'] { grid-template-columns: minmax(0, 1fr); }")).toBe(true);
+    expect(cohabit.includes('InfoDisclosure')).toBe(false);
+  });
+
+  test('keeps one stable accessible info-panel toggle in the workspace header', () => {
+    expect(header.includes('aria-expanded={!infoPanelCollapsed}')).toBe(true);
+    expect(header.includes("t('nomi.workspace.showInfoPanel'")).toBe(true);
+    expect(header.includes("t('nomi.workspace.hideInfoPanel'")).toBe(true);
+    expect(header.includes('<ExpandLeft')).toBe(true);
+    expect(header.includes('<ExpandRight')).toBe(true);
+  });
+
+  test('keeps the identity header to one compact desktop row', () => {
+    expect(headerStyles.includes('min-height: 64px')).toBe(true);
+    expect(headerStyles.includes('box-sizing: border-box')).toBe(true);
+    expect(headerStyles.includes('padding: 7px 20px')).toBe(true);
+  });
+});
+
 describe('deleted features stay deleted', () => {
   test('no 建议 / suggestion surface', () => {
     // The memory MERGE assistant is an unrelated live feature whose endpoint is

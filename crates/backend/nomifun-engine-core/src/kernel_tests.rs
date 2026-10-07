@@ -1,0 +1,680 @@
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    use super::super::*;
+    use nomifun_agent_contracts::{
+        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
+        CapabilityRef, CapabilitySelection, CorrelationId, DigestHex, IdempotencyKey, OperationId,
+        PresetRevisionRef, ResourceBindingId, ResourceId, ResourceKind, RuntimeProfileKind,
+        RuntimeTarget, UserId, VersionString, digest_payload,
+    };
+    use nomifun_agent_domain_wave2::{
+        CONTRACT_VERSION, Wave2HostPort, Wave2HostPortError, Wave2HostRequest,
+        registrations_with_host_port,
+    };
+    use nomifun_agent_kernel::{
+        AgentPresetCompiler, CompileRequest, CompilerEnvironment, InMemoryPluginStatePersistence,
+        MaterializationPolicy,
+    };
+    use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+    use serde_json::json;
+
+    type SeenInvocation = (String, String, String, Vec<String>);
+
+    struct RecordingHost {
+        seen: Arc<Mutex<Vec<SeenInvocation>>>,
+    }
+
+    impl Wave2HostPort for RecordingHost {
+        fn invoke<'a>(
+            &'a self,
+            request: Wave2HostRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>
+        {
+            let seen = Arc::clone(&self.seen);
+            Box::pin(async move {
+                seen.lock().unwrap().push((
+                    request.context.capability_id.as_ref().to_owned(),
+                    request.context.action_id.as_ref().to_owned(),
+                    request.context.agent_session_id.as_ref().to_owned(),
+                    request
+                        .context
+                        .resource_bindings
+                        .iter()
+                        .map(|binding| binding.binding_id.as_ref().to_owned())
+                        .collect(),
+                ));
+                Ok(StrictJsonValue(json!({
+                    "path": request.operation_input().0["path"],
+                    "content": "owner-result"
+                })))
+            })
+        }
+    }
+
+    trait Wave2RequestInput {
+        fn operation_input(&self) -> &StrictJsonValue;
+    }
+
+    impl Wave2RequestInput for Wave2HostRequest {
+        fn operation_input(&self) -> &StrictJsonValue {
+            match &self.operation {
+                nomifun_agent_domain_wave2::Wave2CapabilityOperation::WorkspaceExecution {
+                    input,
+                }
+                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Ssh { input }
+                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Browser { input }
+                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::ComputerA11y { input } => {
+                    input
+                }
+            }
+        }
+    }
+
+    struct KernelFixture {
+        registry: Arc<KernelRegistry>,
+        materialized: Arc<MaterializedRegistry>,
+        snapshot: Arc<CompiledSnapshot>,
+        active: Arc<SessionCapabilityState>,
+        principal: PrincipalRef,
+        action_id: ActionId,
+        binding_id: ResourceBindingId,
+        seen: Arc<Mutex<Vec<SeenInvocation>>>,
+    }
+
+    fn kernel_fixture() -> KernelFixture {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(
+            KernelRegistry::new(
+                MaterializationPolicy::stable(CONTRACT_VERSION),
+                Arc::new(InMemoryPluginStatePersistence::new()),
+            )
+            .unwrap(),
+        );
+        let materialized = registry
+            .replace_all(
+                registrations_with_host_port(Arc::new(RecordingHost {
+                    seen: Arc::clone(&seen),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "coding-owner".to_owned(),
+        };
+        let capability_id = CapabilityId::from("workspace.files");
+        let action_id = ActionId::from("workspace.files/read");
+        let binding_id = ResourceBindingId::from("workspace-binding");
+        let binding = nomifun_agent_contracts::TypedResourceBinding {
+            binding_id: binding_id.clone(),
+            resource_kind: ResourceKind::from("workspace"),
+            resource_id: ResourceId::from("workspace-resource"),
+            owner_id: principal.principal_id.clone(),
+            operations: BTreeSet::from(["read".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
+        let payload = AgentPresetRevisionPayload {
+            context_order: Vec::new(),
+            middleware_order: Vec::new(),
+            schema_version: VersionString::from(CONTRACT_VERSION),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            enabled_capabilities: vec![CapabilitySelection {
+                capability: CapabilityRef {
+                    id: capability_id,
+                },
+                action_allowlist: BTreeSet::from([action_id.clone()]),
+            }],
+            skill_bindings: Vec::new(),
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: "Coding Engine Kernel test".to_owned(),
+            instructions: "Read one file.".to_owned(),
+            starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
+        };
+        let mut revision = AgentPresetRevision {
+            reference: PresetRevisionRef {
+                preset_id: AgentPresetId::from("coding-kernel-test"),
+                revision: 1,
+                revision_digest: digest_payload(&payload).unwrap(),
+            },
+            payload,
+            contribution_locks: vec![
+                materialized
+                    .capability(&CapabilityId::from("workspace.files"))
+                    .unwrap()
+                    .contribution_lock
+                    .clone(),
+            ],
+            created_by: UserId::from(principal.principal_id.clone()),
+            created_at_ms: 1,
+            reason: None,
+        };
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let snapshot = Arc::new(
+            AgentPresetCompiler::compile(
+                &materialized,
+                &CompilerEnvironment {
+                    resolver_version: VersionString::from(CONTRACT_VERSION),
+                    required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
+                    required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                    runtime_feature_inventory_digest: DigestHex::from("runtime"),
+                    available_runtime_features: BTreeSet::new(),
+                    installation_role_bindings: BTreeMap::new(),
+                    canonical_schema_manifest_digest: DigestHex::from("schema"),
+                    target_contribution_manifest_digest: DigestHex::from("target"),
+                    host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
+                    host_surface: "desktop".to_owned(),
+                    availability_evidence_revision: "coding-kernel-test".to_owned(),
+                },
+                CompileRequest {
+                    revision,
+                    principal: principal.clone(),
+                    scene: "coding-kernel-test".to_owned(),
+                    surface: "desktop".to_owned(),
+                    audience: "test".to_owned(),
+                    created_at_ms: 2,
+                    resolver_run_id: OperationId::from("resolve"),
+                },
+            )
+            .unwrap()
+            .with_target_resource_bindings(&principal, vec![binding])
+            .unwrap(),
+        );
+        let active = Arc::new(SessionCapabilityState::new(&snapshot));
+        KernelFixture {
+            registry,
+            materialized,
+            snapshot,
+            active,
+            principal,
+            action_id,
+            binding_id,
+            seen,
+        }
+    }
+
+    fn read_exposure(action_id: ActionId) -> EngineToolExposure {
+        EngineToolExposure {
+            definition: ChatToolDefinition {
+                name: "read_file".to_owned(),
+                description: "Read a UTF-8 file from the bound workspace.".to_owned(),
+                input_schema: StrictJsonValue(json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "path": {"type": "string"}
+                    },
+                    "required": ["path"]
+                })),
+                deferred: false,
+            },
+            capability_id: CapabilityId::from("workspace.files"),
+            action_id,
+        }
+    }
+
+    #[test]
+    fn adapter_type_keeps_session_scope_explicit() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<KernelEngineToolInvoker>();
+    }
+
+    #[test]
+    fn workspace_process_terminal_failure_is_model_visible_without_legacy_identity() {
+        assert!(is_workspace_process_action(
+            &CapabilityId::from("workspace.process"),
+            &ActionId::from("workspace.process/exec"),
+        ));
+        assert!(!is_workspace_process_action(
+            &CapabilityId::from("workspace.process/exec"),
+            &ActionId::from("process.exec.invoke"),
+        ));
+        assert!(process_result_is_error(
+            true,
+            "workspace.process/exec",
+            &json!({"state":"exited", "success":false, "exit_code":7}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            "workspace.process/start",
+            &json!({"state":"running", "success":null}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            "workspace.process/poll",
+            &json!({"state":"exited", "success":true, "exit_code":0}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            "workspace.process/cancel",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            "workspace.process/poll",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
+        ));
+        assert!(process_result_is_error(
+            true,
+            "workspace.process/poll",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":false}}),
+        ));
+        assert!(process_result_is_error(
+            true,
+            "workspace.process/exec",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
+        ));
+    }
+
+    #[test]
+    fn process_host_os_mapping_mismatch_is_a_typed_pre_dispatch_result() {
+        let actual = std::env::consts::OS;
+        let mismatched = if actual == "windows" { "macos" } else { "windows" };
+        let definition = |host: &str| ChatToolDefinition {
+            name: "exec_command".into(),
+            description: format!(
+                "{PROCESS_HOST_OS_DESCRIPTION_PREFIX}{host}. Execute a command."
+            ),
+            input_schema: StrictJsonValue(json!({"type":"object"})),
+            deferred: false,
+        };
+        let call_id = ToolCallId::from("host-os-call");
+        assert!(process_host_os_mapping_error(
+            true,
+            "workspace.process/exec",
+            &definition(actual),
+            &call_id,
+        )
+        .is_none());
+        assert!(process_host_os_mapping_error(
+            true,
+            "workspace.process/poll",
+            &definition(mismatched),
+            &call_id,
+        )
+        .is_none());
+
+        let result = process_host_os_mapping_error(
+            true,
+            "workspace.process/exec",
+            &definition(mismatched),
+            &call_id,
+        )
+        .expect("mismatch must fail before owner dispatch");
+        assert!(result.is_error);
+        let output: serde_json::Value = serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(output["code"], "HOST_OS_COMMAND_MAPPING_ERROR");
+        assert_eq!(output["advertised_host_os"], mismatched);
+        assert_eq!(output["actual_host_os"], actual);
+        assert_eq!(output["user_code_started"], false);
+        assert_eq!(output["status"], "not_executed");
+    }
+
+    #[test]
+    fn process_launch_failure_uses_fixed_model_guidance_without_host_details() {
+        let error = KernelError::capability_execution_failed(
+            "CAPABILITY_UNAVAILABLE",
+            "process spawn failed: secret=NEVER_EMIT and private cwd",
+        );
+        let mapped = kernel_error_for_action(error, true, false, false).to_string();
+        assert!(mapped.contains("command field must contain only the executable"));
+        assert!(mapped.contains("\"args\":[\"test\""));
+        assert!(!mapped.contains("NEVER_EMIT"));
+
+        let unrelated = kernel_error_for_action(
+            KernelError::capability_execution_failed(
+                "CAPABILITY_UNAVAILABLE",
+                "process spawn failed: secret=NEVER_EMIT",
+            ),
+            false,
+            false,
+            false,
+        ).to_string();
+        assert!(!unrelated.contains("Put only the executable in command"));
+    }
+
+    #[test]
+    fn file_failure_explains_repair_without_disclosing_host_diagnostics() {
+        let detail = "workspace.files failed: cannot resolve parent of PRIVATE_PATH: secret=NEVER_EMIT";
+        let mapped = kernel_error_for_action(
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, true, false,
+        ).to_string();
+        assert!(mapped.contains("parent is unavailable"));
+        assert!(mapped.contains("created automatically"));
+        assert!(!mapped.contains("PRIVATE_PATH"));
+        assert!(!mapped.contains("NEVER_EMIT"));
+        let unrelated = kernel_error_for_action(
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, false, false,
+        ).to_string();
+        assert!(!unrelated.contains("created automatically"));
+    }
+
+    #[test]
+    fn computer_launch_missing_path_has_bounded_actionable_guidance() {
+        let detail = "role provider failed: launch target path \"PRIVATE_PATH\" does not exist; secret=NEVER_EMIT";
+        let mapped = kernel_error_for_action(
+            KernelError::capability_execution_failed("ROLE_HOST_PROVIDER_FAILURE", detail),
+            false,
+            false,
+            true,
+        );
+        let EngineToolError::CapabilityKernel { code, message } = mapped else {
+            panic!("Computer launch failure changed error class")
+        };
+        assert_eq!(code, "ROLE_HOST_PROVIDER_FAILURE");
+        assert!(message.contains("target path does not exist"), "{message}");
+        assert!(message.contains("Do not guess"), "{message}");
+        assert!(message.contains("No successful launch"), "{message}");
+        assert!(!message.contains("PRIVATE_PATH"));
+        assert!(!message.contains("NEVER_EMIT"));
+    }
+
+    #[test]
+    fn settlement_loss_feedback_preserves_distinct_owner_outcomes() {
+        let cases = [
+            (
+                "workspace.files/write owner reported success (result digest abc), but the canonical terminal observation could not be committed: PRIVATE_PATH secret=NEVER_EMIT. The durable effect remains pending; automatic retry is disabled; re-read the owner state before resuming",
+                ["owner reported success","Do not retry","Re-read"],
+            ),
+            (
+                "workspace.files/write owner failed with INVALID_PAYLOAD: target changed at PRIVATE_PATH secret=NEVER_EMIT; canonical failure observation could not be committed. The durable effect remains unsettled; automatic retry is disabled",
+                ["owner reported failure","Do not retry","Inspect"],
+            ),
+            (
+                "workspace.files/write owner outcome is unknown (EFFECT_OUTCOME_UNKNOWN): transport disconnected at PRIVATE_PATH secret=NEVER_EMIT; canonical uncertain observation could not be committed. The durable effect remains pending; automatic retry is disabled; reconcile the external owner before resuming",
+                ["owner outcome is unknown","Do not retry","Reconcile"],
+            ),
+        ];
+        for (detail, expected) in cases {
+            let mapped = kernel_error_for_action(
+                KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
+                false,
+                true,
+                false,
+            );
+            let EngineToolError::CapabilityKernel { code,message } = mapped else {
+                panic!("settlement loss changed error class")
+            };
+            assert_eq!(code,"CAPABILITY_UNAVAILABLE");
+            for fragment in expected {
+                assert!(message.contains(fragment),"{message}");
+            }
+            assert!(message.len() <= 2048);
+            assert!(!message.contains("PRIVATE_PATH"));
+            assert!(!message.contains("NEVER_EMIT"));
+        }
+    }
+
+    #[test]
+    fn settlement_loss_feedback_survives_process_and_generic_projection() {
+        let cases = [
+            (
+                "workspace.process/start owner reported success (result digest abc), but the canonical terminal observation could not be committed: PRIVATE_PATH secret=NEVER_EMIT",
+                true,
+                ["owner reported success","Do not retry","Re-read"],
+            ),
+            (
+                "browser/navigate owner failed with BROWSER_PROVIDER_UNAVAILABLE: PRIVATE_PATH secret=NEVER_EMIT; canonical failure observation could not be committed",
+                false,
+                ["owner reported failure","Do not retry","Inspect"],
+            ),
+            (
+                "ssh/exec owner outcome is unknown (EFFECT_OUTCOME_UNKNOWN): PRIVATE_PATH secret=NEVER_EMIT; canonical uncertain observation could not be committed",
+                false,
+                ["owner outcome is unknown","Do not retry","Reconcile"],
+            ),
+        ];
+        for (detail,is_process,expected) in cases {
+            let mapped = kernel_error_for_action(
+                KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
+                is_process,
+                false,
+                false,
+            );
+            let EngineToolError::CapabilityKernel { code,message } = mapped else {
+                panic!("settlement loss changed error class")
+            };
+            assert_eq!(code,"CAPABILITY_UNAVAILABLE");
+            for fragment in expected {
+                assert!(message.contains(fragment),"{message}");
+            }
+            assert!(!message.contains("PRIVATE_PATH"));
+            assert!(!message.contains("NEVER_EMIT"));
+        }
+    }
+
+    #[test]
+    fn patch_failure_feedback_reports_partial_effect_counts_and_unverified_indices() {
+        let detail = json!({
+            "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
+            "cause":"cannot open replacement target: PRIVATE_PATH SECRET_CONTENT",
+            "observation":{
+                "failed_file":1, "published":[0], "unverified_publications":[0], "restored":[],
+                "restore_published_unconfirmed":[], "retained_created":[], "skipped_changed_or_unreadable":[0],
+                "rollback_failed":[], "temporary_cleanup_unconfirmed":[]
+            }
+        });
+        let result = workspace_write_feedback(&detail.to_string());
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["observed_published_count"], 1);
+        assert_eq!(parsed["confirmed_restored_count"], 0);
+        assert_eq!(parsed["index_base"], 0);
+        assert_eq!(parsed["observation"]["unverified_publications"], json!([0]));
+        assert!(parsed["recovery"].as_str().unwrap().contains("Do not report that no files changed"));
+        assert!(!result.contains("PRIVATE_PATH") && !result.contains("SECRET_CONTENT"));
+    }
+
+    #[test]
+    fn patch_failure_feedback_keeps_all_indices_within_the_error_budget() {
+        let names = ["published", "unverified_publications", "restored", "restore_published_unconfirmed",
+            "retained_created", "skipped_changed_or_unreadable", "rollback_failed", "temporary_cleanup_unconfirmed"];
+        let mut observation = serde_json::Map::new();
+        observation.insert("failed_file".into(), json!(63));
+        for name in names { observation.insert(name.into(), json!((0..64).collect::<Vec<_>>())); }
+        let report = json!({"kind":"workspace_patch_failed", "version":1, "journal_settlement":"unconfirmed",
+            "cause":"cannot open replacement target", "observation":observation});
+        let result = workspace_write_feedback(&report.to_string());
+        assert!(result.len() <= 2048, "bounded feedback must remain complete: {}", result.len());
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        for name in names { assert_eq!(parsed["observation"][name], report["observation"][name]); }
+        assert_eq!(parsed["observed_published_count"], 64);
+        assert_eq!(parsed["journal_settlement"], "unconfirmed");
+    }
+
+    #[test]
+    fn patch_failure_feedback_rejects_malformed_optional_observations() {
+        let report = json!({"kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
+            "cause":"file failed", "observation":{
+                "failed_file":0, "published":[0], "unverified_publications":["PRIVATE_VALUE"], "restored":[],
+                "restore_published_unconfirmed":[], "retained_created":[], "skipped_changed_or_unreadable":[],
+                "rollback_failed":[], "temporary_cleanup_unconfirmed":[]
+            }});
+        let result = workspace_write_feedback(&report.to_string());
+        assert!(!result.contains("PRIVATE_VALUE"));
+        assert!(result.contains("Failure alone does not prove"));
+    }
+
+    #[test]
+    fn patch_failure_preserves_bounded_publication_receipt_and_sanitizes_cause() {
+        let detail = json!({
+            "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
+            "cause":"patch hunk line count mismatch: PRIVATE_PATH SECRET_CONTENT",
+            "observation":{
+                "failed_file":1, "published":[0], "restored":[], "restore_published_unconfirmed":[],
+                "retained_created":[0], "skipped_changed_or_unreadable":[], "rollback_failed":[],
+                "temporary_cleanup_unconfirmed":[], "unexpected_private_field":"NEVER_EMIT"
+            },
+            "recovery":"UNTRUSTED_ADVICE"
+        });
+        let result = workspace_write_feedback(&detail.to_string());
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["observation"]["retained_created"], json!([0]));
+        assert_eq!(parsed["observation"]["failed_file"], 1);
+        assert!(parsed["recovery"].as_str().unwrap().contains("old_lines"));
+        for secret in ["PRIVATE_PATH", "SECRET_CONTENT", "NEVER_EMIT", "UNTRUSTED_ADVICE"] {
+            assert!(!result.contains(secret));
+        }
+        let mut malformed = detail;
+        malformed["observation"]["published"] = json!(["PRIVATE_PATH"]);
+        let result = workspace_write_feedback(&malformed.to_string());
+        assert!(!result.contains("PRIVATE_PATH"));
+        assert!(result.contains("hunk"));
+    }
+
+    #[tokio::test]
+    async fn compiled_plan_invokes_the_kernel_with_exact_snapshot_authority() {
+        let fixture = kernel_fixture();
+        let active = fixture.active.snapshot().unwrap();
+        let plan = compile_engine_tool_plan(
+            &fixture.snapshot,
+            &active,
+            &fixture.materialized,
+            [read_exposure(fixture.action_id.clone())],
+        )
+        .unwrap();
+        let binding = plan.binding("read_file").unwrap().clone();
+        assert_eq!(
+            binding.resource_binding_ids,
+            BTreeSet::from([fixture.binding_id.clone()])
+        );
+        assert_eq!(binding.effect_class, EngineEffectClass::ReadOnly);
+        assert!(binding.parallel_safe);
+
+        let invoker = KernelEngineToolInvoker::new(
+            Arc::clone(&fixture.registry),
+            Arc::clone(&fixture.snapshot),
+            Arc::clone(&fixture.active),
+            fixture.principal.clone(),
+            ScopeKey::from("session:coding-kernel-test"),
+        );
+        let result = invoker
+            .invoke(
+                EngineToolInvocation {
+                    agent_session_id: AgentSessionId::from("coding-session"),
+                    principal: fixture.principal,
+                    resolved_snapshot_ref: fixture.snapshot.snapshot_ref().clone(),
+                    active_set_generation: active.generation,
+                    turn_operation_id: OperationId::from("turn"),
+                    operation_id: OperationId::from("turn:tool:call-1"),
+                    idempotency_key: IdempotencyKey::from("coding-tool:call-1"),
+                    correlation_id: CorrelationId::from("coding-tool:call-1"),
+                    call: ChatToolCall {
+                        call_id: ToolCallId::from("call-1"),
+                        name: "read_file".to_owned(),
+                        arguments: StrictJsonValue(json!({"path": "README.md"})),
+                        provider_metadata: None,
+                    },
+                    binding,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.output_text().contains("owner-result"));
+        assert_eq!(
+            *fixture.seen.lock().unwrap(),
+            vec![(
+                "workspace.files".to_owned(),
+                "workspace.files/read".to_owned(),
+                "coding-session".to_owned(),
+                vec!["workspace-binding".to_owned()]
+            )]
+        );
+    }
+
+    #[test]
+    fn plan_compilation_rejects_unselected_capabilities() {
+        let fixture = kernel_fixture();
+        let active = fixture.active.snapshot().unwrap();
+        let error = compile_engine_tool_plan(
+            &fixture.snapshot,
+            &active,
+            &fixture.materialized,
+            [EngineToolExposure {
+                definition: ChatToolDefinition {
+                    name: "write_file".to_owned(),
+                    description: "Write a file.".to_owned(),
+                    input_schema: StrictJsonValue(json!({"type": "object"})),
+                    deferred: false,
+                },
+                capability_id: CapabilityId::from("workspace.vcs"),
+                action_id: ActionId::from("workspace.vcs/status"),
+            }],
+        )
+        .unwrap_err();
+        assert!(matches!(error, EngineToolError::ToolPlan(_)));
+    }
+
+    #[test]
+    fn active_execution_error_exposes_only_the_safe_parallel_recovery() {
+        let error = kernel_error(KernelError::capability_execution_failed(
+            "AGENT_EXECUTION_ALREADY_ACTIVE",
+            "private sqlite path and api_key=secret",
+        ));
+        let EngineToolError::CapabilityKernel { code, message } = error else {
+            panic!("typed capability failure changed error class");
+        };
+        assert_eq!(code, "AGENT_EXECUTION_ALREADY_ACTIVE");
+        assert!(message.contains("strategy=parallel"));
+        assert!(message.contains("synthesize=true"));
+        assert!(!message.contains("sqlite"));
+        assert!(!message.contains("api_key"));
+    }
+
+    #[test]
+    fn committed_session_generation_can_narrow_but_never_expand_the_snapshot_ceiling() {
+        let fixture = kernel_fixture();
+        let original = fixture.active.snapshot().unwrap();
+        assert_eq!(original.generation, 0);
+        assert_eq!(original.active, fixture.snapshot.content().capability_allowlist);
+        let mut forged = original.clone();
+        forged.active.insert(CapabilityId::from("workspace.vcs"));
+        assert_eq!(fixture.active.snapshot().unwrap(), original);
+        assert!(compile_engine_tool_plan(
+            &fixture.snapshot,
+            &forged,
+            &fixture.materialized,
+            [read_exposure(fixture.action_id.clone())],
+        ).is_err());
+        forged = original.clone();
+        forged.generation = 1;
+        assert!(compile_engine_tool_plan(
+            &fixture.snapshot,
+            &forged,
+            &fixture.materialized,
+            [read_exposure(fixture.action_id.clone())],
+        )
+        .is_ok());
+        forged = original;
+        forged.active.clear();
+        assert!(compile_engine_tool_plan(
+            &fixture.snapshot,
+            &forged,
+            &fixture.materialized,
+            std::iter::empty(),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn selected_capability_does_not_override_its_action_allowlist() {
+        let fixture = kernel_fixture();
+        let mut snapshot = (*fixture.snapshot).clone();
+        snapshot.authority_policies.get_mut(&CapabilityId::from("workspace.files"))
+            .unwrap().allowed_actions.clear();
+        assert!(compile_engine_tool_plan(
+            &snapshot,
+            &fixture.active.snapshot().unwrap(),
+            &fixture.materialized,
+            [read_exposure(fixture.action_id)],
+        ).is_err());
+    }
+}

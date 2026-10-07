@@ -1,0 +1,71 @@
+{
+  "target_cells": {
+    "windows_desktop_x64": {
+      "host_os": "windows",
+      "host_arch": "x86_64",
+      "host_target": "x86_64-pc-windows-msvc",
+      "runtime_target": "x86_64-pc-windows-msvc",
+      "host_surface": "desktop",
+      "package_format": "nsis",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "release_manifest_defined"
+        },
+        "computer": {
+          "availability": "release_manifest_defined"
+        }
+      }
+    },
+    "macos_desktop_arm64": {
+      "host_os": "macos",
+      "host_arch": "aarch64",
+      "host_target": "aarch64-apple-darwin",
+      "runtime_target": "aarch64-apple-darwin",
+      "host_surface": "desktop",
+      "package_format": "universal-app",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "release_manifest_defined"
+        },
+        "computer": {
+          "availability": "release_manifest_defined"
+        }
+      }
+    },
+    "linux_desktop_x64": {
+      "host_os": "linux",
+      "host_arch": "x86_64",
+      "host_target": "x86_64-unknown-linux-gnu",
+      "runtime_target": "x86_64-unknown-linux-musl",
+      "host_surface": "desktop",
+      "package_format": "appimage-deb-rpm",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "release_manifest_defined"
+        },
+        "computer": {
+          "availability": "independent_partial_or_exact_unavailable"
+        }
+      }
+    }
+  },
+  "unsupported_local_targets": [
+    "windows_arm64",
+    "linux_arm64"
+  ],
+  "remote_only_surfaces": [
+    "mobile",
+    "web_browser_client",
+    "robot_firmware",
+    "im_client"
+  ]
+}

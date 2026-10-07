@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use nomifun_common::{AgentType, ConversationId, DelegationPolicy, ProviderWithModel, UserId};
@@ -105,109 +102,11 @@ pub struct NomiCompatOverrides {
     /// Explicit opt-in for OpenAI Responses provider-side round retention.
     /// Request builders still apply their own lifecycle gate.
     pub chain_rounds: Option<bool>,
+    /// Normalized model-level reasoning default (low/medium/high).
+    pub reasoning_effort: Option<String>,
     /// Provider-native request body fields after local Agent controls have
     /// been removed. Typed serializer fields overwrite conflicts at send time.
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
-}
-
-/// Fully resolved Nomi configuration passed to the agent manager.
-#[derive(Debug, Clone)]
-pub struct NomiResolvedConfig {
-    /// LLM provider name (anthropic, openai, bedrock, vertex).
-    pub provider: String,
-    /// Decrypted API key.
-    pub api_key: String,
-    /// Model identifier.
-    pub model: String,
-    /// Provider base URL.
-    pub base_url: Option<String>,
-    /// System prompt override.
-    pub system_prompt: Option<String>,
-    /// Capability-declared output ceiling. `None` means omit it where the
-    /// protocol permits; required protocols fail before a turn starts.
-    pub output_ceiling: Option<u32>,
-    /// Max agentic turns.
-    pub max_turns: Option<usize>,
-    /// Provider's declared context window (tokens), if configured. Drives the
-    /// engine's compaction window and the context-usage gauge denominator.
-    pub context_limit: Option<u64>,
-    /// Provider-specific compat overrides.
-    pub compat_overrides: NomiCompatOverrides,
-    /// Directory for nomi session persistence files.
-    pub session_directory: PathBuf,
-    /// Session mode (default, auto_edit, yolo).
-    pub session_mode: Option<String>,
-    /// Session-scoped MCP servers to inject.
-    pub extra_mcp_servers: HashMap<String, nomi_config::config::McpServerConfig>,
-    /// Process-local guards for renewable loopback MCP capabilities. These are
-    /// never serialized; the Nomi manager holds them until runtime teardown.
-    pub loopback_capability_leases: nomifun_common::LoopbackCapabilityLeaseSet,
-    /// AWS Bedrock credentials (region + access key or profile).
-    pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
-    /// Enable the Computer tool (screen/mouse/keyboard control).
-    pub computer_use: bool,
-    /// Enable Browser tools backed by a main-process `BrowserLaneClient`.
-    /// This runtime never owns Chromium or a browser profile.
-    pub browser_use: bool,
-    /// **浏览器来源 LIVE 值**（Browser Host 可执行文件偏好，与 silent 正交）。`"managed"` =
-    /// 内置/下载 CfT；`"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。
-    /// 工厂经 `read_string_pref` LIVE 读 `agent.browserUse.source`（host_default=`"system"`）。
-    /// 主进程 `BrowserSessionHub` 仍是唯一 Host/profile owner：Primary 使用应用管理的稳定
-    /// profile，Crawl Host 使用临时 profile，runtime 不拥有独立 Chromium。
-    pub browser_source: String,
-    /// **F1-sec: browser-use evaluate「全权模式」LIVE 值**（裁决⑨，default-deny）。`true` 当且仅当
-    /// 用户在 System Settings 显式 opt-in（`client_preferences` `agent.browserUse.fullPower`，工厂经
-    /// `read_bool_pref` 范式 LIVE 读）。`false`（默认）→ 引擎 `evaluate` 动作返 `Unsupported`。**绝不看
-    /// session_mode**（yolo/companion 无从豁免，不变量⑧）。
-    pub browser_full_power: bool,
-    /// **SD-6: browser-use 持久登录 LIVE 值**（DESIGN §16/§27 互斥约束）。`true`（产品默认）→ 与全权
-    /// 互斥（evaluate 在两者皆 true 时 Blocked）。工厂经 `read_bool_pref` 范式 LIVE 读
-    /// `agent.browserUse.persistentLogin`（host_default=true）。`false` → 互斥不生效（evaluate 仅受
-    /// full_power 开关控制）。代码级 Default = `false`（与 full_power 同范式 default-deny 基线）。
-    pub browser_persistent_login: bool,
-    /// **P7A site-memory LIVE 值**（opt-in，隐私相关）。`true` → bootstrap 给 Hub-backed
-    /// Browser tool adapter 注入文件型 `SiteMemorySink`（跨会话记住站点结构 + 向 observe
-    /// 注入 hints）。工厂经 `read_bool_pref` 范式 LIVE 读 `agent.browserUse.siteMemory`
-    /// （host_default=**false**=OFF）。`false`（默认）→ 不挂 sink，零行为变化。
-    pub browser_site_memory: bool,
-    /// **Phase D takeover/审批 LIVE 值**（opt-in，安全）。`true` → 桌面会话构造期注入
-    /// `DesktopApprovalGate`：不可逆动作（bypass 会话）+ 被门控跨域 POST（SD-5）浮给用户审批后
-    /// 才放行（否则 fail-closed 硬挡）。工厂经 `read_bool_pref` LIVE 读 `agent.browserUse.takeover`
-    /// （host_default=**false**=OFF）。`false`（默认）→ 不注入 gate，维持 fail-closed 零回归。
-    pub browser_takeover: bool,
-    /// Explicit Browser Use approval bypass. Default false. When true, Browser-specific
-    /// irreversible and egress approval prompts approve immediately.
-    pub browser_unrestricted_approval: bool,
-    /// **P7B visual-fallback LIVE 值**（opt-in，有 token 成本）。`true` → bootstrap 给
-    /// Hub-backed Browser tool adapter 注入会话模型的 `VisualLocator`：DOM/aria 锚定失败
-    /// （ref stale/detached）时截图交视觉模型按描述定位再点。工厂经 `read_bool_pref` 范式
-    /// LIVE 读 `agent.browserUse.visualFallback`（host_default=**false**=OFF）。`false`
-    /// （默认）→ 不注入 locator，适配层保持 Unavailable（零行为变化）。
-    pub browser_visual_fallback: bool,
-    /// Opt-in goal-driven continuation (objective + auto-continuation cap).
-    /// `None` (default) = normal one-shot turn behavior.
-    pub goal: Option<nomi_agent::goal::runtime::GoalSpec>,
-    /// Machine-bound key used for encrypted persistent-browser-login snapshots.
-    pub persistent_login_key: Option<[u8; 32]>,
-    /// Stable identity of the owning conversation instance (the conversation
-    /// row's `created_at`, stringified). Persisted Nomi runtimes always provide
-    /// it; probe-only runtimes may leave it absent because they do not resume a
-    /// conversation session.
-    pub owner_token: Option<String>,
-    /// Backend-authoritative host composition switch. Platform Gateway and
-    /// secondary-user sessions leave embedded AgentExecution uninstalled;
-    /// trusted no-gateway standalone sessions install it. This is
-    /// internal runtime state and is never serialized as user configuration.
-    pub install_embedded_agent_execution: bool,
-    /// Per-session 工具白名单（空 = 不限制），源自 `NomiBuildExtra.allowed_tools`，
-    /// 由 manager 灌进 `config.tools.builtin_allowlist`。
-    pub allowed_tools: Vec<String>,
-    /// 原生文件工具（Write/Edit/ApplyPatch）的写根钳制，按会话**信任面**解析：
-    /// 本地桌面（`Private` 且非渠道）= `None`（OS 用户全权，不钳制，今日行为）；
-    /// 渠道 / 远程 / 对外 = `Some(workspace)`（收窄到会话工作区，堵住对外面过度开放）。
-    /// manager 灌进 `config.tools.write_root`。与 gateway file-service 的
-    /// `PathAuthority` 同一信任模型（见 file-access-authority spec）。
-    pub write_root: Option<String>,
 }
 
 #[cfg(test)]

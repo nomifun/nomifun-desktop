@@ -7,13 +7,13 @@ use crate::artifact_store::PersistedArtifact;
 /// Enforce the shared tool-name/arguments artifact contract at the normalized
 /// runtime boundary. This is intentionally backend-agnostic: external runtimes
 /// must not bypass the same minimum-count and MIME
-/// rules merely because they did not run through `BackendOutputSink`.
+/// rules merely because they came from a different runtime adapter.
 pub fn validate_completed_artifact_contract(data: &ToolCallEventData) -> Result<(), String> {
     if data.status != ToolCallStatus::Completed {
         return Ok(());
     }
     validate_artifact_receipt_integrity(&data.name, &data.artifacts)?;
-    let contract = nomi_agent::output::artifact_contract_with_input(&data.name, &data.args)
+    let contract = crate::runtime_output::artifact_contract_with_input(&data.name, &data.args)
         .map_err(|error| format!("invalid artifact contract for tool '{}': {error}", data.name))?;
     let Some(contract) = contract else {
         return Ok(());
@@ -79,8 +79,19 @@ pub struct ToolCallRetryData {
     pub retry_of_call_id: Option<String>,
 }
 
+/// Display projection of an admitted canonical action, never model-supplied authority.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolCallIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallEventData {
+    #[serde(flatten, default)]
+    pub identity: ToolCallIdentity,
     pub call_id: String,
     pub name: String,
     #[serde(default)]
@@ -146,6 +157,7 @@ mod tests {
 
     fn completed_images(artifacts: Vec<PersistedArtifact>) -> ToolCallEventData {
         ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-images".to_owned(),
             name: "image_gen".to_owned(),
             args: json!({"count": 2}),

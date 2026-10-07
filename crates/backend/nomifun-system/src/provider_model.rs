@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    CapabilityHealth, ModelTask, ModelTrait, ProviderModelCapabilityInput,
+    CapabilityHealth, ModelContextLimitKind, ModelTask, ProviderModelCapabilityInput,
     ProviderModelCapabilityResponse, ProviderModelResponse, SaveProviderModelRequest,
+    MODEL_CONTEXT_LIMIT_KIND_PARAM,
 };
 use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{
@@ -17,9 +18,9 @@ use nomifun_model_invoke::{
 };
 use reqwest::Url;
 
-use crate::managed_model::is_managed_provider_platform;
 use crate::provider_connection::{normalize_auth_scheme, validate_role};
 use crate::provider_deletion::SharedProviderDeletionCoordinator;
+use crate::provider::is_retired_provider_platform;
 
 #[derive(Clone)]
 pub struct ProviderModelService {
@@ -53,14 +54,36 @@ impl ProviderModelService {
     ) -> Result<Vec<ProviderModelResponse>, AppError> {
         if let Some(provider_id) = provider_id {
             validate_provider_id(provider_id)?;
+            if self
+                .provider_repo
+                .find_by_id(provider_id)
+                .await?
+                .is_some_and(|provider| is_retired_provider_platform(&provider.platform))
+            {
+                return Ok(Vec::new());
+            }
         }
-        let (models, capabilities) = match provider_id {
+        let (mut models, mut capabilities) = match provider_id {
             Some(provider_id) => (
                 self.model_repo.list_for_provider(provider_id).await?,
                 self.capability_repo.list_for_provider(provider_id).await?,
             ),
             None => (self.model_repo.list().await?, self.capability_repo.list().await?),
         };
+        if provider_id.is_none() {
+            let retired_provider_ids = self
+                .provider_repo
+                .list()
+                .await?
+                .into_iter()
+                .filter(|provider| is_retired_provider_platform(&provider.platform))
+                .map(|provider| provider.provider_id)
+                .collect::<HashSet<_>>();
+            models.retain(|model| !retired_provider_ids.contains(&model.provider_id));
+            capabilities.retain(|capability| {
+                !retired_provider_ids.contains(&capability.provider_id)
+            });
+        }
         rows_to_model_responses(models, capabilities)
     }
 
@@ -70,6 +93,14 @@ impl ProviderModelService {
         model: &str,
     ) -> Result<Option<ProviderModelResponse>, AppError> {
         validate_provider_id(provider_id)?;
+        if self
+            .provider_repo
+            .find_by_id(provider_id)
+            .await?
+            .is_some_and(|provider| is_retired_provider_platform(&provider.platform))
+        {
+            return Ok(None);
+        }
         let Some(row) = self.model_repo.get(provider_id, model).await? else {
             return Ok(None);
         };
@@ -86,6 +117,24 @@ impl ProviderModelService {
         &self,
         req: SaveProviderModelRequest,
     ) -> Result<ProviderModelResponse, AppError> {
+        self.save_inner(req, false).await
+    }
+
+    /// Conversation imports may add a model, but must never replace an existing
+    /// capability graph. The parent revision fences concurrent graph writes.
+    pub async fn create(
+        &self,
+        req: SaveProviderModelRequest,
+    ) -> Result<ProviderModelResponse, AppError> {
+        self.save_inner(req, true).await
+    }
+
+    async fn save_inner(
+        &self,
+        mut req: SaveProviderModelRequest,
+        create_only: bool,
+    ) -> Result<ProviderModelResponse, AppError> {
+        req.model.model = req.model.model.trim().to_owned();
         validate_provider_id(&req.provider_id)?;
         let provider = self
             .provider_repo
@@ -94,10 +143,9 @@ impl ProviderModelService {
             .ok_or_else(|| {
                 AppError::NotFound(format!("Provider {} not found", req.provider_id))
             })?;
-        if is_managed_provider_platform(&provider.platform) {
+        if is_retired_provider_platform(&provider.platform) {
             return Err(AppError::Forbidden(
-                "Managed model providers must be changed through their dedicated model-service API"
-                    .into(),
+                "Models owned by a retired built-in provider cannot be modified".into(),
             ));
         }
 
@@ -105,6 +153,11 @@ impl ProviderModelService {
             .model_repo
             .get(&req.provider_id, &req.model.model)
             .await?;
+        if create_only && existing.is_some() {
+            return Err(AppError::Conflict(
+                "Model already exists; inspect it in Model Management instead of overwriting it".into(),
+            ));
+        }
         let sort_order = match req.model.sort_order {
             Some(value) => {
                 validate_sort_order(value)?;
@@ -167,9 +220,9 @@ impl ProviderModelService {
     pub async fn delete(&self, provider_id: &str, model: &str) -> Result<bool, AppError> {
         validate_provider_id(provider_id)?;
         let model = model.trim();
-        if model.is_empty() || model.chars().count() > 512 {
+        if model.is_empty() {
             return Err(AppError::BadRequest(
-                "provider model must contain 1 to 512 characters".into(),
+                "provider model must not be empty".into(),
             ));
         }
         let provider = self
@@ -177,10 +230,9 @@ impl ProviderModelService {
             .find_by_id(provider_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
-        if is_managed_provider_platform(&provider.platform) {
+        if is_retired_provider_platform(&provider.platform) {
             return Err(AppError::Forbidden(
-                "Managed model providers must be changed through their dedicated model-service API"
-                    .into(),
+                "Models owned by a retired built-in provider cannot be modified".into(),
             ));
         }
         let lifecycle_barrier = self.deletion_coordinator.provider_lifecycle_barrier();
@@ -229,6 +281,7 @@ impl ProviderModelService {
             }
             validate_positive_token_limit("context_limit", capability.context_limit)?;
             validate_positive_token_limit("output_limit", capability.output_limit)?;
+            validate_compaction_threshold(capability)?;
             validate_provider_params(
                 &capability.protocol,
                 capability.task,
@@ -271,7 +324,9 @@ pub(crate) fn validate_known_provider_model_task(
     model: &str,
     task: ModelTask,
 ) -> Result<(), AppError> {
-    if matches!(platform, "ark" | "volcengine") && task == ModelTask::VideoGeneration {
+    if (platform.eq_ignore_ascii_case("ark") || platform.eq_ignore_ascii_case("volcengine"))
+        && task == ModelTask::VideoGeneration
+    {
         let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
         let model_id = match normalized.as_str() {
             "doubao-seedance-1.5-pro" => Some("doubao-seedance-1-5-pro-251215"),
@@ -331,6 +386,19 @@ pub(crate) fn validate_positive_token_limit(
         return Err(AppError::BadRequest(format!(
             "capability {field} must be greater than zero"
         )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_compaction_threshold(
+    capability: &ProviderModelCapabilityInput,
+) -> Result<(), AppError> {
+    if let Some(pct) = capability.compaction_threshold_pct {
+        if capability.task != ModelTask::Chat || !(50..=95).contains(&pct) {
+            return Err(AppError::BadRequest(
+                "compaction_threshold_pct is supported only for Chat and must be 50-95".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -461,6 +529,13 @@ pub(crate) fn validate_provider_params(
     task: ModelTask,
     params: &serde_json::Value,
 ) -> Result<(), AppError> {
+    if let Some(kind) = params.get(MODEL_CONTEXT_LIMIT_KIND_PARAM) {
+        serde_json::from_value::<ModelContextLimitKind>(kind.clone()).map_err(|_| {
+            AppError::BadRequest(format!(
+                "{MODEL_CONTEXT_LIMIT_KIND_PARAM} must be input_only or combined"
+            ))
+        })?;
+    }
     validate_provider_params_for_protocol(protocol.trim(), task, params).map_err(Into::into)
 }
 
@@ -603,14 +678,7 @@ fn parse_realtime_url(value: &str, field: &str) -> Result<Url, AppError> {
 }
 
 fn parse_websocket_base_url(value: &str, field: &str) -> Result<Url, AppError> {
-    let url = Url::parse(value.trim())
-        .map_err(|error| AppError::BadRequest(format!("{field} is not a valid URL: {error}")))?;
-    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") || url.host_str().is_none() {
-        return Err(AppError::BadRequest(format!(
-            "{field} must be an absolute http(s) or ws(s) URL with a host"
-        )));
-    }
-    validate_safe_url(&url, field)?;
+    let url = parse_realtime_url(value, field)?;
     if url.query().is_some() {
         return Err(AppError::BadRequest(format!(
             "{field} must not contain a query; put task-specific query parameters on realtime_endpoint"
@@ -706,6 +774,7 @@ pub(crate) struct SerializedCapability {
     provider_params: String,
     context_limit: Option<i64>,
     output_limit: Option<i64>,
+    compaction_threshold_pct: Option<u8>,
 }
 
 impl SerializedCapability {
@@ -724,6 +793,7 @@ impl SerializedCapability {
             provider_params: &self.provider_params,
             context_limit: self.context_limit,
             output_limit: self.output_limit,
+            compaction_threshold_pct: self.compaction_threshold_pct.map(i64::from),
         }
     }
 }
@@ -756,6 +826,7 @@ pub(crate) fn serialize_capabilities(
                 )?,
                 context_limit: capability.context_limit,
                 output_limit: capability.output_limit,
+                compaction_threshold_pct: capability.compaction_threshold_pct,
             })
         })
         .collect()
@@ -823,6 +894,7 @@ fn model_task_order(task: ModelTask) -> u8 {
         ModelTask::SpeechRecognition => 6,
         ModelTask::Embedding => 7,
         ModelTask::Rerank => 8,
+        ModelTask::MusicGeneration => 9,
     }
 }
 
@@ -837,7 +909,7 @@ pub(crate) fn capability_row_to_response(
             ))
         },
     )?;
-    let traits: Vec<ModelTrait> = serde_json::from_str(&row.traits).map_err(|error| {
+    let traits = nomifun_api_types::parse_persisted_model_traits(&row.traits).map_err(|error| {
         AppError::Internal(format!(
             "stored capability traits for {}/{} are invalid: {error}",
             row.provider_id, row.model
@@ -874,6 +946,7 @@ pub(crate) fn capability_row_to_response(
         provider_params,
         context_limit: row.context_limit,
         output_limit: row.output_limit,
+        compaction_threshold_pct: row.compaction_threshold_pct.map(|pct| u8::try_from(pct)).transpose().map_err(|_| AppError::Internal("invalid saved compaction threshold".into()))?,
         health,
         health_checked_at: row.health_checked_at,
         created_at: row.created_at,
@@ -900,6 +973,7 @@ mod tests {
             provider_params: serde_json::json!({}),
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
         }
     }
 
@@ -1078,6 +1152,15 @@ mod tests {
         );
         realtime.realtime_endpoint = Some("/realtime?model={model}".into());
         validate_capability_urls(&realtime, "https://api.stepfun.com/v1").unwrap();
+        for invalid_base in [
+            "https://api.stepfun.com/v1?tenant=one",
+            "wss://api.stepfun.com/v1?tenant=one",
+            "wss://api.stepfun.com/v1#fragment",
+            "wss://user@api.stepfun.com/v1",
+            "ftp://api.stepfun.com/v1",
+        ] {
+            assert!(validate_capability_urls(&realtime, invalid_base).is_err());
+        }
 
         realtime.base_url_override = Some("wss://api.stepfun.com/v1".into());
         validate_capability_urls(&realtime, "https://api.stepfun.com/v1").unwrap();

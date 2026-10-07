@@ -1,8 +1,9 @@
 //! System services: provider management, model fetching, settings, and version checks.
 pub mod bedrock_probe;
 pub mod client_pref;
-pub mod managed_model;
 pub mod model_fetcher;
+pub mod model_management;
+pub mod model_gateway;
 pub mod provider;
 pub mod provider_connection;
 pub mod provider_deletion;
@@ -14,14 +15,8 @@ pub mod version;
 
 pub use bedrock_probe::{ConnectionTestRouterState, ConnectionTestService, connection_test_routes};
 pub use client_pref::ClientPrefService;
-pub use managed_model::{
-    DEFAULT_FREE_REFRESH_INTERVAL, FREE_MODEL_PLATFORM,
-    ManagedModelRefreshPolicy, ManagedModelRefreshTask, ManagedModelServer,
-    ManagedModelService, is_managed_provider_platform, start_and_provision_free_model,
-    start_and_provision_free_model_with_preferences,
-};
 pub use model_fetcher::ModelFetchService;
-pub use provider::ProviderService;
+pub use provider::{ProviderService, disable_retired_provider_platforms};
 pub use provider_connection::ProviderConnectionService;
 pub use provider_deletion::{ProviderDeletionCoordinator, SharedProviderDeletionCoordinator};
 pub use provider_model::ProviderModelService;

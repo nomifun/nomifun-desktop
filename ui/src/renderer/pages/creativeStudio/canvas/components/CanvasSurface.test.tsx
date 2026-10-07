@@ -44,6 +44,7 @@ describe('Creative Studio canvas surface', () => {
 
     expect(html.includes('data-canvas-surface="true"')).toBe(true);
     expect(html.includes('data-canvas-background="dots"')).toBe(true);
+    expect(html.includes('--creative-canvas-grid-size:40px')).toBe(true);
     expect(html.includes('data-canvas-world="true"')).toBe(true);
     expect(html.includes('translate3d(120px, -80px, 0) scale(1.25)')).toBe(true);
     expect(html.includes('data-canvas-layer="edges"')).toBe(true);
@@ -73,19 +74,22 @@ describe('Creative Studio canvas surface', () => {
     }
   });
 
-  test('keeps the full-screen chrome responsive down to the compact focus shell', () => {
+  test('keeps the full-screen chrome responsive across desktop widths', () => {
     const css = readFileSync(new URL('./CanvasSurface.module.css', import.meta.url), 'utf8');
+    const miniMapCss = readFileSync(new URL('./CanvasMiniMapFrame.module.css', import.meta.url), 'utf8');
     const zoomCss = readFileSync(new URL('./CanvasZoomControls.module.css', import.meta.url), 'utf8');
 
     expect(css.includes('@media (max-width: 1280px)')).toBe(true);
     expect(css.includes('@media (max-width: 1024px)')).toBe(true);
-    expect(css.includes('@media (max-width: 640px)')).toBe(true);
     expect(css.includes('position: fixed')).toBe(false);
     expect(css.includes('left: 16px')).toBe(true);
     expect(css.includes('bottom: 18px')).toBe(true);
-    expect(zoomCss.includes('@media (max-width: 640px)')).toBe(true);
     expect(zoomCss.includes('.zoomMenu')).toBe(true);
     expect(zoomCss.includes('.zoomStepper')).toBe(true);
     expect(zoomCss.includes('.slider')).toBe(false);
+    expect(/\.controls\s*\{[\s\S]*?box-shadow:\s*none;/.test(zoomCss)).toBe(true);
+    expect(miniMapCss.includes('grid-template-rows: minmax(0, 1fr) 38px')).toBe(true);
+    expect(miniMapCss.includes('height: 38px')).toBe(true);
+    expect(miniMapCss.includes('min-height: 38px')).toBe(true);
   });
 });

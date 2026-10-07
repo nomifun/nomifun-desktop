@@ -14,7 +14,7 @@ import type {
 import type { PromptLibrarySelection } from '../../prompts';
 import { createInitialCanvasState } from '../core';
 import {
-  CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
+  CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES,
   CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
   CreativeCanvasNodeFactoryError,
   createCreativeCanvasProductNode,
@@ -35,13 +35,6 @@ const expectedData: CreativeCanvasNodeDataByKind = {
     fit: 'contain',
     naturalSize: null,
     composer: null,
-  },
-  panorama: {
-    assetId: null,
-    projection: 'equirectangular',
-    yaw: 0,
-    pitch: 0,
-    fieldOfView: 75,
   },
   text: {
     text: '',
@@ -83,11 +76,10 @@ const expectedData: CreativeCanvasNodeDataByKind = {
     trimEndMs: null,
     composer: null,
   },
-  director: {
-    sceneId: null,
-    cameraId: null,
-    timelineMs: 0,
-    durationMs: 0,
+  timeline: {
+    title: '时间线1',
+    muted: false,
+    clips: [],
   },
   group: {
     title: '节点组',
@@ -130,23 +122,22 @@ describe('createCreativeCanvasProductNode', () => {
     expect(JSON.stringify(historical).includes('originalUrl')).toBe(false);
   });
 
-  test('builds all eight canonical payloads with independent bare UUIDv7 ids', () => {
+  test('builds all seven canonical payloads with independent bare UUIDv7 ids', () => {
     const state = createInitialCanvasState();
     const kinds: CreativeCanvasNodeKind[] = [
       'text',
       'image',
-      'panorama',
       'video',
       'audio',
+      'timeline',
       'config',
-      'director',
       'group',
     ];
     const nodes = kinds.map((kind) =>
       createCreativeCanvasProductNode(kind, state, VIEWPORT_SIZE, { cascadeIndex: 0 })
     );
 
-    expect(new Set(nodes.map((node) => node.id)).size).toBe(8);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(7);
     for (const node of nodes) {
       expect(UUID_V7.test(node.id)).toBe(true);
       expect(node.id.includes('node-')).toBe(false);
@@ -154,7 +145,7 @@ describe('createCreativeCanvasProductNode', () => {
       expect(node.groupId).toBeNull();
       expect(node.locked).toBe(false);
       expect(node.zIndex).toBe(0);
-      expect(node.size).toEqual(CREATIVE_CANVAS_PRODUCT_NODE_SIZES[node.type]);
+      expect(node.size).toEqual(CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES[node.type]);
     }
 
     const firstConfig = nodes.find((node) => node.type === 'config');
@@ -174,10 +165,10 @@ describe('createCreativeCanvasProductNode', () => {
     const oneClientSlot = createCreativeCanvasProductNode('text', empty, VIEWPORT_SIZE, {
       cascadeIndex: 1,
     });
-    expect(centered.position).toEqual({ x: 180, y: 80 });
+    expect(centered.position).toEqual({ x: 206, y: 56 });
     expect(oneClientSlot.position).toEqual({
-      x: 180 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
-      y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      x: 206 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      y: 56 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
     });
 
     const high = createCreativeCanvasProductNode('image', empty, VIEWPORT_SIZE, {
@@ -195,8 +186,8 @@ describe('createCreativeCanvasProductNode', () => {
     const cascaded = createCreativeCanvasProductNode('text', populated, VIEWPORT_SIZE);
 
     expect(cascaded.position).toEqual({
-      x: 180 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
-      y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      x: 206 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      y: 56 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
     });
     expect(cascaded.zIndex).toBe(8);
 
@@ -229,7 +220,7 @@ describe('createCreativeCanvasProductNode', () => {
       createCreativeCanvasProductNode('text', centeredState, VIEWPORT_SIZE, {
         cascadeIndex: 0,
       }).position
-    ).toEqual({ x: -170, y: -120 });
+    ).toEqual({ x: -144, y: -144 });
 
     const userPanned = createInitialCanvasState({
       viewport: { x: 12, y: -8, zoom: 1 },
@@ -241,7 +232,7 @@ describe('createCreativeCanvasProductNode', () => {
 
   test('accepts explicit safe layout overrides without giving up generated identity', () => {
     const state = createInitialCanvasState();
-    const node = createCreativeCanvasProductNode('director', state, VIEWPORT_SIZE, {
+    const node = createCreativeCanvasProductNode('group', state, VIEWPORT_SIZE, {
       position: { x: 12, y: 34 },
       size: { width: 480, height: 270 },
       zIndex: -4,
@@ -332,7 +323,7 @@ describe('real library insertion helpers', () => {
   test('copies a validated prompt verbatim into a text node and no unsupported metadata', () => {
     const prompt: PromptLibrarySelection = {
       id: 'prompt-real-1',
-      source: 'preset',
+      source: 'catalog',
       title: '电影感雨夜',
       prompt: '保留真实材质。\n使用柔和侧光。',
       category: '摄影',

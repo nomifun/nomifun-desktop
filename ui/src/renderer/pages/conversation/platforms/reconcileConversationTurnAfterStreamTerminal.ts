@@ -1,7 +1,7 @@
 import type { ConversationId } from '@/common/types/ids';
 import type { TChatConversation } from '@/common/config/storage';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
-import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { getConversationPauseNotice, getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { emitter } from '@/renderer/utils/emitter';
 
 export const TERMINAL_RECONCILE_DELAYS_MS = [120, 400, 1_200, 3_000, 8_000, 16_000] as const;
@@ -45,6 +45,7 @@ type AuthoritativeRuntimeReconciliationOptions = {
   isCurrent: () => boolean;
   onIdle: (conversation: TChatConversation | null) => void;
   onProcessing?: (conversation: TChatConversation) => void;
+  onPaused?: (conversation: TChatConversation) => void;
   onUnknown?: (conversation: TChatConversation) => void;
   delaysMs?: readonly number[];
   getConversation?: typeof getConversationOrNull;
@@ -70,6 +71,7 @@ export const reconcileConversationAuthoritativeRuntime = async (
     isCurrent,
     onIdle,
     onProcessing,
+    onPaused,
     onUnknown,
     delaysMs = AUTHORITATIVE_RUNTIME_RESYNC_DELAYS_MS,
     getConversation = getConversationOrNull,
@@ -96,6 +98,11 @@ export const reconcileConversationAuthoritativeRuntime = async (
         queryTimeoutMs
       );
       if (!isCurrent()) return false;
+      if (getConversationPauseNotice(conversation)) {
+        onPaused?.(conversation!);
+        // Pause ends this stream, but never releases the turn or its queue.
+        return false;
+      }
       const runtimeAuthority = getConversationRuntimeAuthority(conversation);
       if (runtimeAuthority === 'processing') {
         if (conversation) onProcessing?.(conversation);

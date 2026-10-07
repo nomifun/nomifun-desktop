@@ -15,14 +15,51 @@ import {
   composeMessage,
   joinPath,
   mergeTextMessageContent,
-  transformKnowledgeWritebackEvent,
+  mergeToolCallContent,
+  normalizeAgentStreamError,
+  normalizeToolCallContent,
+  preferTextMessageVersion,
   transformMessage,
   transformUserCreatedEvent,
 } from './chatLib';
 
+describe('structured error diagnosis', () => {
+  test('retains host-classified cause and frozen execution context', () => {
+    const data = {
+      message: 'The Agent stopped', code: 'NOMIFUN_TASK_INCOMPLETE',
+      detail: 'completion account contains blocked work; task cannot complete',
+      taskIncompleteReason: 'blocked_work', agentLabel: 'Research Agent',
+      agentTemplateKey: 'assistant.general', modelName: 'used-model',
+      workspacePath: '/workspace/research', retryable: false,
+    };
+    expect(normalizeAgentStreamError(data)).toEqual(data);
+  });
+
+  test('never guesses a reason from diagnostic prose or accepts an unknown reason', () => {
+    const data = { message: 'stopped', code: 'NOMIFUN_TASK_INCOMPLETE', detail: 'completion account contains blocked work;' };
+    expect(normalizeAgentStreamError(data)?.taskIncompleteReason).toBeUndefined();
+    expect(normalizeAgentStreamError({ ...data, taskIncompleteReason: 'made_up' })?.taskIncompleteReason).toBeUndefined();
+    expect(normalizeAgentStreamError({ ...data, code: 'UNKNOWN_UPSTREAM_ERROR', taskIncompleteReason: 'blocked_work' })?.taskIncompleteReason).toBeUndefined();
+  });
+});
+
 const MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000001');
 const SECOND_MESSAGE_ID = parseMessageId('019b0000-0000-7000-8000-000000000002');
 const COMPANION_ID = parseCompanionId('019b0000-0000-7000-8000-000000000001');
+
+test('late user-message acknowledgements retain persisted camera observations and device provenance', () => {
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
+  const live = transformUserCreatedEvent({ conversation_id: conversationId, msg_id: MESSAGE_ID,
+    content: 'Look here', position: 'right', status: 'finish', created_at: 1,
+    interaction: { kind: 'robot', robot_id: 'robot-1', connection_id: 'socket-1', request_id: 'turn-1', input_modality: 'speech', output_mode: 'spoken' },
+  }, conversationId)!;
+  const saved = { ...live, content: { ...live.content, observations: [{ question: 'What is here?', answer: 'A cup', observed_at: 2,
+    image: { id: 'photo-1', path: '/companion/cup.jpg', mime_type: 'image/jpeg', sha256: 'a'.repeat(64) } }] } };
+  const merged = preferTextMessageVersion(live, saved);
+  expect(merged.content.content).toBe('Look here');
+  expect(merged.content.interaction?.robot_id).toBe('robot-1');
+  expect(merged.content.observations?.[0].image.id).toBe('photo-1');
+});
 
 const baseWire = (overrides: Record<string, unknown>) =>
   ({
@@ -30,6 +67,79 @@ const baseWire = (overrides: Record<string, unknown>) =>
     conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000001'),
     ...overrides,
   }) as any;
+
+describe('typed gateway terminal errors', () => {
+  const cases = [
+    ['USER_LLM_PROVIDER_BILLING_REQUIRED', 'The model gateway balance is insufficient. Top up the account to continue.'],
+    ['USER_LLM_PROVIDER_BILLING_REQUIRED', 'The model gateway subscription has expired. Renew the subscription to continue.'],
+    ['USER_LLM_PROVIDER_BILLING_REQUIRED', 'The selected model is not included in your gateway plan. Choose an included model or change the plan.'],
+    ['USER_LLM_PROVIDER_AUTH_FAILED', 'The model gateway key has expired. Create a new key and update provider credentials.'],
+    ['USER_LLM_PROVIDER_RATE_LIMITED', 'The model gateway rate limited the request. Wait and retry the same model.'],
+  ];
+  test.each(cases)('renders %s as a failed Turn error preserving wire correlation', (code, message) => {
+    const notice = transformMessage(baseWire({ type: 'error', turn_id: SECOND_MESSAGE_ID, created_at: 1234,
+      data: { code, message, ownership: 'user_llm_provider', retryable: false },
+    }));
+    expect(notice?.type).toBe('tips');
+    if (notice?.type !== 'tips') throw new Error('expected presentation notice');
+    expect(notice.msg_id).toBe(MESSAGE_ID); expect(notice.turn_id).toBe(SECOND_MESSAGE_ID);
+    expect(notice.created_at).toBe(1234);
+    expect(notice.content).toEqual({ type: 'error', content: message,
+      error: { code, message, ownership: 'user_llm_provider', retryable: false },
+    });
+    expect(notice.message_id).toBeUndefined();
+  });
+  test('keeps cron and unknown System payloads invisible without classifying prose', () => {
+    for (const data of [
+      { kind: 'cron_response', message: cases[0][1] },
+      { kind: 'unknown', error: { code: cases[0][0], message: cases[0][1], ownership: 'user_llm_provider' } },
+      null, [], cases[0][1],
+    ]) expect(transformMessage(baseWire({ type: 'system', data }))).toBeUndefined();
+  });
+});
+
+test('explicit thinking deltas can reopen a completed contiguous phase', () => {
+  const completed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Inspect. ', status: 'done' } }));
+  const resumed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Verify.', status: 'thinking' } }));
+  const merged = composeMessage(resumed, completed ? [completed] : []);
+  expect(merged).toHaveLength(1);
+  expect(merged[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+});
+
+test('reasoning resumes its canonical row across narration and another completed step', () => {
+  const first = transformMessage(baseWire({ type: 'thinking', data: { content: 'Inspect. ', status: 'done' } }))!;
+  const narration = transformMessage(baseWire({ type: 'text', msg_id: SECOND_MESSAGE_ID, data: { content: 'Reading the source.' } }))!;
+  const resumed = transformMessage(baseWire({ type: 'thinking', data: { content: 'Verify.', status: 'thinking' } }))!;
+  const merged = composeMessage(resumed, [first, narration]);
+  expect(merged).toHaveLength(2);
+  expect(merged[0].id).toBe(first.id);
+  expect(merged[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+  expect(merged[1]).toBe(narration);
+  expect(first.content).toMatchObject({ content: 'Inspect. ', status: 'done' });
+});
+
+test('cancelled tool history cannot become successful after a late frame', () => {
+  const cancelled = normalizeToolCallContent({call_id:'cancelled',name:'exec_command',status:'canceled',output:'STARTED'}, 'finish');
+  expect(cancelled.status).toBe('canceled');
+  const completed = {...cancelled,status:'completed' as const};
+  expect(mergeToolCallContent(completed, cancelled).status).toBe('canceled');
+  expect(mergeToolCallContent(cancelled, completed).status).toBe('canceled');
+  expect(mergeToolCallContent(cancelled, completed).artifacts).toEqual([]);
+  expect(mergeToolCallContent(cancelled, {...cancelled,status:'error'}).status).toBe('error');
+});
+
+test('canonical cancelled Turn metadata survives transport normalization', () => {
+  const message = transformMessage(baseWire({type:'agent_status',data:{
+    backend:'nomi',status:'error',turn_summary:true,turn_state:'cancelled',finished_at_ms:3000,
+  }}));
+  if(message?.type!=='agent_status')throw new Error('expected status metadata');
+  expect(message.content.turn_state).toBe('cancelled');
+  const ordinary = transformMessage(baseWire({type:'agent_status',data:{
+    backend:'nomi',status:'error',turn_state:'cancelled',
+  }}));
+  if(ordinary?.type!=='agent_status')throw new Error('expected agent status');
+  expect(ordinary.content.turn_state).toBeUndefined();
+});
 
 describe('joinPath compatibility export', () => {
   test('preserves UNC and URI prefixes', () => {
@@ -270,81 +380,6 @@ describe('transformMessage runtime field normalization', () => {
     expect(composeMessage(second, [first])).toHaveLength(2);
   });
 
-  test('legacy tool-group Error is absorbing across a late image Success frame', () => {
-    const wire = (status: 'Error' | 'Success', result_display?: Record<string, string>) =>
-      transformMessage(
-        baseWire({
-          type: 'tool_group',
-          data: [
-            {
-              call_id: 'legacy-image',
-              name: 'ImageGeneration',
-              description: 'generate',
-              status,
-              result_display,
-            },
-          ],
-        })
-      )!;
-    const failed = wire('Error');
-    const lateSuccess = wire('Success', { img_url: '/workspace/old.png', relative_path: 'old.png' });
-    const merged = composeMessage(lateSuccess, [failed]);
-    const message = merged[0];
-    if (message.type !== 'tool_group') throw new Error('expected tool group');
-    expect(message.content[0].status).toBe('Error');
-    expect(message.content[0].result_display).toBeUndefined();
-  });
-
-  test('legacy tool-group image Success is downgraded at message admission without receipt authority', () => {
-    const message = transformMessage(
-      baseWire({
-        type: 'tool_group',
-        data: [
-          {
-            call_id: 'legacy-unverified-image',
-            name: 'ImageGeneration',
-            description: 'generated',
-            status: 'Success',
-            result_display: {
-              img_url: '/workspace/old.png',
-              relative_path: 'old.png',
-            },
-          },
-        ],
-      })
-    );
-
-    if (message?.type !== 'tool_group') throw new Error('expected tool group');
-    expect(message.content[0].status).toBe('Error');
-    expect(message.content[0].result_display).toBeUndefined();
-    expect(message.content[0].description.includes('committed artifact receipt')).toBe(true);
-  });
-
-  test('legacy tool-group terminal Success cannot inherit a provisional image path', () => {
-    const wire = (status: 'Executing' | 'Success', result_display?: Record<string, string>) =>
-      transformMessage(
-        baseWire({
-          type: 'tool_group',
-          data: [
-            {
-              call_id: 'legacy-image',
-              name: 'ImageGeneration',
-              description: 'generate',
-              status,
-              ...(result_display ? { result_display } : {}),
-            },
-          ],
-        })
-      )!;
-    const progress = wire('Executing', { img_url: '/workspace/old.png', relative_path: 'old.png' });
-    const terminalWithoutReceipt = wire('Success');
-    const merged = composeMessage(terminalWithoutReceipt, [progress]);
-    const message = merged[0];
-    if (message.type !== 'tool_group') throw new Error('expected tool group');
-    expect(message.content[0].status).toBe('Success');
-    expect(message.content[0].result_display).toBeUndefined();
-  });
-
   test('serializes structured text payloads instead of leaking objects into message content', () => {
     const message = transformMessage(
       baseWire({
@@ -504,23 +539,24 @@ describe('transformMessage runtime field normalization', () => {
     expect(message.content.status).toBe('disconnected');
   });
 
-  test('converts knowledge writeback events into assistant message status updates', () => {
-    const message = transformKnowledgeWritebackEvent({
-      conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000001'),
-      msg_id: MESSAGE_ID,
-      status: 'writing',
-      attempt_id: 'attempt-1',
-      started_at: 1000,
-      updated_at: 1200,
-      retryable: false,
-      candidates: 2,
-    });
+  test('keeps canonical turn wall-clock timing on status metadata', () => {
+    const message = transformMessage(
+      baseWire({
+        type: 'agent_status',
+        data: {
+          backend: 'nomi',
+          status: 'prepared',
+          turn_summary: true,
+          started_at_ms: 4_000_000,
+          finished_at_ms: 4_002_000,
+        },
+      })
+    );
 
-    expect(message?.type).toBe('text');
-    expect(message?.msg_id).toBe(MESSAGE_ID);
-    expect(message?.content.content).toBe('');
-    expect(message?.content.knowledge_writeback?.status).toBe('writing');
-    expect(message?.content.knowledge_writeback?.attempt_id).toBe('attempt-1');
+    expect(message?.type).toBe('agent_status');
+    if (message?.type !== 'agent_status') throw new Error('expected agent_status message');
+    expect(message.content.started_at_ms).toBe(4_000_000);
+    expect(message.content.finished_at_ms).toBe(4_002_000);
   });
 
   test('preserves persisted knowledge writeback state when hydrating text messages', () => {

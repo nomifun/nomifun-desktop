@@ -1,4 +1,4 @@
-use nomifun_api_types::FetchModelsResponse;
+use nomifun_api_types::{FetchModelsResponse, ModelCatalogSource};
 use nomifun_common::AppError;
 use nomifun_model_invoke::root_candidates;
 use tracing::debug;
@@ -84,6 +84,7 @@ pub(crate) async fn try_fix_url(
 
     Ok(FetchModelsResponse {
         models,
+        catalog_source: Some(ModelCatalogSource::Remote),
         fixed_base_url: Some(fixed_url),
     })
 }

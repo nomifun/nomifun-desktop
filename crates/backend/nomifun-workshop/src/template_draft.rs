@@ -16,8 +16,6 @@ pub const MAX_TEMPLATE_DRAFT_MODEL_UTF16: usize = 512;
 /// provider may still perform its existing bounded transport negotiation while
 /// the downstream receiver remains live.
 pub const TEMPLATE_DRAFT_TIMEOUT_SECS: u64 = 120;
-/// A template draft is intentionally small and structurally bounded.
-pub const TEMPLATE_DRAFT_MAX_TOKENS: u32 = 4_096;
 /// Renderer limit for the JSON payload inside the canonical response fence.
 pub const MAX_TEMPLATE_DRAFT_JSON_BYTES: usize = 262_144;
 /// Hard local output budget: frontend JSON budget plus the only allowed

@@ -3,14 +3,14 @@
 //! 底座选型（Task 3 Step 1 探索结论）：复用本 crate 既有的 provider 直连路径
 //! （`resolve_provider_config` + `nomi_providers::create_provider`，与
 //! `one_shot_completion`/IDMM sidecar/companion learner 同族），在其上补一个
-//! 最小 tool-loop，而不是复用完整 nomi 引擎会话（`nomi_agent::session`）。
+//! 最小 tool-loop，而不是复用完整 nomi 引擎会话（统一 Runtime Session）。
 //! 理由：完整引擎的会话构造会注册内建 OS/文件/浏览器工具、技能与 MCP 面，
 //! "再剔除"属于运行时钳制（fail-open 风险正是本设计要消灭的）；而 provider
 //! 直连路径发给模型的工具表 **只能** 来自 `OneShotTurnRequest::tools`——安全
 //! 边界由构造保证：未传入的工具在注册表中根本不存在，也没有任何 handler 可被
 //! 调用。该入口不含任何客服（cs）概念，可被任意域复用。
 //!
-//! 无状态：每回合新建请求、跑完丢弃；不触碰 AgentRuntimeRegistry / workspace
+//! 无状态：每回合新建请求、跑完丢弃；不触碰 AgentRuntimeSessions / workspace
 //! lease / 会话持久化。
 
 use std::path::PathBuf;
@@ -26,8 +26,6 @@ use nomifun_model_invoke::ModelInvokeService;
 
 use crate::factory::provider_config::resolve_provider_config;
 
-/// Max tokens for a one-shot reply.
-const ONE_SHOT_MAX_TOKENS: u32 = 4096;
 /// Upper bound on tool rounds inside one turn, so a looping model cannot spin
 /// forever below the wall-clock timeout.
 const MAX_TOOL_ROUNDS: usize = 8;
@@ -79,17 +77,47 @@ pub async fn run_one_shot_turn(services: &OneShotDeps, req: OneShotTurnRequest) 
         &services.workspace,
     )
     .await?;
+    let output_limit = configured_output_limit(
+        config.output_max_tokens,
+        config.provider.requires_output_ceiling(),
+    )?;
     let provider: Arc<dyn LlmProvider> = create_provider(&config);
-    run_one_shot_turn_with_provider(provider, req).await
+    run_one_shot_turn_with_output_limit(provider, req, output_limit).await
+}
+
+fn configured_output_limit(
+    output_limit: Option<u32>,
+    requires_output_ceiling: bool,
+) -> Result<Option<u32>, AppError> {
+    if output_limit == Some(0) {
+        return Err(AppError::BadRequest(
+            "one-shot Chat output limit must be positive".into(),
+        ));
+    }
+    if output_limit.is_none() && requires_output_ceiling {
+        return Err(AppError::BadRequest(
+            "selected one-shot Chat protocol requires an explicit output limit; set Max output tokens on the selected model capability".into(),
+        ));
+    }
+    Ok(output_limit)
 }
 
 /// Provider-injected core of [`run_one_shot_turn`] (tests stub the LLM here).
+#[cfg(test)]
 pub(crate) async fn run_one_shot_turn_with_provider(
     provider: Arc<dyn LlmProvider>,
     req: OneShotTurnRequest,
 ) -> Result<String, AppError> {
+    run_one_shot_turn_with_output_limit(provider, req, None).await
+}
+
+async fn run_one_shot_turn_with_output_limit(
+    provider: Arc<dyn LlmProvider>,
+    req: OneShotTurnRequest,
+    output_limit: Option<u32>,
+) -> Result<String, AppError> {
     let timeout = std::time::Duration::from_secs(req.timeout_secs);
-    match tokio::time::timeout(timeout, tool_loop(provider, req)).await {
+    match tokio::time::timeout(timeout, tool_loop(provider, req, output_limit)).await {
         Ok(result) => result,
         Err(_) => Err(AppError::Internal("one-shot turn timed out".into())),
     }
@@ -98,6 +126,7 @@ pub(crate) async fn run_one_shot_turn_with_provider(
 async fn tool_loop(
     provider: Arc<dyn LlmProvider>,
     req: OneShotTurnRequest,
+    output_limit: Option<u32>,
 ) -> Result<String, AppError> {
     // The tool defs sent to the model and the handler table are derived from
     // the SAME whitelist; there is no other tool source in this code path.
@@ -128,7 +157,9 @@ async fn tool_loop(
             system: req.system_prompt.clone(),
             messages: messages.clone(),
             tools: tool_defs.clone(),
-            max_tokens: Some(ONE_SHOT_MAX_TOKENS),
+            // Preserve the selected model's configured ceiling on every round.
+            // Absence delegates output behavior to the provider, not a 4K cap.
+            max_tokens: output_limit,
             thinking: None,
             reasoning_effort: None,
             retain_provider_round: false,
@@ -343,6 +374,7 @@ mod tests {
         script: Mutex<Vec<Vec<LlmEvent>>>,
         seen_tool_names: Mutex<Vec<Vec<String>>>,
         seen_messages: Mutex<Vec<Vec<Message>>>,
+        seen_output_limits: Mutex<Vec<Option<u32>>>,
     }
 
     impl ScriptedProvider {
@@ -351,6 +383,7 @@ mod tests {
                 script: Mutex::new(script),
                 seen_tool_names: Mutex::new(Vec::new()),
                 seen_messages: Mutex::new(Vec::new()),
+                seen_output_limits: Mutex::new(Vec::new()),
             })
         }
     }
@@ -366,6 +399,7 @@ mod tests {
                 .unwrap()
                 .push(request.tools.iter().map(|tool| tool.name.clone()).collect());
             self.seen_messages.lock().unwrap().push(request.messages.clone());
+            self.seen_output_limits.lock().unwrap().push(request.max_tokens);
             let mut script = self.script.lock().unwrap();
             if script.is_empty() {
                 return Err(ProviderError::Connection("script exhausted".into()));
@@ -385,6 +419,55 @@ mod tests {
 
     fn done(stop_reason: StopReason) -> LlmEvent {
         LlmEvent::Done { stop_reason, usage: TokenUsage::default() }
+    }
+
+    #[test]
+    fn configured_output_limit_preserves_defaults_and_requires_mandatory_fields() {
+        assert_eq!(configured_output_limit(None, false).unwrap(), None);
+        for limit in [512, 4096, 100_000] {
+            assert_eq!(configured_output_limit(Some(limit), false).unwrap(), Some(limit));
+            assert_eq!(configured_output_limit(Some(limit), true).unwrap(), Some(limit));
+        }
+        assert!(matches!(configured_output_limit(None, true),
+            Err(AppError::BadRequest(message)) if message.contains("requires an explicit output limit")));
+        assert!(matches!(configured_output_limit(Some(0), false),
+            Err(AppError::BadRequest(message)) if message.contains("must be positive")));
+    }
+
+    #[tokio::test]
+    async fn injected_provider_uses_provider_output_default() {
+        let provider = ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("provider-defined output".into()),
+            done(StopReason::EndTurn),
+        ]]);
+        run_one_shot_turn_with_provider(provider.clone(), request(vec![], 30))
+            .await.unwrap();
+        assert_eq!(provider.seen_output_limits.lock().unwrap().as_slice(), &[None]);
+    }
+
+    #[tokio::test]
+    async fn configured_output_limit_is_unchanged_across_tool_rounds() {
+        for output_limit in [None, Some(512), Some(100_000)] {
+            let provider = ScriptedProvider::new(vec![
+                vec![LlmEvent::ToolUse {
+                    id: "call_1".into(),
+                    name: "knowledge_search".into(),
+                    input: serde_json::json!({"query": "x"}),
+                    extra: None,
+                }, done(StopReason::ToolUse)],
+                vec![LlmEvent::TextDelta("done".into()), done(StopReason::EndTurn)],
+            ]);
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let text = run_one_shot_turn_with_output_limit(
+                provider.clone(),
+                request(vec![tool("knowledge_search", calls.clone())], 30),
+                output_limit,
+            ).await.unwrap();
+            assert_eq!(text, "done");
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            assert_eq!(provider.seen_output_limits.lock().unwrap().as_slice(),
+                &[output_limit, output_limit], "every round uses the exact model configuration");
+        }
     }
 
     /// 安全不变量：发给模型的工具注册面恰等于传入集合——每一轮都如此。

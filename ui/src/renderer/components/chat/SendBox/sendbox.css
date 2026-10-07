@@ -156,6 +156,35 @@
   color: #a1a2aa !important;
 }
 
+/* Desktop-companion composer: references first, editor second, controls last.
+ * The tighter inset keeps the stacked layout compact without shrinking the
+ * 32px attach/send targets or the two-line editor. */
+.sendbox-panel--compact-stacked {
+  padding: 10px 12px !important;
+  border-radius: 18px !important;
+}
+
+.sendbox-panel--compact-stacked [data-composer-attachments] {
+  padding: 0 1px 5px;
+}
+
+.sendbox-panel--compact-stacked .sendbox-highlight-container {
+  min-height: 40px !important;
+  margin-bottom: 0 !important;
+}
+
+.sendbox-panel--compact-stacked textarea {
+  height: 40px !important;
+  min-height: 40px !important;
+  max-height: 40px !important;
+  padding-block: 0 !important;
+}
+
+.sendbox-panel--compact-stacked .sendbox-bottom-row {
+  min-height: 32px;
+  margin-top: 2px;
+}
+
 /* Sendbox tools buttons - prevent layout jitter from theme hover transforms (#1075) */
 .sendbox-tools .arco-btn,
 .sendbox-tools .arco-btn:hover,
@@ -164,7 +193,7 @@
   transform: none !important;
 }
 
-/* Conversation sendbox model/permission pills: blend into background */
+/* Conversation sendbox model pills blend into the background. */
 .sendbox-tools .sendbox-model-btn,
 .sendbox-tools .sendbox-model-btn:hover,
 .sendbox-tools .sendbox-model-btn:active,
@@ -190,6 +219,60 @@
 .sendbox-actions .sendbox-model-btn:focus,
 .sendbox-actions .sendbox-model-btn:focus-visible {
   color: var(--text-primary) !important;
+}
+
+/* Model and per-session reasoning form one compound control. Each segment
+ * keeps its own dropdown while sharing one surface, scale and focus language. */
+.sendbox-model-reasoning-group {
+  display: inline-flex;
+  align-items: stretch;
+  height: 28px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-fill-1) 76%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-2) 64%, transparent);
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment {
+  height: 28px;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment {
+  padding-inline: 10px 8px !important;
+}
+
+.sendbox-model-reasoning-group .sendbox-reasoning-segment {
+  position: relative;
+  min-width: 52px;
+  padding-inline: 9px 8px !important;
+}
+
+.sendbox-model-reasoning-group .sendbox-reasoning-segment::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  width: 1px;
+  background: var(--color-border-2);
+  pointer-events: none;
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment:hover,
+.sendbox-model-reasoning-group .sendbox-model-segment:active,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment:hover,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment:active {
+  background: var(--color-fill-2) !important;
+  color: var(--text-primary) !important;
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment:focus-visible,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment:focus-visible {
+  box-shadow: inset 0 0 0 1px rgb(var(--primary-6)) !important;
 }
 
 /* The unified collaboration pill keeps the former policy control's enabled
@@ -384,166 +467,13 @@
   min-width: 0;
 }
 
-/* The composer action row owns the remaining width between the attachment
- * button and send controls. Nomi's configuration group uses that real width as
- * a query container, so it responds to split panes/sidebars as well as the
- * outer window size. */
-.sendbox-actions {
-  flex: 1 1 auto;
-  min-width: 0;
-  justify-content: flex-end;
-}
-
-.sendbox-responsive-config-group {
-  container-name: sendbox-config;
-  container-type: inline-size;
-  flex: 1 1 0;
-  max-width: 100%;
-}
-
-.sendbox-responsive-config-group > * {
-  min-width: 0;
-  flex-shrink: 0;
-}
-
-/* The collaboration policy is intentionally an icon in the normal toolbar,
- * but it participates in the same desktop hover-to-expand interaction. */
-.sendbox-responsive-config-group .nomi-sendbox-policy-btn {
-  width: auto !important;
-  min-width: 28px !important;
-  max-width: 28px !important;
-  height: 28px !important;
-  padding: 0 !important;
-  border-radius: 999px !important;
-  flex: 0 1 auto !important;
-  overflow: hidden !important;
-  transition:
-    max-width 160ms ease,
-    padding 160ms ease,
-    opacity 160ms ease !important;
-}
-
-.sendbox-responsive-config-group .nomi-sendbox-policy-btn .sendbox-responsive-label {
-  display: none !important;
-}
-
-/* When the remaining toolbar slot cannot fit the text pills, preserve every
- * action in place and collapse all variable-width controls to their icons. */
-@container sendbox-config (max-width: 560px) {
-  .sendbox-responsive-config-group .sendbox-responsive-label,
-  .sendbox-responsive-config-group .sendbox-responsive-chevron {
-    display: none !important;
-  }
-
-  .sendbox-responsive-config-group .nomi-sendbox-model-btn,
-  .sendbox-responsive-config-group .nomi-sendbox-summon-btn,
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn,
-  .sendbox-actions .sendbox-responsive-config-group .agent-mode-compact-pill {
-    width: auto !important;
-    min-width: 28px !important;
-    max-width: 28px !important;
-    height: 28px !important;
-    padding: 0 !important;
-    border-radius: 999px !important;
-    flex: 0 1 auto !important;
-    overflow: hidden !important;
-    transition:
-      max-width 160ms ease,
-      padding 160ms ease,
-      opacity 160ms ease !important;
-  }
-
-  .sendbox-responsive-config-group .nomi-sendbox-model-btn .arco-btn-content,
-  .sendbox-responsive-config-group .nomi-sendbox-summon-btn .arco-btn-content,
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn .arco-btn-content,
-  .sendbox-responsive-config-group .agent-mode-compact-pill .arco-btn-content {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: 100% !important;
-    min-width: 0 !important;
-    overflow: visible !important;
-  }
-
-  .sendbox-responsive-config-group .nomi-sendbox-summon-btn .arco-btn-icon {
-    margin: 0 !important;
-  }
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover,
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible {
-    width: auto !important;
-    min-width: 28px !important;
-    max-width: 180px !important;
-    padding: 0 10px !important;
-    flex: 0 1 auto !important;
-    position: relative;
-    z-index: 2;
-  }
-
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover .sendbox-responsive-label,
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label {
-    display: inline-flex !important;
-  }
-
-  @container sendbox-config (max-width: 560px) {
-    .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover,
-    .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible,
-    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover,
-    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:hover,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible {
-      width: auto !important;
-      min-width: 28px !important;
-      max-width: 200px !important;
-      padding: 0 10px !important;
-      flex: 0 1 auto !important;
-      position: relative;
-      z-index: 2;
-    }
-
-    .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover .sendbox-responsive-label,
-    .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover .sendbox-responsive-chevron,
-    .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-label,
-    .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-chevron,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover .sendbox-responsive-label,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible .sendbox-responsive-label,
-    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover .sendbox-responsive-label,
-    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:hover .sendbox-responsive-label,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:hover .sendbox-responsive-chevron,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible .sendbox-responsive-label,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible .sendbox-responsive-chevron {
-      display: inline-flex !important;
-    }
-  }
-}
+.sendbox-actions { flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
+.sendbox-responsive-config-group { flex: 0 1 auto; max-width: 100%; }
+.sendbox-responsive-config-group > * { min-width: 0; flex-shrink: 0; }
 
 /* Circle / icon-only buttons must not shrink */
 .sendbox-tools .arco-btn-shape-circle {
   flex-shrink: 0 !important;
-}
-
-/* Only pill buttons shrink; file-attach / other fixed buttons stay rigid.
- * flex-basis:0 makes all pills share space equally when compressed,
- * max-width:max-content prevents short-text pills from stretching. */
-.sendbox-tools .agent-mode-compact-pill,
-.sendbox-actions .agent-mode-compact-pill {
-  min-width: 0 !important;
-  overflow: hidden !important;
-  flex-shrink: 1 !important;
-  flex-basis: 0 !important;
-  flex-grow: 1 !important;
-  max-width: max-content !important;
-}
-
-.sendbox-tools .agent-mode-compact-pill .arco-btn-content,
-.sendbox-actions .agent-mode-compact-pill .arco-btn-content {
-  min-width: 0 !important;
-  overflow: hidden !important;
 }
 
 /* Pill marquee animation for overflowing text */
@@ -610,112 +540,4 @@
 .sendbox-highlight-textarea::placeholder {
   color: #a1a2aa !important;
   -webkit-text-fill-color: #a1a2aa !important;
-}
-
-/* Mobile compact: `+` launcher button replaces inline tools when the
- * action sheet pattern is active. Sized to match the send button so the
- * left/right poles feel balanced. */
-.sendbox-mobile-plus-btn,
-.sendbox-mobile-plus-btn.arco-btn,
-.sendbox-mobile-plus-btn.arco-btn-secondary {
-  width: 32px !important;
-  height: 32px !important;
-  min-width: 32px !important;
-  padding: 0 !important;
-  border: none !important;
-  background: var(--color-fill-2) !important;
-  color: var(--color-text-1) !important;
-  flex-shrink: 0 !important;
-}
-
-.sendbox-mobile-plus-btn:hover,
-.sendbox-mobile-plus-btn:active,
-.sendbox-mobile-plus-btn:focus,
-.sendbox-mobile-plus-btn:focus-visible {
-  background: var(--color-fill-3) !important;
-}
-
-.sendbox-tools-mobile-compact {
-  display: flex;
-  align-items: center;
-}
-
-/* Mobile: allow horizontal scrolling for sendbox tools (model/permission pills) */
-@media (max-width: 767px) {
-  .sendbox-tools-scroll-mobile {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-    max-width: calc(100vw - 140px);
-    overflow-x: auto;
-    overflow-y: hidden;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-    touch-action: pan-x;
-  }
-
-  .sendbox-tools-scroll-mobile::-webkit-scrollbar {
-    display: none;
-  }
-
-  /* Sendbox input — 14px to match desktop body type (per product call;
-     accept the iOS auto-zoom trade-off). One-line resting height; autoSize
-     still expands the textarea as soon as the user wraps. The wrapping
-     container shares the same floor, and we trim the gap below the textarea
-     (default inline 8px → 4px) so the toolbar sits closer. */
-  .sendbox-input--mobile {
-    font-size: 14px !important;
-    line-height: 22px !important;
-    min-height: 22px !important;
-  }
-
-  /* Strip Arco's default 4px 12px padding from the textarea wrapper on mobile —
-     long placeholders ("Send message to Claude Code...") were getting clipped
-     on narrow screens because the wrapper's right-side 12px ate trailing chars.
-     Force the wrapper to fill the available flex slot so the textarea (and the
-     hit area) grows to the right edge instead of shrinking to placeholder width. */
-  .sendbox-panel .arco-textarea-wrapper,
-  .sendbox-panel .arco-textarea {
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-    width: 100% !important;
-  }
-
-  .sendbox-highlight-container {
-    min-height: 22px !important;
-    margin-bottom: 4px !important;
-  }
-
-  /* Mobile placeholder shares the input's 14px font for consistency. */
-  .sendbox-input--mobile::placeholder,
-  .sendbox-input--mobile::-webkit-input-placeholder,
-  .sendbox-highlight-textarea.sendbox-input--mobile::placeholder {
-    font-size: 14px !important;
-  }
-
-  /* Tighter mobile sendbox: reduce outer padding so the bottom input takes
-     less vertical space on narrow screens. */
-  .sendbox-panel {
-    padding: 8px 10px !important;
-    border-radius: 16px !important;
-  }
-
-  .speech-input-feedback {
-    grid-template-columns: clamp(56px, 20vw, 92px) auto;
-    gap: 8px;
-  }
-
-  .speech-input-feedback__waveform {
-    gap: 2px;
-  }
-
-  .speech-input-feedback__bar {
-    width: 1.5px;
-  }
-
-  .speech-input-feedback__label {
-    min-width: 28px;
-  }
 }

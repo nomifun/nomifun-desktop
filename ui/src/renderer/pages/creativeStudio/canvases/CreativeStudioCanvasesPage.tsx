@@ -42,6 +42,8 @@ type CanvasesAction =
 export interface CreativeStudioCanvasesPageProps {
   service?: CreativeStudioCanvasesService;
   onOpenCanvas?: (canvas: CreativeCanvasSummary) => void;
+  onPrefetchCanvas?: (canvas: CreativeCanvasSummary) => void;
+  openingCanvasId?: string | null;
   copy?: Partial<CreativeStudioCanvasesCopy>;
   initialSnapshot?: CreativeStudioCanvasesSnapshot;
   initialSelectedIds?: readonly string[];
@@ -56,6 +58,8 @@ const CreativeStudioCanvasesPage: React.FC<
 > = ({
   service = creativeStudioCanvasesService,
   onOpenCanvas,
+  onPrefetchCanvas,
+  openingCanvasId = null,
   copy: copyOverrides,
   initialSnapshot,
   initialSelectedIds = [],
@@ -132,7 +136,8 @@ const CreativeStudioCanvasesPage: React.FC<
   }, [canvases, editingId]);
 
   const selectionActive = selectedIds.size > 0;
-  const controlsDisabled = loadState !== 'ready' || busyAction !== null;
+  const controlsDisabled =
+    loadState !== 'ready' || busyAction !== null || openingCanvasId !== null;
 
   const createCanvas = useCallback(async () => {
     if (busyAction) return;
@@ -370,9 +375,11 @@ const CreativeStudioCanvasesPage: React.FC<
                 selected={selectedIds.has(canvas.canvasId)}
                 editing={editingId === canvas.canvasId}
                 editingTitle={editingTitle}
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || openingCanvasId !== null}
+                opening={openingCanvasId === canvas.canvasId}
                 exportDisabled={!service.archiveCapabilities.canExport}
                 archiveUnavailableMessage={copy.archiveUnavailable}
+                onPrefetch={onPrefetchCanvas}
                 onOpen={(item) => onOpenCanvas?.(item)}
                 onToggleSelected={toggleSelected}
                 onStartRename={(item) => {
@@ -403,7 +410,7 @@ const CreativeStudioCanvasesPage: React.FC<
         autoFocus={false}
         unmountOnExit
         getPopupContainer={() =>
-          document.getElementById('creative-studio-portal-root') ??
+          document.getElementById('resource-page-portal-root') ??
           document.body
         }
         onCancel={() => {

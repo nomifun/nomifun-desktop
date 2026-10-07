@@ -67,10 +67,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_embed_respects_env_gate() {
-        // Unless NOMIFUN_EMBED_BUN=1 at build time, ProductionEmbed reports "no embed".
-        assert!(!ProductionEmbed.has());
-        assert_eq!(ProductionEmbed.blob(), b"");
+    fn production_embed_metadata_is_consistent() {
+        if ProductionEmbed.has() {
+            assert!(!ProductionEmbed.blob().is_empty());
+            assert!(!ProductionEmbed.version().is_empty());
+            assert_eq!(ProductionEmbed.sha256().len(), 64);
+            assert!(ProductionEmbed.sha256().bytes().all(|byte| byte.is_ascii_hexdigit()));
+        } else {
+            assert_eq!(ProductionEmbed.blob(), b"");
+            assert_eq!(ProductionEmbed.sha256(), "");
+            assert_eq!(ProductionEmbed.version(), "");
+        }
     }
 
     #[test]

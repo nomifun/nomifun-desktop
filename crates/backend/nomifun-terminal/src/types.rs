@@ -88,12 +88,21 @@ pub(crate) fn terminal_owner_scope(env_json: Option<&str>) -> TerminalOwnerScope
 /// sentinel to the platform default shell and resolving a bare program name
 /// to its absolute executable path.
 pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) {
-    let program = if command == SHELL_SENTINEL {
+    let login_shell = command == SHELL_SENTINEL;
+    let program = if login_shell {
         default_login_shell()
     } else {
         command.to_owned()
     };
-    (resolve_program(&program), args.to_vec())
+    let mut resolved_args = args.to_vec();
+    #[cfg(unix)]
+    if login_shell && resolved_args.is_empty() {
+        // The renderer's Shell preset intentionally persists `$SHELL` with an
+        // empty argv. Expand that exact product shape to a login shell here;
+        // explicit caller arguments remain byte-for-byte unchanged.
+        resolved_args.push("-l".to_owned());
+    }
+    (resolve_program(&program), resolved_args)
 }
 
 /// Resolve a bare command name to its absolute executable path so the PTY
@@ -226,6 +235,14 @@ mod tests {
         assert_ne!(program, SHELL_SENTINEL);
         assert!(!program.is_empty());
         assert_eq!(args, vec!["-l".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_sentinel_without_args_requests_a_login_shell() {
+        let (program, args) = resolve_command(SHELL_SENTINEL, &[]);
+        assert_ne!(program, SHELL_SENTINEL);
+        assert_eq!(args.first().map(String::as_str), Some("-l"));
     }
 
     #[cfg(windows)]

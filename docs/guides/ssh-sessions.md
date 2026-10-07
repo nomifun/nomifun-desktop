@@ -39,14 +39,26 @@ From a host row, click **New session**. NomiFun creates a chat session bound to
 that host and opens it. SSH sessions appear as their own kind in the session
 list, separate from ordinary local work.
 
-From that point the agent's tools operate the remote host:
+The default SSH session enables `ssh/exec`. Filesystem and sudo actions require
+their corresponding Agent action grants and the bound host's exact resource
+operation grants. When authorized, the tools operate the remote host:
 
-- `Bash` runs in a **persistent remote shell** — `cd`, `export`, activated
+- `ssh/exec` runs in a **persistent remote shell** — `cd`, `export`, activated
   virtualenvs and other shell state persist across commands within the session,
-  exactly like a real interactive terminal.
-- `Read`, `Write`, `Edit` use **SFTP**, with atomic writes (temp file + rename)
+  exactly like a real interactive terminal. The shell runs as a non-root Linux
+  account with the kernel's no-new-privileges bit enabled; `setpriv` support is
+  required, and ordinary execution cannot elevate through setuid programs.
+- `ssh/fs.read` and `ssh/fs.write` use **SFTP**, with atomic writes (temp file + rename)
   and preserved permissions. File edits are never built out of shell strings.
-- `Grep` and `Glob` search the remote tree (ripgrep if present, else grep).
+- The search and listing operations of `ssh/fs.read` search the remote tree
+  (ripgrep if present, else grep).
+
+A timeout interrupts the command and attempts to resynchronize the existing
+shell, preserving its state when that succeeds. If the channel must be replaced,
+or the transport reconnects, only the last working directory confirmed by a
+completed command is restored. Environment variables, functions, and virtualenv
+activation must be set again in the new process. An explicit `exit` reports the
+server's exit status and the next command uses a fresh, equally restricted shell.
 
 ## The link, and how you can see it
 
@@ -80,21 +92,23 @@ because `known_hosts` is shared with your own `ssh`.
 
 ## Sudo
 
-If you set a per-host sudo password, the agent can run privileged commands
-(`sudo systemctl restart nginx`, …) without being interrupted. The password is
-injected by the transport layer when it recognises the sudo prompt: it goes
-straight to the remote shell's input and never appears in the command text, the
-conversation transcript, or the request sent to the model. It is injected once
-per command and never retried, so a wrong password stops rather than tripping a
-PAM lockout. Leave the field blank if the remote account has passwordless sudo.
+Privileged commands require both the Agent's `ssh/sudo` action and the bound
+host's `sudo` operation. A stored password alone does not grant that authority.
+The action accepts the command body, for example `systemctl restart nginx`.
+The owner authenticates sudo on a separate short-lived shell, using an exact,
+single-use password prompt, removes the password responder, and then executes
+the body with `sudo -n`. The password never appears in command text, the
+conversation transcript, or the request sent to the model. The ordinary
+persistent shell never receives that password or elevated process state.
+Leave the field blank if the remote account has passwordless sudo.
 
 ## Security posture
 
-The agent operates a remote host with the **same latitude it has locally** — by
-design. There are no extra approval gates or destructive-command interception
-beyond what local execution already does; the machine is yours and you are
-responsible for it. Be deliberate about which hosts you connect and whether you
-store a sudo password for production systems.
+The Agent's frozen SSH action grants and exact host resource operations determine
+which remote effects it may perform. Ordinary execution is fenced from privilege
+elevation, while privileged execution requires the separate sudo grants. Be
+deliberate about which hosts and operations you authorize and whether you store
+a sudo password for production systems.
 
 What NomiFun does guarantee: credentials are encrypted at rest, never returned
 to the UI in plaintext, never placed in the conversation or the model request,

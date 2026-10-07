@@ -9,20 +9,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{AgentExecutionDetail, SendMessageRequest};
 use nomifun_common::AppError;
-use nomifun_conversation::{AgentExecutionConversationPort, ConversationService};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository, IProviderRepository,
 };
-use nomifun_preset::PresetService;
 use nomifun_realtime::UserEventSink;
 use nomifun_model_invoke::ModelInvokeService;
 
-use crate::attempt_runner::ConversationAttemptRunner;
+use crate::attempt_runner::{AgentExecutionSessionPort, AgentSessionAttemptRunner};
 use crate::engine::{AgentExecutionEngine, AgentExecutionEngineDeps};
 use crate::event_publisher::AgentExecutionEventPublisher;
+use crate::lifecycle::AgentExecutionLifecycle;
 use crate::planner::{LlmPlanProducer, PlanProducer};
 use crate::scheduler::ConversationEffects;
 
@@ -38,25 +36,22 @@ pub struct AgentExecutionEngineConfig {
     pub provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
     pub provider_model_capability_repository:
         Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
-    pub preset_service: Arc<PresetService>,
     pub realtime: Arc<dyn UserEventSink>,
-    pub conversation: ConversationService,
-    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    pub session: Arc<dyn AgentExecutionSessionPort>,
     pub model_invoke: Arc<ModelInvokeService>,
     pub workspace_root: PathBuf,
+    pub lifecycle: AgentExecutionLifecycle,
 }
 
 struct ProductionConversationEffects {
-    conversation: ConversationService,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    execution_port: AgentExecutionConversationPort,
+    session: Arc<dyn AgentExecutionSessionPort>,
 }
 
 #[async_trait]
 impl ConversationEffects for ProductionConversationEffects {
     async fn cancel_attempt(&self, owner_id: &str, conversation_id: &str) -> Result<(), AppError> {
-        self.conversation
-            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
+        self.session
+            .cancel_for_execution(owner_id, conversation_id)
             .await
     }
     async fn steer_attempt(
@@ -64,14 +59,17 @@ impl ConversationEffects for ProductionConversationEffects {
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
+        target_operation_id: &str,
         text: &str,
     ) -> Result<(), AppError> {
-        self.execution_port
-            .steer_turn(
+        self.session
+            .steer_turn_for_execution(
                 owner_id,
                 conversation_id,
                 operation_id,
+                target_operation_id,
                 SendMessageRequest {
+                    plugin_delivery: None,
                     content: text.to_owned(),
                     files: vec![],
                     inject_skills: vec![],
@@ -87,10 +85,11 @@ impl ConversationEffects for ProductionConversationEffects {
         &self,
         owner_id: &str,
         conversation_id: &str,
-        _operation_id: &str,
+        operation_id: &str,
+        target_operation_id: &str,
     ) -> Result<(), AppError> {
-        self.conversation
-            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
+        self.session
+            .cancel_turn_for_execution(owner_id, conversation_id, operation_id, target_operation_id)
             .await
     }
     async fn report_lead(
@@ -110,8 +109,10 @@ impl ConversationEffects for ProductionConversationEffects {
             .unwrap_or("执行已结束，但没有生成汇总。");
         // The persisted terminal summary is already the synthesis/sole
         // business output selected by the scheduler. Project it as the final
-        // assistant message; never feed it back through the lead model.
-        self.conversation
+        // assistant message; never feed it back through the lead model. Do not
+        // cancel by Session identity here: the original delegation turn may
+        // have ended and a later user turn may now own the active slot.
+        self.session
             .project_assistant_message_idempotent(
                 owner_id,
                 conversation_id,
@@ -127,11 +128,10 @@ impl ConversationEffects for ProductionConversationEffects {
 impl AgentExecutionEngine {
     /// Construct the canonical production engine.
     pub fn new(config: AgentExecutionEngineConfig) -> Self {
-        let publisher = AgentExecutionEventPublisher::new(config.realtime);
-        let attempt_runner = Arc::new(ConversationAttemptRunner::new(
-            config.conversation.clone(),
-            config.runtime_registry.clone(),
-        ));
+        let publisher = AgentExecutionEventPublisher::new(config.realtime)
+            .with_lifecycle(config.lifecycle.clone());
+        let session = config.session;
+        let attempt_runner = Arc::new(AgentSessionAttemptRunner::new(session.clone()));
         // The immutable participant snapshot supplies the actual lead model;
         // absence stays typed and fails explicitly in the planner.
         let planner: Arc<dyn PlanProducer> = Arc::new(LlmPlanProducer::new(
@@ -139,13 +139,8 @@ impl AgentExecutionEngine {
             config.model_invoke,
             config.workspace_root.clone(),
         ));
-        let execution_port = config
-            .conversation
-            .agent_execution_port(config.runtime_registry.clone());
         let conversation_effects = Arc::new(ProductionConversationEffects {
-            conversation: config.conversation,
-            runtime_registry: config.runtime_registry,
-            execution_port,
+            session: session.clone(),
         });
         let deps = AgentExecutionEngineDeps::new(
             config.repository,
@@ -153,12 +148,13 @@ impl AgentExecutionEngine {
             config.provider_repository,
             config.provider_model_repository,
             config.provider_model_capability_repository,
-            config.preset_service,
             planner,
             attempt_runner,
             conversation_effects,
             publisher,
             config.workspace_root,
+            config.lifecycle,
+            session,
         );
         Self::from_dependencies(deps)
     }

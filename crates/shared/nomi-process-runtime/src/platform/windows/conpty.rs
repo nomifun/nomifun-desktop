@@ -28,6 +28,52 @@ const MAX_CLOSE_CAPACITY: usize = 512;
 const CLOSE_CAPACITY_PER_CPU: usize = 16;
 static CLOSE_EXECUTOR: OnceLock<Result<ConPtyCloseExecutor, Arc<str>>> = OnceLock::new();
 
+/// Read-only counters of the existing Windows pseudoconsole close owner.
+/// Counters are sampled independently, not as an atomic transaction; callers
+/// must wait for an owner-settled boundary before checking zero-current gauges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowsConPtyCloseMetrics {
+    pub capacity: usize,
+    pub admitted: usize,
+    pub retained_jobs: usize,
+    pub pending: usize,
+    pub active: usize,
+    pub quarantined: usize,
+    pub workers: usize,
+    pub running: bool,
+    pub completed: u64,
+    pub panics: u64,
+    pub overflow_retained: u64,
+    pub peak_pending: usize,
+}
+
+pub(super) fn windows_conpty_close_metrics() -> Result<Option<WindowsConPtyCloseMetrics>, &'static str> {
+    close_metrics_from_cell(&CLOSE_EXECUTOR)
+}
+
+fn close_metrics_from_cell(
+    cell: &OnceLock<Result<ConPtyCloseExecutor, Arc<str>>>,
+) -> Result<Option<WindowsConPtyCloseMetrics>, &'static str> {
+    let Some(existing) = cell.get() else { return Ok(None); };
+    let executor = existing.as_ref().map_err(|_| "ConPTY close executor initialization failed")?;
+    let shared = &executor.inner.shared;
+    let counters = &shared.counters;
+    Ok(Some(WindowsConPtyCloseMetrics {
+        capacity: shared.capacity,
+        admitted: counters.admitted.load(Ordering::Acquire),
+        retained_jobs: counters.retained_jobs.load(Ordering::Acquire),
+        pending: counters.pending.load(Ordering::Acquire),
+        active: counters.active.load(Ordering::Acquire),
+        quarantined: counters.quarantined.load(Ordering::Acquire),
+        workers: counters.workers.load(Ordering::Acquire),
+        running: counters.running.load(Ordering::Acquire),
+        completed: counters.completed.load(Ordering::Acquire),
+        panics: counters.panics.load(Ordering::Acquire),
+        overflow_retained: counters.overflow_retained.load(Ordering::Acquire),
+        peak_pending: counters.peak_pending.load(Ordering::Acquire),
+    }))
+}
+
 struct CloseJob {
     handle: HPCON,
     action: CloseAction,
@@ -755,7 +801,7 @@ mod tests {
         collections::HashSet,
         io,
         sync::{
-            Arc, Mutex,
+            Arc, Mutex, OnceLock,
             atomic::{AtomicU64, AtomicUsize, Ordering},
             mpsc,
         },
@@ -764,7 +810,24 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{ConPtyCloseExecutor, PseudoConsoleControl};
+    // The close-executor stress/fault tests and the Windows spawn/ConPTY
+    // lifecycle tests share process-wide close authority and worker resources.
+    // Keep every such test in the same named group: separate named/default
+    // groups can run concurrently under Cargo's default harness and deadlock a
+    // bounded close queue while another test waits for cleanup proof.
+
+    use super::{ConPtyCloseExecutor, PseudoConsoleControl, close_metrics_from_cell};
+
+    #[test]
+    fn close_metrics_inspection_does_not_initialize_an_executor() {
+        let cell = OnceLock::new();
+        assert_eq!(close_metrics_from_cell(&cell), Ok(None));
+        assert!(cell.get().is_none(), "inspection cannot start workers or reserve close authority");
+        assert!(cell.set(Err(Arc::from("retained initialization failure"))).is_ok());
+        assert_eq!(close_metrics_from_cell(&cell), Err("ConPTY close executor initialization failed"));
+        assert_eq!(cell.get().unwrap().as_ref().err().unwrap().as_ref(), "retained initialization failure",
+            "an observation cannot replace or retry failed initialization");
+    }
 
     fn wait_for(counter: &AtomicU64, expected: u64) {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -783,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(conpty_close_executor)]
+    #[serial(windows_process_runtime)]
     fn close_timeout_is_off_thread_bounded_and_single_owner() {
         let executor = ConPtyCloseExecutor::start_config(4, 1, None)
             .expect("test close executor should start");
@@ -832,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(conpty_close_executor)]
+    #[serial(windows_process_runtime)]
     fn ten_thousand_drop_handoffs_use_only_the_fixed_worker_set_and_bounded_queue() {
         const JOBS: usize = 10_000;
         const WORKERS: usize = 3;
@@ -916,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(conpty_close_executor)]
+    #[serial(windows_process_runtime)]
     fn saturated_close_authority_rejects_n_plus_one_before_creation() {
         let executor = ConPtyCloseExecutor::start_config(2, 1, None)
             .expect("bounded close executor should start");
@@ -979,6 +1042,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(windows_process_runtime)]
     fn partial_worker_start_failure_joins_started_workers_and_fails_before_admission() {
         let started = Instant::now();
         let error = ConPtyCloseExecutor::start_config(2, 2, Some(1))
@@ -993,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(conpty_close_executor)]
+    #[serial(windows_process_runtime)]
     fn close_action_panic_is_quarantined_without_losing_authority_or_worker() {
         let executor = ConPtyCloseExecutor::start_config(1, 1, None)
             .expect("panic test close executor should start");
@@ -1049,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(conpty_close_executor)]
+    #[serial(windows_process_runtime)]
     fn permanent_close_failure_is_sticky_and_fails_closed_at_constant_capacity() {
         let executor = ConPtyCloseExecutor::start_config(1, 1, None)
             .expect("failure test close executor should start");

@@ -17,7 +17,6 @@ macro_rules! grouped_tests {
 grouped_tests!(
     assets_e2e => "../assets_e2e.rs",
     builtin_asset_contract => "../builtin_asset_contract.rs",
-    extension_e2e => "../extension_e2e.rs",
     file_e2e => "../file_e2e.rs",
     office_e2e => "../office_e2e.rs",
     shell_e2e => "../shell_e2e.rs",
@@ -27,9 +26,7 @@ grouped_tests!(
 #[test]
 fn every_top_level_integration_test_is_registered() {
     use std::collections::BTreeSet;
-    use std::path::Path;
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest: toml::Value = toml::from_str(include_str!("../../Cargo.toml"))
         .expect("nomifun-app Cargo.toml must be valid TOML");
     let mut registered = manifest
@@ -43,7 +40,6 @@ fn every_top_level_integration_test_is_registered() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     registered.extend(GROUPED_TEST_FILES.iter().map(|file| (*file).to_owned()));
-
     let actual = std::fs::read_dir(manifest_dir.join("tests"))
         .expect("tests directory must be readable")
         .filter_map(Result::ok)

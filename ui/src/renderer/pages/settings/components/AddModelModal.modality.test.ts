@@ -24,6 +24,10 @@ describe('single-source model management integration', () => {
     expect(source.includes('useProviderAutoConfiguration({')).toBe(true);
     expect(source.includes('applyProviderAutoConfiguration')).toBe(true);
     expect(source.includes('<ProviderAutoConfigurationNotice')).toBe(true);
+    expect(source.includes('createModelDefinitionDraft(initialTask)')).toBe(true);
+    expect(source.includes('initialTask?: ModelTask')).toBe(true);
+    expect(source.includes("emptyCapabilityDraft('chat')")).toBe(false);
+    expect(source.includes('tasksSource: model.tasksSource')).toBe(true);
   });
 
   test('add-provider atomically sends provider, initial model, and named connections', () => {
@@ -46,6 +50,6 @@ describe('single-source model management integration', () => {
     expect(source.includes('<ModelAdvancedEditor')).toBe(true);
     expect(source.includes('ipcBridge.providerModel.save.invoke')).toBe(true);
     expect(source.includes('capabilities: row.capabilities.map(capabilityInputFromResponse)')).toBe(true);
-    expect(source.includes('updateModelCapabilities')).toBe(true);
+    expect(source.includes('updateModelDefinition')).toBe(true);
   });
 });

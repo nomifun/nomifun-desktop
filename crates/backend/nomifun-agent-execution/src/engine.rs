@@ -5,7 +5,7 @@
 //! partial lifecycle writes or invent a second execution state machine.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,9 +16,10 @@ use nomifun_api_types::{
     AgentExecutionTemplateParticipantInput, AnswerExecutionDecisionRequest,
     ConfigureExecutionStepRequest, ConversationResponse, CreateAgentExecutionRequest,
     CreateAgentExecutionTemplateRequest, CreateExecutionFromTemplateRequest, ExecutionModelPool,
-    ExecutionParticipant, ExecutionStep, PlannedExecution, PresetOverrides, PresetTarget,
+    ExecutionParticipant, ExecutionStep, ExecutionStepProfile, PlannedExecution,
+    PlannedExecutionStep,
     ReassignExecutionStepRequest, RenameAgentExecutionRequest, ReplanAgentExecutionRequest,
-    ResolvedPresetSnapshot, RetryExecutionStepRequest,
+    AgentResolvedSnapshot, RetryExecutionStepRequest,
     SteerExecutionStepRequest, UpdateExecutionStepRequest, VersionedAgentExecutionCommand,
     UpdateAgentExecutionTemplateRequest, WorkspaceEntry,
 };
@@ -27,8 +28,9 @@ use nomifun_common::{
     AgentExecutionTemplateId, AgentId, AppError, ConversationId, DecisionPolicy, EntityId,
     ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
-    MAX_AGENT_EXECUTION_STEPS, NOMI_AGENT_ID, ParticipantAssignmentSource, PlanGate,
-    ProviderId, generate_id, now_ms,
+    MAX_AGENT_EXECUTION_STEPS, NOMI_AGENT_ID, ParticipantAssignmentSource, ProviderId,
+    ParallelDelegationRequest, RequirementId, StepFailurePolicy,
+    generate_id, now_ms,
 };
 use nomifun_db::{
     AdoptAgentExecutionStepOutputParams, AppendAgentExecutionStepsFromAttemptParams,
@@ -39,21 +41,26 @@ use nomifun_db::{
     IAgentExecutionTemplateRepository, IProviderRepository, NewAgentExecutionEvent,
     NewAgentExecutionParticipant, NewAgentExecutionTemplateParticipant,
     NewAgentExecutionStep, NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
-    RetryAgentExecutionStep, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
+    RetryAgentExecutionStep, AgentExecutionActiveTurnGuard, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
     UpdateAgentExecutionTemplateParams,
 };
-use nomifun_preset::PresetService;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::attempt_runner::AttemptRunner;
-use crate::artifact_contract::validate_required_artifacts;
+use crate::attempt_runner::{
+    AgentExecutionSessionPort, AttemptRunner, MISSING_DELIVERY_RECEIPT_CODE,
+};
+use crate::automation::{
+    AgentExecutionAutomationPort, AutomationExecutionReceipt, AutomationExecutionRequest,
+    AutomationExecutionSource,
+};
 use crate::conversation_effect::AttemptConversationEffects;
 use crate::domain_mapper;
 use crate::event_publisher::{
     AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase,
 };
+use crate::lifecycle::AgentExecutionLifecycle;
 use crate::participant_resolver::ParticipantResolver;
 use crate::participant_router::score_participant;
 use crate::plan_materializer::{self, MaterializedPlan};
@@ -65,6 +72,7 @@ use crate::participant_router::rank_participants;
 use crate::scheduler::{
     ConversationEffects, DEFAULT_ATTEMPT_TIMEOUT, DEFAULT_MAX_PARALLEL, ExecutionScheduler,
     ExecutionSchedulerDeps, terminal_transition_payload,
+    agent_outcome_can_complete,
 };
 
 const PLAN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -127,6 +135,23 @@ enum InitialPlanningCommand {
         supplemental_context: Option<serde_json::Value>,
     },
     Explicit { plan: PlannedExecution },
+    Automation {
+        source: AutomationExecutionSource,
+        plan: PlannedExecution,
+    },
+}
+
+pub(crate) fn is_automation_initial_plan(input: &str) -> Result<bool, AppError> {
+    let command: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+        AppError::Internal(format!("invalid persisted initial planning input: {error}"))
+    })?;
+    match command.get("mode").and_then(serde_json::Value::as_str) {
+        Some("automation") => Ok(true),
+        Some("automatic" | "explicit") => Ok(false),
+        _ => Err(AppError::Internal(
+            "persisted initial planning input has an unknown mode".to_owned(),
+        )),
+    }
 }
 
 pub(crate) struct AgentExecutionEngineDeps {
@@ -136,13 +161,14 @@ pub(crate) struct AgentExecutionEngineDeps {
     pub(crate) provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
     pub(crate) provider_model_capability_repository:
         Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
-    pub(crate) preset_service: Arc<PresetService>,
     pub(crate) planner: Arc<dyn PlanProducer>,
     pub(crate) attempt_runner: Arc<dyn AttemptRunner>,
     pub(crate) publisher: AgentExecutionEventPublisher,
     pub(crate) data_dir: PathBuf,
     pub(crate) conversation_effects: Arc<dyn ConversationEffects>,
     pub(crate) attempt_timeout: Duration,
+    pub(crate) lifecycle: AgentExecutionLifecycle,
+    pub(crate) session: Arc<dyn AgentExecutionSessionPort>,
 }
 
 impl AgentExecutionEngineDeps {
@@ -155,12 +181,13 @@ impl AgentExecutionEngineDeps {
         provider_model_capability_repository: Arc<
             dyn nomifun_db::IProviderModelCapabilityRepository,
         >,
-        preset_service: Arc<PresetService>,
         planner: Arc<dyn PlanProducer>,
         attempt_runner: Arc<dyn AttemptRunner>,
         conversation_effects: Arc<dyn ConversationEffects>,
         publisher: AgentExecutionEventPublisher,
         data_dir: PathBuf,
+        lifecycle: AgentExecutionLifecycle,
+        session: Arc<dyn AgentExecutionSessionPort>,
     ) -> Self {
         Self {
             repository,
@@ -168,13 +195,14 @@ impl AgentExecutionEngineDeps {
             provider_repository,
             provider_model_repository,
             provider_model_capability_repository,
-            preset_service,
             planner,
             attempt_runner,
             publisher,
             data_dir,
             conversation_effects,
             attempt_timeout: DEFAULT_ATTEMPT_TIMEOUT,
+            lifecycle,
+            session,
         }
     }
 }
@@ -183,11 +211,14 @@ impl AgentExecutionEngineDeps {
 pub struct AgentExecutionEngine {
     repository: Arc<dyn IAgentExecutionRepository>,
     template_repository: Arc<dyn IAgentExecutionTemplateRepository>,
-    preset_service: Arc<PresetService>,
     resolver: ParticipantResolver,
     planner: Arc<dyn PlanProducer>,
     publisher: AgentExecutionEventPublisher,
     scheduler: ExecutionScheduler,
+    lifecycle: AgentExecutionLifecycle,
+    session: Arc<dyn AgentExecutionSessionPort>,
+    managed_workspace_root: PathBuf,
+    automation_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AgentExecutionEngine {
@@ -196,8 +227,8 @@ impl AgentExecutionEngine {
             deps.provider_repository.clone(),
             deps.provider_model_repository.clone(),
             deps.provider_model_capability_repository.clone(),
-            deps.preset_service.clone(),
         );
+        let managed_workspace_root = deps.data_dir.join("conversations");
         let mut scheduler_deps = ExecutionSchedulerDeps::new(
             deps.repository.clone(),
             deps.attempt_runner,
@@ -206,15 +237,42 @@ impl AgentExecutionEngine {
             deps.data_dir,
         );
         scheduler_deps.attempt_timeout = deps.attempt_timeout;
+        scheduler_deps.lifecycle = deps.lifecycle.clone();
         Self {
             repository: deps.repository,
             template_repository: deps.template_repository,
-            preset_service: deps.preset_service,
             resolver,
             planner: deps.planner,
             publisher: deps.publisher,
             scheduler: ExecutionScheduler::new(scheduler_deps),
+            lifecycle: deps.lifecycle,
+            session: deps.session,
+            managed_workspace_root,
+            automation_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Stop and join every background task owned by this engine composition.
+    pub async fn shutdown(&self) -> Result<(), AppError> {
+        self.scheduler.shutdown().await
+    }
+
+    /// Start boot recovery under the same lifecycle tracker as scheduler and
+    /// outbox tasks.
+    pub fn spawn_recovery(self: &Arc<Self>) {
+        if self.lifecycle.is_cancelled() {
+            return;
+        }
+        let engine = Arc::clone(self);
+        self.lifecycle.clone().spawn(async move {
+            let result = tokio::select! {
+                _ = engine.lifecycle.cancelled() => return,
+                result = engine.recover() => result,
+            };
+            if let Err(error) = result {
+                tracing::error!(%error, "Agent Execution recovery failed");
+            }
+        });
     }
 
     pub async fn create(
@@ -226,10 +284,29 @@ impl AgentExecutionEngine {
         self.create_inner(owner_id, actor, request, None).await
     }
 
+    /// Authenticated HTTP creation entrypoint. A declared lead Conversation is
+    /// authority, not presentation metadata: resolve it through the Session
+    /// owner and freeze its exact Agent snapshot into the lead Participant.
+    /// Calling `create` directly would manufacture a snapshot-less Participant
+    /// whose first Attempt cannot open a canonical AgentSession.
+    pub async fn create_from_http(
+        &self,
+        owner_id: &str,
+        actor: &AgentExecutionActor,
+        request: CreateAgentExecutionRequest,
+    ) -> Result<AgentExecution, AppError> {
+        let Some(conversation_id) = request.lead_conversation_id.clone() else {
+            return self.create(owner_id, actor, request).await;
+        };
+        let conversation = self.session.get(owner_id, &conversation_id).await?;
+        self.create_from_conversation(owner_id, actor, &conversation, request)
+            .await
+    }
+
     /// Create an execution from an authenticated calling Conversation.
     ///
     /// The Conversation remains the interaction boundary while its frozen
-    /// preset is copied into the immutable lead Participant. This keeps one
+    /// Agent snapshot is copied into the immutable lead Participant. This keeps one
     /// execution state machine without silently dropping the caller's rules,
     /// skills or knowledge bindings when work is delegated.
     pub async fn create_from_conversation(
@@ -248,21 +325,21 @@ impl AgentExecutionEngine {
             owner_id,
             actor,
             request,
-            conversation.preset_snapshot.as_ref(),
+            conversation.agent_snapshot.as_ref(),
         )
         .await
     }
 
     /// Create an execution for an authenticated Agent identity that does not
     /// have a Conversation boundary (for example a Remote installation token).
-    /// The optional frozen preset enriches the immutable lead Participant; no
+    /// The optional frozen Agent snapshot supplies the immutable lead Participant; no
     /// synthetic Conversation is created and terminal reporting therefore
     /// cannot trigger an extra model turn.
     pub async fn create_for_agent(
         &self,
         owner_id: &str,
         actor: &AgentExecutionActor,
-        lead_preset: Option<&ResolvedPresetSnapshot>,
+        lead_snapshot: Option<&AgentResolvedSnapshot>,
         request: CreateAgentExecutionRequest,
     ) -> Result<AgentExecution, AppError> {
         if request.lead_conversation_id.is_some() {
@@ -271,7 +348,7 @@ impl AgentExecutionEngine {
                     .to_owned(),
             ));
         }
-        self.create_inner(owner_id, actor, request, lead_preset).await
+        self.create_inner(owner_id, actor, request, lead_snapshot).await
     }
 
     /// Instantiate reusable authoring input into one independent execution.
@@ -289,8 +366,34 @@ impl AgentExecutionEngine {
             .await
     }
 
+    /// HTTP/template counterpart of [`Self::create_from_http`]. Templates add
+    /// reusable participants, while the authenticated lead Session still owns
+    /// the immutable caller snapshot and Conversation link.
+    pub async fn create_from_template_http(
+        &self,
+        owner_id: &str,
+        actor: &AgentExecutionActor,
+        template_id: &str,
+        request: CreateExecutionFromTemplateRequest,
+    ) -> Result<AgentExecution, AppError> {
+        let Some(conversation_id) = request.lead_conversation_id.clone() else {
+            return self
+                .create_from_template(owner_id, actor, template_id, request)
+                .await;
+        };
+        let conversation = self.session.get(owner_id, &conversation_id).await?;
+        self.create_from_template_for_conversation(
+            owner_id,
+            actor,
+            &conversation,
+            template_id,
+            request,
+        )
+        .await
+    }
+
     /// Conversation-authenticated variant used by `nomi_delegate`. The
-    /// caller's frozen preset is retained as the lead snapshot exactly as it is
+    /// caller's frozen Agent snapshot is retained exactly as it is
     /// for a non-template execution.
     pub async fn create_from_template_for_conversation(
         &self,
@@ -310,7 +413,7 @@ impl AgentExecutionEngine {
             actor,
             template_id,
             request,
-            conversation.preset_snapshot.as_ref(),
+            conversation.agent_snapshot.as_ref(),
         )
         .await
     }
@@ -321,7 +424,7 @@ impl AgentExecutionEngine {
         actor: &AgentExecutionActor,
         template_id: &str,
         request: CreateExecutionFromTemplateRequest,
-        lead_preset: Option<&ResolvedPresetSnapshot>,
+        lead_snapshot: Option<&AgentResolvedSnapshot>,
     ) -> Result<AgentExecution, AppError> {
         let template_id = canonical_id::<AgentExecutionTemplateId>("template_id", template_id)?;
         let rows = self
@@ -346,8 +449,8 @@ impl AgentExecutionEngine {
             .map(|raw| decode_json(raw, "template context"))
             .transpose()?;
         let mut participants = runtime_participants_from_template(&rows.participants)?;
-        if let Some(snapshot) = lead_preset {
-            ParticipantResolver::prepend_frozen_lead(
+        if let Some(snapshot) = lead_snapshot {
+            ParticipantResolver::prepend_frozen_snapshot(
                 &mut participants,
                 snapshot,
                 request.lead_model.as_ref(),
@@ -363,7 +466,6 @@ impl AgentExecutionEngine {
             // only because ordinary creation accepts unresolved model input.
             model_pool: ExecutionModelPool::Automatic,
             delegation_policy: request.delegation_policy,
-            plan_gate: request.plan_gate,
             adaptation_policy: request.adaptation_policy,
             decision_policy: request.decision_policy,
             max_parallel,
@@ -377,6 +479,7 @@ impl AgentExecutionEngine {
             execution_request,
             participants,
             context,
+            None,
         )
         .await
     }
@@ -386,20 +489,20 @@ impl AgentExecutionEngine {
         owner_id: &str,
         actor: &AgentExecutionActor,
         request: CreateAgentExecutionRequest,
-        lead_preset: Option<&ResolvedPresetSnapshot>,
+        lead_snapshot: Option<&AgentResolvedSnapshot>,
     ) -> Result<AgentExecution, AppError> {
         let mut participants = self
             .resolver
             .resolve(&request.model_pool, request.lead_model.as_ref())
             .await?;
-        if let Some(snapshot) = lead_preset {
-            ParticipantResolver::prepend_frozen_lead(
+        if let Some(snapshot) = lead_snapshot {
+            ParticipantResolver::prepend_frozen_snapshot(
                 &mut participants,
                 snapshot,
                 request.lead_model.as_ref(),
             )?;
         }
-        self.persist_execution(owner_id, actor, request, participants, None)
+        self.persist_execution(owner_id, actor, request, participants, None, None)
             .await
     }
 
@@ -410,6 +513,7 @@ impl AgentExecutionEngine {
         request: CreateAgentExecutionRequest,
         participants: Vec<NewAgentExecutionParticipant>,
         supplemental_context: Option<serde_json::Value>,
+        automation_source: Option<AutomationExecutionSource>,
     ) -> Result<AgentExecution, AppError> {
         if let Some(conversation_id) = request.lead_conversation_id.as_deref() {
             canonical_id::<ConversationId>("lead_conversation_id", conversation_id)?;
@@ -426,18 +530,29 @@ impl AgentExecutionEngine {
                 "explicit execution steps must not be empty".to_owned(),
             ));
         }
-        let initial_plan = match request.steps {
-            Some(steps) => InitialPlanningCommand::Explicit {
+        let initial_plan = match (request.steps, automation_source) {
+            (Some(steps), Some(source)) => InitialPlanningCommand::Automation {
+                source,
                 plan: PlannedExecution { steps },
             },
-            None => InitialPlanningCommand::Automatic {
+            (Some(steps), None) => InitialPlanningCommand::Explicit {
+                plan: PlannedExecution { steps },
+            },
+            (None, Some(_)) => {
+                return Err(AppError::Internal(
+                    "automation execution requires one explicit durable plan".to_owned(),
+                ));
+            }
+            (None, None) => InitialPlanningCommand::Automatic {
                 supplemental_context,
             },
         };
         // Do not create an aggregate that can never leave Planning. The
         // original declarative plan remains the persisted recovery input;
         // generated step IDs are intentionally materialized only at commit.
-        if let InitialPlanningCommand::Explicit { plan } = &initial_plan {
+        if let InitialPlanningCommand::Explicit { plan }
+        | InitialPlanningCommand::Automation { plan, .. } = &initial_plan
+        {
             let resolved = participants_from_new("preflight", 0, &participants)?;
             plan_materializer::materialize(plan.clone(), &resolved)?;
         }
@@ -454,7 +569,6 @@ impl AgentExecutionEngine {
                 &CreateAgentExecutionParams {
                     goal,
                     status: AgentExecutionStatus::Planning,
-                    plan_gate: request.plan_gate,
                     adaptation_policy: request.adaptation_policy,
                     decision_policy: request.decision_policy,
                     delegation_policy: request.delegation_policy,
@@ -522,9 +636,7 @@ impl AgentExecutionEngine {
         if let Some(max_parallel) = request.max_parallel {
             validate_max_parallel(Some(max_parallel))?;
         }
-        let participants = self
-            .resolve_template_participant_inputs(request.participants)
-            .await?;
+        let participants = self.resolve_template_participant_inputs(request.participants)?;
         let rows = self
             .template_repository
             .create_template(
@@ -557,8 +669,7 @@ impl AgentExecutionEngine {
         }
         let participants = match request.participants {
             Some(participants) => Some(
-                self.resolve_template_participant_inputs(participants)
-                    .await?,
+                self.resolve_template_participant_inputs(participants)?,
             ),
             None => None,
         };
@@ -612,7 +723,7 @@ impl AgentExecutionEngine {
         }
     }
 
-    async fn resolve_template_participant_inputs(
+    fn resolve_template_participant_inputs(
         &self,
         inputs: Vec<AgentExecutionTemplateParticipantInput>,
     ) -> Result<Vec<NewAgentExecutionTemplateParticipant>, AppError> {
@@ -624,8 +735,7 @@ impl AgentExecutionEngine {
         let mut participants = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.into_iter().enumerate() {
             participants.push(
-                self.resolve_template_participant_input(input, index as i64)
-                .await?,
+                self.resolve_template_participant_input(input, index as i64)?,
             );
         }
         let models: HashSet<_> = participants
@@ -645,7 +755,7 @@ impl AgentExecutionEngine {
         Ok(participants)
     }
 
-    async fn resolve_template_participant_input(
+    fn resolve_template_participant_input(
         &self,
         input: AgentExecutionTemplateParticipantInput,
         default_sort_order: i64,
@@ -653,8 +763,7 @@ impl AgentExecutionEngine {
         let AgentExecutionTemplateParticipantInput {
             source_agent_id,
             preset_id,
-            preset_snapshot,
-            preset_overrides,
+            agent_snapshot,
             provider_id,
             model,
             role,
@@ -666,46 +775,31 @@ impl AgentExecutionEngine {
             disabled_builtin_skills,
             sort_order,
         } = input;
-        let snapshot = match (preset_snapshot, preset_id, preset_overrides) {
-            (Some(snapshot), explicit_id, None) => {
-                if explicit_id
+        let snapshot = match agent_snapshot {
+            Some(snapshot) => {
+                if preset_id
                     .as_deref()
                     .is_some_and(|id| id != snapshot.preset_id)
                 {
                     return Err(AppError::BadRequest(
-                        "template participant preset_id does not match preset_snapshot"
+                        "template participant preset_id does not match the frozen Agent snapshot"
                             .to_owned(),
                     ));
                 }
-                validate_template_snapshot(&snapshot)?;
+                validate_frozen_agent_snapshot(&snapshot)?;
                 Some(snapshot)
             }
-            (Some(_), _, Some(_)) => {
+            None if preset_id.is_some() => {
                 return Err(AppError::BadRequest(
-                    "preset_overrides cannot be combined with a frozen preset_snapshot"
+                    "template participants must provide a frozen Agent snapshot; preset_id is not resolved by AgentExecution"
                         .to_owned(),
                 ));
             }
-            (None, Some(preset_id), overrides) => Some(
-                self.preset_service
-                    .resolve(
-                        &non_empty("preset_id", preset_id)?,
-                        PresetTarget::ExecutionStep,
-                        None,
-                        overrides.unwrap_or_else(PresetOverrides::default),
-                    )
-                    .await?,
-            ),
-            (None, None, Some(_)) => {
-                return Err(AppError::BadRequest(
-                    "preset_overrides require preset_id".to_owned(),
-                ));
-            }
-            (None, None, None) => None,
+            None => None,
         };
         let snapshot_model = snapshot.as_ref().and_then(|snapshot| {
             let model = snapshot.resolved_model.as_ref()?;
-            Some((model.provider_id.clone()?, model.model.clone()))
+            Some((model.provider_id.clone(), model.model.clone()))
         });
         let (provider_id, model) = match (provider_id, model, snapshot_model) {
             (Some(provider_id), Some(model), _) => (
@@ -730,9 +824,9 @@ impl AgentExecutionEngine {
         };
         let preset_id = snapshot.as_ref().map(|snapshot| snapshot.preset_id.clone());
         let preset_revision = snapshot.as_ref().map(|snapshot| snapshot.preset_revision);
-        let preset_snapshot = snapshot
+        let agent_snapshot = snapshot
             .as_ref()
-            .map(|snapshot| encode_json(snapshot, "template preset snapshot"))
+            .map(|snapshot| encode_json(snapshot, "template Agent snapshot"))
             .transpose()?;
         let source_agent_id = source_agent_id
             .or_else(|| {
@@ -780,7 +874,7 @@ impl AgentExecutionEngine {
             source_agent_id,
             preset_id,
             preset_revision,
-            preset_snapshot,
+            agent_snapshot: agent_snapshot,
             provider_id,
             model,
             role,
@@ -827,7 +921,9 @@ impl AgentExecutionEngine {
             // Attempt transcripts remain execution-owned audit records after
             // settlement. They must never fall through and become the lead of
             // a new aggregate; historical routing also keeps replay reachable.
-            .filter(|link| link.relation == "attempt")
+            .filter(|link| {
+                link.relation == "attempt" || (link.relation == "automation" && link.active)
+            })
             .map(|link| link.execution_id);
         let execution = links.next();
         if links.next().is_some() {
@@ -880,7 +976,7 @@ impl AgentExecutionEngine {
             .await?
             .into_iter()
             .filter(|link| {
-                link.relation == "attempt"
+                matches!(link.relation.as_str(), "attempt" | "automation")
                     && link.attempt_id.as_deref() == Some(actor_attempt_id.as_str())
             });
         let link = links.next().ok_or_else(|| {
@@ -1056,6 +1152,21 @@ impl AgentExecutionEngine {
             .iter()
             .filter(|link| link.execution_id == execution_id)
             .collect::<Vec<_>>();
+        let automation_links = target_links
+            .iter()
+            .filter(|link| link.relation == "automation")
+            .collect::<Vec<_>>();
+        if automation_links.len() > 1 {
+            return Err(AppError::Conflict(
+                "Agent caller has multiple active AutoWork Attempt relations".to_owned(),
+            ));
+        }
+        if let Some(link) = automation_links.first() {
+            let attempt_id = link.attempt_id.clone().ok_or_else(|| {
+                AppError::Internal("active AutoWork Attempt link has no attempt id".to_owned())
+            })?;
+            return Ok(AgentExecutionActor::agent(conversation_id, Some(attempt_id)));
+        }
         let link = target_links
             .first()
             .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
@@ -1111,12 +1222,28 @@ impl AgentExecutionEngine {
         conversation_id: &str,
     ) -> Result<AgentExecutionActor, AppError> {
         canonical_id::<ConversationId>("conversation_id", conversation_id)?;
-        let mut attempts = self
+        let links = self
             .repository
             .resolve_conversation_link(owner_id, conversation_id)
-            .await?
-            .into_iter()
-            .filter(|link| link.relation == "attempt");
+            .await?;
+        let active_automation = links
+            .iter()
+            .filter(|link| link.active && link.relation == "automation")
+            .collect::<Vec<_>>();
+        if active_automation.len() > 1 {
+            return Err(AppError::Conflict(
+                "Agent caller has multiple active AutoWork Attempt relations".to_owned(),
+            ));
+        }
+        if let Some(link) = active_automation.first() {
+            return Ok(AgentExecutionActor::agent(
+                conversation_id,
+                Some(link.attempt_id.clone().ok_or_else(|| {
+                    AppError::Internal("AutoWork Attempt link has no attempt id".to_owned())
+                })?),
+            ));
+        }
+        let mut attempts = links.into_iter().filter(|link| link.relation == "attempt");
         let attempt_id = match attempts.next() {
             Some(link) => Some(link.attempt_id.ok_or_else(|| {
                 AppError::Internal("attempt link has no attempt id".to_owned())
@@ -1204,41 +1331,6 @@ impl AgentExecutionEngine {
         nomifun_file::list_workspace_level(std::path::Path::new(root), path, search)
     }
 
-    pub async fn approve(
-        &self,
-        owner_id: &str,
-        actor: &AgentExecutionActor,
-        execution_id: &str,
-        command: VersionedAgentExecutionCommand,
-    ) -> Result<AgentExecution, AppError> {
-        let current = self.require_execution(owner_id, execution_id).await?;
-        require_status(current.status, &[AgentExecutionStatus::AwaitingApproval])?;
-        let row = self
-            .repository
-            .update_execution(
-                owner_id,
-                execution_id,
-                command.expected_version,
-                None,
-                &UpdateAgentExecutionParams {
-                    status: Some(AgentExecutionStatus::Running),
-                    ..Default::default()
-                },
-                &actor_event(
-                    actor,
-                    AgentExecutionEventKind::StatusChanged,
-                    None,
-                    None,
-                    json!({"status":"running","reason":"plan_approved"}),
-                ),
-            )
-            .await?;
-        self.publish().await;
-        self.scheduler
-            .start(owner_id.to_owned(), execution_id.to_owned());
-        domain_mapper::execution(row, current.lead_conversation_id)
-    }
-
     pub async fn pause(
         &self,
         owner_id: &str,
@@ -1246,6 +1338,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<AgentExecution, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "pause")
+            .await?;
         let current = self.detail(owner_id, execution_id).await?;
         require_status(
             current.execution.status,
@@ -1254,12 +1348,21 @@ impl AgentExecutionEngine {
                 AgentExecutionStatus::WaitingInput,
             ],
         )?;
+        let mut recovered_outputs = Vec::new();
+        for attempt in current.attempts.iter().filter(|attempt| {
+            attempt.status == ExecutionAttemptStatus::Running
+        }) {
+            if let Some(output) = self.scheduler.recover_attempt_output(owner_id, attempt).await? {
+                recovered_outputs.push(output);
+            }
+        }
         let row = self
             .repository
             .pause_execution(
                 owner_id,
                 execution_id,
                 command.expected_version,
+                &recovered_outputs,
                 &actor_event(
                     actor,
                     AgentExecutionEventKind::StatusChanged,
@@ -1271,7 +1374,7 @@ impl AgentExecutionEngine {
             .await?;
         self.scheduler.stop(execution_id);
         self.scheduler
-            .cancel_conversations(owner_id, &current)
+            .reconcile_conversation_cleanup(Some(execution_id))
             .await;
         self.publish().await;
         domain_mapper::execution(row, current.execution.lead_conversation_id)
@@ -1284,6 +1387,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<AgentExecution, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "resume")
+            .await?;
         let current = self.detail(owner_id, execution_id).await?;
         require_status(current.execution.status, &[AgentExecutionStatus::Paused])?;
         if current.attempts.iter().any(|attempt| {
@@ -1341,6 +1446,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "cancel")
+            .await?;
         let before = self.detail(owner_id, execution_id).await?;
         if before.execution.status.is_terminal() {
             return Err(AppError::Conflict(
@@ -1363,7 +1470,7 @@ impl AgentExecutionEngine {
             )
             .await?;
         self.scheduler.stop(execution_id);
-        self.scheduler.cancel_conversations(owner_id, &before).await;
+        self.scheduler.reconcile_conversation_cleanup(Some(execution_id)).await;
         // An explicit cancel is already part of the caller's synchronous turn.
         // Publishing its durable state is required, but projecting another
         // assistant result into the lead Conversation would duplicate the
@@ -1381,6 +1488,23 @@ impl AgentExecutionEngine {
         command: VersionedAgentExecutionCommand,
     ) -> Result<(), AppError> {
         let before = self.detail(owner_id, execution_id).await?;
+        let row = self
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let initial: InitialPlanningCommand = serde_json::from_str(&row.initial_plan_input)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "invalid persisted initial planning input for {execution_id}: {error}"
+                ))
+            })?;
+        if matches!(initial, InitialPlanningCommand::Automation { .. }) {
+            return Err(AppError::Conflict(
+                "AutoWork AgentExecution is durable Requirement audit evidence and cannot be deleted"
+                    .to_owned(),
+            ));
+        }
         if before.execution.version != command.expected_version {
             return Err(AppError::Conflict(
                 "stale Agent Execution version".to_owned(),
@@ -1408,7 +1532,7 @@ impl AgentExecutionEngine {
         }
         self.scheduler.stop(execution_id);
         self.scheduler
-            .cancel_conversations(owner_id, &before)
+            .reconcile_conversation_cleanup(Some(execution_id))
             .await;
         self.publish().await;
         Ok(())
@@ -1421,6 +1545,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: RenameAgentExecutionRequest,
     ) -> Result<AgentExecution, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "rename")
+            .await?;
         let goal = non_empty("goal", request.goal)?;
         let current = self.require_execution(owner_id, execution_id).await?;
         let row = self
@@ -1454,6 +1580,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: ReplanAgentExecutionRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "replan")
+            .await?;
         let before = self.detail(owner_id, execution_id).await?;
         if before.execution.status.is_terminal() {
             return Err(AppError::Conflict(
@@ -1485,8 +1613,6 @@ impl AgentExecutionEngine {
             .produce_plan(owner_id, execution_id, &goal, &planning_participants)
             .await?;
         let materialized = plan_materializer::materialize(plan, &planning_participants)?;
-        let target_gate = request.plan_gate.unwrap_or(before.execution.plan_gate);
-        let status = planned_status(target_gate);
         let retire_participant_ids = if new_participants.is_empty() {
             Vec::new()
         } else {
@@ -1505,7 +1631,6 @@ impl AgentExecutionEngine {
                 request.expected_version,
                 &ReconcileAgentExecutionPlanParams {
                     goal: goal_update,
-                    plan_gate: request.plan_gate,
                     adaptation_policy: request.adaptation_policy,
                     decision_policy: request.decision_policy,
                     delegation_policy: request.delegation_policy,
@@ -1514,7 +1639,7 @@ impl AgentExecutionEngine {
                     retire_participant_ids,
                     new_steps: materialized.steps,
                     new_dependencies: materialized.dependencies,
-                    execution_status: status,
+                    execution_status: AgentExecutionStatus::Running,
                 },
                 &actor_event(
                     actor,
@@ -1526,13 +1651,11 @@ impl AgentExecutionEngine {
             )
             .await?;
         self.scheduler.stop(execution_id);
-        self.scheduler.cancel_conversations(owner_id, &before).await;
+        self.scheduler.reconcile_conversation_cleanup(Some(execution_id)).await;
         self.publish().await;
         let detail = domain_mapper::detail(rows)?;
-        if detail.execution.status == AgentExecutionStatus::Running {
-            self.scheduler
-                .start(owner_id.to_owned(), execution_id.to_owned());
-        }
+        self.scheduler
+            .start(owner_id.to_owned(), execution_id.to_owned());
         Ok(detail)
     }
 
@@ -1543,16 +1666,16 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: AdjustAgentExecutionRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "adjust")
+            .await?;
         let intent = non_empty("intent", request.intent)?;
         let before = self.detail(owner_id, execution_id).await?;
         if !matches!(
             before.execution.status,
-            AgentExecutionStatus::Running
-                | AgentExecutionStatus::Paused
-                | AgentExecutionStatus::AwaitingApproval
+            AgentExecutionStatus::Running | AgentExecutionStatus::Paused
         ) {
             return Err(AppError::Conflict(
-                "only a running, paused, or approval-gated execution can be adjusted".to_owned(),
+                "only a running or paused execution can be adjusted".to_owned(),
             ));
         }
         let adjusted = self
@@ -1563,16 +1686,9 @@ impl AgentExecutionEngine {
         validate_final_step_count(keep_step_ids.len(), materialized.steps.len())?;
         let status = match before.execution.status {
             AgentExecutionStatus::Paused => AgentExecutionStatus::Paused,
-            AgentExecutionStatus::AwaitingApproval => AgentExecutionStatus::AwaitingApproval,
             _ => AgentExecutionStatus::Running,
         };
-        let superseded: HashSet<String> = before
-            .steps
-            .iter()
-            .filter(|step| step.superseded_in_revision.is_none())
-            .map(|step| step.step_id.clone())
-            .filter(|id| !keep_step_ids.contains(id))
-            .collect();
+
         let rows = self
             .repository
             .reconcile_plan(
@@ -1581,7 +1697,6 @@ impl AgentExecutionEngine {
                 request.expected_version,
                 &ReconcileAgentExecutionPlanParams {
                     goal: None,
-                    plan_gate: None,
                     adaptation_policy: None,
                     decision_policy: None,
                     delegation_policy: None,
@@ -1603,7 +1718,7 @@ impl AgentExecutionEngine {
             .await?;
         self.scheduler.stop(execution_id);
         self.scheduler
-            .cancel_conversations_for_steps(owner_id, &before, &superseded)
+            .reconcile_conversation_cleanup(Some(execution_id))
             .await;
         self.publish().await;
         let detail = domain_mapper::detail(rows)?;
@@ -1621,6 +1736,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: AddExecutionStepsRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "add steps to")
+            .await?;
         if request.steps.is_empty() {
             return Err(AppError::BadRequest("steps must not be empty".to_owned()));
         }
@@ -1643,7 +1760,7 @@ impl AgentExecutionEngine {
         }
         if before.execution.status.is_terminal() {
             self.scheduler
-                .ensure_terminal_projection_delivered(owner_id, &before)
+                .reconcile_lead_report(owner_id, &before)
                 .await?;
             before = self.detail(owner_id, execution_id).await?;
         }
@@ -1698,6 +1815,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: UpdateExecutionStepRequest,
     ) -> Result<ExecutionStep, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "update")
+            .await?;
         if request.title.is_none() && request.spec.is_none() {
             return Err(AppError::BadRequest("empty step update".to_owned()));
         }
@@ -1752,6 +1871,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: ReassignExecutionStepRequest,
     ) -> Result<ExecutionStep, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "reassign")
+            .await?;
         canonical_uuidv7("participant_id", &request.participant_id)?;
         let detail = self.detail(owner_id, execution_id).await?;
         let step = require_pending_agent_step(&detail, step_id)?;
@@ -1816,6 +1937,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: ConfigureExecutionStepRequest,
     ) -> Result<ExecutionStep, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "configure")
+            .await?;
         if request.model.is_none() && request.preset_prompt.is_none() {
             return Err(AppError::BadRequest("empty step configuration".to_owned()));
         }
@@ -1959,7 +2082,6 @@ impl AgentExecutionEngine {
                 expected_execution_version,
                 &ReconcileAgentExecutionPlanParams {
                     goal: None,
-                    plan_gate: None,
                     adaptation_policy: None,
                     decision_policy: None,
                     delegation_policy: None,
@@ -2008,6 +2130,8 @@ impl AgentExecutionEngine {
         if detail.execution.version != request.expected_execution_version {
             return Err(AppError::Conflict("stale Agent Execution version".to_owned()));
         }
+        self.reject_automation_manual_recovery(owner_id, execution_id, "retry")
+            .await?;
         if detail.execution.status == AgentExecutionStatus::Cancelled {
             return Err(AppError::Conflict(
                 "a cancelled Agent Execution cannot be reopened".to_owned(),
@@ -2015,7 +2139,7 @@ impl AgentExecutionEngine {
         }
         if detail.execution.status.is_terminal() {
             self.scheduler
-                .ensure_terminal_projection_delivered(owner_id, &detail)
+                .reconcile_lead_report(owner_id, &detail)
                 .await?;
             detail = self.detail(owner_id, execution_id).await?;
         }
@@ -2061,6 +2185,8 @@ impl AgentExecutionEngine {
         if detail.execution.version != request.expected_execution_version {
             return Err(AppError::Conflict("stale Agent Execution version".to_owned()));
         }
+        self.reject_automation_manual_recovery(owner_id, execution_id, "adopt output for")
+            .await?;
         if detail.execution.status == AgentExecutionStatus::Cancelled {
             return Err(AppError::Conflict(
                 "a cancelled Agent Execution cannot be reopened".to_owned(),
@@ -2068,7 +2194,7 @@ impl AgentExecutionEngine {
         }
         if detail.execution.status.is_terminal() {
             self.scheduler
-                .ensure_terminal_projection_delivered(owner_id, &detail)
+                .reconcile_lead_report(owner_id, &detail)
                 .await?;
             detail = self.detail(owner_id, execution_id).await?;
         }
@@ -2084,21 +2210,16 @@ impl AgentExecutionEngine {
             .max_by_key(|attempt| attempt.attempt_no)
             .and_then(|attempt| attempt.conversation_id.clone())
             .ok_or_else(|| AppError::BadRequest("step has no Agent conversation to adopt".to_owned()))?;
-        let output = self
+        let outcome = self
             .scheduler
-            .read_attempt_output(owner_id, &conversation_id)
-            .await
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| AppError::BadRequest("Agent conversation has no final output".to_owned()))?;
-        let output_files = self
-            .scheduler
-            .read_attempt_output_files(owner_id, &conversation_id)
-            .await;
-        validate_required_artifacts(&step.spec, &output_files).map_err(|error| {
-            AppError::BadRequest(format!(
-                "Agent conversation output cannot be adopted: {error}"
-            ))
-        })?;
+            .read_adoptable_attempt_output(owner_id, &conversation_id)
+            .await?
+            .filter(agent_outcome_can_complete)
+            .ok_or_else(|| AppError::BadRequest("Agent conversation has no successful canonical public delivery to adopt".to_owned()))?;
+        let output = outcome.text.filter(|text| !text.trim().is_empty()).unwrap_or_else(|| {
+            format!("Verified output files:\n{}", outcome.output_files.join("\n"))
+        });
+        let output_files = outcome.output_files;
         let output_files = serde_json::to_string(&output_files)
             .map_err(|error| AppError::Internal(format!("encode verified adopted output files: {error}")))?;
         self.repository
@@ -2111,7 +2232,7 @@ impl AgentExecutionEngine {
                 &AdoptAgentExecutionStepOutputParams {
                     output_summary: output,
                     output_files,
-                    tokens: None,
+                    tokens: outcome.tokens,
                     runtime_state: None,
                 },
                 &actor_event(
@@ -2137,6 +2258,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: SteerExecutionStepRequest,
     ) -> Result<(), AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "steer")
+            .await?;
         let text = non_empty("text", request.text)?;
         let detail = self.detail(owner_id, execution_id).await?;
         let step = current_step(&detail, step_id)?;
@@ -2168,7 +2291,13 @@ impl AgentExecutionEngine {
             })?
             .unwrap_or_default();
         let operation_id = generate_id();
-        effects.push_steer(operation_id.clone(), text.clone())?;
+        let operation_key = effects.current_turn_operation_key(&attempt.attempt_id)?;
+        let target_operation_id = self.session.read_turn_output(owner_id, attempt.conversation_id.as_deref()
+            .ok_or_else(|| AppError::Conflict("running attempt has no Session".to_owned()))?, Some(&operation_key))
+            .await?
+            .map(|output| output.canonical_operation_id)
+            .ok_or_else(|| AppError::Conflict("the Attempt has no exact canonical Turn to steer".to_owned()))?;
+        effects.push_steer(operation_id.clone(), target_operation_id.clone(), text.clone())?;
         let persisted = self
             .repository
             .enqueue_attempt_conversation_effect(
@@ -2207,6 +2336,7 @@ impl AgentExecutionEngine {
                 owner_id,
                 &persisted.conversation_id,
                 &operation_id,
+                &target_operation_id,
                 &text,
             )
             .await;
@@ -2252,6 +2382,7 @@ impl AgentExecutionEngine {
         owner_id: &str,
         actor: &AgentExecutionActor,
         conversation_id: &str,
+        source_turn_operation_id: &nomifun_agent_contracts::OperationId,
         question: String,
     ) -> Result<AgentExecutionDetail, AppError> {
         let question = non_empty("question", question)?;
@@ -2261,7 +2392,9 @@ impl AgentExecutionEngine {
             .await?;
         let mut links = links
             .into_iter()
-            .filter(|link| link.active && link.relation == "attempt");
+            .filter(|link| {
+                link.active && matches!(link.relation.as_str(), "attempt" | "automation")
+            });
         let link = links
             .next()
             .ok_or_else(|| AppError::BadRequest("conversation is not an active execution attempt".to_owned()))?;
@@ -2313,8 +2446,12 @@ impl AgentExecutionEngine {
             )
         })?;
         let operation_id = generate_id();
+        let target_operation_id = source_turn_operation_id.as_ref().to_owned();
+        if target_operation_id.trim().is_empty() {
+            return Err(AppError::Conflict("Native Agent decision requires its exact source Turn".into()));
+        }
         let mut effects = AttemptConversationEffects::default();
-        effects.push_stop_turn(operation_id.clone())?;
+        effects.push_stop_turn(operation_id.clone(), target_operation_id.clone())?;
         let persisted = self.repository
             .settle_attempt(
                 owner_id,
@@ -2325,6 +2462,10 @@ impl AgentExecutionEngine {
                 attempt.version,
                 Some(&lease),
                 &SettleAgentExecutionAttemptParams {
+                    expected_active_session_turn: Some(AgentExecutionActiveTurnGuard {
+                        conversation_id: conversation_id.to_owned(),
+                        canonical_operation_id: target_operation_id.clone(),
+                    }),
                     attempt_status: ExecutionAttemptStatus::WaitingInput,
                     step_status: ExecutionStepStatus::WaitingInput,
                     execution_status: Some(AgentExecutionStatus::WaitingInput),
@@ -2357,7 +2498,7 @@ impl AgentExecutionEngine {
         // retried under the same identity before any DecisionInput continuation.
         let delivery = self
             .scheduler
-            .stop_attempt_turn(owner_id, conversation_id, &operation_id)
+            .stop_attempt_turn(owner_id, conversation_id, &operation_id, &target_operation_id)
             .await;
         if delivery.is_ok() {
             if let Some(persisted_attempt) = persisted.current_attempt.as_ref()
@@ -2414,6 +2555,43 @@ impl AgentExecutionEngine {
         attempt_id: &str,
         request: AnswerExecutionDecisionRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.answer_decision_inner(owner_id,actor,execution_id,step_id,attempt_id,request,None).await
+    }
+
+    /// Voice opt-in metadata around the original decision CAS. UI commands
+    /// continue through answer_decision without extra queries or event fields.
+    pub async fn lookup_voice_decision_answer(&self,owner:&str,execution:&str,key:&str)->Result<Option<AgentExecutionEvent>,AppError> {
+        let mut after=0;
+        loop {let page=self.events(owner,execution,Some(after),Some(MAX_LIST_LIMIT)).await?;
+            if let Some(event)=page.iter().find(|event|event.event_type==AgentExecutionEventKind::DecisionAnswered&&event.payload.get("voice_operation_key").and_then(serde_json::Value::as_str)==Some(key)){return Ok(Some(event.clone()));}
+            let next=page.last().map_or(after,|event|event.sequence);if next<=after{return Ok(None);}after=next;
+        }
+    }
+
+    pub async fn answer_voice_decision(&self,owner:&str,actor:&AgentExecutionActor,execution:&str,step:&str,attempt:&str,request:AnswerExecutionDecisionRequest,
+        key:&str,request_sequence:i64,question_digest:&str,presentation_digest:&str,
+        source_session:&nomifun_agent_contracts::AgentSessionId,source_operation:&nomifun_agent_contracts::OperationId,source_fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentExecutionDetail,AppError> {
+        if !matches!(actor,AgentExecutionActor::User {user_id} if user_id==owner)||key.is_empty()||key.len()>256||request_sequence<=0
+            ||[question_digest,presentation_digest].iter().any(|digest|digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))) {
+            return Err(AppError::BadRequest("voice answer requires an exact authenticated decision presentation".into()));
+        }
+        let proof=json!({"voice_operation_key":key,"answer_request_digest":format!("{:x}",Sha256::digest(serde_json::to_vec(&request).map_err(|error|AppError::Internal(error.to_string()))?)),
+            "request_event_sequence":request_sequence,"question_digest":question_digest,"presentation_digest":presentation_digest,
+            "voice_source_target":{"agent_session_id":source_session,"turn_operation_id":source_operation,"binding_version":source_fence.binding_version,"execution_generation":source_fence.execution_generation}});
+        let matches=|event:&AgentExecutionEvent|event.step_id.as_deref()==Some(step)&&event.attempt_id.as_deref()==Some(attempt)
+            &&proof.as_object().is_some_and(|fields|fields.iter().all(|(key,value)|event.payload.get(key)==Some(value)));
+        if let Some(event)=self.lookup_voice_decision_answer(owner,execution,key).await? {
+            if !matches(&event){return Err(AppError::Conflict("voice answer replay differs from its original complete request".into()));}return self.detail(owner,execution).await;
+        }
+        let result=self.answer_decision_inner(owner,actor,execution,step,attempt,request,Some(proof.clone())).await;
+        if matches!(result,Err(AppError::Conflict(_))) {
+            if let Some(event)=self.lookup_voice_decision_answer(owner,execution,key).await? {if matches(&event){return self.detail(owner,execution).await;}}
+        }
+        result
+    }
+
+    async fn answer_decision_inner(&self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,step_id:&str,attempt_id:&str,
+        request:AnswerExecutionDecisionRequest,voice_proof:Option<serde_json::Value>)->Result<AgentExecutionDetail,AppError> {
         canonical_id::<AgentExecutionId>("execution_id", execution_id)?;
         canonical_uuidv7("step_id", step_id)?;
         canonical_uuidv7("attempt_id", attempt_id)?;
@@ -2429,6 +2607,17 @@ impl AgentExecutionEngine {
             return Err(AppError::Conflict(
                 "waiting attempt changed before the answer".to_owned(),
             ));
+        }
+        if let Some(proof)=&voice_proof {
+            let sequence=proof.get("request_event_sequence").and_then(serde_json::Value::as_i64).ok_or_else(||AppError::BadRequest("voice decision request identity missing".into()))?;
+            let requested=self.events(owner_id,execution_id,Some(sequence-1),Some(1)).await?.into_iter().next()
+                .filter(|event|event.sequence==sequence&&event.event_type==AgentExecutionEventKind::DecisionRequested&&event.step_id.as_deref()==Some(step_id)&&event.attempt_id.as_deref()==Some(attempt_id))
+                .ok_or_else(||AppError::Conflict("voice decision request changed".into()))?;
+            let question=requested.payload.get("question").and_then(serde_json::Value::as_str).ok_or_else(||AppError::Conflict("voice request has no question".into()))?;
+            if waiting.attempt.question.as_deref()!=Some(question)||proof.get("question_digest").and_then(serde_json::Value::as_str)!=Some(format!("{:x}",Sha256::digest(question.as_bytes())).as_str())
+                ||requested.payload.get("force_click").and_then(serde_json::Value::as_bool)==Some(true)||requested.payload.get("requires_explicit_click").and_then(serde_json::Value::as_bool)==Some(true) {
+                return Err(AppError::Conflict("voice answer does not match an eligible exact pending question".into()));
+            }
         }
         let mut effects = AttemptConversationEffects::decode(
             waiting.attempt.runtime_state.as_deref(),
@@ -2453,7 +2642,11 @@ impl AgentExecutionEngine {
                     AgentExecutionEventKind::DecisionAnswered,
                     Some(step_id),
                     Some(attempt_id),
-                    json!({"answered":true,"operation_id":operation_id}),
+                    {
+                        let mut payload=json!({"answered":true,"operation_id":operation_id});
+                        if let Some(proof)=voice_proof {payload.as_object_mut().expect("answer event object").extend(proof.as_object().expect("voice proof object").clone());}
+                        payload
+                    },
                 ),
             )
             .await?;
@@ -2473,6 +2666,9 @@ impl AgentExecutionEngine {
     }
 
     pub async fn recover(&self) -> Result<(), AppError> {
+        if self.lifecycle.is_cancelled() {
+            return Ok(());
+        }
         let statuses = [
             AgentExecutionStatus::Planning,
             AgentExecutionStatus::Running,
@@ -2513,13 +2709,22 @@ impl AgentExecutionEngine {
     }
 
     fn spawn_initial_plan(&self, owner_id: String, execution_id: String) {
+        if self.lifecycle.is_cancelled() {
+            return;
+        }
         let engine = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) = engine.plan_initial(&owner_id, &execution_id).await {
+        self.lifecycle.spawn(async move {
+            let result = tokio::select! {
+                _ = engine.lifecycle.cancelled() => return,
+                result = engine.plan_initial(&owner_id, &execution_id) => result,
+            };
+            if let Err(error) = result {
                 tracing::error!(%execution_id, %error, "Agent Execution planning failed");
-                engine
-                    .fail_planning(&owner_id, &execution_id, &error.to_string())
-                    .await;
+                if !engine.lifecycle.is_cancelled() {
+                    engine
+                        .fail_planning(&owner_id, &execution_id, &error.to_string())
+                        .await;
+                }
             }
         });
     }
@@ -2555,7 +2760,8 @@ impl AgentExecutionEngine {
                 ))
             })?;
             let plan = match &command {
-                InitialPlanningCommand::Explicit { plan } => plan.clone(),
+                InitialPlanningCommand::Explicit { plan }
+                | InitialPlanningCommand::Automation { plan, .. } => plan.clone(),
                 InitialPlanningCommand::Automatic {
                     supplemental_context,
                 } => {
@@ -2592,41 +2798,37 @@ impl AgentExecutionEngine {
                 }
             };
             let materialized = plan_materializer::materialize(plan, &participants)?;
-            let status = planned_status(detail.execution.plan_gate);
             let result = self
                 .repository
                 .reconcile_plan(
-                owner_id,
-                execution_id,
-                detail.execution.version,
-                &ReconcileAgentExecutionPlanParams {
-                    goal: None,
-                    plan_gate: None,
-                    adaptation_policy: None,
-                    decision_policy: None,
-                    delegation_policy: None,
-                    keep_step_ids: Vec::new(),
-                    new_participants: Vec::new(),
-                    retire_participant_ids: Vec::new(),
-                    new_steps: materialized.steps,
-                    new_dependencies: materialized.dependencies,
-                    execution_status: status,
-                },
-                &system_event(
-                    AgentExecutionEventKind::PlanChanged,
-                    None,
-                    None,
-                    json!({"status":status,"change":"initial_plan"}),
-                ),
-            )
+                    owner_id,
+                    execution_id,
+                    detail.execution.version,
+                    &ReconcileAgentExecutionPlanParams {
+                        goal: None,
+                        adaptation_policy: None,
+                        decision_policy: None,
+                        delegation_policy: None,
+                        keep_step_ids: Vec::new(),
+                        new_participants: Vec::new(),
+                        retire_participant_ids: Vec::new(),
+                        new_steps: materialized.steps,
+                        new_dependencies: materialized.dependencies,
+                        execution_status: AgentExecutionStatus::Running,
+                    },
+                    &system_event(
+                        AgentExecutionEventKind::PlanChanged,
+                        None,
+                        None,
+                        json!({"status":"running","change":"initial_plan"}),
+                    ),
+                )
                 .await;
             match result {
                 Ok(_) => {
                     self.publish().await;
-                    if status == AgentExecutionStatus::Running {
-                        self.scheduler
-                            .start(owner_id.to_owned(), execution_id.to_owned());
-                    }
+                    self.scheduler
+                        .start(owner_id.to_owned(), execution_id.to_owned());
                     return Ok(());
                 }
                 Err(nomifun_db::DbError::Conflict(_)) => {
@@ -2778,10 +2980,760 @@ impl AgentExecutionEngine {
     }
 }
 
-fn planned_status(gate: PlanGate) -> AgentExecutionStatus {
-    match gate {
-        PlanGate::Automatic => AgentExecutionStatus::Running,
-        PlanGate::RequireApproval => AgentExecutionStatus::AwaitingApproval,
+impl AgentExecutionEngine {
+    /// Materialize the shared `strategy=parallel` request into one explicit
+    /// AgentExecution DAG. Every task is an independent root; optional
+    /// synthesis is one read-only downstream Agent blocked on every root.
+    pub fn materialize_parallel_delegation(
+        request: ParallelDelegationRequest,
+    ) -> Result<(String, Vec<PlannedExecutionStep>), AppError> {
+        request.validate().map_err(AppError::BadRequest)?;
+        let goal = format!(
+            "Complete the delegated work: {}",
+            request
+                .tasks
+                .iter()
+                .map(|task| task.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut steps = request
+            .tasks
+            .into_iter()
+            .map(|task| PlannedExecutionStep {
+                title: task.name,
+                spec: task.prompt,
+                profile: Some(ExecutionStepProfile {
+                    kind: "general".to_owned(),
+                    needs_vision: false,
+                    needs_web_search: false,
+                    needs_long_context: false,
+                    needs_high_reasoning: false,
+                    bulk: true,
+                    managed_process_only: false,
+                }),
+                kind: ExecutionStepKind::Agent,
+                agent_mode: Some(nomifun_common::AgentStepMode::Normal),
+                depends_on: Vec::new(),
+                participant_index: None,
+                assignment_rationale: Some("explicit parallel delegation".to_owned()),
+                role: task.role,
+                tool_policy: task.tool_policy,
+                fanout_group: Some("explicit".to_owned()),
+                control_policy: None,
+                failure_policy: StepFailurePolicy::FailExecution,
+            })
+            .collect::<Vec<_>>();
+        if request.synthesize {
+            let depends_on = (0..steps.len()).collect();
+            steps.push(PlannedExecutionStep {
+                title: "Synthesize results".to_owned(),
+                spec: "Synthesize all upstream results into one coherent answer for the goal."
+                    .to_owned(),
+                profile: None,
+                kind: ExecutionStepKind::Agent,
+                agent_mode: Some(nomifun_common::AgentStepMode::Synthesis),
+                depends_on,
+                participant_index: None,
+                assignment_rationale: Some("synthesis".to_owned()),
+                role: Some("synthesis".to_owned()),
+                tool_policy: nomifun_common::AgentToolPolicy::ReadOnly,
+                fanout_group: None,
+                control_policy: None,
+                failure_policy: StepFailurePolicy::FailExecution,
+            });
+        }
+        Ok((goal, steps))
+    }
+
+    /// Create one aggregate from a native parallel delegation request. This
+    /// is the in-process Agent Capability path corresponding to the Gateway's
+    /// `nomi_delegate(strategy=parallel)` contract.
+    pub async fn collaborate_parallel_from_session(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+        request: ParallelDelegationRequest,
+    ) -> Result<AgentExecution, AppError> {
+        let (goal, steps) = Self::materialize_parallel_delegation(request)?;
+        self.collaborate_with_plan_from_session(
+            owner_id,
+            agent_session_id,
+            goal,
+            Some(steps),
+            None,
+        )
+        .await
+    }
+
+    /// Product `agent.collaboration` boundary. A calling Attempt appends work
+    /// to its exact aggregate; an ordinary AgentSession creates one aggregate
+    /// whose lead keeps the frozen Session Snapshot and exact resolved model.
+    pub async fn collaborate_from_session(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+        goal: String,
+        single_step: bool,
+    ) -> Result<AgentExecution, AppError> {
+        let steps = single_step.then(|| vec![collaboration_step(&goal)]);
+        self.collaborate_with_plan_from_session(
+            owner_id,
+            agent_session_id,
+            goal,
+            steps,
+            single_step.then_some(1),
+        )
+        .await
+    }
+
+    async fn collaborate_with_plan_from_session(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+        goal: String,
+        steps: Option<Vec<PlannedExecutionStep>>,
+        max_parallel: Option<i64>,
+    ) -> Result<AgentExecution, AppError> {
+        canonical_id::<ConversationId>("agent_session_id", agent_session_id)?;
+        let goal = non_empty("goal", goal)?;
+        let links = self
+            .repository
+            .resolve_conversation_link(owner_id, agent_session_id)
+            .await?;
+        let mut attempts = links
+            .iter()
+            .filter(|link| {
+                link.active && matches!(link.relation.as_str(), "attempt" | "automation")
+            });
+        if let Some(link) = attempts.next() {
+            if attempts.next().is_some() {
+                return Err(AppError::Conflict(
+                    "AgentSession belongs to multiple active execution Attempts".into(),
+                ));
+            }
+            let attempt_id = link.attempt_id.clone().ok_or_else(|| {
+                AppError::Internal("active Attempt link has no Attempt identity".into())
+            })?;
+            let actor = AgentExecutionActor::agent(agent_session_id, Some(attempt_id));
+            return self
+                .delegate_from_attempt(
+                    owner_id,
+                    &actor,
+                    agent_session_id,
+                    goal,
+                    ExecutionModelPool::Automatic,
+                    None,
+                    steps,
+                )
+                .await
+                .map(|(detail, _)| detail.execution);
+        }
+
+        let session = self.session.get(owner_id, agent_session_id).await?;
+        let snapshot = session.agent_snapshot.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "Agent collaboration requires an immutable Agent Snapshot".into(),
+            )
+        })?;
+        // Collaboration is an execution mode of the calling AgentSession, not
+        // a detached blank project. Carry only the workspace authority frozen
+        // into that Session's immutable binding; never trust a model-supplied
+        // path or the mutable Conversation `extra` projection here. Without
+        // this, coding delegates run under the execution scratch directory and
+        // cannot observe or modify the project the user actually selected.
+        let work_dir = collaboration_workspace(
+            owner_id,
+            agent_session_id,
+            snapshot,
+            &self.managed_workspace_root,
+        )?;
+        let resolved_model = snapshot.resolved_model.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "Agent collaboration Snapshot has no exact resolved model".into(),
+            )
+        })?;
+        let lead_model = nomifun_api_types::ExecutionModelRef {
+            provider_id: resolved_model.provider_id.clone(),
+            model: resolved_model.model.clone(),
+        };
+        let model_pool = ExecutionModelPool::Single {
+            model: lead_model.clone(),
+        };
+        let mut participants = self.resolver.resolve(&model_pool, Some(&lead_model)).await?;
+        ParticipantResolver::prepend_frozen_snapshot(
+            &mut participants,
+            snapshot,
+            Some(&lead_model),
+        )?;
+        let actor = AgentExecutionActor::agent(agent_session_id, None);
+        self.persist_execution(
+                owner_id,
+                &actor,
+                CreateAgentExecutionRequest {
+                    goal: goal.clone(),
+                    work_dir,
+                    model_pool,
+                    delegation_policy: nomifun_common::DelegationPolicy::Automatic,
+                    adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
+                    decision_policy: DecisionPolicy::Automatic,
+                    max_parallel,
+                    lead_conversation_id: Some(agent_session_id.to_owned()),
+                    lead_model: Some(lead_model),
+                    steps,
+                },
+                participants,
+                None,
+                None,
+            )
+            .await
+    }
+
+    async fn find_automation_execution(
+        &self,
+        owner_id: &str,
+        source: &AutomationExecutionSource,
+    ) -> Result<Option<AgentExecutionDetail>, AppError> {
+        validate_automation_source(source)?;
+        let mut offset = 0;
+        let mut matching_id: Option<String> = None;
+        loop {
+            let rows = self
+                .repository
+                .list_executions(owner_id, MAX_LIST_LIMIT, offset)
+                .await?;
+            let page_len = rows.len();
+            for row in rows {
+                let command: InitialPlanningCommand =
+                    serde_json::from_str(&row.initial_plan_input).map_err(|error| {
+                        AppError::Internal(format!(
+                            "invalid persisted initial planning input for {}: {error}",
+                            row.execution_id
+                        ))
+                    })?;
+                if matches!(
+                    command,
+                    InitialPlanningCommand::Automation {
+                        source: ref persisted,
+                        ..
+                    } if persisted == source
+                ) {
+                    if matching_id.replace(row.execution_id.clone()).is_some() {
+                        return Err(AppError::Conflict(format!(
+                            "automation source {} generation {} owns multiple Agent Executions",
+                            source.requirement_id, source.claim_generation
+                        )));
+                    }
+                }
+            }
+            if page_len < MAX_LIST_LIMIT as usize {
+                break;
+            }
+            offset += MAX_LIST_LIMIT;
+        }
+        match matching_id {
+            Some(execution_id) => self.detail(owner_id, &execution_id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// AutoWork lifecycle is owned by the exact Requirement claim generation.
+    /// User/Agent execution controls must not mutate the queue-owned aggregate;
+    /// the AutoWork port uses the System actor for its fenced cancellation.
+    async fn reject_automation_external_command(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+        actor: &AgentExecutionActor,
+        operation: &str,
+    ) -> Result<(), AppError> {
+        if matches!(actor, AgentExecutionActor::System) {
+            return Ok(());
+        }
+        let row = self
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let command: InitialPlanningCommand = serde_json::from_str(&row.initial_plan_input)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "invalid persisted initial planning input for {execution_id}: {error}"
+                ))
+            })?;
+        reject_automation_external_command(&command, actor, operation)
+    }
+
+    /// AutoWork recovery is owned by the exact Requirement claim generation.
+    /// Generic UI recovery commands do not carry that authority and therefore
+    /// cannot reopen or adopt output into an automation aggregate.
+    async fn reject_automation_manual_recovery(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+        operation: &str,
+    ) -> Result<(), AppError> {
+        let row = self
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let command: InitialPlanningCommand = serde_json::from_str(&row.initial_plan_input)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "invalid persisted initial planning input for {execution_id}: {error}"
+                ))
+            })?;
+        reject_automation_manual_recovery_command(&command, operation)
+    }
+
+    async fn ensure_automation_execution(
+        &self,
+        owner_id: &str,
+        request: &AutomationExecutionRequest,
+    ) -> Result<String, AppError> {
+        validate_automation_request(request)?;
+        let _transition = self.automation_transition.lock().await;
+        if let Some(existing) = self
+            .find_automation_execution(owner_id, &request.source)
+            .await?
+        {
+            if existing.execution.lead_conversation_id.as_deref()
+                != Some(request.lead_session_id.as_str())
+                || existing.execution.goal != request.goal.trim()
+                || request.workspace.as_deref().is_some_and(|workspace| {
+                    existing.execution.work_dir.as_deref() != Some(workspace)
+                })
+            {
+                return Err(AppError::Conflict(format!(
+                    "automation source {} generation {} was replayed with different input",
+                    request.source.requirement_id, request.source.claim_generation
+                )));
+            }
+            return Ok(existing.execution.execution_id);
+        }
+
+        let session = self.session.get(owner_id, &request.lead_session_id).await?;
+        if session.conversation_id != request.lead_session_id {
+            return Err(AppError::Conflict(
+                "AgentSession lookup returned a different automation lead".to_owned(),
+            ));
+        }
+        let snapshot = session.agent_snapshot.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "AutoWork requires an immutable Agent snapshot on its bound Session".to_owned(),
+            )
+        })?;
+        let effective_workspace = automation_workspace(
+            owner_id,
+            &request.lead_session_id,
+            snapshot,
+            &self.managed_workspace_root,
+            request.workspace.as_deref(),
+        )?;
+        let resolved_model = snapshot.resolved_model.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "AutoWork bound Agent snapshot has no resolved model".to_owned(),
+            )
+        })?;
+        let lead_model = nomifun_api_types::ExecutionModelRef {
+            provider_id: resolved_model.provider_id.clone(),
+            model: resolved_model.model.clone(),
+        };
+        let model_pool = ExecutionModelPool::Single {
+            model: lead_model.clone(),
+        };
+        let mut participants = self.resolver.resolve(&model_pool, Some(&lead_model)).await?;
+        ParticipantResolver::prepend_frozen_snapshot(
+            &mut participants,
+            snapshot,
+            Some(&lead_model),
+        )?;
+        let goal = request.goal.trim().to_owned();
+        let execution = self
+            .persist_execution(
+                owner_id,
+                &AgentExecutionActor::system(),
+                CreateAgentExecutionRequest {
+                    goal: goal.clone(),
+                    work_dir: effective_workspace,
+                    model_pool,
+                    delegation_policy: nomifun_common::DelegationPolicy::Automatic,
+                    adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
+                    decision_policy: DecisionPolicy::AskUser,
+                    max_parallel: Some(1),
+                    lead_conversation_id: Some(request.lead_session_id.clone()),
+                    lead_model: Some(lead_model),
+                    steps: Some(vec![PlannedExecutionStep {
+                        title: format!("Requirement {}", request.source.requirement_id),
+                        spec: goal,
+                        profile: None,
+                        kind: ExecutionStepKind::Agent,
+                        agent_mode: Some(nomifun_common::AgentStepMode::Normal),
+                        depends_on: Vec::new(),
+                        participant_index: Some(0),
+                        assignment_rationale: Some(
+                            "AutoWork exact bound Agent snapshot".to_owned(),
+                        ),
+                        role: Some("requirement_owner".to_owned()),
+                        tool_policy: nomifun_common::AgentToolPolicy::Full,
+                        fanout_group: None,
+                        control_policy: None,
+                        failure_policy: StepFailurePolicy::FailExecution,
+                    }]),
+                },
+                participants,
+                None,
+                Some(request.source.clone()),
+            )
+            .await?;
+        Ok(execution.execution_id)
+    }
+
+    async fn preflight_automation_execution(
+        &self,
+        owner_id: &str,
+        request: &AutomationExecutionRequest,
+    ) -> Result<(), AppError> {
+        validate_automation_request(request)?;
+        if let Some(existing) = self
+            .find_automation_execution(owner_id, &request.source)
+            .await?
+        {
+            if existing.execution.lead_conversation_id.as_deref()
+                != Some(request.lead_session_id.as_str())
+                || existing.execution.goal != request.goal.trim()
+                || request.workspace.as_deref().is_some_and(|workspace| {
+                    existing.execution.work_dir.as_deref() != Some(workspace)
+                })
+            {
+                return Err(AppError::Conflict(format!(
+                    "automation source {} generation {} was replayed with different input",
+                    request.source.requirement_id, request.source.claim_generation
+                )));
+            }
+            return Ok(());
+        }
+        let session = self.session.get(owner_id, &request.lead_session_id).await?;
+        if session.conversation_id != request.lead_session_id {
+            return Err(AppError::Conflict(
+                "AgentSession lookup returned a different automation lead".to_owned(),
+            ));
+        }
+        let snapshot = session.agent_snapshot.as_ref().ok_or_else(|| {
+            AppError::Conflict(
+                "AutoWork requires an immutable Agent snapshot on its bound Session".to_owned(),
+            )
+        })?;
+        automation_workspace(
+            owner_id,
+            &request.lead_session_id,
+            snapshot,
+            &self.managed_workspace_root,
+            request.workspace.as_deref(),
+        )?;
+        if snapshot.resolved_model.is_none() {
+            return Err(AppError::Conflict(
+                "AutoWork bound Agent snapshot has no resolved model".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn automation_receipt(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+    ) -> Result<Option<AutomationExecutionReceipt>, AppError> {
+        let detail = self.detail(owner_id, execution_id).await?;
+        let receipt = match detail.execution.status {
+            AgentExecutionStatus::Planning | AgentExecutionStatus::Running => return Ok(None),
+            AgentExecutionStatus::Paused | AgentExecutionStatus::WaitingInput => return Ok(None),
+            AgentExecutionStatus::Completed => AutomationExecutionReceipt::Completed {
+                execution_id: execution_id.to_owned(),
+                summary: detail.execution.summary,
+            },
+            AgentExecutionStatus::CompletedWithFailures => {
+                AutomationExecutionReceipt::CompletedWithFailures {
+                    execution_id: execution_id.to_owned(),
+                    summary: detail.execution.summary,
+                }
+            }
+            AgentExecutionStatus::Failed => {
+                let outcome_unknown = detail.attempts.iter().rev().find_map(|attempt| {
+                    attempt
+                        .error
+                        .as_ref()
+                        .filter(|error| is_automation_outcome_unknown_error(error))
+                });
+                if let Some(error) = outcome_unknown {
+                    AutomationExecutionReceipt::OutcomeUnknown {
+                        execution_id: execution_id.to_owned(),
+                        error: Some(error.clone()),
+                    }
+                } else {
+                    AutomationExecutionReceipt::Failed {
+                        execution_id: execution_id.to_owned(),
+                        error: detail.execution.summary.or_else(|| {
+                            detail
+                                .attempts
+                                .iter()
+                                .rev()
+                                .find_map(|attempt| attempt.error.clone())
+                        }),
+                    }
+                }
+            }
+            AgentExecutionStatus::Cancelled => AutomationExecutionReceipt::Cancelled {
+                execution_id: execution_id.to_owned(),
+                replay_safe: automation_cancellation_replay_safe(detail.attempts.len()),
+            },
+        };
+        Ok(Some(receipt))
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentExecutionAutomationPort for AgentExecutionEngine {
+    async fn preflight_automation(
+        &self,
+        owner_id: &str,
+        request: &AutomationExecutionRequest,
+    ) -> Result<(), AppError> {
+        self.preflight_automation_execution(owner_id, request).await
+    }
+
+    async fn admit_automation(
+        &self,
+        owner_id: &str,
+        request: AutomationExecutionRequest,
+    ) -> Result<crate::automation::AutomationExecutionAdmission, AppError> {
+        let execution_id = self.ensure_automation_execution(owner_id, &request).await?;
+        Ok(crate::automation::AutomationExecutionAdmission { execution_id })
+    }
+
+    async fn await_automation(
+        &self,
+        owner_id: &str,
+        admission: &crate::automation::AutomationExecutionAdmission,
+    ) -> Result<AutomationExecutionReceipt, AppError> {
+        loop {
+            if let Some(receipt) = self
+                .automation_receipt(owner_id, &admission.execution_id)
+                .await?
+            {
+                return Ok(receipt);
+            }
+            tokio::select! {
+                _ = self.lifecycle.cancelled() => {
+                    return Err(AppError::Conflict(
+                        "AgentExecution shut down while AutoWork awaited its canonical receipt"
+                            .to_owned(),
+                    ));
+                }
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
+    }
+
+    async fn cancel_automation(
+        &self,
+        owner_id: &str,
+        source: &AutomationExecutionSource,
+    ) -> Result<Option<AutomationExecutionReceipt>, AppError> {
+        let Some(detail) = self.find_automation_execution(owner_id, source).await? else {
+            return Ok(None);
+        };
+        if detail.execution.status.is_terminal() {
+            self.scheduler
+                .reconcile_conversation_cleanup_strict(
+                    &detail.execution.execution_id,
+                )
+                .await?;
+            return self
+                .automation_receipt(owner_id, &detail.execution.execution_id)
+                .await;
+        }
+        let cancelled = self.cancel(
+            owner_id,
+            &AgentExecutionActor::system(),
+            &detail.execution.execution_id,
+            VersionedAgentExecutionCommand {
+                expected_version: detail.execution.version,
+            },
+        )
+        .await;
+        match cancelled {
+            Ok(cancelled) => {
+                self.scheduler
+                    .reconcile_conversation_cleanup_strict(
+                        &cancelled.execution.execution_id,
+                    )
+                    .await?;
+                self.automation_receipt(owner_id, &cancelled.execution.execution_id)
+                    .await
+            }
+            Err(error) if is_automation_cancel_cas_conflict(&error) => {
+                // Cancellation is a CAS. A terminal transition may win after
+                // the source lookup but before that CAS. Re-read by the exact
+                // immutable automation source and return its winner rather
+                // than manufacturing cancellation or leaking a stale race.
+                let Some(latest) = self.find_automation_execution(owner_id, source).await? else {
+                    return Err(error);
+                };
+                if latest.execution.status.is_terminal() {
+                    self.scheduler
+                        .reconcile_conversation_cleanup_strict(
+                            &latest.execution.execution_id,
+                        )
+                        .await?;
+                    self.automation_receipt(owner_id, &latest.execution.execution_id)
+                        .await
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn reject_automation_manual_recovery_command(
+    command: &InitialPlanningCommand,
+    operation: &str,
+) -> Result<(), AppError> {
+    if matches!(command, InitialPlanningCommand::Automation { .. }) {
+        return Err(AppError::Conflict(format!(
+            "cannot {operation} an AutoWork AgentExecution without the exact atomic Requirement observer"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_automation_external_command(
+    command: &InitialPlanningCommand,
+    actor: &AgentExecutionActor,
+    operation: &str,
+) -> Result<(), AppError> {
+    if !matches!(actor, AgentExecutionActor::System)
+        && matches!(command, InitialPlanningCommand::Automation { .. })
+    {
+        return Err(AppError::Conflict(format!(
+            "cannot {operation} an AutoWork AgentExecution; use AutoWork queue controls"
+        )));
+    }
+    Ok(())
+}
+
+fn is_automation_outcome_unknown_error(error: &str) -> bool {
+    error
+        .strip_prefix(MISSING_DELIVERY_RECEIPT_CODE)
+        .is_some_and(|suffix| suffix.starts_with(": "))
+}
+
+fn automation_cancellation_replay_safe(attempt_count: usize) -> bool {
+    // Every external model/tool effect is owned by an Attempt. Zero durable
+    // Attempts therefore proves both zero admission and zero effects; any
+    // admitted Attempt is fail-closed regardless of its displayed state.
+    attempt_count == 0
+}
+
+fn is_automation_cancel_cas_conflict(error: &AppError) -> bool {
+    matches!(error, AppError::Conflict(_) | AppError::RevisionConflict(_))
+}
+
+fn validate_automation_source(source: &AutomationExecutionSource) -> Result<(), AppError> {
+    RequirementId::try_from(source.requirement_id.as_str()).map_err(|error| {
+        AppError::BadRequest(format!("invalid automation requirement_id: {error}"))
+    })?;
+    if source.claim_generation <= 0 {
+        return Err(AppError::BadRequest(
+            "automation claim_generation must be positive".to_owned(),
+        ));
+    }
+    if source.operation_id.trim().is_empty()
+        || source.operation_id.len() > 128
+        || source.operation_id.bytes().any(|byte| !byte.is_ascii_graphic())
+    {
+        return Err(AppError::BadRequest(
+            "automation operation_id must contain 1-128 visible ASCII bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_automation_request(request: &AutomationExecutionRequest) -> Result<(), AppError> {
+    validate_automation_source(&request.source)?;
+    canonical_id::<ConversationId>("lead_session_id", &request.lead_session_id)?;
+    if request.goal.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "automation goal must not be empty".to_owned(),
+        ));
+    }
+    if request
+        .workspace
+        .as_deref()
+        .is_some_and(|workspace| workspace.trim().is_empty())
+    {
+        return Err(AppError::BadRequest(
+            "automation workspace must be absent or non-empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn automation_workspace(
+    owner_id: &str,
+    session_id: &str,
+    snapshot: &AgentResolvedSnapshot,
+    managed_workspace_root: &Path,
+    requested: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    crate::automation::admit_frozen_session_workspace(
+        owner_id,
+        snapshot.canonical_binding.as_ref(),
+        session_id,
+        managed_workspace_root,
+        requested,
+    )
+}
+
+fn collaboration_workspace(
+    owner_id: &str,
+    session_id: &str,
+    snapshot: &AgentResolvedSnapshot,
+    managed_workspace_root: &Path,
+) -> Result<Option<String>, AppError> {
+    snapshot
+        .canonical_binding
+        .as_ref()
+        .map(|binding| {
+            crate::automation::resolve_frozen_session_workspace(
+                owner_id,
+                binding,
+                session_id,
+                managed_workspace_root,
+            )
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn collaboration_step(goal: &str) -> PlannedExecutionStep {
+    PlannedExecutionStep {
+        title: "Delegated Agent work".to_owned(),
+        spec: goal.to_owned(),
+        profile: None,
+        kind: ExecutionStepKind::Agent,
+        agent_mode: Some(nomifun_common::AgentStepMode::Normal),
+        depends_on: Vec::new(),
+        participant_index: Some(0),
+        assignment_rationale: Some("Exact calling Agent collaboration grant".to_owned()),
+        role: Some("delegate".to_owned()),
+        tool_policy: nomifun_common::AgentToolPolicy::Full,
+        fanout_group: None,
+        control_policy: None,
+        failure_policy: StepFailurePolicy::FailExecution,
     }
 }
 
@@ -2839,28 +3791,23 @@ fn decode_json<T: DeserializeOwned>(raw: &str, field: &str) -> Result<T, AppErro
         .map_err(|error| AppError::Internal(format!("invalid persisted {field}: {error}")))
 }
 
-fn validate_template_snapshot(snapshot: &ResolvedPresetSnapshot) -> Result<(), AppError> {
-    if snapshot.preset_id.trim().is_empty()
-        || snapshot.preset_revision <= 0
-        || snapshot.target != PresetTarget::ExecutionStep
-    {
+fn validate_frozen_agent_snapshot(snapshot: &AgentResolvedSnapshot) -> Result<(), AppError> {
+    if snapshot.preset_id.trim().is_empty() || snapshot.preset_revision <= 0 {
         return Err(AppError::BadRequest(
-            "template participant preset_snapshot must be a valid execution_step snapshot"
+            "template participant agent_snapshot must be a valid Agent snapshot"
                 .to_owned(),
         ));
     }
     if let Some(model) = snapshot.resolved_model.as_ref() {
-        if let Some(provider_id) = model.provider_id.as_deref()
-            && ProviderId::try_from(provider_id).is_err()
-        {
+        if ProviderId::try_from(model.provider_id.as_str()).is_err() {
             return Err(AppError::BadRequest(
-                "template participant preset_snapshot has a non-canonical provider_id"
+                "template participant Agent snapshot has a non-canonical provider_id"
                     .to_owned(),
             ));
         }
         if model.model.is_empty() || model.model.trim() != model.model {
             return Err(AppError::BadRequest(
-                "template participant preset_snapshot has an invalid model".to_owned(),
+                "template participant Agent snapshot has an invalid model".to_owned(),
             ));
         }
     }
@@ -2899,17 +3846,17 @@ fn runtime_participants_from_template(
         // snapshots are still copied verbatim; there is no lossy model-range
         // reconstruction.
         let snapshot = row
-            .preset_snapshot
+            .agent_snapshot
             .as_deref()
             .map(|snapshot| {
-                decode_json::<ResolvedPresetSnapshot>(
+                decode_json::<AgentResolvedSnapshot>(
                     snapshot,
                     "template participant preset snapshot",
                 )
             })
             .transpose()?;
         if let Some(snapshot) = snapshot.as_ref() {
-            validate_template_snapshot(&snapshot)?;
+            validate_frozen_agent_snapshot(&snapshot)?;
         }
         // The materialized participant row is the sole live provider binding.
         // A frozen preset may describe the historical resolution, but using it
@@ -2949,7 +3896,7 @@ fn runtime_participants_from_template(
             source_agent_id: row.source_agent_id.clone(),
             preset_id: row.preset_id.clone(),
             preset_revision: row.preset_revision,
-            preset_snapshot: row.preset_snapshot.clone(),
+            agent_snapshot: row.agent_snapshot.clone(),
             provider_id: Some(provider_id),
             model: Some(model),
             role: row.role.clone(),
@@ -3030,8 +3977,8 @@ fn map_template_participant(
         source_agent_id: row.source_agent_id,
         preset_id: row.preset_id,
         preset_revision: row.preset_revision,
-        preset_snapshot: row
-            .preset_snapshot
+        agent_snapshot: row
+            .agent_snapshot
             .as_deref()
             .map(|raw| decode_json(raw, "template participant preset snapshot"))
             .transpose()?,
@@ -3095,7 +4042,10 @@ fn validate_final_step_count(kept: usize, introduced: usize) -> Result<(), AppEr
     Ok(())
 }
 
-fn require_status(current: AgentExecutionStatus, allowed: &[AgentExecutionStatus]) -> Result<(), AppError> {
+fn require_status(
+    current: AgentExecutionStatus,
+    allowed: &[AgentExecutionStatus],
+) -> Result<(), AppError> {
     if allowed.contains(&current) {
         Ok(())
     } else {
@@ -3316,12 +4266,7 @@ fn automatic_assignment(
     detail: &AgentExecutionDetail,
     step: &ExecutionStep,
 ) -> Result<StepAssignment, AppError> {
-    let active: Vec<ExecutionParticipant> = detail
-        .participants
-        .iter()
-        .filter(|participant| participant.retired_in_revision.is_none())
-        .cloned()
-        .collect();
+    let active = active_participants(detail);
     let (participant, score, rationale) = if let Some(profile) = step.profile.as_ref() {
         if let Some(candidate) = rank_participants(&active, profile).first() {
             (
@@ -3365,7 +4310,7 @@ fn participants_from_new(
                 source_agent_id: row.source_agent_id.clone(),
                 preset_id: row.preset_id.clone(),
                 preset_revision: row.preset_revision,
-                preset_snapshot: parse_optional("preset_snapshot", row.preset_snapshot.as_deref())?,
+                agent_snapshot: parse_optional("agent_snapshot", row.agent_snapshot.as_deref())?,
                 provider_id: row.provider_id.clone(),
                 model: row.model.clone(),
                 role: row.role.clone(),
@@ -3514,13 +4459,7 @@ fn system_event(
     attempt_id: Option<&str>,
     payload: serde_json::Value,
 ) -> NewAgentExecutionEvent {
-    NewAgentExecutionEvent {
-        event_type: kind,
-        step_id: step_id.map(str::to_owned),
-        attempt_id: attempt_id.map(str::to_owned),
-        actor: AgentExecutionActor::system(),
-        payload: payload.to_string(),
-    }
+    actor_event(&AgentExecutionActor::system(), kind, step_id, attempt_id, payload)
 }
 
 fn explicit_cancel_payload() -> serde_json::Value {
@@ -3533,11 +4472,25 @@ fn explicit_cancel_payload() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        InitialPlanningCommand, attempt_delegation_operation_id, explicit_cancel_payload,
-        runtime_model_pair, validate_max_parallel,
+        AgentExecutionEngine, AutomationExecutionSource, InitialPlanningCommand,
+        attempt_delegation_operation_id, automation_cancellation_replay_safe,
+        collaboration_workspace, explicit_cancel_payload, is_automation_cancel_cas_conflict,
+        is_automation_outcome_unknown_error, reject_automation_external_command,
+        reject_automation_manual_recovery_command, runtime_model_pair,
+        validate_automation_source, validate_max_parallel,
     };
-    use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
-    use nomifun_common::MAX_AGENT_EXECUTION_PARALLELISM;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use nomifun_api_types::{
+        AgentBindingValueDto, AgentKnowledgePolicy, AgentResolvedSnapshot, ExecutionModelPool,
+        ExecutionModelRef, PresetRevisionRefDto, ResolvedSnapshotRefDto,
+        TypedResourceBindingDto,
+    };
+    use nomifun_common::{
+        AgentDelegationTask, AgentExecutionActor, AgentStepMode, AgentToolPolicy,
+        MAX_AGENT_EXECUTION_PARALLELISM, ParallelDelegationRequest,
+        ParallelDelegationStrategy,
+    };
 
     const PROVIDER_A: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_OVERRIDE: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -3576,6 +4529,206 @@ mod tests {
         );
         assert!(validate_max_parallel(Some(0)).is_err());
         assert!(validate_max_parallel(Some(MAX_AGENT_EXECUTION_PARALLELISM + 1)).is_err());
+    }
+
+    #[test]
+    fn parallel_delegation_materializes_two_roots_and_one_read_only_join() {
+        let (goal, steps) = AgentExecutionEngine::materialize_parallel_delegation(
+            ParallelDelegationRequest {
+                strategy: ParallelDelegationStrategy::Parallel,
+                tasks: vec![
+                    AgentDelegationTask {
+                        name: "upstream-a".to_owned(),
+                        prompt: "produce A".to_owned(),
+                        role: Some("technical".to_owned()),
+                        tool_policy: AgentToolPolicy::Full,
+                    },
+                    AgentDelegationTask {
+                        name: "upstream-b".to_owned(),
+                        prompt: "produce B".to_owned(),
+                        role: Some("ethics".to_owned()),
+                        tool_policy: AgentToolPolicy::ReadOnly,
+                    },
+                ],
+                synthesize: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(goal, "Complete the delegated work: upstream-a, upstream-b");
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].depends_on.is_empty());
+        assert!(steps[1].depends_on.is_empty());
+        assert_eq!(steps[2].depends_on, vec![0, 1]);
+        assert_eq!(steps[2].agent_mode, Some(AgentStepMode::Synthesis));
+        assert_eq!(steps[2].tool_policy, AgentToolPolicy::ReadOnly);
+    }
+
+    #[test]
+    fn collaboration_inherits_only_the_frozen_session_workspace() {
+        let workspace = std::env::temp_dir()
+            .join("nomifun-collaboration-workspace")
+            .to_string_lossy()
+            .into_owned();
+        let snapshot = AgentResolvedSnapshot {
+            canonical_binding: Some(AgentBindingValueDto {
+                preset_revision_ref: PresetRevisionRefDto {
+                    preset_id: nomifun_common::generate_id(),
+                    revision: 1,
+                    revision_digest: "a".repeat(64),
+                },
+                resolved_snapshot_ref: ResolvedSnapshotRefDto {
+                    snapshot_id: nomifun_common::generate_id(),
+                    snapshot_digest: "b".repeat(64),
+                },
+                typed_resource_bindings: vec![TypedResourceBindingDto {
+                    binding_id: "workspace-binding".to_owned(),
+                    resource_kind: "workspace".to_owned(),
+                    resource_id: "selected-workspace".to_owned(),
+                    owner_id: "owner".to_owned(),
+                    operations: BTreeSet::new(),
+                    connection_config_ref: None,
+                    typed_parameters: BTreeMap::from([(
+                        "workspace_root".to_owned(),
+                        workspace.clone(),
+                    )]),
+                }],
+                binding_version: 1,
+            }),
+            preset_id: nomifun_common::generate_id(),
+            preset_revision: 1,
+            preset_name: "coding".to_owned(),
+            routing_description: None,
+            instructions: String::new(),
+            resolved_agent_id: None,
+            resolved_agent_type: None,
+            resolved_agent_backend: None,
+            resolved_model: None,
+            included_skills: Vec::new(),
+            excluded_auto_skills: Vec::new(),
+            enabled_capabilities: Vec::new(),
+            enabled_capability_actions: BTreeMap::new(),
+            required_resource_kinds: BTreeSet::new(),
+            knowledge_policy: AgentKnowledgePolicy::default(),
+            warnings: Vec::new(),
+        };
+        let session_id = nomifun_common::generate_id();
+        let managed_workspace_root = std::env::temp_dir().join("conversations");
+
+        assert_eq!(
+            collaboration_workspace(
+                "owner",
+                &session_id,
+                &snapshot,
+                &managed_workspace_root,
+            )
+            .unwrap(),
+            Some(workspace),
+        );
+        assert!(
+            collaboration_workspace(
+                "different-owner",
+                &session_id,
+                &snapshot,
+                &managed_workspace_root,
+            )
+            .is_err(),
+            "collaboration must not inherit another owner's workspace",
+        );
+    }
+
+    #[test]
+    fn automation_source_is_typed_and_never_accepts_a_raw_claim_capability() {
+        let source = AutomationExecutionSource {
+            requirement_id: "0190f5fe-7c00-7a00-8000-000000000031".to_owned(),
+            claim_generation: 4,
+            operation_id: format!("autowork:{}", "a".repeat(64)),
+        };
+        validate_automation_source(&source).unwrap();
+
+        let mut invalid = source.clone();
+        invalid.claim_generation = 0;
+        assert!(validate_automation_source(&invalid).is_err());
+        invalid = source;
+        invalid.operation_id = "contains a secret-shaped space".to_owned();
+        assert!(validate_automation_source(&invalid).is_err());
+    }
+
+    #[test]
+    fn automation_manual_recovery_commands_fail_closed() {
+        let command: InitialPlanningCommand = serde_json::from_value(serde_json::json!({
+            "mode": "automation",
+            "source": {
+                "requirement_id": "0190f5fe-7c00-7a00-8000-000000000031",
+                "claim_generation": 4,
+                "operation_id": format!("autowork:{}", "a".repeat(64)),
+            },
+            "plan": {
+                "steps": [{"title":"execute", "spec":"perform exact work"}]
+            }
+        }))
+        .unwrap();
+        assert!(reject_automation_manual_recovery_command(&command, "retry").is_err());
+        assert!(
+            reject_automation_manual_recovery_command(&command, "adopt output for").is_err()
+        );
+        assert!(
+            reject_automation_external_command(
+                &command,
+                &AgentExecutionActor::user("owner"),
+                "replan",
+            )
+            .is_err()
+        );
+        assert!(
+            reject_automation_external_command(
+                &command,
+                &AgentExecutionActor::agent("conversation", Some("attempt".to_owned())),
+                "adjust",
+            )
+            .is_err()
+        );
+        assert!(
+            reject_automation_external_command(
+                &command,
+                &AgentExecutionActor::system(),
+                "cancel",
+            )
+            .is_ok(),
+            "the queue owner must retain its fenced cancellation path"
+        );
+
+        let explicit: InitialPlanningCommand = serde_json::from_value(serde_json::json!({
+            "mode": "explicit",
+            "plan": {
+                "steps": [{"title":"execute", "spec":"perform exact work"}]
+            }
+        }))
+        .unwrap();
+        assert!(reject_automation_manual_recovery_command(&explicit, "retry").is_ok());
+    }
+
+    #[test]
+    fn automation_receipt_preserves_unknown_outcome_marker_and_cancel_evidence() {
+        assert!(is_automation_outcome_unknown_error(
+            "agent_delivery_receipt_missing: receipt absent"
+        ));
+        assert!(!is_automation_outcome_unknown_error(
+            "agent_delivery_receipt_missing"
+        ));
+        assert!(!is_automation_outcome_unknown_error("ordinary failure"));
+        assert!(automation_cancellation_replay_safe(0));
+        assert!(!automation_cancellation_replay_safe(1));
+        assert!(!automation_cancellation_replay_safe(8));
+        assert!(is_automation_cancel_cas_conflict(
+            &nomifun_common::AppError::Conflict("completion won".to_owned())
+        ));
+        assert!(is_automation_cancel_cas_conflict(
+            &nomifun_common::AppError::RevisionConflict("completion won".to_owned())
+        ));
+        assert!(!is_automation_cancel_cas_conflict(
+            &nomifun_common::AppError::Internal("repository failed".to_owned())
+        ));
     }
 
     #[test]

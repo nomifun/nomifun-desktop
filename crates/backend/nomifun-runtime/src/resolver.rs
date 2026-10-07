@@ -36,7 +36,6 @@ impl From<ExtractError> for ResolveError {
 }
 
 static RESOLVED_BUN: OnceLock<PathBuf> = OnceLock::new();
-static BUN_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Returns the path to a usable `bun` executable.
 ///
@@ -46,25 +45,18 @@ pub fn resolve_bun() -> Result<PathBuf, ResolveError> {
     if let Some(path) = RESOLVED_BUN.get() {
         return Ok(path.clone());
     }
-    let resolved = resolve_with(&ProductionEmbed)?;
-    let _ = RESOLVED_BUN.set(resolved.clone());
-    Ok(resolved)
+    let resolved = resolve_with(&ProductionEmbed, std::env::var("NOMIFUN_BUN_PATH").ok().as_deref())?;
+    Ok(RESOLVED_BUN.get_or_init(|| resolved).clone())
 }
 
-/// Returns the directory that holds `bun` and `bunx`, if a bundled
-/// runtime was extracted. `None` when no embed + no override was used.
+/// Return the directory of the resolved Bun executable, including overrides
+/// and PATH fallback. Failed lookups remain retryable, as in `resolve_bun`.
 pub fn bun_bin_dir() -> Option<PathBuf> {
-    BUN_DIR
-        .get_or_init(|| {
-            resolve_with(&ProductionEmbed)
-                .ok()
-                .and_then(|p| p.parent().map(PathBuf::from))
-        })
-        .clone()
+    resolve_bun().ok().and_then(|path| path.parent().map(PathBuf::from))
 }
 
-fn resolve_with<E: EmbeddedBun>(embed: &E) -> Result<PathBuf, ResolveError> {
-    if let Some(p) = env_override() {
+fn resolve_with<E: EmbeddedBun>(embed: &E, override_raw: Option<&str>) -> Result<PathBuf, ResolveError> {
+    if let Some(p) = env_override(override_raw) {
         return Ok(p);
     }
     if !embed.has() {
@@ -73,21 +65,14 @@ fn resolve_with<E: EmbeddedBun>(embed: &E) -> Result<PathBuf, ResolveError> {
     let dir = cache::bun_dir(embed.version(), embed.sha256()).ok_or(ResolveError::NotFound)?;
     let bun_path = dir.join(extract::bun_filename());
 
-    // Stamp says fresh AND the executable is actually on disk: fast path.
-    if extract::is_fresh(&dir, embed.sha256(), embed.version()) && bun_path.is_file() {
+    // Stamp and all required executables are present: fast path.
+    if extract::is_fresh(&dir, embed.sha256(), embed.version()) {
         return Ok(bun_path);
     }
 
-    // One retry on checksum mismatch: wipe dir and re-extract.
-    let extracted = match extract::extract_into(&dir, embed.blob(), embed.sha256(), embed.version()) {
-        Ok(p) => p,
-        Err(ExtractError::ChecksumMismatch { .. }) => {
-            tracing::warn!("bun cache checksum mismatch; wiping and retrying");
-            let _ = std::fs::remove_dir_all(&dir);
-            extract::extract_into(&dir, embed.blob(), embed.sha256(), embed.version())?
-        }
-        Err(e) => return Err(e.into()),
-    };
+    // A mismatching immutable blob cannot be repaired by retrying it. Keep
+    // failure cleanup inside extract_into's lock; never wipe the cache here.
+    let extracted = extract::extract_into(&dir, embed.blob(), embed.sha256(), embed.version())?;
 
     // Guard against returning a phantom path: wait until the executable
     // is observable on disk. Without this, a caller that immediately
@@ -114,9 +99,8 @@ fn wait_until_observable(path: &Path) -> Result<(), ResolveError> {
     }
 }
 
-fn env_override() -> Option<PathBuf> {
-    let raw = std::env::var("NOMIFUN_BUN_PATH").ok()?;
-    let trimmed = raw.trim();
+fn env_override(raw: Option<&str>) -> Option<PathBuf> {
+    let trimmed = raw?.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -176,77 +160,51 @@ pub fn resolve_command_in(cmd: &str, dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::embed::FakeEmbed;
-    use std::io::Write as _;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn make_blob(payload: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut enc = zstd::stream::write::Encoder::new(&mut out, 0).unwrap();
-        enc.write_all(payload).unwrap();
-        enc.finish().unwrap();
-        out
-    }
-
-    fn sha(payload: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(payload);
-        hex::encode(h.finalize())
-    }
 
     #[test]
-    fn no_embed_falls_back_to_which() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // Safety: unset to avoid env override winning.
-        // SAFETY: ENV_LOCK serializes tests that mutate NOMIFUN_BUN_PATH.
-        unsafe {
-            std::env::remove_var("NOMIFUN_BUN_PATH");
+    fn bun_directory_recovers_after_initial_resolution_failure() {
+        // Compile-time embeds cannot exercise the no-runtime startup case.
+        if ProductionEmbed.has() {
+            return;
         }
-
-        let fake = FakeEmbed {
-            has: false,
-            blob: b"",
-            sha256: "",
-            version: "",
-        };
-        let res = resolve_with(&fake);
-        // If bun is on the test host's PATH -> Ok; otherwise NotFound.
-        // Both are correct behaviors for this branch.
-        match res {
-            Ok(_) | Err(ResolveError::NotFound) => {}
-            Err(e) => panic!("unexpected error: {e:?}"),
+        if let Some(fixture) = std::env::var_os("NOMIFUN_RUNTIME_CACHE_TEST") {
+            let fixture = PathBuf::from(fixture);
+            assert_eq!(bun_bin_dir(), None);
+            assert!(matches!(resolve_bun(), Err(ResolveError::NotFound)));
+            let binary = fixture.join(extract::bun_filename());
+            std::fs::write(&binary, b"fixture only: never executed").unwrap();
+            assert_eq!(resolve_bun().unwrap(), binary);
+            assert_eq!(bun_bin_dir(), Some(fixture));
+            return;
         }
+        // Isolate process-wide caches and environment from parallel tests.
+        // The child only resolves an artificial file; it never launches Bun.
+        let tmp = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "resolver::tests::bun_directory_recovers_after_initial_resolution_failure"])
+            .current_dir(tmp.path())
+            .env("NOMIFUN_RUNTIME_CACHE_TEST", tmp.path())
+            .env("NOMIFUN_BUN_PATH", tmp.path().join(extract::bun_filename()))
+            .env("PATH", tmp.path())
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 
     #[test]
     fn env_override_wins_over_embed() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
-        // SAFETY: ENV_LOCK serializes tests that mutate NOMIFUN_BUN_PATH.
-        unsafe {
-            std::env::set_var("NOMIFUN_BUN_PATH", &path);
-        }
-
-        let payload = b"anything";
-        let fake_blob: &'static [u8] = Box::leak(make_blob(payload).into_boxed_slice());
-        let fake_sha: &'static str = Box::leak(sha(payload).into_boxed_str());
         let fake = FakeEmbed {
             has: true,
-            blob: fake_blob,
-            sha256: fake_sha,
+            blob: b"invalid zstd: override must bypass extraction",
+            sha256: "unused",
             version: "1.0",
         };
 
-        let result = resolve_with(&fake).unwrap();
+        let raw = format!("  {}  ", path.display());
+        let result = resolve_with(&fake, Some(&raw)).unwrap();
         assert_eq!(result, path);
-
-        // SAFETY: ENV_LOCK serializes tests that mutate NOMIFUN_BUN_PATH.
-        unsafe {
-            std::env::remove_var("NOMIFUN_BUN_PATH");
-        }
     }
 
     #[test]
@@ -270,31 +228,13 @@ mod tests {
     }
 
     #[test]
-    fn bad_env_override_falls_through_to_embed() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: ENV_LOCK serializes tests that mutate NOMIFUN_BUN_PATH.
-        unsafe {
-            std::env::set_var("NOMIFUN_BUN_PATH", "/definitely/does/not/exist");
-        }
-
-        let fake = FakeEmbed {
-            has: false,
-            blob: b"",
-            sha256: "",
-            version: "",
-        };
-        let res = resolve_with(&fake);
-        // Must not error out as `Extract(...)` from env override branch;
-        // must fall through to which() (Ok or NotFound — both fine).
-        match res {
-            Ok(_) | Err(ResolveError::NotFound) => {}
-            Err(e) => panic!("unexpected error: {e:?}"),
-        }
-
-        // SAFETY: ENV_LOCK serializes tests that mutate NOMIFUN_BUN_PATH.
-        unsafe {
-            std::env::remove_var("NOMIFUN_BUN_PATH");
-        }
+    fn env_override_ignores_absent_blank_missing_and_directory_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        assert_eq!(env_override(None), None);
+        assert_eq!(env_override(Some(" \t\n")), None);
+        assert_eq!(env_override(missing.to_str()), None);
+        assert_eq!(env_override(tmp.path().to_str()), None);
     }
 
     #[cfg(unix)]

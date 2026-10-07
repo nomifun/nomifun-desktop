@@ -33,6 +33,19 @@ const setDuration = (video: HTMLVideoElement, duration: number) => {
 };
 
 describe('shared creative video player previews', () => {
+  test('reports real dimensions when video metadata arrives for canvas geometry', () => {
+    const sizes: Array<{ width: number; height: number }> = [];
+    const { container } = render(withCanvasTestI18n(
+      <CreativeVideoPlayer src='/portrait.mp4' label='Portrait' onMediaSize={(size) => sizes.push(size)} />
+    ));
+    const video = container.querySelector('video')!;
+    fireEvent.loadedMetadata(video);
+    expect(sizes).toEqual([]);
+    Object.defineProperty(video, 'videoWidth', { configurable: true, value: 720 });
+    Object.defineProperty(video, 'videoHeight', { configurable: true, value: 1280 });
+    fireEvent.loadedMetadata(video);
+    expect(sizes).toEqual([{ width: 720, height: 1280 }]);
+  });
   test('uses the shared controls for previews without native controls, PiP, or a canvas drag surface', () => {
     const { container } = render(withCanvasTestI18n(
       <CreativeVideoPlayer src='/preview.mp4' poster='/cover.jpg' label='Preview clip' />

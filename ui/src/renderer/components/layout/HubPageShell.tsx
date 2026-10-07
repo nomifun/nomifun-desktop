@@ -6,7 +6,6 @@
 
 import classNames from 'classnames';
 import React from 'react';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 
 interface HubPageShellProps {
   title: string;
@@ -17,6 +16,10 @@ interface HubPageShellProps {
   maxWidthClass?: string;
   /** Rendered between the header and the body (e.g. a segmented tab bar). */
   toolbar?: React.ReactNode;
+  /** Page-level actions aligned to the right of the visible heading. */
+  actions?: React.ReactNode;
+  /** Dense workbenches provide their visible title inside the navigation pane. */
+  hideHeading?: boolean;
   children: React.ReactNode;
 }
 
@@ -27,7 +30,7 @@ export const HUB_PAGE_TITLE_CLASS = 'm-0 text-22px font-600 leading-tight text-t
  * HubPageShell — shared chrome for the homepage "hub" destinations (Model
  * Management, Presets, Skills, MCP). Mirrors the scroll container + centered content
  * column of `SettingsPageWrapper` so the embedded settings content components lay
- * out correctly — but without the settings-specific mobile top navigation.
+ * out correctly.
  */
 const HubPageShell: React.FC<HubPageShellProps> = ({
   title,
@@ -35,24 +38,30 @@ const HubPageShell: React.FC<HubPageShellProps> = ({
   className,
   maxWidthClass = 'md:max-w-1100px',
   toolbar,
+  actions,
+  hideHeading = false,
   children,
 }) => {
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
-
   return (
     <div
       className={classNames(
         'w-full min-h-full box-border overflow-y-auto',
         className,
-        isMobile ? 'px-16px py-16px' : 'px-12px md:px-40px py-32px'
+        'px-12px md:px-40px py-32px'
       )}
     >
       <div className={classNames('mx-auto w-full', maxWidthClass)}>
-        <div className='mb-18px'>
-          <h1 className={HUB_PAGE_TITLE_CLASS}>{title}</h1>
-          {subtitle && <div className='mt-6px text-13px leading-18px text-t-tertiary'>{subtitle}</div>}
-        </div>
+        {hideHeading ? (
+          <h1 className='sr-only'>{title}</h1>
+        ) : (
+          <div className='mb-18px flex items-start justify-between gap-24px'>
+            <div className='min-w-0'>
+              <h1 className={HUB_PAGE_TITLE_CLASS}>{title}</h1>
+              {subtitle && <div className='mt-6px text-13px leading-18px text-t-tertiary'>{subtitle}</div>}
+            </div>
+            {actions && <div className='flex shrink-0 items-center'>{actions}</div>}
+          </div>
+        )}
         {toolbar && <div className='mb-20px'>{toolbar}</div>}
         {children}
       </div>

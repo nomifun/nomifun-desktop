@@ -13,7 +13,7 @@ import { creativeAssetClient } from './client';
 import { CreativeAssetDeletedError, subscribeCreativeAssetDeletion } from './assetDeletion';
 import { useCreativeAssets } from './useCreativeAssets';
 
-export interface CreativeAssetPickerRequest {
+interface CreativeAssetPickerRequest {
   acceptedKinds: readonly CreativeAssetKind[];
   initialSelectedIds?: readonly string[];
   selectionLimit?: number;
@@ -104,10 +104,14 @@ export function useCreativeAssetPickerDialog(
       nextRequest.initialSelectedIds ?? [],
       nextRequest.selectionLimit
     ));
+    // The picker can stay mounted while the sidebar library creates, updates,
+    // or receives generated assets. Refresh on every open so both surfaces
+    // present the same authoritative records instead of a stale local page.
+    void assets.reload();
     return new Promise<string[] | null>((resolve) => {
       resolverRef.current = resolve;
     });
-  }, []);
+  }, [assets.reload]);
 
   const toggle = useCallback((asset: CreativeAsset) => {
     if (isCreativeAssetDeleted(asset)) return;

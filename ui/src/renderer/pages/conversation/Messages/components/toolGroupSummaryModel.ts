@@ -11,6 +11,7 @@ import {
 } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { mergeProcessStates } from '../turnProcessState';
+import { formatToolDiagnostics, formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
 
 export interface ToolSummaryDescriptor {
   target: string;
@@ -30,11 +31,15 @@ export type ToolReceiptIcon = 'tool' | 'file' | 'edit';
 
 export interface ToolReceiptSummaryPart {
   action: ToolReceiptAction;
+  /** Logical tool calls with explicit retries collapsed, not a count of distinct files. */
   count: number;
   state: TurnDisclosureProcessState;
   target?: string;
   skipped?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
+  commandExitCode?: number;
+  commandNotStarted?: boolean;
+  commandTimedOut?: boolean;
 }
 
 export interface ToolReceiptDetailRow {
@@ -42,17 +47,28 @@ export interface ToolReceiptDetailRow {
   action: ToolReceiptAction;
   state: TurnDisclosureProcessState;
   title: string;
+  diagnostics?: string;
   target?: string;
   input?: string;
   output?: string;
   truncated?: boolean;
   skipped?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
+  commandExitCode?: number;
+  commandNotStarted?: boolean;
+  commandTimedOut?: boolean;
   retryCount?: number;
   attempts?: ToolReceiptAttemptRow[];
 }
 
-export interface ToolReceiptAttemptRow {
+export const countBoundedSearchResults = (tools: NormalizedToolCall[]): number =>
+  tools.filter((tool) => tool.boundedResult === 'search_context_withheld').length;
+
+export const countNonFatalToolFailures = (tools: NormalizedToolCall[]): number =>
+  tools.filter((tool) => tool.nonFatalFailure === true && tool.boundedResult === undefined
+    && tool.commandExitCode === undefined).length;
+
+interface ToolReceiptAttemptRow {
   key: string;
   attemptNo: number;
   state: TurnDisclosureProcessState;
@@ -60,6 +76,8 @@ export interface ToolReceiptAttemptRow {
   output?: string;
   truncated?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
+  commandNotStarted?: boolean;
+  commandTimedOut?: boolean;
 }
 
 interface ToolRetryGroup {
@@ -71,7 +89,7 @@ interface ToolRetryGroup {
  * Collapse only a complete explicit retry chain. Legacy calls and malformed,
  * ambiguous, or out-of-order metadata fail closed as independent rows.
  */
-export const groupExplicitToolRetries = (tools: NormalizedToolCall[]): ToolRetryGroup[] => {
+const groupExplicitToolRetries = (tools: NormalizedToolCall[]): ToolRetryGroup[] => {
   const groups: ToolRetryGroup[] = [];
   const openGroups = new Map<string, ToolRetryGroup>();
 
@@ -149,14 +167,9 @@ const compactToolText = (value?: unknown): string => {
   return text.replace(/\s+/g, ' ').trim();
 };
 
-const formatToolTarget = (tool: NormalizedToolCall): string => {
+const formatToolTarget = (tool: NormalizedToolCall, language = 'en-US'): string => {
   if (classifyToolForReceipt(tool) === 'run_commands') return getCommandTarget(tool);
-
-  const rawName = compactToolText(tool.name);
-  const name = compactToolText(formatToolDisplayName(rawName));
-  const description = compactToolText(tool.description);
-  if (name && description && description !== name && description !== rawName) return `${name} ${description}`;
-  return name || description || tool.key;
+  return formatToolPresentationLabel(resolveToolPresentation(tool, language));
 };
 
 const commandFieldNames = ['command', 'cmd', 'script', 'shell', 'bash'];
@@ -314,6 +327,8 @@ const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => 
   if (['glob', 'list'].includes(kind)) return 'list_files';
   if (['edit', 'write'].includes(kind)) return 'edit_files';
   if (kind === 'read') return 'read_files';
+  const explicitAction = resolveToolPresentation(tool).receiptAction;
+  if (explicitAction) return explicitAction as ToolReceiptAction;
   // A server-local MCP name is descriptive metadata, not a trusted semantic
   // kind. Preserve strong compound actions such as read_file/exec_command, but
   // do not turn ambiguous one-word names such as search/read/run/list into
@@ -378,7 +393,7 @@ const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => 
   return 'generic';
 };
 
-const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptAction): string | undefined => {
+const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptAction, language: string): string | undefined => {
   if (action === 'run_commands') {
     return getCommandTarget(tool);
   }
@@ -386,15 +401,15 @@ const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptActio
     return getFileTarget(tool);
   }
   if (action !== 'generic') return undefined;
-  return formatToolTarget(tool);
+  return formatToolTarget(tool, language);
 };
 
-const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceiptAction): string | undefined => {
+const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceiptAction, language: string): string | undefined => {
   const description = compactToolText(tool.description);
   const rawName = compactToolText(tool.name);
   const name = compactToolText(formatToolDisplayName(rawName));
 
-  if (action === 'generic') return formatToolTarget(tool);
+  if (action === 'generic') return formatToolTarget(tool, language);
   if (action === 'read_files' || action === 'edit_files') return getFileTarget(tool);
   if (description && description !== name && description !== rawName) return description;
   if (action === 'run_commands') return getCommandTarget(tool);
@@ -415,7 +430,8 @@ const getToolProcessState = (tool: NormalizedToolCall): TurnDisclosureProcessSta
 
 export const buildToolReceiptSummaryParts = (
   tools: NormalizedToolCall[],
-  _state: TurnDisclosureProcessState
+  _state: TurnDisclosureProcessState,
+  language = 'en-US'
 ): ToolReceiptSummaryPart[] => {
   const grouped = new Map<
     string,
@@ -426,15 +442,18 @@ export const buildToolReceiptSummaryParts = (
       targets: string[];
       states: TurnDisclosureProcessState[];
       notExecutedReason?: NormalizedToolNotExecutedReason;
+      commandExitCode?: number;
+      commandNotStarted?: boolean;
+      commandTimedOut?: boolean;
     }
   >();
 
   groupExplicitToolRetries(tools).forEach(({ latest: tool }) => {
     const action = classifyToolForReceipt(tool);
-    const target = getToolReceiptTarget(tool, action);
+    const target = getToolReceiptTarget(tool, action, language);
     // A pre-dispatch rejection is a different receipt outcome from a tool that
     // actually ran. Keep them separate even when their semantic action matches.
-    const groupKey = `${action}:${tool.notExecutedReason ?? 'executed'}`;
+    const groupKey = `${action}:${tool.notExecutedReason ?? 'executed'}:${tool.commandExitCode ?? 'unknown'}:${tool.commandNotStarted === true}:${tool.commandTimedOut === true}`;
     const current = grouped.get(groupKey) ?? {
       action,
       count: 0,
@@ -442,6 +461,9 @@ export const buildToolReceiptSummaryParts = (
       targets: [],
       states: [],
       ...(tool.notExecutedReason ? { notExecutedReason: tool.notExecutedReason } : {}),
+      ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
+      ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
+      ...(tool.commandTimedOut ? { commandTimedOut: true } : {}),
     };
     current.count += 1;
     if (tool.skipped) current.skippedCount += 1;
@@ -457,22 +479,26 @@ export const buildToolReceiptSummaryParts = (
     ...(value.targets.length ? { target: Array.from(new Set(value.targets)).join(', ') } : {}),
     ...(value.skippedCount === value.count ? { skipped: true } : {}),
     ...(value.notExecutedReason ? { notExecutedReason: value.notExecutedReason } : {}),
+    ...(value.commandExitCode !== undefined ? { commandExitCode: value.commandExitCode } : {}),
+    ...(value.commandNotStarted ? { commandNotStarted: true } : {}),
+    ...(value.commandTimedOut ? { commandTimedOut: true } : {}),
   }));
 };
 
 export const getToolReceiptIconFromSummaryParts = (parts: ToolReceiptSummaryPart[]): ToolReceiptIcon | undefined => {
   const focusedPart =
-    parts.findLast((part) => part.state === 'running' || part.state === 'waiting') ??
+    parts.findLast((part) => part.state === 'running') ??
     parts.findLast((part) => part.state === 'failed' || part.state === 'canceled') ??
     parts.at(-1);
   return focusedPart ? toolReceiptIconByAction[focusedPart.action] : undefined;
 };
 
-export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolReceiptDetailRow[] =>
+export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[], language = 'en-US'): ToolReceiptDetailRow[] =>
   groupExplicitToolRetries(tools).map(({ attempts, latest: tool }) => {
     const action = classifyToolForReceipt(tool);
-    const title = compactToolText(formatToolDisplayName(tool.name)) || tool.key;
-    const target = getToolReceiptDetailTarget(tool, action);
+    const presentation = resolveToolPresentation(tool, language);
+    const title = presentation.title;
+    const target = getToolReceiptDetailTarget(tool, action, language);
     return {
       // Keep the rendered detail row anchored to the immutable retry root.
       // Using the latest call id here remounted the row whenever a retry
@@ -481,12 +507,17 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
       action,
       state: getToolProcessState(tool),
       title,
+      ...(presentation.title !== tool.name || presentation.source || tool.capabilityId || tool.actionId
+        ? { diagnostics: formatToolDiagnostics(presentation) } : {}),
       ...(target ? { target } : {}),
       ...(tool.input ? { input: tool.input } : {}),
       ...(tool.output ? { output: tool.output } : {}),
       ...(tool.truncated ? { truncated: tool.truncated } : {}),
       ...(tool.skipped ? { skipped: true } : {}),
       ...(tool.notExecutedReason ? { notExecutedReason: tool.notExecutedReason } : {}),
+      ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
+      ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
+      ...(tool.commandTimedOut ? { commandTimedOut: true } : {}),
       ...(attempts.length > 1
         ? {
             retryCount: attempts.length - 1,
@@ -498,6 +529,8 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
               ...(attempt.output ? { output: attempt.output } : {}),
               ...(attempt.truncated ? { truncated: attempt.truncated } : {}),
               ...(attempt.notExecutedReason ? { notExecutedReason: attempt.notExecutedReason } : {}),
+              ...(attempt.commandNotStarted ? { commandNotStarted: true } : {}),
+              ...(attempt.commandTimedOut ? { commandTimedOut: true } : {}),
             })),
           }
         : {}),
@@ -506,7 +539,8 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
 
 export const buildToolSummaryDescriptor = (
   tools: NormalizedToolCall[],
-  state: TurnDisclosureProcessState
+  state: TurnDisclosureProcessState,
+  language = 'en-US'
 ): ToolSummaryDescriptor | null => {
   const logicalTools = groupExplicitToolRetries(tools).map(({ latest }) => latest);
   if (!logicalTools.length) return null;
@@ -515,7 +549,7 @@ export const buildToolSummaryDescriptor = (
   if (!focusedTool) return null;
 
   return {
-    target: formatToolTarget(focusedTool),
+    target: formatToolTarget(focusedTool, language),
     count: logicalTools.length,
   };
 };

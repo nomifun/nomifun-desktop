@@ -2,8 +2,8 @@ import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useCallback, useMemo } from 'react';
-import useSWR, { type SWRConfiguration } from 'swr';
-import { orderModelSelectorProviders } from './modelSelectorProviderOrdering';
+import useSWR, { useSWRConfig, type SWRConfiguration } from 'swr';
+import useSWRSubscription from 'swr/subscription';
 
 export interface ModelProviderListResult {
   /** Enabled providers in selector order. Task membership is filtered from
@@ -20,18 +20,26 @@ export interface ModelProviderListResult {
 export const PROVIDERS_SWR_KEY = 'providers';
 
 // Provider config is local application state. Keep it stable after the initial
-// load and refresh only through explicit mutate() calls after CRUD operations.
-export const PROVIDERS_SWR_OPTIONS: SWRConfiguration<IProvider[], Error> = {
+// load and refresh after editor CRUD or a conversation configuration event.
+const PROVIDERS_SWR_OPTIONS: SWRConfiguration<IProvider[], Error> = {
   revalidateOnFocus: false,
   revalidateOnReconnect: false,
   shouldRetryOnError: false,
 };
 
-export const fetchProviders = async (): Promise<IProvider[]> => {
+const fetchProviders = async (): Promise<IProvider[]> => {
   return (await ipcBridge.mode.listProviders.invoke()) ?? [];
 };
 
 export const useProvidersQuery = () => {
+  const { mutate } = useSWRConfig();
+  // SWR shares one subscription per cache/key across all model selectors.
+  useSWRSubscription('providers.changed', () => {
+    const refresh = () => { void mutate(PROVIDERS_SWR_KEY).catch(() => undefined); };
+    const stopChanges = ipcBridge.mode.onProvidersChanged.on(refresh);
+    const stopReconnect = ipcBridge.conversation.reconnected.on(refresh);
+    return () => { stopChanges(); stopReconnect(); };
+  });
   return useSWR<IProvider[]>(PROVIDERS_SWR_KEY, fetchProviders, PROVIDERS_SWR_OPTIONS);
 };
 
@@ -53,7 +61,7 @@ export const useModelProviderList = (): ModelProviderListResult => {
     // 过滤掉被禁用的 provider（默认为启用）。
     // 注意：不再按「是否有可用模型」过滤 —— 模型级别的可用性由
     // useModelsForTask（嵌套 task capability）决定，空组不会被渲染。
-    return orderModelSelectorProviders(configuredProviders.filter((p) => p.enabled !== false));
+    return configuredProviders.filter((p) => p.enabled !== false);
   }, [configuredProviders]);
 
   const formatModelLabel = useCallback((

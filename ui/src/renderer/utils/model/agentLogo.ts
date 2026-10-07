@@ -90,74 +90,14 @@ export function getAgentLogo(agent: string | undefined | null): string | null {
  *
  * Priority:
  *   1. Explicit icon/avatar (if provided)
- *   2. Opaque extension AgentRegistry ID (`ext:extensionName:adapterId`) → built-in logo map
- *   3. Backend ID → built-in logo map
- *   4. null (caller renders its own fallback)
+ *   2. Backend vendor ID → built-in logo map
+ *   3. null (caller renders its own fallback)
  */
 export function resolveAgentLogo(opts: {
   icon?: string | null;
   backend?: string | null;
-  agentId?: string | null;
-  isExtension?: boolean;
 }): string | null {
   if (opts.icon) return normalizeLogoUrl(opts.icon);
 
-  // Extension IDs are opaque registry keys; only their final display segment
-  // is used for logo lookup, never for entity-ID parsing.
-  if (opts.isExtension && opts.agentId) {
-    const adapterId = opts.agentId.split(':').pop();
-    const logo = getAgentLogo(adapterId);
-    if (logo) return logo;
-  }
-
   return getAgentLogo(opts.backend);
 }
-
-/**
- * 检查 agent 是否有对应的 logo
- * Check if agent has a corresponding logo
- *
- * @param agent - Agent 名称（不区分大小写）/ Agent name (case-insensitive)
- * @returns 是否存在对应的 logo / Whether the agent has a corresponding logo
- */
-export function hasAgentLogo(agent: string | undefined | null): boolean {
-  return getAgentLogo(agent) !== null;
-}
-
-/**
- * Check if a model value/label indicates it's a default/recommended model
- * 检查模型值/标签是否表示默认/推荐模型
- *
- * @param value - Model value
- * @param label - Model label
- * @returns true if the model is marked as default/recommended
- */
-export const isDefaultModel = (value?: string | null, label?: string | null): boolean => {
-  const text = `${value || ''} ${label || ''}`.toLowerCase();
-  return text.includes('default') || text.includes('recommended') || text.includes('默认');
-};
-
-/**
- * Get display label for a model, with fallback handling
- * 获取模型的显示标签，带回退处理
- *
- * @param selected_value - Selected model value
- * @param selectedLabel - Selected model label
- * @param defaultModelLabel - Label to use for default models
- * @param fallbackLabel - Label to use when no label is available
- * @returns The computed display label
- */
-export const getModelDisplayLabel = ({
-  selected_value,
-  selectedLabel,
-  defaultModelLabel,
-  fallbackLabel,
-}: {
-  selected_value?: string | null;
-  selectedLabel?: string | null;
-  defaultModelLabel: string;
-  fallbackLabel: string;
-}): string => {
-  if (!selectedLabel) return fallbackLabel;
-  return isDefaultModel(selected_value, selectedLabel) ? defaultModelLabel : selectedLabel;
-};

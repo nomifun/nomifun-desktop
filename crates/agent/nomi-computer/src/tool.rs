@@ -18,11 +18,26 @@ use nomi_types::tool::{JsonSchema, ToolResult};
 use crate::input::{self, ScrollDirection};
 use crate::keys::parse_key_combo;
 use crate::scale::{map_llm_coord, map_screen_coord};
-use crate::screen::{CaptureGeometry, capture_screen, encode_png};
+use crate::screen::{
+    CANONICAL_SCREENSHOT_PNG_BYTES, CaptureGeometry, capture_screen, encode_png,
+    encode_png_with_limit,
+};
 use crate::fallback_backend;
 
 const MAX_WAIT_SECONDS: f64 = 5.0;
 const DEFAULT_SCROLL_AMOUNT: i64 = 3;
+
+/// True only for the exact semantic-ref stale rejection produced before the
+/// Accessibility backend performs an action. The message also proves that the
+/// Computer layer did not use its pixel fallback, so a role owner may settle
+/// the reserved external effect as rejected instead of outcome-unknown.
+pub fn is_proven_stale_input_rejection(result: &ToolResult) -> bool {
+    result.is_error
+        && result.images.is_empty()
+        && result.content.starts_with("Accessibility action on [")
+        && result.content.contains(" failed: stale reference:")
+        && result.content.contains("No pixel fallback was performed;")
+}
 
 /// Example key combo for the platform we are compiled for. The accelerator
 /// modifier differs by OS (Command on macOS, Control on Windows/Linux), so we
@@ -138,6 +153,94 @@ impl ComputerTool {
         }
     }
 
+    /// Execute one native operation under an exact canonical `computer`
+    /// action grant. The caller supplies the Action ID frozen into the Agent
+    /// snapshot; a mismatched native operation is rejected before any OS API
+    /// is touched.
+    pub async fn execute_authorized(&self, action_id: &str, input: Value) -> ToolResult {
+        let Some(granted_action) = crate::capability::ComputerAction::parse(action_id) else {
+            return ToolResult::error(format!(
+                "COMPUTER_ACTION_NOT_DECLARED: {action_id:?} is not an action declared by the computer module"
+            ));
+        };
+        let Some(native_operation) = input
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return ToolResult::error(
+                "Missing required parameter `action`. See the tool description for the list of supported operations.",
+            );
+        };
+        let Some(required_action) =
+            crate::capability::ComputerAction::for_native_operation(&native_operation)
+        else {
+            return ToolResult::error(format!(
+                "Unknown Computer operation {native_operation:?}."
+            ));
+        };
+        if granted_action != required_action {
+            return ToolResult::error(format!(
+                "COMPUTER_ACTION_NOT_GRANTED: {native_operation:?} requires {}, not {}",
+                required_action.id(),
+                granted_action.id()
+            ));
+        }
+        if granted_action == crate::capability::ComputerAction::A11yObserve
+            && native_operation == "observe"
+        {
+            // Keep the canonical Accessibility action independent from Screen
+            // Recording. The separate computer/observe action owns pixels;
+            // attaching a full screenshot here couples TCC grants and can force
+            // avoidable model-context compaction for an otherwise small tree.
+            return self.do_observe(false).await;
+        }
+        if granted_action == crate::capability::ComputerAction::Observe
+            && native_operation == "screenshot"
+        {
+            // The canonical Kernel port is JSON-only until the application
+            // restores a typed image part. Bound the PNG before that envelope
+            // so high-entropy screens cannot be truncated into invalid JSON.
+            return self
+                .do_screenshot_with_limit(&input, Some(CANONICAL_SCREENSHOT_PNG_BYTES))
+                .await;
+        }
+        self.execute_native(input, &native_operation).await
+    }
+
+    async fn execute_native(&self, input: Value, action: &str) -> ToolResult {
+        tracing::debug!(action = %action, "ComputerTool executing");
+
+        match action {
+            "observe" => self.do_observe(true).await,
+            "click_element" => self.do_click_element(&input).await,
+            "set_element_value" => self.do_set_element_value(&input).await,
+            "right_click_element" => {
+                self.do_element_gesture(&input, enigo::Button::Right, 1, "right-click").await
+            }
+            "double_click_element" => {
+                self.do_element_gesture(&input, enigo::Button::Left, 2, "double-click").await
+            }
+            "launch" => self.do_launch(&input).await,
+            "screenshot" => self.do_screenshot(&input).await,
+            "cursor_position" => self.do_cursor_position().await,
+            "list_windows" => self.do_list_windows().await,
+            "left_click" => self.do_click(&input, enigo::Button::Left, 1).await,
+            "right_click" => self.do_click(&input, enigo::Button::Right, 1).await,
+            "middle_click" => self.do_click(&input, enigo::Button::Middle, 1).await,
+            "double_click" => self.do_click(&input, enigo::Button::Left, 2).await,
+            "triple_click" => self.do_click(&input, enigo::Button::Left, 3).await,
+            "mouse_move" => self.do_mouse_move(&input).await,
+            "left_click_drag" => self.do_drag(&input).await,
+            "type" => self.do_type(&input).await,
+            "key" => self.do_key(&input).await,
+            "scroll" => self.do_scroll(&input).await,
+            "focus_window" => self.do_focus_window(&input).await,
+            "wait" => self.do_wait(&input).await,
+            other => ToolResult::error(format!("Unknown Computer operation {other:?}.")),
+        }
+    }
+
     /// Lazily construct (and cache) the accessibility engine. The error string
     /// is cached too, so an unavailable backend is reported without retrying.
     fn engine(&self) -> Result<Arc<dyn A11yEngine>, String> {
@@ -148,11 +251,18 @@ impl ComputerTool {
         guard.as_ref().unwrap().clone()
     }
 
-    /// a11y-first "look": read the focused window's accessibility tree, return a
-    /// numbered element list, and (when screen capture is available) a
-    /// Set-of-Marks overlay screenshot. Needs only the Accessibility grant for
-    /// the element list; the overlay additionally needs Screen Recording.
-    async fn do_observe(&self) -> ToolResult {
+    /// A11y-first "look": read the focused window's accessibility tree and
+    /// return a numbered element list. Legacy combined-tool callers may request
+    /// an opportunistic Set-of-Marks overlay; the canonical
+    /// `computer/a11y.observe` action always passes `include_pixels=false` so
+    /// its output and authority remain independent from Screen Recording.
+    async fn do_observe(&self, include_pixels: bool) -> ToolResult {
+        // A failed refresh must not leave old OCR/pixel targets actionable.
+        *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self
+            .last_capture
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let engine = match self.engine() {
             Ok(e) => e,
             Err(msg) => {
@@ -184,6 +294,37 @@ impl ComputerTool {
         // order); OCR-fused targets continue after this so refs never collide.
         let max_ax_ref = snap.entries.iter().map(|e| e.r#ref).max().unwrap_or(0);
 
+        let ax_only = |note: &str| {
+            let mut cached: Vec<CachedEntry> = Vec::with_capacity(snap.entries.len());
+            for e in &snap.entries {
+                let (cx, cy) = e.bounds.center();
+                cached.push(CachedEntry {
+                    display: e.clone(),
+                    target: CachedTarget::Ax {
+                        engine_ref: e.r#ref,
+                        screen_center: (cx as i32, cy as i32),
+                    },
+                });
+            }
+            let count = cached.len();
+            *self
+                .last_snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SnapshotCache {
+                generation: snap.generation,
+                entries: cached,
+            });
+            ToolResult::text(format!(
+                "Accessibility snapshot (gen {}): {count} element(s){app_note}{ax_note}. {note}\n\n{}",
+                snap.generation.0, snap.text
+            ))
+        };
+        if !include_pixels {
+            return ax_only(
+                "Pixel overlay intentionally omitted by computer/a11y.observe; use the separate computer/observe screenshot action when pixels are required.",
+            );
+        }
+
         // Capture a screenshot for the overlay + OCR fusion + pixel mapping. If
         // it is denied, fall back to an AX-only text list (a11y needs only the
         // Accessibility grant) — the core a11y-first win.
@@ -197,32 +338,9 @@ impl ComputerTool {
                 *self.last_capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(shot.geometry);
                 shot
             }
-            Err(_) => {
-                // AX-only: no overlay, no OCR. Display bounds stay AX-space; show
-                // the engine's hierarchical semantic tree (desktop → window → …).
-                let mut cached: Vec<CachedEntry> = Vec::with_capacity(snap.entries.len());
-                for e in &snap.entries {
-                    let (cx, cy) = e.bounds.center();
-                    cached.push(CachedEntry {
-                        display: e.clone(),
-                        target: CachedTarget::Ax {
-                            engine_ref: e.r#ref,
-                            screen_center: (cx as i32, cy as i32),
-                        },
-                    });
-                }
-                let count = cached.len();
-                *self.last_snapshot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SnapshotCache {
-                    generation: snap.generation,
-                    entries: cached,
-                });
-                return ToolResult::text(format!(
-                    "Accessibility snapshot (gen {}): {count} element(s){app_note}{ax_note}. No \
-                     Set-of-Marks overlay (screen capture unavailable) — still actionable by \
-                     [ref] with `click_element`.\n\n{}",
-                    snap.generation.0, snap.text
-                ));
-            }
+            Err(_) => return ax_only(
+                "No Set-of-Marks overlay (screen capture unavailable) — still actionable by [ref] with `click_element`.",
+            ),
         };
         let geom = shot.geometry;
 
@@ -346,17 +464,52 @@ impl ComputerTool {
         }
     }
 
+    /// Share semantic invocation and its fallback gate. Lost targets, denied
+    /// permission, or a failed task are not permission to click cached pixels.
+    async fn act_on_ax<F, Fut>(
+        &self,
+        r: u32,
+        generation: SnapshotGen,
+        action: ElementAction,
+        fallback: F,
+    ) -> ToolResult
+    where
+        F: FnOnce(A11yError) -> Fut,
+        Fut: std::future::Future<Output = ToolResult>,
+    {
+        let engine = match self.engine() {
+            Ok(engine) => engine,
+            Err(msg) => return ToolResult::error(format!("Accessibility engine unavailable: {msg}")),
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            engine.invoke(&Target::Ref(r), generation, action)
+        })
+        .await;
+        let error = match result {
+            Ok(Ok(effect)) => return ToolResult::text(format!(
+                "{}. Run `observe` to verify the result.", effect.message
+            )),
+            Ok(Err(e @ (A11yError::Unsupported { .. } | A11yError::Backend(_)))) => {
+                return fallback(e).await;
+            }
+            Ok(Err(e)) => e.to_string(),
+            Err(e) => format!("invoke task failed: {e}"),
+        };
+        *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        ToolResult::error(format!(
+            "Accessibility action on [{r}] failed: {error}. No pixel fallback was \
+             performed; re-run observe before using element refs."
+        ))
+    }
+
     /// Act on an element by its `[ref]` from the latest `observe` snapshot.
     /// Accessibility elements use AXPress with an automatic pixel-click
     /// fallback; OCR/pixel-only elements click their center directly.
     async fn do_click_element(&self, input: &Value) -> ToolResult {
-        let Some(r) = input.get("ref").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(
-                "Missing required parameter `ref` for click_element (a number from the latest \
-                 observe snapshot).",
-            );
+        let r = match require_u32(input, "ref") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::error(e),
         };
-        let r = r as u32;
         let (generation, entry) = match self.resolve_ref(r) {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
@@ -367,24 +520,11 @@ impl ComputerTool {
                 engine_ref,
                 screen_center,
             } => {
-                let engine = match self.engine() {
-                    Ok(e) => e,
-                    Err(msg) => {
-                        return ToolResult::error(format!("Accessibility engine unavailable: {msg}"));
-                    }
-                };
-                let eng = engine.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    eng.invoke(&Target::Ref(engine_ref), generation, ElementAction::LeftClick)
-                })
-                .await
-                .unwrap_or_else(|e| Err(A11yError::Backend(format!("invoke task failed: {e}"))));
-                match result {
-                    Ok(eff) => ToolResult::text(format!(
-                        "{}. Run `observe` (or take a screenshot) to verify the result.",
-                        eff.message
-                    )),
-                    Err(e) => {
+                self.act_on_ax(
+                    engine_ref,
+                    generation,
+                    ElementAction::LeftClick,
+                    |e| async move {
                         let (sx, sy) = screen_center;
                         match input::click(sx, sy, enigo::Button::Left, 1).await {
                             Ok(()) => ToolResult::text(format!(
@@ -396,8 +536,8 @@ impl ComputerTool {
                                  also failed: {pe}"
                             )),
                         }
-                    }
-                }
+                    },
+                ).await
             }
             CachedTarget::Pixel { screen_center } => {
                 let (sx, sy) = screen_center;
@@ -415,51 +555,35 @@ impl ComputerTool {
     /// AXValue with a focus-then-type fallback; OCR/pixel-only elements click
     /// then type.
     async fn do_set_element_value(&self, input: &Value) -> ToolResult {
-        let Some(r) = input.get("ref").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(
-                "Missing required parameter `ref` for set_element_value (from the latest observe).",
-            );
+        let r = match require_u32(input, "ref") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::error(e),
         };
         let Some(text) = input.get("text").and_then(|v| v.as_str()) else {
             return ToolResult::error("Missing required parameter `text` for set_element_value.");
         };
-        let r = r as u32;
         let text = text.to_string();
         let (generation, entry) = match self.resolve_ref(r) {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
         };
 
-        // For accessibility elements, try the semantic set-value first.
-        if let CachedTarget::Ax { engine_ref, .. } = entry.target {
-            let engine = match self.engine() {
-                Ok(e) => e,
-                Err(msg) => {
-                    return ToolResult::error(format!("Accessibility engine unavailable: {msg}"));
-                }
-            };
-            let eng = engine.clone();
-            let value = text.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                eng.invoke(
-                    &Target::Ref(engine_ref),
+        match entry.target {
+            CachedTarget::Ax { engine_ref, screen_center } => {
+                self.act_on_ax(
+                    engine_ref,
                     generation,
-                    ElementAction::SetValue(value),
-                )
-            })
-            .await
-            .unwrap_or_else(|e| Err(A11yError::Backend(format!("invoke task failed: {e}"))));
-            if let Ok(eff) = result {
-                return ToolResult::text(format!("{}. Run `observe` to verify the value.", eff.message));
+                    ElementAction::SetValue(text.clone()),
+                    |_| Self::set_value_by_typing(r, screen_center, text),
+                ).await
+            }
+            CachedTarget::Pixel { screen_center } => {
+                Self::set_value_by_typing(r, screen_center, text).await
             }
         }
+    }
 
-        // Fallback (OCR/pixel target, or AX set-value did not take): click the
-        // element to focus it, then type.
-        let (sx, sy) = match entry.target {
-            CachedTarget::Ax { screen_center, .. } => screen_center,
-            CachedTarget::Pixel { screen_center } => screen_center,
-        };
+    async fn set_value_by_typing(r: u32, (sx, sy): (i32, i32), text: String) -> ToolResult {
         if let Err(pe) = input::click(sx, sy, enigo::Button::Left, 1).await {
             return ToolResult::error(format!(
                 "Could not focus element [{r}] to type into it: {pe}"
@@ -493,13 +617,10 @@ impl ComputerTool {
         count: u32,
         verb: &str,
     ) -> ToolResult {
-        let Some(r) = input.get("ref").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(format!(
-                "Missing required parameter `ref` for {verb} (a number from the latest observe \
-                 snapshot)."
-            ));
+        let r = match require_u32(input, "ref") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::error(e),
         };
-        let r = r as u32;
         let (sx, sy) = match self.ref_screen_center(r) {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
@@ -526,7 +647,11 @@ impl ComputerTool {
                  Browser tool, not launch.",
             );
         };
-        let app = input.get("app").and_then(|v| v.as_str());
+        let app = match input.get("app") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(app)) => Some(app.as_str()),
+            Some(_) => return ToolResult::error("Parameter `app` must be a string."),
+        };
         match crate::launch::launch(target, app).await {
             Ok(msg) => ToolResult::text(format!(
                 "{msg} Take a screenshot or run `observe` to see the result."
@@ -564,10 +689,21 @@ impl ComputerTool {
     }
 
     async fn do_screenshot(&self, input: &Value) -> ToolResult {
+        self.do_screenshot_with_limit(input, None).await
+    }
+
+    async fn do_screenshot_with_limit(
+        &self,
+        input: &Value,
+        max_png_bytes: Option<usize>,
+    ) -> ToolResult {
         let display = match input.get("display") {
             None | Some(Value::Null) => None,
             Some(v) => match v.as_u64() {
-                Some(d) => Some(d as usize),
+                Some(d) => match usize::try_from(d) {
+                    Ok(d) => Some(d),
+                    Err(_) => return ToolResult::error("Parameter `display` is out of range."),
+                },
                 None => {
                     return ToolResult::error(
                         "Parameter `display` must be a non-negative integer display index.",
@@ -583,7 +719,11 @@ impl ComputerTool {
 
         match captured {
             Ok(shot) => {
-                match encode_png(&shot.image) {
+                let encoded = match max_png_bytes {
+                    Some(limit) => encode_png_with_limit(&shot.image, limit),
+                    None => encode_png(&shot.image),
+                };
+                match encoded {
                     Ok(encoded) => {
                         let mut geometry = shot.geometry;
                         geometry.img_w = encoded.width;
@@ -731,17 +871,16 @@ impl ComputerTool {
             Ok(d) => d,
             Err(e) => return ToolResult::error(e),
         };
-        let amount = input
-            .get("amount")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(DEFAULT_SCROLL_AMOUNT)
-            .clamp(1, 100) as i32;
-        let at = match (
-            input.get("x").and_then(|v| v.as_i64()),
-            input.get("y").and_then(|v| v.as_i64()),
-        ) {
-            (Some(x), Some(y)) => Some(self.to_screen(x as i32, y as i32)),
-            _ => None,
+        let amount = match input.get("amount") {
+            None | Some(Value::Null) => DEFAULT_SCROLL_AMOUNT,
+            Some(v) => match v.as_i64() {
+                Some(amount) => amount,
+                None => return ToolResult::error("Parameter `amount` must be an integer."),
+            },
+        }.clamp(1, 100) as i32;
+        let at = match optional_xy(input) {
+            Ok(at) => at.map(|(x, y)| self.to_screen(x, y)),
+            Err(e) => return ToolResult::error(e),
         };
         match input::scroll(at, direction, amount).await {
             Ok(()) => ToolResult::text(format!(
@@ -752,13 +891,11 @@ impl ComputerTool {
     }
 
     async fn do_focus_window(&self, input: &Value) -> ToolResult {
-        let Some(window_id) = input.get("window_id").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(
-                "Missing required parameter `window_id` for the focus_window action. \
-                 Use list_windows to get window ids.",
-            );
+        let window_id = match require_u32(input, "window_id") {
+            Ok(id) => id,
+            Err(e) => return ToolResult::error(e),
         };
-        match fallback_backend::focus_window(window_id as u32).await {
+        match fallback_backend::focus_window(window_id).await {
             Ok(msg) => ToolResult::text(msg),
             Err(e) => ToolResult::error(e),
         }
@@ -844,13 +981,29 @@ fn ax_rect_to_pixel(r: nomi_a11y::Rect, g: &CaptureGeometry) -> nomi_a11y::Rect 
     }
 }
 
+fn require_u32(input: &Value, name: &str) -> Result<u32, String> {
+    let value = input.get(name).and_then(Value::as_u64)
+        .ok_or_else(|| format!("Missing or invalid required parameter `{name}`: expected an unsigned integer."))?;
+    u32::try_from(value).map_err(|_| format!("Parameter `{name}` is out of range for a 32-bit id."))
+}
+
+fn optional_xy(input: &Value) -> Result<Option<(i32, i32)>, String> {
+    match (input.get("x"), input.get("y")) {
+        (None | Some(Value::Null), None | Some(Value::Null)) => Ok(None),
+        _ => require_xy(input, "x", "y").map(Some),
+    }
+}
+
 /// Extract a required (x, y)-style coordinate pair, naming the missing
 /// parameters in the error.
 fn require_xy(input: &Value, x_name: &str, y_name: &str) -> Result<(i32, i32), String> {
     let x = input.get(x_name).and_then(|v| v.as_i64());
     let y = input.get(y_name).and_then(|v| v.as_i64());
     match (x, y) {
-        (Some(x), Some(y)) => Ok((x as i32, y as i32)),
+        (Some(x), Some(y)) => Ok((
+            i32::try_from(x).map_err(|_| format!("Parameter `{x_name}` is out of range for a 32-bit coordinate."))?,
+            i32::try_from(y).map_err(|_| format!("Parameter `{y_name}` is out of range for a 32-bit coordinate."))?,
+        )),
         (None, Some(_)) => Err(format!("Missing required parameter `{x_name}`.")),
         (Some(_), None) => Err(format!("Missing required parameter `{y_name}`.")),
         (None, None) => Err(format!(
@@ -917,49 +1070,17 @@ impl Tool for ComputerTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(action) = input.get("action").and_then(|v| v.as_str()) else {
+        let Some(action) = input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+        else {
             return ToolResult::error(
                 "Missing required parameter `action`. See the tool description for the \
                  list of supported actions.",
             );
         };
-
-        tracing::debug!(action = %action, "ComputerTool executing");
-
-        match action {
-            "observe" => self.do_observe().await,
-            "click_element" => self.do_click_element(&input).await,
-            "set_element_value" => self.do_set_element_value(&input).await,
-            "right_click_element" => {
-                self.do_element_gesture(&input, enigo::Button::Right, 1, "right-click").await
-            }
-            "double_click_element" => {
-                self.do_element_gesture(&input, enigo::Button::Left, 2, "double-click").await
-            }
-            "launch" => self.do_launch(&input).await,
-            "screenshot" => self.do_screenshot(&input).await,
-            "cursor_position" => self.do_cursor_position().await,
-            "list_windows" => self.do_list_windows().await,
-            "left_click" => self.do_click(&input, enigo::Button::Left, 1).await,
-            "right_click" => self.do_click(&input, enigo::Button::Right, 1).await,
-            "middle_click" => self.do_click(&input, enigo::Button::Middle, 1).await,
-            "double_click" => self.do_click(&input, enigo::Button::Left, 2).await,
-            "triple_click" => self.do_click(&input, enigo::Button::Left, 3).await,
-            "mouse_move" => self.do_mouse_move(&input).await,
-            "left_click_drag" => self.do_drag(&input).await,
-            "type" => self.do_type(&input).await,
-            "key" => self.do_key(&input).await,
-            "scroll" => self.do_scroll(&input).await,
-            "focus_window" => self.do_focus_window(&input).await,
-            "wait" => self.do_wait(&input).await,
-            other => ToolResult::error(format!(
-                "Unknown action {other:?}. Supported actions: observe, click_element, \
-                 set_element_value, right_click_element, double_click_element, launch, screenshot, \
-                 cursor_position, list_windows, left_click, right_click, middle_click, \
-                 double_click, triple_click, mouse_move, left_click_drag, type, key, scroll, \
-                 focus_window, wait."
-            )),
-        }
+        self.execute_native(input, &action).await
     }
 
     fn category(&self) -> ToolCategory {
@@ -1052,8 +1173,240 @@ impl Tool for ComputerTool {
 mod tests {
     use super::*;
 
+    type AxOutcome = fn() -> Result<nomi_a11y::Effect, A11yError>;
+
+    struct FakeEngine(AxOutcome);
+
+    impl A11yEngine for FakeEngine {
+        fn capabilities(&self) -> nomi_a11y::Capabilities {
+            panic!("unexpected capability probe")
+        }
+        fn observe(&self, _: &ObserveOpts) -> Result<nomi_a11y::Snapshot, A11yError> {
+            Err(A11yError::Backend("simulated observe failure".into()))
+        }
+        fn invoke(&self, target: &Target, generation: SnapshotGen, _: ElementAction)
+            -> Result<nomi_a11y::Effect, A11yError>
+        {
+            assert!(matches!(target, Target::Ref(1)));
+            assert_eq!(generation, SnapshotGen(7));
+            (self.0)()
+        }
+        fn focus_window(&self, _: i32) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected window activation")
+        }
+    }
+
+    struct SnapshotEngine;
+
+    impl A11yEngine for SnapshotEngine {
+        fn capabilities(&self) -> nomi_a11y::Capabilities {
+            panic!("unexpected capability probe")
+        }
+        fn observe(&self, _: &ObserveOpts) -> Result<nomi_a11y::Snapshot, A11yError> {
+            Ok(nomi_a11y::Snapshot {
+                generation: SnapshotGen(9),
+                entries: vec![ElementEntry {
+                    r#ref: 1,
+                    role: "button".into(),
+                    name: Some("Continue".into()),
+                    value: None,
+                    states: vec![],
+                    bounds: nomi_a11y::Rect {
+                        x: 10.0,
+                        y: 20.0,
+                        w: 30.0,
+                        h: 40.0,
+                    },
+                    source: Source::A11y,
+                }],
+                overlay: None,
+                text: "[1] button \"Continue\"".into(),
+                truncated: false,
+                pid: Some(1),
+                app_name: Some("Fixture".into()),
+                window_title: Some("Fixture Window".into()),
+            })
+        }
+        fn invoke(
+            &self,
+            _: &Target,
+            _: SnapshotGen,
+            _: ElementAction,
+        ) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected element action")
+        }
+        fn focus_window(&self, _: i32) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected window activation")
+        }
+    }
+
+    struct TruncatedSnapshotEngine;
+
+    impl A11yEngine for TruncatedSnapshotEngine {
+        fn capabilities(&self) -> nomi_a11y::Capabilities {
+            panic!("unexpected capability probe")
+        }
+        fn observe(&self, _: &ObserveOpts) -> Result<nomi_a11y::Snapshot, A11yError> {
+            let entries: Vec<_> = (0..120)
+                .map(|index| ElementEntry {
+                    r#ref: index + 1,
+                    role: "button".into(),
+                    name: Some(format!("AX_ITEM_{index:03}")),
+                    value: None,
+                    states: vec![],
+                    bounds: nomi_a11y::Rect {
+                        x: 10.0,
+                        y: 20.0 + f64::from(index),
+                        w: 30.0,
+                        h: 20.0,
+                    },
+                    source: Source::A11y,
+                })
+                .collect();
+            let text = entries
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "[{}] button \"{}\"",
+                        entry.r#ref,
+                        entry.name.as_deref().unwrap()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(nomi_a11y::Snapshot {
+                generation: SnapshotGen(10),
+                entries,
+                overlay: None,
+                text,
+                truncated: true,
+                pid: Some(2),
+                app_name: Some("Large Fixture".into()),
+                window_title: Some("Large Fixture Window".into()),
+            })
+        }
+        fn invoke(
+            &self,
+            _: &Target,
+            _: SnapshotGen,
+            _: ElementAction,
+        ) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected element action")
+        }
+        fn focus_window(&self, _: i32) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected window activation")
+        }
+    }
+
+    fn tool_with_snapshot(outcome: AxOutcome) -> ComputerTool {
+        let t = tool();
+        *t.a11y.lock().unwrap() = Some(Ok(Arc::new(FakeEngine(outcome))));
+        *t.last_snapshot.lock().unwrap() = Some(SnapshotCache {
+            generation: SnapshotGen(7),
+            entries: vec![CachedEntry {
+                display: ElementEntry {
+                    r#ref: 1,
+                    role: "text".into(),
+                    name: None,
+                    value: None,
+                    states: vec![],
+                    bounds: nomi_a11y::Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 },
+                    source: Source::Ocr,
+                },
+                target: CachedTarget::Pixel { screen_center: (2, 4) },
+            }],
+        });
+        t
+    }
+
     fn tool() -> ComputerTool {
         ComputerTool::new(&ComputerConfig::default())
+    }
+
+    #[tokio::test]
+    async fn semantic_fallback_gate_preserves_target_and_task_errors() {
+        // The fallback is injected: even a regression cannot synthesize input.
+        let cases: [(AxOutcome, bool, bool); 7] = [
+            (|| Err(A11yError::Stale("stale".into())), false, true),
+            (|| Err(A11yError::NotFound("gone".into())), false, true),
+            (|| Err(A11yError::Permission("denied".into())), false, true),
+            (|| panic!("simulated worker failure"), false, true),
+            (|| Err(A11yError::Backend("unsupported pattern".into())), true, false),
+            (|| Err(A11yError::Unsupported { capability: "action".into(), hint: "".into() }), true, false),
+            (|| Ok(nomi_a11y::Effect { changed: true, message: "done".into() }), false, false),
+        ];
+        for (outcome, expect_fallback, expect_error) in cases {
+            for action in [ElementAction::LeftClick, ElementAction::SetValue("value".into())] {
+                let t = tool_with_snapshot(outcome);
+                let mut called = false;
+                let result = t.act_on_ax(1, SnapshotGen(7), action, |_| {
+                    called = true;
+                    std::future::ready(ToolResult::text("injected fallback"))
+                }).await;
+                assert_eq!(called, expect_fallback);
+                assert_eq!(result.is_error, expect_error, "{}", result.content);
+                assert_eq!(t.last_snapshot.lock().unwrap().is_none(), expect_error);
+            }
+        }
+    }
+
+    #[test]
+    fn only_exact_no_fallback_stale_errors_prove_zero_input_effect() {
+        let stale = ToolResult::error(
+            "Accessibility action on [7] failed: stale reference: focus changed. No pixel \
+             fallback was performed; re-run observe before using element refs.",
+        );
+        assert!(is_proven_stale_input_rejection(&stale));
+        for result in [
+            ToolResult::error(
+                "Accessibility action on [7] failed: accessibility backend error: worker lost. \
+                 No pixel fallback was performed; re-run observe before using element refs.",
+            ),
+            ToolResult::error("stale reference: focus changed"),
+            ToolResult::text(
+                "Accessibility action on [7] failed: stale reference: focus changed. No pixel \
+                 fallback was performed; re-run observe before using element refs.",
+            ),
+        ] {
+            assert!(!is_proven_stale_input_rejection(&result));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_observe_invalidates_old_pixel_refs() {
+        let t = tool_with_snapshot(|| panic!("observe must not invoke an element"));
+        assert!(t.resolve_ref(1).is_ok());
+        let result = t.execute(json!({"action": "observe"})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("simulated observe failure"));
+        assert!(t.resolve_ref(1).is_err());
+    }
+
+    #[test]
+    fn target_numbers_are_checked_before_narrowing() {
+        for name in ["ref", "window_id"] {
+            for value in [json!(u32::MAX as u64 + 1), json!(u64::MAX), json!(-1), json!("1")] {
+                let input = json!({(name): value});
+                assert!(require_u32(&input, name).is_err());
+            }
+            assert_eq!(require_u32(&json!({(name): u32::MAX}), name).unwrap(), u32::MAX);
+        }
+        for (x, y) in [(i64::MAX, 0), (0, i64::MIN), (i32::MAX as i64 + 1, 0)] {
+            assert!(require_xy(&json!({"x": x, "y": y}), "x", "y").is_err());
+        }
+        assert_eq!(require_xy(&json!({"x": i32::MIN, "y": i32::MAX}), "x", "y").unwrap(),
+            (i32::MIN, i32::MAX));
+    }
+
+    #[test]
+    fn optional_scroll_target_is_absent_or_a_complete_valid_pair() {
+        assert_eq!(optional_xy(&json!({})).unwrap(), None);
+        assert_eq!(optional_xy(&json!({"x": null, "y": null})).unwrap(), None);
+        assert_eq!(optional_xy(&json!({"x": -2, "y": 4})).unwrap(), Some((-2, 4)));
+        for input in [json!({"x": 1}), json!({"y": 1}), json!({"x": "1", "y": 2}),
+            json!({"x": 1, "y": null}), json!({"x": i64::MAX, "y": 1})] {
+            assert!(optional_xy(&input).is_err(), "{input}");
+        }
     }
 
     // --- schema ---
@@ -1209,6 +1562,86 @@ mod tests {
         let result = tool().execute(json!({})).await;
         assert!(result.is_error);
         assert!(result.content.contains("action"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn canonical_action_grant_cannot_authorize_another_operation_group() {
+        let result = tool()
+            .execute_authorized(
+                crate::capability::COMPUTER_OBSERVE_ACTION_ID,
+                json!({"action":"launch","target":"notepad"}),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("COMPUTER_ACTION_NOT_GRANTED"));
+        assert!(
+            result
+                .content
+                .contains(crate::capability::COMPUTER_LAUNCH_ACTION_ID)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canonical_action_grant_admits_only_its_native_operation_group() {
+        let result = tool()
+            .execute_authorized(
+                crate::capability::COMPUTER_OBSERVE_ACTION_ID,
+                json!({"action":"wait","seconds":0}),
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn canonical_a11y_observe_never_captures_or_emits_screen_pixels() {
+        let t = tool();
+        *t.a11y.lock().unwrap() = Some(Ok(Arc::new(SnapshotEngine)));
+        *t.last_capture.lock().unwrap() = Some(CaptureGeometry {
+            img_w: 100,
+            img_h: 100,
+            logical_w: 100,
+            logical_h: 100,
+            origin_x: 0,
+            origin_y: 0,
+        });
+
+        let result = t
+            .execute_authorized(
+                crate::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+                json!({"action":"observe"}),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.images.is_empty());
+        assert!(result.content.contains("Accessibility snapshot (gen 9)"));
+        assert!(result.content.contains("Pixel overlay intentionally omitted"));
+        assert!(t.last_capture.lock().unwrap().is_none());
+        assert!(t.resolve_ref(1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn canonical_a11y_observe_marks_an_incomplete_node_budget_without_tail_refs() {
+        let t = tool();
+        *t.a11y.lock().unwrap() = Some(Ok(Arc::new(TruncatedSnapshotEngine)));
+
+        let result = t
+            .execute_authorized(
+                crate::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+                json!({"action":"observe"}),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.images.is_empty());
+        assert!(result.content.contains("120 element(s)"));
+        assert!(result.content.contains("a11y tree truncated to the node budget"));
+        assert!(result.content.contains("AX_ITEM_000"));
+        assert!(result.content.contains("AX_ITEM_119"));
+        assert!(!result.content.contains("AX_OMITTED_SENTINEL_199"));
+        assert!(result.content.len() <= 64 * 1024);
+        assert!(t.resolve_ref(120).is_ok());
+        assert!(t.resolve_ref(121).is_err());
     }
 
     #[tokio::test]

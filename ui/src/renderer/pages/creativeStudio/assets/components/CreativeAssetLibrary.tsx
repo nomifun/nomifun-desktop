@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Button, Checkbox } from '@arco-design/web-react';
 import {
   AllApplication,
-  Check,
   Close,
   Delete,
   Download,
@@ -30,6 +30,8 @@ import React, { useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
+import { NOMI_PAGINATION_CLASS_NAME } from '@/renderer/components/base/NomiPagination';
+import { creativeAssetDisplayTitle, formatCreativeAssetBytes } from '../presentation';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
 import CreativeAssetActionsMenu from './CreativeAssetActionsMenu';
 import CreativeAssetUploadQueue from './CreativeAssetUploadQueue';
@@ -48,7 +50,7 @@ import type {
 import { createCreativeAssetLibraryLabels } from './types';
 import styles from './CreativeAssetLibrary.module.css';
 
-export interface CreativeAssetLibraryProps {
+interface CreativeAssetLibraryProps {
   state: CreativeAssetLibraryState;
   search: string;
   kind: CreativeAssetKindFilter;
@@ -73,12 +75,10 @@ export interface CreativeAssetLibraryProps {
   onSelectionChange: (selectedIds: ReadonlySet<string>) => void;
   onUploadFiles?: (files: readonly File[]) => void;
   onCreateText?: () => void;
-  onRenameCollection?: () => void;
   onOpenAsset?: CreativeAssetAction;
   onEditAsset?: CreativeAssetAction;
   onDownloadAsset?: CreativeAssetAction;
   onRemoveAsset?: CreativeAssetAction;
-  onSetSelectedLibrary?: (assets: readonly CreativeAsset[], inLibrary: boolean) => void;
   onInsertSelected?: CreativeAssetBatchAction;
   onDownloadSelected?: CreativeAssetBatchAction;
   onRemoveSelected?: CreativeAssetBatchAction;
@@ -106,22 +106,9 @@ export function submitCreativeAssetLibrarySearch(
   onSearchSubmit?.(search);
 }
 
-const formatBytes = (bytes: number | null): string => {
-  if (bytes == null || bytes < 0 || !Number.isFinite(bytes)) return '—';
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
-};
-
 const assetDetails = (asset: CreativeAsset): string => {
   const dimensions = asset.width && asset.height ? `${asset.width} × ${asset.height}` : null;
-  return [dimensions, formatBytes(asset.bytes), asset.mimeType].filter(Boolean).join(' · ');
+  return [dimensions, formatCreativeAssetBytes(asset.bytes), asset.mimeType].filter(Boolean).join(' · ');
 };
 
 const kindLabel = (kind: CreativeAssetKind, labels: CreativeAssetLibraryLabels) => labels[kind];
@@ -169,52 +156,57 @@ const AssetItem: React.FC<AssetItemProps> = ({
   onRemove,
 }) => {
   const updatedAt = formatUpdatedAt(asset.updatedAt, locale);
+  const title = creativeAssetDisplayTitle(asset);
+  const collection = asset.collection?.trim();
   return (
     <article
       className={classNames(styles.assetItem, view === 'list' && styles.assetRow)}
       data-asset-id={asset.id}
       data-asset-kind={asset.kind}
       data-selected={selected || undefined}
+      data-selectable={selectable || undefined}
     >
       {selectable ? (
-        <label className={styles.assetSelect} title={labels.select}>
-          <input type='checkbox' checked={selected} disabled={disabled} onChange={onToggle} />
-          <span aria-hidden='true'>
-            <Check theme='outline' size={13} fill='currentColor' strokeWidth={4} />
-          </span>
-          <span className={styles.srOnly}>{labels.select}</span>
-        </label>
+        <div className={styles.assetSelect}>
+          <Checkbox
+            className={styles.assetCheckbox}
+            title={labels.select}
+            aria-label={`${labels.select}: ${title}`}
+            checked={selected}
+            disabled={disabled}
+            onChange={onToggle}
+          />
+        </div>
       ) : null}
 
-      <div className={styles.assetCover}>
+      <div className={styles.assetCover} data-asset-cover>
         <button
           type='button'
           className={styles.assetPreviewButton}
           disabled={!onOpen || disabled}
-          aria-label={`${labels.open}: ${asset.title}`}
+          aria-label={`${labels.open}: ${title}`}
           onClick={() => onOpen?.(asset)}
         >
           <CreativeAssetMedia asset={asset} unavailableLabel={labels.mediaUnavailable} compact={view === 'list'} />
         </button>
-        <span className={styles.kindBadge} data-kind={asset.kind}>
-          <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, 13)}</span>
-          {kindLabel(asset.kind, labels)}
-        </span>
+        <div className={styles.assetBadges}>
+          {collection ? (
+            <span className={styles.collectionBadge} data-asset-collection title={collection}>
+              {collection}
+            </span>
+          ) : null}
+          <span className={styles.kindBadge} data-kind={asset.kind}>
+            <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, 13)}</span>
+            <span>{kindLabel(asset.kind, labels)}</span>
+          </span>
+        </div>
       </div>
 
       <div className={styles.assetContent}>
         <div className={styles.assetTitleBlock}>
-          <strong title={asset.title}>{asset.title}</strong>
-          <span title={asset.collection || labels.noCollection}>{asset.collection || labels.noCollection}</span>
+          <strong title={title}>{title}</strong>
         </div>
 
-        <div className={styles.assetTags} aria-label={asset.tags.length ? asset.tags.join(', ') : labels.noTags}>
-          {asset.tags.length ? (
-            asset.tags.slice(0, view === 'list' ? 4 : 3).map((tag) => <span key={tag} title={tag}>{tag}</span>)
-          ) : (
-            <span>{labels.noTags}</span>
-          )}
-        </div>
         {view === 'list' ? <time dateTime={updatedAt.dateTime}>{updatedAt.label}</time> : null}
       </div>
 
@@ -271,12 +263,10 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
   onSelectionChange,
   onUploadFiles,
   onCreateText,
-  onRenameCollection,
   onOpenAsset,
   onEditAsset,
   onDownloadAsset,
   onRemoveAsset,
-  onSetSelectedLibrary,
   onInsertSelected,
   onDownloadSelected,
   onRemoveSelected,
@@ -510,8 +500,41 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         </div>
         {sourceAppearance ? (
           <div className={styles.sourceActions}>
-            {onRenameCollection ? (
-              <button type='button' disabled={busy} onClick={onRenameCollection}>{labels.renameCollection}</button>
+            {selectable && state.assets.length > 0 ? (
+              <div className={styles.sourceSelection} data-asset-selection-toolbar>
+                <Checkbox
+                  className={styles.sourceSelectAll}
+                  checked={allVisibleSelected}
+                  indeterminate={selectedAssets.length > 0 && !allVisibleSelected}
+                  disabled={busy || state.loading}
+                  onChange={selectAllVisible}
+                >
+                  <span className={styles.selectAllLabel}>{labels.selectAll}</span>
+                </Checkbox>
+                {selectedAssets.length > 0 ? (
+                  <>
+                    <span>{labels.selectedCount(selectedAssets.length)}</span>
+                    <Button type='text' size='mini' disabled={busy} onClick={() => onSelectionChange(new Set())}>
+                      {labels.clearSelection}
+                    </Button>
+                    {onInsertSelected ? (
+                      <Button type='text' size='mini' disabled={busy} onClick={() => onInsertSelected(selectedAssets)}>
+                        {labels.insertIntoCanvas}
+                      </Button>
+                    ) : null}
+                    {onDownloadSelected ? (
+                      <Button type='text' size='mini' disabled={busy} onClick={() => onDownloadSelected(selectedAssets)}>
+                        {labels.downloadSelected}
+                      </Button>
+                    ) : null}
+                    {onRemoveSelected ? (
+                      <Button type='text' status='danger' size='mini' disabled={busy} onClick={() => onRemoveSelected(selectedAssets)}>
+                        {labels.deleteSelected}
+                      </Button>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
             ) : null}
             {onUploadFiles ? (
               <button
@@ -534,22 +557,13 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         )}
       </div>
 
-      {selectable && selectedAssets.length > 0 ? (
+      {!sourceAppearance && selectable && selectedAssets.length > 0 ? (
         <div className={styles.selectionBar} data-asset-selection-bar>
           <strong>{labels.selectedCount(selectedAssets.length)}</strong>
           <button type='button' className={styles.textButton} disabled={busy} onClick={selectAllVisible}>
             {allVisibleSelected ? labels.clearSelection : labels.selectAll}
           </button>
           <div className={styles.selectionActions}>
-            {onSetSelectedLibrary ? (
-              <button
-                type='button'
-                disabled={busy}
-                onClick={() => onSetSelectedLibrary(selectedAssets, scope !== 'library')}
-              >
-                {scope === 'library' ? labels.removeFromLibrary : labels.addToLibrary}
-              </button>
-            ) : null}
             {onInsertSelected ? (
               <button type='button' disabled={busy} onClick={() => onInsertSelected(selectedAssets)}>
                 <Plus theme='outline' size={14} fill='currentColor' strokeWidth={3} />
@@ -568,7 +582,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
                 {labels.deleteSelected}
               </button>
             ) : null}
-            <button type='button' className={styles.iconButton} aria-label={labels.clearSelection} onClick={() => onSelectionChange(new Set())}>
+            <button type='button' className={styles.iconButton} aria-label={labels.clearSelection} disabled={busy} onClick={() => onSelectionChange(new Set())}>
               <Close theme='outline' size={14} fill='currentColor' strokeWidth={3} />
             </button>
           </div>
@@ -648,21 +662,23 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
 
       {sourceAppearance && pagination ? (
         <nav
-          className={styles.sourcePagination}
+          className={classNames(styles.sourcePagination, NOMI_PAGINATION_CLASS_NAME)}
           aria-label={labels.pagination}
           data-empty={pagination.total <= 0 || undefined}
         >
           <button
             type='button'
+            data-nomi-pagination-control
             aria-label={labels.previousPage}
             disabled={pagination.loading || pagination.page <= 1}
             onClick={() => pagination.onPageChange(pagination.page - 1)}
           >
             <Left theme='outline' size={13} fill='currentColor' strokeWidth={3} />
           </button>
-          <span className={styles.sourcePageNumber} aria-current='page'>{pagination.page}</span>
+          <span data-nomi-pagination-page aria-current='page'>{pagination.page}</span>
           <button
             type='button'
+            data-nomi-pagination-control
             aria-label={labels.nextPage}
             disabled={pagination.loading || pagination.page >= totalPages}
             onClick={() => pagination.onPageChange(pagination.page + 1)}
@@ -673,7 +689,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
               <Right theme='outline' size={13} fill='currentColor' strokeWidth={3} />
             )}
           </button>
-          <span className={styles.sourcePageSize}>{labels.pageSize(pagination.pageSize)}</span>
+          <span data-nomi-pagination-option>{labels.pageSize(pagination.pageSize)}</span>
         </nav>
       ) : null}
       </div>

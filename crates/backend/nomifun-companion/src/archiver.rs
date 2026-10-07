@@ -48,7 +48,7 @@ pub struct WindowMessage {
 /// Seam over the conversation domain. The archiver only needs to (a) read a
 /// window's messages and (b) durably reset the live engine context. A trait
 /// keeps `nomifun-companion` from hard-depending on conversation internals and
-/// lets tests run without a live `ConversationService` (mirrors the
+/// lets tests run without a live AgentSession owner (mirrors the
 /// `IdmmHandle` seam in `nomifun-requirement`).
 #[async_trait::async_trait]
 pub trait ArchiveConversationPort: Send + Sync {
@@ -218,7 +218,7 @@ impl Archiver {
                 // on a later tick (same policy as the learner keeping its cursor).
                 let raw = match self
                     .completer
-                    .complete(&model.provider_id, &model.model, prompt::ARCHIVE_SYSTEM, &user_prompt, prompt::ARCHIVE_MAX_TOKENS)
+                    .complete(&model.provider_id, &model.model, prompt::ARCHIVE_SYSTEM, &user_prompt, None)
                     .await
                 {
                     Ok(raw) => raw,
@@ -324,7 +324,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl CompanionCompleter for CannedCompleter {
-        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<String, AppError> {
+        async fn complete(&self, _p: &str, _m: &str, _s: &str, _u: &str, _t: Option<u32>) -> Result<String, AppError> {
             *self.calls.lock().unwrap() += 1;
             Ok(self.reply.clone())
         }

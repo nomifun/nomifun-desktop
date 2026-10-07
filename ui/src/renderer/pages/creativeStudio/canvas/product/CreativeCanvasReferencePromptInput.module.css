@@ -234,17 +234,7 @@
   font-weight: 600;
 }
 
-@media (max-width: 520px) {
-  .popup {
-    right: auto;
-    left: 0;
-    width: 100%;
-  }
 
-  .option {
-    min-height: 52px;
-  }
-}
 .thumbnailText {
   display: -webkit-box;
   overflow: hidden;

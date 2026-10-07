@@ -95,15 +95,43 @@ fn main() {
             emit_ready().unwrap_or_else(|error| fail_io("emit interrupt readiness", error));
             thread::sleep(LONG_SLEEP);
         }
+        #[cfg(windows)]
+        "observe-console-size" => {
+            require_len(&args, 3);
+            let cols = u16::try_from(parse_u64(&args[1], "target console columns"))
+                .unwrap_or_else(|_| fail("invalid target console columns"));
+            let rows = u16::try_from(parse_u64(&args[2], "target console rows"))
+                .unwrap_or_else(|_| fail("invalid target console rows"));
+            observe_console_size(cols, rows)
+                .unwrap_or_else(|error| fail_io("observe console size", error));
+        }
         "write-pid" => {
             require_len(&args, 2);
             write_pid_atomically(Path::new(&args[1]), process::id())
                 .unwrap_or_else(|error| fail_io("write PID marker", error));
         }
+        "write-pid-then-sleep" => {
+            require_len(&args, 3);
+            write_pid_atomically(Path::new(&args[1]), process::id())
+                .unwrap_or_else(|error| fail_io("write PID marker", error));
+            thread::sleep(Duration::from_millis(parse_u64(
+                &args[2],
+                "sleep duration",
+            )));
+        }
         "write-file" => {
             require_len(&args, 2);
             fs::write(Path::new(&args[1]), b"written by process_test_helper\n")
                 .unwrap_or_else(|error| fail_io("write file", error));
+        }
+        "write-file-then-sleep" => {
+            require_len(&args, 3);
+            fs::write(Path::new(&args[1]), b"partial effect before timeout\n")
+                .unwrap_or_else(|error| fail_io("write partial-effect file", error));
+            thread::sleep(Duration::from_millis(parse_u64(
+                &args[2],
+                "sleep duration",
+            )));
         }
         "print-args-env-cwd" => {
             require_len(&args, 5);
@@ -157,6 +185,62 @@ fn emit_ready() -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(b"ready\n")?;
     stdout.flush()
+}
+
+#[cfg(windows)]
+fn observe_console_size(target_cols: u16, target_rows: u16) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo,
+    };
+
+    ignore_interrupt()?;
+    // CONOUT$ selects this helper's attached console, independently of the
+    // parent's requested PTY dimensions and the supervisor's resize result.
+    let console = OpenOptions::new().read(true).write(true).open("CONOUT$")?;
+    let dimensions = || -> io::Result<(i32, i32, i16, i16)> {
+        let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+        // SAFETY: console owns a live console-output handle and info is writable.
+        if unsafe { GetConsoleScreenBufferInfo(console.as_raw_handle(), &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1,
+            i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1,
+            info.dwSize.X,
+            info.dwSize.Y,
+        ))
+    };
+    let mut stdout = io::stdout().lock();
+    let mut report = |stage: &str,
+                      (cols, rows, buffer_cols, buffer_rows): (i32, i32, i16, i16)|
+     -> io::Result<()> {
+        writeln!(
+            stdout,
+            "console-size {stage} pid={} window={cols}x{rows} buffer={buffer_cols}x{buffer_rows}",
+            process::id()
+        )?;
+        stdout.flush()
+    };
+    report("initial", dimensions()?)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observed = dimensions()?;
+        if observed.0 == i32::from(target_cols) && observed.1 == i32::from(target_rows) {
+            report("resized", observed)?;
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("console window never reached {target_cols}x{target_rows}: {observed:?}"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    // Keep this same process alive for the existing supervisor cancellation path.
+    thread::sleep(LONG_SLEEP);
+    Ok(())
 }
 
 fn print_args_env_cwd(

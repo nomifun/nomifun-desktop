@@ -1,130 +1,57 @@
-/**
- * @license
- * Copyright 2025-2026 NomiFun (nomifun.com)
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import type { NomiModelSelection } from './useNomiModelSelection';
-import { compositeKey } from '@/common/utils/compositeKey';
+import ChatModelSelector from '@/renderer/components/chat/ChatModelSelector';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
-import { iconColors } from '@/renderer/styles/colors';
-import { Button, Dropdown, Menu } from '@arco-design/web-react';
-import { Brain, Down } from '@icon-park/react';
-import React from 'react';
 import { useTranslation } from 'react-i18next';
-import classNames from 'classnames';
-import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import type { NomiModelSelection } from './useNomiModelSelection';
+import {
+  capabilityOf,
+  capabilitySupportsTechnicalCapability,
+} from '@/common/utils/providerModels';
+import {
+  reasoningEffortsForProtocol,
+  type SessionReasoningEffort,
+} from '@/common/types/reasoningEffort';
 
-const NomiModelSelector: React.FC<{
+/** Adapt conversation-owned selection to the same picker used on the home page. */
+export default function NomiModelSelector({
+  selection,
+  disabled = false,
+  compact,
+  className,
+  reasoningEffort,
+  reasoningEffortDisabled = false,
+  onReasoningEffortChange,
+}: {
   selection?: NomiModelSelection;
   disabled?: boolean;
   compact?: boolean;
   className?: string;
-}> = ({ selection, disabled = false, compact: compactProp, className }) => {
+  reasoningEffort?: SessionReasoningEffort;
+  reasoningEffortDisabled?: boolean;
+  onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
+}) {
   const { t } = useTranslation();
-  const { isOpen: isPreviewOpen } = usePreviewContext();
-  const layout = useLayoutContext();
-  const compact = compactProp ?? (isPreviewOpen || layout?.isMobile);
-  const isMobileHeaderCompact = Boolean(layout?.isMobile);
-  const defaultModelLabel = t('common.defaultModel');
-  const providerLabel = useModelSelectorProviderLabel();
-
-  const current_model = selection?.current_model;
-
-  const renderLogo = () => <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />;
-
-  if (disabled || !selection) {
-    return (
-      <Button
-        className={classNames(
-          'sendbox-model-btn header-model-btn min-w-0',
-          compact ? '!max-w-[120px]' : '!max-w-[280px]',
-          isMobileHeaderCompact && '!max-w-[160px]',
-          className
-        )}
-        shape='round'
-        size='small'
-        style={{ cursor: 'default' }}
-        aria-label={t('conversation.welcome.useCliModel')}
-      >
-        <span className='flex items-center gap-6px min-w-0'>
-          {renderLogo()}
-          <span className='sendbox-responsive-label block truncate min-w-0'>
-            {t('conversation.welcome.useCliModel')}
-          </span>
-        </span>
-      </Button>
-    );
-  }
-
-  const { providers, getAvailableModels, handleSelectModel } = selection;
-
-  const label = getModelDisplayLabel({
-    selected_value: current_model?.use_model,
-    selectedLabel: current_model?.use_model || '',
-    defaultModelLabel,
-    fallbackLabel: t('conversation.welcome.selectModel'),
-  });
-
-  return (
-    <Dropdown
-      trigger='click'
-      // Mobile: portal the popup to <body> so it escapes the titlebar slot.
-      // Desktop: leave default container so click events reach Menu.Item normally.
-      {...(isMobileHeaderCompact ? { getPopupContainer: () => document.body } : {})}
-      droplist={
-        <Menu>
-          {providers.map((provider) => {
-            const models = getAvailableModels(provider);
-            if (!models.length) return null;
-
-            return (
-              <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
-                {models.map((modelName) => (
-                  <Menu.Item
-                    key={compositeKey(provider.id, modelName)}
-                    data-testid={`nomi-model-option-${modelName}`}
-                    className={current_model?.id === provider.id && current_model?.use_model === modelName ? '!bg-2' : ''}
-                    onClick={() => void handleSelectModel(provider, modelName)}
-                  >
-                    <div className='flex items-center gap-8px w-full'>
-                      <span>{modelName}</span>
-                    </div>
-                  </Menu.Item>
-                ))}
-              </Menu.ItemGroup>
-            );
-          })}
-        </Menu>
-      }
-    >
-      <Button
-        data-testid='nomi-model-selector'
-        className={classNames(
-          'sendbox-model-btn header-model-btn min-w-0',
-          compact ? '!max-w-[120px]' : '!max-w-[280px]',
-          isMobileHeaderCompact && '!max-w-[160px]',
-          className
-        )}
-        shape='round'
-        size='small'
-        aria-label={label}
-      >
-        <span className='flex items-center gap-6px min-w-0'>
-          {renderLogo()}
-          <span className='sendbox-responsive-label block truncate min-w-0'>{label}</span>
-          <Down
-            theme='outline'
-            size={12}
-            fill={iconColors.secondary}
-            className='sendbox-responsive-chevron shrink-0'
-          />
-        </span>
-      </Button>
-    </Dropdown>
-  );
-};
-
-export default NomiModelSelector;
+  const { isOpen } = usePreviewContext();
+  const currentCapability = selection?.current_model
+    ? capabilityOf(
+        selection.providers.find(provider => provider.id === selection.current_model?.id),
+        selection.current_model.use_model,
+        'chat'
+      )
+    : undefined;
+  const reasoningEffortOptions = capabilitySupportsTechnicalCapability(
+    currentCapability,
+    'reasoning'
+  )
+    ? reasoningEffortsForProtocol(currentCapability?.protocol)
+    : [];
+  return <ChatModelSelector providers={selection?.providers ?? []} currentModel={selection?.current_model}
+    getAvailableModels={provider => selection?.getAvailableModels(provider) ?? []}
+    onSelectModel={async (provider, model) => { await selection?.handleSelectModel(provider, model); }}
+    disabled={disabled || !selection || selection.pickerDisabled} compact={compact ?? isOpen} className={className}
+    readOnlyLabel={!selection ? t('conversation.welcome.useCliModel') : undefined}
+    reasoningEffort={reasoningEffort}
+    reasoningEffortOptions={reasoningEffortOptions}
+    reasoningEffortDisabled={reasoningEffortDisabled}
+    onReasoningEffortChange={onReasoningEffortChange}
+    testId='nomi-model-selector' />;
+}

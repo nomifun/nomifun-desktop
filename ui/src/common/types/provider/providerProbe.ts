@@ -15,9 +15,6 @@
  * common real answer and a boolean cannot express it.
  */
 
-export type { EndpointRootShape } from '@/common/protocolBindings/EndpointRootShape';
-export type { ProbeCandidateResult } from '@/common/protocolBindings/ProbeCandidateResult';
 export type { ProbeProviderConnectionAnonymousRequest } from '@/common/protocolBindings/ProbeProviderConnectionAnonymousRequest';
 export type { ProbeProviderConnectionRequest } from '@/common/protocolBindings/ProbeProviderConnectionRequest';
 export type { ProbeProviderConnectionResponse } from '@/common/protocolBindings/ProbeProviderConnectionResponse';
-export type { ProviderReachability } from '@/common/protocolBindings/ProviderReachability';

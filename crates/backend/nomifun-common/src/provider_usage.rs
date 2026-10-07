@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderUsageFeature {
-    Conversation,
+    Agent,
     DesktopCompanion,
     CustomerService,
     AgentExecution,

@@ -13,6 +13,20 @@ const REDACTED_CAPABILITY: &str = "[REDACTED]";
 /// span. Similar prefixes, legacy numeric ports, and malformed tokens are not
 /// treated as capability routes.
 fn access_log_path(path: &str) -> Cow<'_, str> {
+    let plugin_segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    if matches!(
+        plugin_segments.as_slice(),
+        ["api", "plugins" | "plugin-drafts", owner_id, "surface", "assets", session_id, generation, digest, _asset, ..]
+            if nomifun_common::validate_uuidv7(owner_id).is_ok()
+                && nomifun_common::validate_uuidv7(session_id).is_ok()
+                && generation.parse::<u64>().is_ok_and(|value| value > 0)
+                && is_preview_capability(digest)
+    ) {
+        let mut redacted = plugin_segments;
+        redacted[5] = REDACTED_CAPABILITY;
+        return Cow::Owned(format!("/{}", redacted.join("/")));
+    }
+
     let Some(path_without_root) = path.strip_prefix('/') else {
         return Cow::Borrowed(path);
     };
@@ -117,6 +131,19 @@ mod tests {
         assert_eq!(
             access_log_path(&format!("/api/office-watch-proxy/{CAPABILITY}/")),
             "/api/office-watch-proxy/[REDACTED]/"
+        );
+    }
+
+    #[test]
+    fn unified_plugin_surface_session_capability_is_redacted() {
+        let path = format!(
+            "/api/plugins/0199aa00-0000-7000-8000-000000000001/surface/assets/0199aa00-0000-7000-8000-000000000002/4/{CAPABILITY}/ui/index.html"
+        );
+        assert_eq!(
+            access_log_path(&path),
+            format!(
+                "/api/plugins/0199aa00-0000-7000-8000-000000000001/surface/assets/[REDACTED]/4/{CAPABILITY}/ui/index.html"
+            )
         );
     }
 

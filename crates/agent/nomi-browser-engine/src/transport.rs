@@ -16,26 +16,22 @@
 //!
 //! 错误：本模块自有 [`TransportError`]（定义在 `session.rs`），不耦合 `BrowserError`。
 
-use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use chromiumoxide::cdp::js_protocol::runtime::{
-    ReleaseObjectGroupParams, RunIfWaitingForDebuggerParams,
-};
+use chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams;
 use chromiumoxide::cdp::browser_protocol::fetch::{
     EnableParams as FetchEnableParams, EventRequestPaused,
 };
 use chromiumoxide::cdp::browser_protocol::target::{
-    CloseTargetParams, DetachFromTargetParams, EventAttachedToTarget, GetTargetsParams,
-    SetAutoAttachParams,
+    EventAttachedToTarget, SetAutoAttachParams,
 };
 use chromiumoxide::types::{CallId, Command, MethodCall, MethodType};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
@@ -43,23 +39,11 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStre
 pub use crate::session::{
     CdpEvent, CommandResult, SessionRegistry, TransportError, ROOT_SESSION,
 };
-use crate::session::{
-    ReliableEventTaskBudget, ReliableTaskEventReceiver, TaskSessionAdmission,
-};
 
 /// 每条 CDP 命令的默认超时（对冲上游 hang；DESIGN §5/§22）。Task A 的 `Progress` 是
 /// 更上层的取消地基；本传输层至少给每命令一个独立 deadline，绝不无限等回包。
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-/// Top-level pages stay paused only long enough for the trusted Host router to
-/// correlate a create nonce/opener. Unknown pages are then locally closed.
-const TASK_SESSION_AUTHORITY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Cancellation/panic fallback for action object-group cleanup. Normal actions
-/// await `Runtime.releaseObjectGroup` before returning, so this queue only
-/// carries abnormal cleanup debt. It is deliberately small and per connection:
-/// exceeding it poisons that exact Host instead of retaining an unbounded set
-/// of remote handles or detached Tokio tasks.
-pub(crate) const DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY: usize = 64;
 
 /// Hard wire-size limits for a single CDP JSON message. Screenshots and DOM
 /// snapshots can be large, but an unlimited WebSocket/pipe frame lets a broken
@@ -73,7 +57,7 @@ type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>;
 /// 运输写半边：CDP 协议不变,只是底层是 WS 帧还是 `--remote-debugging-pipe` 的 NUL 分隔字节流。
 /// Unix 生产走 `Pipe`（浏览器在父死/管道 EOF 时自退,免疫 SIGKILL——见
 /// docs/superpowers/specs/browser-use/2026-06-19-macos-pdeath-pipe-transport-design.md）;
-/// Windows 生产 + 手测低层入口（`NOMI_CDP_WS_URL`）走 `Ws`。
+/// Windows 的显式运行时/授权连接走 `Ws`。
 enum TransportSink {
     Ws(WsSink),
     #[cfg(unix)]
@@ -84,6 +68,9 @@ enum TransportSink {
 #[derive(Clone)]
 pub struct Connection {
     inner: Arc<ConnectionInner>,
+    /// Handle-local response clock policy; never changes the shared transport
+    /// or the ordinary write deadline used by any clone.
+    response_pause: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 struct ConnectionInner {
@@ -109,30 +96,8 @@ struct ConnectionInner {
     /// the last connection clone aborts it so no detached task can retain the
     /// registry indefinitely.
     read_loop: StdMutex<Option<tokio::task::JoinHandle<()>>>,
-    /// One fixed worker owns cancellation/panic fallback releases. A Drop path
-    /// only inserts into this bounded/coalescing queue; it never spawns a task.
-    object_group_releases: Arc<ObjectGroupReleaseDispatcher>,
-    object_group_release_loop: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct DeferredObjectGroupRelease {
-    session_id: String,
-    group: String,
-}
-
-#[derive(Default)]
-struct ObjectGroupReleaseState {
-    queued: VecDeque<DeferredObjectGroupRelease>,
-    queued_keys: HashSet<DeferredObjectGroupRelease>,
-    active: Option<DeferredObjectGroupRelease>,
-}
-
-#[derive(Default)]
-struct ObjectGroupReleaseDispatcher {
-    state: StdMutex<ObjectGroupReleaseState>,
-    wake: Notify,
-}
 
 /// Removes a registered callback when a `send` future is cancelled or dropped
 /// while it is queued on the shared sink or waiting for a response.
@@ -175,80 +140,10 @@ impl ConnectionInner {
     }
 }
 
-impl ObjectGroupReleaseDispatcher {
-    fn enqueue(&self, release: DeferredObjectGroupRelease) -> Result<(), ()> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.active.as_ref() == Some(&release) || state.queued_keys.contains(&release) {
-            return Ok(());
-        }
-        if state.queued.len() + usize::from(state.active.is_some())
-            >= DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY
-        {
-            return Err(());
-        }
-        state.queued_keys.insert(release.clone());
-        state.queued.push_back(release);
-        drop(state);
-        self.wake.notify_one();
-        Ok(())
-    }
-
-    fn take_next(&self) -> Option<DeferredObjectGroupRelease> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let release = state.queued.pop_front()?;
-        state.queued_keys.remove(&release);
-        state.active = Some(release.clone());
-        Some(release)
-    }
-
-    fn finish_active(&self, release: &DeferredObjectGroupRelease) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.active.as_ref() == Some(release) {
-            state.active = None;
-        }
-    }
-
-    fn clear(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.queued.clear();
-        state.queued_keys.clear();
-        state.active = None;
-        drop(state);
-        self.wake.notify_one();
-    }
-
-    #[cfg(test)]
-    fn counts(&self) -> (usize, usize) {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (state.queued.len(), usize::from(state.active.is_some()))
-    }
-}
 
 impl Drop for ConnectionInner {
     fn drop(&mut self) {
         self.registry.fail_connection();
-        let release_loop = self
-            .object_group_release_loop
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(handle) = release_loop.take() {
-            handle.abort();
-        }
         let read_loop = self
             .read_loop
             .get_mut()
@@ -260,102 +155,6 @@ impl Drop for ConnectionInner {
 }
 
 impl Connection {
-    fn spawn_object_group_release_loop(inner: &Arc<ConnectionInner>) {
-        let weak_inner = Arc::downgrade(inner);
-        let dispatcher = Arc::clone(&inner.object_group_releases);
-        let handle = tokio::spawn(async move {
-            loop {
-                let Some(inner) = weak_inner.upgrade() else {
-                    dispatcher.clear();
-                    return;
-                };
-                if inner.registry.is_connection_closed() {
-                    dispatcher.clear();
-                    return;
-                }
-                drop(inner);
-
-                let Some(release) = dispatcher.take_next() else {
-                    // `Notify` stores a permit when enqueue races this await,
-                    // so checking the queue before waiting cannot lose a wake.
-                    dispatcher.wake.notified().await;
-                    continue;
-                };
-
-                let Some(inner) = weak_inner.upgrade() else {
-                    dispatcher.finish_active(&release);
-                    dispatcher.clear();
-                    return;
-                };
-                let conn = Connection { inner };
-                let result = conn
-                    .send::<ReleaseObjectGroupParams>(
-                        &release.session_id,
-                        &ReleaseObjectGroupParams::new(release.group.clone()),
-                    )
-                    .await;
-                dispatcher.finish_active(&release);
-
-                match result {
-                    Ok(_) | Err(TransportError::Closed) | Err(TransportError::SessionClosed)
-                    | Err(TransportError::SessionCrashed) => {}
-                    Err(error) => {
-                        tracing::error!(
-                            target: "nomi_browser_engine::transport",
-                            session_id = %release.session_id,
-                            group = %release.group,
-                            error = %error,
-                            "deferred Runtime.releaseObjectGroup failed; retiring exact browser Host"
-                        );
-                        conn.inner.registry.poison_connection(error);
-                    }
-                }
-            }
-        });
-        inner
-            .object_group_release_loop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(handle);
-    }
-
-    /// Enqueue a cancellation/panic fallback release without allocating a
-    /// Tokio task. Duplicate `(session, group)` keys coalesce. Saturation or a
-    /// dead worker poisons this connection so the Host/process cleanup path is
-    /// the authoritative final proof instead of silently leaking remote state.
-    pub(crate) fn defer_object_group_release(&self, session_id: &str, group: &str) {
-        if self.inner.registry.is_connection_closed() {
-            return;
-        }
-        let worker_dead = self
-            .inner
-            .object_group_release_loop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .is_none_or(tokio::task::JoinHandle::is_finished);
-        if worker_dead {
-            self.inner.registry.poison_connection(TransportError::Protocol(
-                "deferred object-group release worker terminated unexpectedly".to_owned(),
-            ));
-            return;
-        }
-
-        let release = DeferredObjectGroupRelease {
-            session_id: session_id.to_owned(),
-            group: group.to_owned(),
-        };
-        if self.inner.object_group_releases.enqueue(release).is_err() {
-            self.inner.registry.poison_connection(TransportError::Protocol(format!(
-                "deferred object-group release limit exceeded ({DEFERRED_OBJECT_GROUP_RELEASE_CAPACITY})"
-            )));
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn deferred_object_group_release_counts(&self) -> (usize, usize) {
-        self.inner.object_group_releases.counts()
-    }
 
     /// 连接到给定的 CDP browser WebSocket URL（如
     /// `ws://127.0.0.1:9222/devtools/browser/<id>`），启动后台 read loop，并返回
@@ -391,8 +190,6 @@ impl Connection {
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
             fetch_firewall_armed: AtomicBool::new(false),
             read_loop: StdMutex::new(None),
-            object_group_releases: Arc::new(ObjectGroupReleaseDispatcher::default()),
-            object_group_release_loop: StdMutex::new(None),
         });
 
         // 后台 read loop：每条文本喂纯路由；WS 关闭/出错 → poison + fatal signal。
@@ -457,9 +254,8 @@ impl Connection {
             }
         });
         *inner.read_loop.lock().unwrap() = Some(read_loop);
-        Self::spawn_object_group_release_loop(&inner);
 
-        Ok(Self { inner })
+        Ok(Self { inner, response_pause: None })
     }
 
     /// 经 `--remote-debugging-pipe` 的 fd 连接（Unix）。`resp_reader` = chrome 写响应的管道读端
@@ -489,8 +285,6 @@ impl Connection {
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
             fetch_firewall_armed: AtomicBool::new(false),
             read_loop: StdMutex::new(None),
-            object_group_releases: Arc::new(ObjectGroupReleaseDispatcher::default()),
-            object_group_release_loop: StdMutex::new(None),
         });
 
         // 后台 read loop:逐字节按 NUL 切帧，未终止帧不得越过硬上限。
@@ -571,12 +365,11 @@ impl Connection {
             }
         });
         *inner.read_loop.lock().unwrap() = Some(read_loop);
-        Self::spawn_object_group_release_loop(&inner);
 
-        Ok(Self { inner })
+        Ok(Self { inner, response_pause: None })
     }
 
-    /// 从 [`launch`](crate::launch) 产物的运输连接（pipe/ws 二选一）。供 `CdpBackend::from_launched`
+    /// 从 [`launch`](crate::launch) 产物的运输连接（pipe/ws 二选一）。由显式进程 owner 使用。
     /// 与注入侧手测母本（`#[ignore]`）复用,避免各处重复 transport 分派。
     pub async fn connect_launched(
         transport: crate::launch::LaunchTransport,
@@ -632,23 +425,21 @@ impl Connection {
         self.inner.registry.subscribe_reliable(method, session_id)
     }
 
-    /// Temporary task-owned lossless subscription.  Unlike Host-owned
-    /// firewall/router consumers, every queued copy also consumes the trusted
-    /// task's aggregate cross-Host authority.
-    pub(crate) fn subscribe_reliable_for_task(
-        &self,
-        method: impl Into<String>,
-        session_id: Option<&str>,
-        task_budget: &Arc<ReliableEventTaskBudget>,
-    ) -> Result<ReliableTaskEventReceiver, TransportError> {
-        let method = method.into();
-        if method == EventRequestPaused::IDENTIFIER {
+    /// Receive the selected control methods in wire order through one shared,
+    /// bounded reliable queue. This does not enable any browser domain.
+    pub fn subscribe_reliable_sequence(&self, methods: &[&str], session_id: Option<&str>) -> tokio::sync::mpsc::UnboundedReceiver<CdpEvent> {
+        if methods.contains(&EventRequestPaused::IDENTIFIER) {
             self.inner.fetch_firewall_armed.store(true, Ordering::Release);
         }
-        self.inner
-            .registry
-            .subscribe_reliable_for_task(method, session_id, task_budget)
+        self.inner.registry.subscribe_reliable_sequence(methods, session_id)
     }
+
+    /// Clone only this handle with a pausable response budget. Socket writes
+    /// remain bounded normally, and unrelated handles keep their own clocks.
+    pub fn with_response_pause(&self, pause: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self { inner: Arc::clone(&self.inner), response_pause: Some(pause) }
+    }
+
 
     /// 在指定 session 上发一条 CDP 命令并等回包（带每命令超时）。
     ///
@@ -685,6 +476,9 @@ impl Connection {
             return Err(e);
         }
 
+        if let Some(pause) = self.response_pause.clone() {
+            return wait_pausable_response(rx, deadline, pause).await;
+        }
         // 等回包 vs deadline 竞速。
         match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(result)) => result,
@@ -721,10 +515,9 @@ impl Connection {
     /// cdp.rs:106508）。`wait_for_debugger_on_start=true` 让新 target 暂停等调试器——
     /// 这给了我们「**先装监听、后放行**」的时间窗：调用方应**先**
     /// [`Connection::subscribe`]("Target.attachedToTarget", None)，**再**调本方法；
-    /// 之后用 [`Connection::run_attach_loop`]（或自建循环）处理每个 attach 事件、登记
-    /// 子 session、装好该子 session 的监听，**最后**对它发
+    /// 隔离 page owner 消费 attach 事件、装好该子 session 的监听，**最后**对它发
     /// `Runtime.runIfWaitingForDebugger` 放行（否则尤其 service_worker 永久卡）。
-    pub async fn enable_auto_attach(&self) -> Result<(), TransportError> {
+    pub(crate) async fn enable_auto_attach(&self) -> Result<(), TransportError> {
         let params = SetAutoAttachParams::builder()
             .auto_attach(true)
             .wait_for_debugger_on_start(true)
@@ -737,59 +530,34 @@ impl Connection {
         Ok(())
     }
 
-    /// 处理**单个** `Target.attachedToTarget` 事件：登记子 session（含 target 类型），
-    /// 然后对其放行（`Runtime.runIfWaitingForDebugger`）。
+    /// Handle an already registered attach envelope for an isolated page owner.
+    /// Verify exact live identity, arm interception, then resume the target.
     ///
     /// **spike 坑（务必遵守）**：**不**对 service_worker 主动 `detachFromTarget`
     /// （chromiumoxide 的写法）——SW 出口流量防火墙（P2/P3）需保持对 SW 的 attach。
-    /// 这里对**所有**子 target（含 SW）一视同仁：登记 + 放行。
+    /// 此方法不授予业务权限，也不创建、重新登记或关闭 target。
     ///
     /// 调用方应在 `enable_auto_attach` **之前**就订阅好 attach 事件，再把每个收到的
     /// 事件交给本方法。这保证「先装监听后放行」：放行（runIfWaitingForDebugger）发生
     /// 在子 session 已登记之后，故该子 session 上的后续事件不会丢。
-    pub async fn handle_attached(&self, event: &EventAttachedToTarget) -> Result<(), TransportError> {
+    pub(crate) async fn handle_attached(&self, event: &EventAttachedToTarget) -> Result<(), TransportError> {
         let sid: String = event.session_id.clone().into();
         let ttype = event.target_info.r#type.clone();
         let target_id: String = event.target_info.target_id.clone().into();
 
-        // 1) The read loop has already registered the complete attach envelope
-        // (including trustworthy parent-session lineage) before broadcasting
-        // this event. A production Host router enables task quota routing; in
-        // that mode this worker must never perform the historical second
-        // unscoped registration, because doing so would resurrect a session
-        // rejected by a per-family/Lane quota.
-        if self.inner.registry.task_session_quota_routing_enabled() {
-            let admission = self
-                .inner
-                .registry
-                .wait_for_task_session_admission(&sid, TASK_SESSION_AUTHORITY_TIMEOUT)
-                .await;
-            if admission == TaskSessionAdmission::Rejected {
-                if let Err(error) = self
-                    .close_quota_rejected_attached_target(&sid, &target_id)
-                    .await
-                {
-                    // Local cleanup could not prove the exact target absent.
-                    // Publish a fatal signal so the existing Host cleanup
-                    // authority subsumes it; never merely log and continue.
-                    self.inner.registry.poison_connection(error.clone());
-                    return Err(error);
-                }
-                return Ok(());
-            }
-            debug_assert_eq!(admission, TaskSessionAdmission::Admitted);
-        } else {
-            // Low-level diagnostic connections have no Host target router and
-            // retain the legacy Host-global-only behavior.
-            self.inner.registry.register_session(&sid, &ttype);
+        // Registration happened in the read loop before event publication.
+        // Never re-register a stale queued attach or close a target here: the
+        // isolated page owner has its own target/process cleanup authority.
+        if !self.inner.registry.attached_session_matches(&sid, &target_id, &ttype) {
+            return Err(TransportError::SessionClosed);
         }
+
 
         // 2) 在放行 target 前安装出口防火墙——**但仅当 Fetch.requestPaused 已有可靠
         //    订阅者**（F1）。无订阅者时的事件被静默丢弃且 CDP 不会重发 requestPaused，
         //    此时挂 Fetch.enable 会把该 session 的全部网络请求永久卡死（比无防火墙更糟
-        //    且不可恢复）。生产构造器（CdpBackend/CdpHostRuntime::from_launched）在
-        //    attach loop 启动**之前**就注册防火墙的可靠订阅，故此 gate 在生产恒为
-        //    true；低层诊断路径（Launched::connect）无防火墙循环，保持 CDP 默认
+        //    且不可恢复）。启用流量拦截的 owner 必须在 attach 前注册可靠订阅；
+        //    低层诊断路径（Launched::connect）无防火墙循环，保持 CDP 默认
         //    （不拦截）网络——与引入 Fetch.enable 前的行为一致。
         //    若 Fetch.enable 失败，保持 waiting-for-debugger 状态即为 fail-closed，
         //    绝不能让首批请求绕过策略。
@@ -841,81 +609,7 @@ impl Connection {
         Ok(())
     }
 
-    /// Detach the refused CDP session and terminate only its exact target. A
-    /// successful close response or root inventory absence is authoritative;
-    /// anything else escalates through the Host fatal supervisor.
-    async fn close_quota_rejected_attached_target(
-        &self,
-        session_id: &str,
-        target_id: &str,
-    ) -> Result<(), TransportError> {
-        self.inner.registry.fail_session(session_id, false);
 
-        let detach = DetachFromTargetParams::builder()
-            .session_id(session_id.to_owned())
-            .build();
-        let detach_result = self
-            .send::<DetachFromTargetParams>(ROOT_SESSION, &detach)
-            .await;
-        let close_result = self
-            .send::<CloseTargetParams>(
-                ROOT_SESSION,
-                &CloseTargetParams::new(target_id.to_owned()),
-            )
-            .await;
-        // Chromium's historical `success` field is deprecated and was
-        // documented as always true. It proves command acceptance, not that
-        // the renderer/worker target is absent. Always inventory the exact
-        // target before returning its quota authority.
-        let inventory = self
-            .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams::default())
-            .await?;
-        let target_still_present = inventory
-            .get("targetInfos")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                TransportError::Protocol(
-                    "Target.getTargets response missing targetInfos during quota cleanup".into(),
-                )
-            })?
-            .iter()
-            .any(|info| {
-                info.get("targetId")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(target_id)
-            });
-        if !target_still_present {
-            return Ok(());
-        }
-
-        Err(TransportError::Protocol(format!(
-            "quota-rejected target remained live after exact detach/close; detach={detach_result:?}, close={close_result:?}"
-        )))
-    }
-
-    /// 后台运行 attach 处理循环：持续消费 `Target.attachedToTarget`（全 session 通配），
-    /// 对每个事件调 [`Connection::handle_attached`]。返回的 `JoinHandle` 可在连接关闭时丢弃。
-    ///
-    /// 编排正确性依赖：**先订阅（本方法内部 subscribe）→ 再 enable_auto_attach**。故
-    /// 典型用法是先 `let h = conn.run_attach_loop();` 再 `conn.enable_auto_attach().await?;`。
-    pub fn run_attach_loop(&self) -> tokio::task::JoinHandle<()> {
-        let conn = self.clone();
-        let mut rx = self.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
-        tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                match serde_json::from_value::<EventAttachedToTarget>(ev.params.clone()) {
-                    Ok(attached) => {
-                        if let Err(e) = conn.handle_attached(&attached).await {
-                            tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "handle_attached failed");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "failed to parse attachedToTarget");
-                    }
-                }
-            }
-        })
-    }
 
     /// Close the transport explicitly and release every pending command/event
     /// subscriber. This is idempotent and intentionally best-effort: process
@@ -923,21 +617,6 @@ impl Connection {
     /// pipe shutdown cannot complete.
     pub async fn shutdown(&self) {
         self.inner.registry.fail_connection();
-        self.inner.object_group_releases.clear();
-        let release_loop = self
-            .inner
-            .object_group_release_loop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(mut handle) = release_loop
-            && tokio::time::timeout(Duration::from_secs(1), &mut handle)
-                .await
-                .is_err()
-        {
-            handle.abort();
-            let _ = handle.await;
-        }
         self.inner.close_sink().await;
         let read_loop = self.inner.read_loop.lock().unwrap().take();
         if let Some(mut handle) = read_loop {
@@ -1009,6 +688,49 @@ impl Connection {
     }
 }
 
+async fn wait_pausable_response(
+    mut response: tokio::sync::oneshot::Receiver<CommandResult>,
+    deadline: tokio::time::Instant,
+    mut pause: tokio::sync::watch::Receiver<bool>,
+) -> CommandResult {
+    let mut remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    loop {
+        let paused = *pause.borrow_and_update();
+        let started = tokio::time::Instant::now();
+        let changed = if paused {
+            tokio::select! {
+                biased;
+                result = &mut response => return result.unwrap_or(Err(TransportError::Closed)),
+                changed = pause.changed() => changed,
+            }
+        } else {
+            let changed = tokio::select! {
+                biased;
+                result = &mut response => return result.unwrap_or(Err(TransportError::Closed)),
+                changed = pause.changed() => changed,
+                _ = tokio::time::sleep(remaining) => return Err(TransportError::Timeout),
+            };
+            remaining = remaining.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(TransportError::Timeout);
+            }
+            changed
+        };
+        if changed.is_err() {
+            // Losing the owner of the pause signal cannot create an infinite
+            // wait. Resume the remaining response budget without resetting it.
+            return match tokio::time::timeout(remaining, response).await {
+                Ok(result) => result.unwrap_or(Err(TransportError::Closed)),
+                Err(_) => Err(TransportError::Timeout),
+            };
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "transport_dialog_tests.rs"]
+mod dialog_support_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,17 +760,7 @@ mod tests {
                     serde_json::from_str(&text).expect("fake received valid json");
                 let id = request["id"].as_u64().expect("fake request has id");
                 // 回包须回显 sessionId，否则子 session 命令的回调路由不到。
-                let result = match request["method"].as_str() {
-                    Some(CloseTargetParams::IDENTIFIER) => {
-                        // This legacy field is deliberately true even though
-                        // quota cleanup must still request exact inventory.
-                        serde_json::json!({ "success": true })
-                    }
-                    Some(GetTargetsParams::IDENTIFIER) => {
-                        serde_json::json!({ "targetInfos": [] })
-                    }
-                    _ => serde_json::json!({}),
-                };
+                let result = serde_json::json!({});
                 let mut response = serde_json::json!({ "id": id, "result": result });
                 if let Some(session_id) = request.get("sessionId") {
                     response["sessionId"] = session_id.clone();
@@ -1098,52 +810,6 @@ mod tests {
         (format!("ws://{address}"), release_tx, server)
     }
 
-    async fn quota_cleanup_failure_fake_ws_server() -> (
-        String,
-        tokio::task::JoinHandle<Vec<String>>,
-    ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind quota-cleanup fake websocket");
-        let address = listener.local_addr().expect("read fake websocket address");
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept fake client");
-            let mut websocket = tokio_tungstenite::accept_async(stream)
-                .await
-                .expect("complete fake websocket handshake");
-            let mut methods = Vec::new();
-            while let Some(Ok(WsMessage::Text(text))) = websocket.next().await {
-                let request: serde_json::Value =
-                    serde_json::from_str(&text).expect("fake received valid json");
-                let id = request["id"].as_u64().expect("fake request has id");
-                let method = request["method"].as_str().unwrap().to_owned();
-                let response = match method.as_str() {
-                    DetachFromTargetParams::IDENTIFIER => serde_json::json!({
-                        "id": id,
-                        "error": { "code": -32000, "message": "synthetic detach failure" }
-                    }),
-                    CloseTargetParams::IDENTIFIER => serde_json::json!({
-                        "id": id,
-                        "result": { "success": false }
-                    }),
-                    GetTargetsParams::IDENTIFIER => serde_json::json!({
-                        "id": id,
-                        "result": {
-                            "targetInfos": [{ "targetId": "stuck-worker-target" }]
-                        }
-                    }),
-                    other => panic!("unexpected quota cleanup command {other}"),
-                };
-                methods.push(method);
-                websocket
-                    .send(WsMessage::Text(response.to_string().into()))
-                    .await
-                    .expect("fake sends quota cleanup response");
-            }
-            methods
-        });
-        (format!("ws://{address}"), server)
-    }
 
     async fn nonresponding_fake_ws_server() -> (
         String,
@@ -1173,6 +839,12 @@ mod tests {
             r#"{{"sessionId":"{session_id}","targetInfo":{{"targetId":"T-{session_id}","type":"page","title":"","url":"","attached":true,"canAccessOpener":false}},"waitingForDebugger":true}}"#
         );
         serde_json::from_str(&event_json).expect("valid attach event")
+    }
+
+    fn register_attach_event(conn: &Connection, event: &EventAttachedToTarget) {
+        conn.registry().dispatch_message(&serde_json::json!({
+            "method":"Target.attachedToTarget", "params":event
+        }).to_string()).unwrap();
     }
 
     fn service_worker_attach_event(
@@ -1357,114 +1029,6 @@ mod tests {
             .expect("fake server joins");
     }
 
-    #[tokio::test]
-    async fn quota_rejected_service_worker_is_detached_and_closed_without_double_register() {
-        let (ws_url, server) = recording_fake_ws_server().await;
-        let conn = Connection::connect(&ws_url).await.expect("connect fake");
-        let registry = conn.registry();
-        registry.enable_task_session_quota_routing();
-
-        for index in 0..crate::session::MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST {
-            assert_eq!(
-                registry.register_attached(
-                    ROOT_SESSION,
-                    format!("existing-sw-{index}"),
-                    format!("existing-sw-target-{index}"),
-                    "service_worker",
-                    None,
-                ),
-                TaskSessionAdmission::Admitted
-            );
-        }
-        let event = service_worker_attach_event("overflow-sw", "overflow-sw-target");
-        assert_eq!(
-            registry.register_attached(
-                ROOT_SESSION,
-                "overflow-sw",
-                "overflow-sw-target",
-                "service_worker",
-                None,
-            ),
-            TaskSessionAdmission::Rejected
-        );
-
-        conn.handle_attached(&event)
-            .await
-            .expect("exact rejected-target cleanup succeeds");
-        assert!(
-            !registry.has_session("overflow-sw"),
-            "the attach worker must not resurrect the rejected session"
-        );
-        assert!(!registry.is_connection_closed());
-
-        conn.shutdown().await;
-        let requests = server.await.expect("fake server joins");
-        let methods = requests
-            .iter()
-            .map(|request| request["method"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            methods,
-            vec![
-                DetachFromTargetParams::IDENTIFIER,
-                CloseTargetParams::IDENTIFIER,
-                GetTargetsParams::IDENTIFIER,
-            ],
-            "a refused worker is never Fetch-armed or released, and its exact absence is proven"
-        );
-    }
-
-    #[tokio::test]
-    async fn quota_rejection_cleanup_failure_publishes_host_fatal_authority() {
-        let (ws_url, server) = quota_cleanup_failure_fake_ws_server().await;
-        let conn = Connection::connect(&ws_url).await.expect("connect fake");
-        let registry = conn.registry();
-        registry.enable_task_session_quota_routing();
-        let fatal = conn.subscribe_fatal();
-
-        for index in 0..crate::session::MAX_UNATTRIBUTED_AUXILIARY_SESSIONS_PER_HOST {
-            registry.register_attached(
-                ROOT_SESSION,
-                format!("existing-stuck-sw-{index}"),
-                format!("existing-stuck-target-{index}"),
-                "service_worker",
-                None,
-            );
-        }
-        let event = service_worker_attach_event("stuck-worker", "stuck-worker-target");
-        assert_eq!(
-            registry.register_attached(
-                ROOT_SESSION,
-                "stuck-worker",
-                "stuck-worker-target",
-                "service_worker",
-                None,
-            ),
-            TaskSessionAdmission::Rejected
-        );
-
-        let error = conn
-            .handle_attached(&event)
-            .await
-            .expect_err("a still-present target requires authoritative Host cleanup");
-        assert!(matches!(error, TransportError::Protocol(_)));
-        assert!(registry.is_connection_closed());
-        assert!(matches!(
-            fatal.borrow().as_ref(),
-            Some(TransportError::Protocol(_))
-        ));
-
-        conn.shutdown().await;
-        let methods = server.await.expect("failure fake server joins");
-        assert_eq!(
-            methods,
-            vec![
-                DetachFromTargetParams::IDENTIFIER,
-                CloseTargetParams::IDENTIFIER,
-                GetTargetsParams::IDENTIFIER,
-            ]
-        );
-    }
 
     /// **F18 回归**：无任何 `Fetch.requestPaused` 可靠订阅者（`Launched::connect`
     /// 诊断路径的形态）时，`handle_attached` **绝不能**发 `Fetch.enable`——否则
@@ -1474,6 +1038,7 @@ mod tests {
         let (ws_url, server) = recording_fake_ws_server().await;
         let conn = Connection::connect(&ws_url).await.expect("connect fake");
 
+        register_attach_event(&conn, &page_attach_event("S1"));
         conn.handle_attached(&page_attach_event("S1"))
             .await
             .expect("handle_attached succeeds");
@@ -1505,6 +1070,7 @@ mod tests {
         // 模拟生产编排：防火墙的可靠订阅先于 attach 处理注册。
         let _paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
 
+        register_attach_event(&conn, &page_attach_event("S2"));
         conn.handle_attached(&page_attach_event("S2"))
             .await
             .expect("handle_attached succeeds");
@@ -1545,6 +1111,8 @@ mod tests {
         // 生产编排：防火墙先注册可靠订阅（armed）……随后其任务死亡（接收端 drop）。
         let paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
         drop(paused_rx);
+
+        register_attach_event(&conn, &page_attach_event("S3"));
 
         let error = conn
             .handle_attached(&page_attach_event("S3"))
@@ -1612,57 +1180,37 @@ mod tests {
         assert_eq!(v["method"], "Runtime.runIfWaitingForDebugger");
     }
 
-    /// handle_attached：登记子 session（不 detach SW）。这验证 spike 修正——
-    /// service_worker 一视同仁登记，绝不主动 detach。用注册表直接断言副作用，
-    /// 放行命令（无真 WS）会在 send_may_fail 里因 sink 不可用而被吞（SessionClosed 路径
-    /// 不触发，因 session 已登记；这里改为构造 waiting_for_debugger=false 跳过放行写 WS）。
     #[tokio::test]
-    async fn handle_attached_registers_service_worker_without_detach() {
-        // 构造一个不需要真 WS 的 Connection 不可行（connect 要真连接）。改为直接对
-        // SessionRegistry 验证 handle_attached 的核心副作用「登记 SW 子 session」——
-        // 该逻辑即 registry.register_session，已在 session.rs 单测覆盖类型登记。
-        // 此处断言「不 detach」的契约：我们的 handle_attached 路径里**没有**任何
-        // detachFromTarget 调用——以源码不变量形式由本测试名+注释钉死，运行期由
-        // Task 7 的 #[ignore] 集成（真实 SW attach 后仍可见）兜底验证。
-        let reg = SessionRegistry::new();
-        // 模拟 handle_attached 的登记步骤（waiting=false 分支不写 WS）。
-        let event_json = r#"{"sessionId":"SW1","targetInfo":{"targetId":"T","type":"service_worker","title":"","url":"","attached":true,"canAccessOpener":false},"waitingForDebugger":false}"#;
-        let event: EventAttachedToTarget = serde_json::from_str(event_json).unwrap();
-        let sid: String = event.session_id.clone().into();
-        reg.register_session(&sid, event.target_info.r#type.clone());
-        assert!(reg.has_session("SW1"));
-        assert_eq!(reg.target_type("SW1").as_deref(), Some("service_worker"));
-        // 不 detach：session 仍活（未被 fail_session）。
-        assert!(reg.register_command("SW1", CallId::new(1)).is_ok());
+    async fn stale_or_mismatched_attach_work_never_registers_or_closes_targets() {
+        let (url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&url).await.unwrap();
+        let event = page_attach_event("retired");
+        register_attach_event(&conn, &event);
+        conn.registry().fail_session("retired", false);
+        assert_eq!(conn.handle_attached(&event).await, Err(TransportError::SessionClosed));
+        assert!(!conn.registry().has_session("retired"));
+        let live = page_attach_event("live");
+        register_attach_event(&conn, &live);
+        let mismatch = service_worker_attach_event("live", "different-target");
+        assert_eq!(conn.handle_attached(&mismatch).await, Err(TransportError::SessionClosed));
+        assert!(!conn.registry().is_connection_closed());
+        conn.shutdown().await;
+        assert!(server.await.unwrap().is_empty(), "no close, detach, or resume for unproven targets");
     }
 
-    // ── 真实 connect 集成测试 ───────────────────────────────────────────────
-    //
-    // 真实 WS connect + setAutoAttach + 子 session 放行需要一个跑着的 Chromium
-    // （`chrome --remote-debugging-port=9222 --headless=new`）。本 task 范围只到传输/
-    // 路由层，统一留给 Task 7 的 launch+connect 冒烟一并验证（届时由托管启动提供端口）。
-    // 这里放一个 `#[ignore]` 占位，指向手动起的 9222 实例，便于本地按需冒烟。
     #[tokio::test]
-    #[ignore = "需手动 chrome --remote-debugging-port=9222 --headless=new；统一留 Task 7"]
-    async fn live_connect_and_auto_attach_smoke() {
-        // 取 browser ws url：GET http://127.0.0.1:9222/json/version → webSocketDebuggerUrl。
-        // 这里省略 HTTP 探测（属 Task 7 launch 职责），直接用约定 url 形态示意。
-        // 这是手动冒烟占位：未提供 NOMI_CDP_WS_URL 时优雅跳过（而非 panic），
-        // 这样 `--run-ignored` 全量跑不会因缺少手动起的 9222 实例而见红；真实
-        // launch+connect 覆盖由本 crate 其它 #[ignore] 集成测试（自起托管 Chrome）提供。
-        let Ok(ws_url) = std::env::var("NOMI_CDP_WS_URL") else {
-            eprintln!(
-                "skipping live_connect_and_auto_attach_smoke: set NOMI_CDP_WS_URL to a browser \
-                 webSocketDebuggerUrl (with a running `chrome --remote-debugging-port=9222 \
-                 --headless=new`) to run this manual smoke"
-            );
-            return;
-        };
-        let conn = Connection::connect(&ws_url).await.expect("connect");
-        let _attach_loop = conn.run_attach_loop();
-        conn.enable_auto_attach().await.expect("setAutoAttach");
-        // 给子 session attach 一点时间，然后断言至少根 session 在。
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(conn.registry().has_session(ROOT_SESSION));
+    async fn registered_service_worker_is_resumed_without_target_ownership() {
+        let (url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&url).await.unwrap();
+        let event = service_worker_attach_event("worker", "worker-target");
+        register_attach_event(&conn, &event);
+        conn.handle_attached(&event).await.unwrap();
+        assert!(conn.registry().has_session("worker"));
+        conn.shutdown().await;
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["method"], "Runtime.runIfWaitingForDebugger");
+        assert_eq!(requests[0]["sessionId"], "worker");
     }
+
 }

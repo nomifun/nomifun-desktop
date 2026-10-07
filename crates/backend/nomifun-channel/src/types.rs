@@ -544,17 +544,16 @@ pub enum MediaKind {
 }
 
 // ---------------------------------------------------------------------------
-// G2. Decision (blocking permission/confirmation relayed as numbered text)
+// G2. Channel-owned stop confirmation
 // ---------------------------------------------------------------------------
 
-/// One selectable option of a blocking decision (agent permission /
-/// confirmation) relayed to a channel user as a numbered text list.
+/// One selectable option of the channel-owned remote-stop confirmation.
 ///
-/// `option_id` is the value submitted back through
-/// `ConversationService::confirm` (a bare option-id string for ACP); `label`
-/// is the human-readable name rendered in the numbered list.
+/// This is deliberately not an Agent approval option. The channel consumes the
+/// selected index locally and either invokes its owner-scoped stop operation or
+/// clears the request; no Agent call is waiting for the option value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DecisionOption {
+pub struct ChannelStopOption {
     pub option_id: String,
     pub label: String,
 }
@@ -1153,15 +1152,14 @@ mod tests {
 
     #[test]
     fn action_button_with_params() {
-        let mut params = HashMap::new();
-        params.insert("agentType".into(), "acp".into());
         let btn = ActionButton {
-            label: "Switch to ACP".into(),
-            action: "agent.select".into(),
-            params: Some(params),
+            label: "Help".into(),
+            action: "help.show".into(),
+            params: None,
         };
         let json = serde_json::to_value(&btn).unwrap();
-        assert_eq!(json["params"]["agentType"], "acp");
+        assert_eq!(json["action"], "help.show");
+        assert!(json.get("params").is_none());
     }
 
     // -- Roundtrip tests -----------------------------------------------------

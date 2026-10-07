@@ -433,7 +433,7 @@ describe('collectTurnDeliverables', () => {
     expect(result.size).toBe(0);
   });
 
-  test('collects successful WriteFile tool_group results with diff stats', () => {
+  test('tool-group status summaries do not supply deliverable receipts', () => {
     const result = collect([
       candidate({
         toolMessages: [
@@ -443,25 +443,19 @@ describe('collectTurnDeliverables', () => {
               name: 'WriteFile',
               status: 'Success',
               description: '',
-              render_output_as_markdown: false,
-              result_display: { file_diff: WRITE_FILE_DIFF, file_name: 'outputs/snake.html' },
             },
             {
               call_id: 'g-2',
               name: 'WriteFile',
               status: 'Error',
               description: '',
-              render_output_as_markdown: false,
-              result_display: { file_diff: WRITE_FILE_DIFF, file_name: 'outputs/failed.html' },
             },
           ]),
         ],
       }),
     ]);
 
-    const items = result.get(TURN_1);
-    expect(items).toHaveLength(1);
-    expect(items![0]).toMatchObject({ relativePath: 'outputs/snake.html', insertions: 3, deletions: 0 });
+    expect(result.size).toBe(0);
   });
 
   test('collects pre-parsed file_summary diffs', () => {
@@ -478,27 +472,8 @@ describe('collectTurnDeliverables', () => {
   test('dedupes by workspace-relative path keeping the last write and merging receipt data', () => {
     const result = collect([
       candidate({
-        toolMessages: [
-          toolGroup([
-            {
-              call_id: 'g-1',
-              name: 'WriteFile',
-              status: 'Success',
-              description: '',
-              render_output_as_markdown: false,
-              result_display: { file_diff: REPORT_DIFF_V1, file_name: 'outputs/report.html' },
-            },
-            {
-              call_id: 'g-2',
-              name: 'WriteFile',
-              status: 'Success',
-              description: '',
-              render_output_as_markdown: false,
-              result_display: { file_diff: REPORT_DIFF_V2, file_name: 'outputs/report.html' },
-            },
-          ]),
-          toolCall({ artifacts: [artifact()] }),
-        ],
+        fileDiffs: [parseDiff(REPORT_DIFF_V1, 'outputs/report.html'), parseDiff(REPORT_DIFF_V2, 'outputs/report.html')],
+        toolMessages: [toolCall({ artifacts: [artifact()] })],
       }),
     ]);
 

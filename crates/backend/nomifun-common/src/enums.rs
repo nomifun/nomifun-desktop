@@ -26,17 +26,6 @@ impl AgentType {
             AgentType::Nomi => Some(&[".nomi/skills"]),
         }
     }
-
-    /// Canonical full-auto session mode id for this agent type.
-    ///
-    /// The per-vendor mode table this used to carry existed only for external
-    /// CLI agents, each of which named its permissive mode differently. The
-    /// native engine has one name for it.
-    pub fn full_auto_mode_id(&self) -> &'static str {
-        match self {
-            AgentType::Nomi => "yolo",
-        }
-    }
 }
 
 /// Runtime status of a conversation.
@@ -69,7 +58,6 @@ pub enum MessageType {
     ToolGroup,
     AgentStatus,
     Permission,
-    Plan,
     Thinking,
     AvailableCommands,
     SkillSuggest,
@@ -126,21 +114,12 @@ pub enum AgentKillReason {
     /// from the completed turn could be mistaken for successor output. This is
     /// a deliberate protocol-boundary recycle, not a crash.
     TurnBoundaryRecycle,
-    /// The session's bound knowledge bases changed (a `挂载知识库` toggle, a
-    /// rebind, or a write-back mode switch). The agent bakes the knowledge
-    /// retrieval-protocol section at build time and is cached per
-    /// conversation, so the in-memory Agent runtime is recycled to force a rebuild —
-    /// honoring the UI contract that a binding change "takes effect on the
-    /// next message". The conversation (and any persisted ACP session) is
-    /// preserved; the rebuilt agent resumes and re-delivers the section.
-    KnowledgeBindingChanged,
     /// A deliberate administrative recycle so a conversation-level
     /// configuration change takes effect on the next build: a model /
     /// workspace / delegation update, a companion skill-snapshot refresh, a
-    /// summon change, a failover model switch, or a failed-edit session
-    /// rollback. Like [`Self::KnowledgeBindingChanged`] this recycles a
-    /// healthy runtime on purpose, so the restart governor must never count
-    /// it as a crash.
+    /// failover model switch, or a failed-edit session
+    /// rollback. This recycles a healthy runtime on purpose, so the restart
+    /// governor must never count it as a crash.
     ConfigurationChanged,
     /// The owning conversation was deleted via `DELETE /api/conversations/{id}`.
     /// The agent process must be torn down so it stops emitting stream events
@@ -161,7 +140,6 @@ pub enum PreviewContentType {
     Word,
     Excel,
     Image,
-    Url,
 }
 
 /// File change operation type.
@@ -216,17 +194,6 @@ mod tests {
         assert_eq!(json, r#""nomi""#);
         let parsed: AgentType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, val);
-    }
-
-    #[test]
-    fn test_agent_type_all_variants() {
-        let cases = [(AgentType::Nomi, "nomi")];
-        for (variant, expected) in cases {
-            let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, format!("\"{expected}\""), "serialize {variant:?}");
-            let parsed: AgentType = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, variant, "deserialize {expected}");
-        }
     }
 
     #[test]
@@ -304,10 +271,5 @@ mod tests {
             let parsed: McpServerStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, variant, "deserialize {expected_json}");
         }
-    }
-
-    #[test]
-    fn agent_type_full_auto_mode_id() {
-        assert_eq!(AgentType::Nomi.full_auto_mode_id(), "yolo");
     }
 }

@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
@@ -23,6 +24,18 @@ const emptyRuntime: CreativeTemplateRuntimeSnapshot = {
 };
 
 describe('CreativeCanvasTemplatePanel', () => {
+  test('uses the same wide workspace composition as the shared template dialog', () => {
+    const css = readFileSync(
+      new URL('./CreativeCanvasTemplatePanel.module.css', import.meta.url),
+      'utf8'
+    );
+
+    expect(css.includes('.headerCard')).toBe(true);
+    expect(css.includes('min-height: 94px;')).toBe(true);
+    expect(css.includes('grid-template-columns: repeat(3, minmax(0, 1fr));')).toBe(true);
+    expect(css.includes('.openCenterButton')).toBe(true);
+  });
+
   test('renders the canonical template catalog and opens a real runner action', () => {
     const html = renderToStaticMarkup(
       <CreativeCanvasTemplatePanel

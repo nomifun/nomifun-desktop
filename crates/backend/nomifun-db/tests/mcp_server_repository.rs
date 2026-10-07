@@ -332,44 +332,6 @@ async fn delete_existing_removes_record() {
 }
 
 #[tokio::test]
-async fn soft_delete_cascades_conversation_selection_links() {
-    let (r, db) = repo().await;
-    let server = r.create(stdio_params()).await.unwrap();
-    let user_id = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-    let conversation_id = nomifun_common::ConversationId::new().into_string();
-    nomifun_db::sqlx::query(
-        "INSERT INTO conversations \
-         (conversation_id, user_id, name, type, created_at, updated_at) \
-         VALUES (?, ?, 'MCP selection', 'nomi', 1, 1)",
-    )
-    .bind(&conversation_id)
-    .bind(&user_id)
-    .execute(db.pool())
-    .await
-    .unwrap();
-    nomifun_db::sqlx::query(
-        "INSERT INTO conversation_mcp_servers \
-         (conversation_id, mcp_server_id, sort_order) VALUES (?, ?, 0)",
-    )
-    .bind(&conversation_id)
-    .bind(&server.mcp_server_id)
-    .execute(db.pool())
-    .await
-    .unwrap();
-
-    r.delete(&server.mcp_server_id).await.unwrap();
-
-    let link_count: i64 = nomifun_db::sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversation_mcp_servers WHERE mcp_server_id = ?",
-    )
-    .bind(&server.mcp_server_id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(link_count, 0);
-}
-
-#[tokio::test]
 async fn delete_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
     let err = r.delete(&missing_id()).await.unwrap_err();

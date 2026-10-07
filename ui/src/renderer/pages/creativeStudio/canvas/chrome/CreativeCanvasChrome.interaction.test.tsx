@@ -13,7 +13,6 @@ import React, { useState } from 'react';
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeCanvasChrome from './CreativeCanvasChrome';
 import type {
-  CreativeCanvasBottomView,
   CreativeCanvasChromeProps,
   CreativeCanvasChromeTool,
 } from './types';
@@ -31,18 +30,14 @@ const baseProps = (
   canRedo: false,
   leftOpen: true,
   leftView: 'canvas',
+  resourceView: null,
   rightView: null,
-  bottomView: null,
   backgroundMenuOpen: false,
   slots: {
     canvas: <div>canvas</div>,
     left: {
       canvas: <div>outline</div>,
       assets: <div>assets</div>,
-    },
-    bottom: {
-      history: <div>HISTORY CONTENT</div>,
-      timeline: <div>TIMELINE CONTENT</div>,
     },
   },
   onBackToCanvases: noop,
@@ -54,8 +49,8 @@ const baseProps = (
   onRedo: noop,
   onLeftPanelOpenChange: noop,
   onLeftViewChange: noop,
+  onResourceViewChange: noop,
   onRightViewChange: noop,
-  onBottomViewChange: noop,
   ...overrides,
 });
 
@@ -63,8 +58,18 @@ afterEach(() => {
   cleanup();
 });
 
+test('switching canvases discards the previous title edit even when names match', () => {
+  const props = baseProps({ canvasId: 'first', onRenameCanvas: async () => {} });
+  const view = render(withCanvasTestI18n(<CreativeCanvasChrome {...props} />));
+  fireEvent.doubleClick(view.getByRole('heading', { name: props.canvasTitle }));
+  fireEvent.change(view.getByRole('textbox'), { target: { value: 'Unsubmitted title' } });
+  view.rerender(withCanvasTestI18n(<CreativeCanvasChrome {...props} canvasId='second' />));
+  expect(view.queryByRole('textbox')).toBeNull();
+  expect(view.getByRole('heading', { name: props.canvasTitle })).toBeTruthy();
+});
+
 describe('CreativeCanvasChrome floating resource rail interaction', () => {
-  test('does not mark a collapsed resource rail tab as active', () => {
+  test('only the canvas control owns the rail active state', () => {
     const { getByRole } = render(
       withCanvasTestI18n(
         <CreativeCanvasChrome
@@ -76,15 +81,22 @@ describe('CreativeCanvasChrome floating resource rail interaction', () => {
       )
     );
 
-    for (const tab of getByRole('tablist', {
+    const rail = getByRole('toolbar', {
       name: 'creativeStudio.canvas.chrome.resources',
-    }).querySelectorAll('[role="tab"]')) {
-      expect(tab.getAttribute('aria-selected')).toBe('false');
-      expect(tab.hasAttribute('data-active')).toBe(false);
+    });
+    expect(within(rail).getByRole('button', {
+      name: 'creativeStudio.canvas.panels.left.canvas',
+    }).getAttribute('aria-pressed')).toBe('false');
+    for (const label of ['assets', 'prompts', 'templates']) {
+      const button = within(rail).getByRole('button', {
+        name: `creativeStudio.canvas.panels.left.${label}`,
+      });
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(button.hasAttribute('data-active')).toBe(false);
     }
   });
 
-  test('collapses from the active tab and the dedicated fold control', () => {
+  test('collapses the canvas panel from its control and the dedicated fold control', () => {
     const openChanges: boolean[] = [];
     const { getByRole, getByLabelText } = render(
       withCanvasTestI18n(
@@ -99,7 +111,7 @@ describe('CreativeCanvasChrome floating resource rail interaction', () => {
     );
 
     fireEvent.click(
-      getByRole('tab', {
+      getByRole('button', {
         name: 'creativeStudio.canvas.panels.left.canvas',
       })
     );
@@ -111,22 +123,46 @@ describe('CreativeCanvasChrome floating resource rail interaction', () => {
     expect(openChanges).toEqual([false, false]);
   });
 
-  test('activating another bubble switches its view and reopens the content panel', () => {
-    const viewChanges: string[] = [];
+  test('keeps node creation buttons from reopening the canvas bubble', () => {
+    const created: string[] = [];
+    const NodeHarness: React.FC = () => {
+      const [leftOpen, setLeftOpen] = useState(true);
+      return (
+        <CreativeCanvasChrome
+          {...baseProps({
+            leftOpen,
+            onLeftPanelOpenChange: setLeftOpen,
+            onAddNode: (kind) => created.push(kind),
+          })}
+        />
+      );
+    };
+
+    const { getByRole, container } = render(withCanvasTestI18n(<NodeHarness />));
+    fireEvent.click(
+      getByRole('button', { name: 'creativeStudio.canvas.nodeKinds.text' })
+    );
+
+    expect(created).toEqual(['text']);
+    expect(container.querySelector('[data-left-open="false"]')).not.toBeNull();
+  });
+
+  test('opens assets, prompts, and templates in the shared resource dialog', () => {
+    const resourceChanges: Array<string | null> = [];
     const PanelHarness: React.FC = () => {
       const [leftOpen, setLeftOpen] = useState(false);
-      const [leftView, setLeftView] = useState<'canvas' | 'assets'>('canvas');
+      const [resourceView, setResourceView] = useState<'assets' | 'prompts' | 'templates' | null>(null);
 
       return (
         <CreativeCanvasChrome
           {...baseProps({
             leftOpen,
-            leftView,
+            leftView: 'canvas',
+            resourceView,
             onLeftPanelOpenChange: setLeftOpen,
-            onLeftViewChange: (view) => {
-              viewChanges.push(view);
-              if (view === 'canvas' || view === 'assets') setLeftView(view);
-              setLeftOpen(true);
+            onResourceViewChange: (view) => {
+              resourceChanges.push(view);
+              setResourceView(view);
             },
           })}
         />
@@ -136,30 +172,31 @@ describe('CreativeCanvasChrome floating resource rail interaction', () => {
     const { getByRole } = render(withCanvasTestI18n(<PanelHarness />));
 
     fireEvent.click(
-      getByRole('tab', {
+      getByRole('button', {
         name: 'creativeStudio.canvas.panels.left.assets',
       })
     );
 
-    expect(viewChanges).toEqual(['assets']);
-    expect(getByRole('tabpanel').hasAttribute('hidden')).toBe(false);
+    expect(resourceChanges).toEqual(['assets']);
+    expect(
+      document.querySelector('[data-canvas-resource-dialog="assets"]')?.textContent
+    ).toContain('assets');
+    expect(getByRole('button', {
+      name: 'creativeStudio.canvas.panels.left.assets',
+    }).hasAttribute('data-active')).toBe(false);
   });
 });
 
-describe('CreativeCanvasChrome toolbar interactions', () => {
-  test('uses one hand toggle and one entry for the shared bottom panel', () => {
+describe('CreativeCanvasChrome top action interactions', () => {
+  test('uses one hand toggle without retired bottom-panel entries', () => {
     const ToolbarHarness: React.FC = () => {
       const [tool, setTool] = useState<CreativeCanvasChromeTool>('select');
-      const [bottomView, setBottomView] =
-        useState<CreativeCanvasBottomView | null>(null);
 
       return (
         <CreativeCanvasChrome
           {...baseProps({
             tool,
-            bottomView,
             onToolChange: setTool,
-            onBottomViewChange: setBottomView,
           })}
         />
       );
@@ -168,32 +205,23 @@ describe('CreativeCanvasChrome toolbar interactions', () => {
     const { container, getByRole } = render(
       withCanvasTestI18n(<ToolbarHarness />)
     );
-    const toolbar = getByRole('toolbar', {
-      name: 'creativeStudio.canvas.chrome.toolbar',
-    });
-
     expect(
-      within(toolbar).queryByRole('button', {
-        name: 'creativeStudio.canvas.actions.selectTool',
-      })
+      container.querySelector('[aria-label="creativeStudio.canvas.actions.selectTool"]')
     ).toBeNull();
     expect(
-      within(toolbar).queryByRole('button', {
-        name: 'creativeStudio.canvas.actions.fitView',
-      })
+      container.querySelector('[aria-label="creativeStudio.canvas.actions.fitView"]')
     ).toBeNull();
     expect(
-      within(toolbar).queryByRole('button', {
-        name: 'creativeStudio.canvas.actions.openMiniMap',
-      })
+      container.querySelector('[aria-label="creativeStudio.canvas.actions.openMiniMap"]')
     ).toBeNull();
     expect(
-      within(toolbar).queryByRole('button', {
-        name: 'creativeStudio.canvas.panels.bottom.timeline',
-      })
+      container.querySelector('[aria-label="creativeStudio.canvas.panels.bottom.timeline"]')
+    ).toBeNull();
+    expect(
+      container.querySelector('[aria-label="creativeStudio.canvas.panels.bottom.history"]')
     ).toBeNull();
 
-    const panButton = within(toolbar).getByRole('button', {
+    const panButton = getByRole('button', {
       name: 'creativeStudio.canvas.actions.panTool',
     });
     expect(panButton.getAttribute('aria-pressed')).toBe('false');
@@ -201,42 +229,24 @@ describe('CreativeCanvasChrome toolbar interactions', () => {
     expect(panButton.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(panButton);
     expect(panButton.getAttribute('aria-pressed')).toBe('false');
+  });
 
-    const historyButton = within(toolbar).getByRole('button', {
-      name: 'creativeStudio.canvas.panels.bottom.history',
+  test('keeps direct node creation in source order on the side rail', () => {
+    const created: string[] = [];
+    const { getByRole } = render(withCanvasTestI18n(
+      <CreativeCanvasChrome {...baseProps({ onAddNode: (kind) => created.push(kind) })} />
+    ));
+    const rail = getByRole('toolbar', {
+      name: 'creativeStudio.canvas.chrome.resources',
     });
-    expect(historyButton.getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(historyButton);
-
-    const historyPanel = container.querySelector<HTMLElement>(
-      'section[aria-label="creativeStudio.canvas.panels.bottom.history"]'
-    );
-    expect(historyPanel).not.toBeNull();
-    expect(historyButton.getAttribute('aria-pressed')).toBe('true');
-    expect(historyPanel?.textContent?.includes('HISTORY CONTENT')).toBe(true);
-
-    fireEvent.click(
-      within(historyPanel!).getByRole('tab', {
-        name: 'creativeStudio.canvas.panels.bottom.timeline',
-      })
-    );
-    const timelinePanel = container.querySelector<HTMLElement>(
-      'section[aria-label="creativeStudio.canvas.panels.bottom.timeline"]'
-    );
-    expect(timelinePanel).not.toBeNull();
-    expect(timelinePanel?.textContent?.includes('TIMELINE CONTENT')).toBe(true);
-    expect(historyButton.getAttribute('aria-pressed')).toBe('true');
-
-    fireEvent.click(historyButton);
-    expect(
-      container.querySelector(
-        'section[aria-label="creativeStudio.canvas.panels.bottom.history"], section[aria-label="creativeStudio.canvas.panels.bottom.timeline"]'
-      )
-    ).toBeNull();
-    expect(historyButton.getAttribute('aria-pressed')).toBe('false');
+    for (const kind of ['text', 'image', 'video', 'audio', 'timeline']) {
+      fireEvent.click(within(rail).getByRole('button', {
+        name: `creativeStudio.canvas.nodeKinds.${kind}`,
+      }));
+    }
+    expect(created).toEqual(['text', 'image', 'video', 'audio', 'timeline']);
   });
 });
-
 describe('CreativeCanvasChrome right panel resize interaction', () => {
   test('adjusts the persisted width with keyboard controls', () => {
     const widthChanges: number[] = [];

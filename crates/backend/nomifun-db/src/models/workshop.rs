@@ -69,7 +69,7 @@ pub struct CreativeStudioTemplateRunRow {
     pub updated_at: TimestampMs,
 }
 
-/// Row mapping for the `workshop_assets` table (创意工坊 资产库).
+/// Row mapping for the `workshop_assets` table (创作 资产库).
 ///
 /// Metadata is indexed here; the binary lives under the data dir at `rel_path`
 /// (`workshop/assets/{asset_id}.{ext}`). `text` assets carry their body in
@@ -113,11 +113,12 @@ pub struct WorkshopAssetRow {
 /// reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreationTaskRow {
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
     pub creation_task_id: String,
-    /// Canonical project owner. A node or standalone workbench discriminator
-    /// completes the branch; both are mutually exclusive with template ownership.
+    /// Canvas owner, completed by node_id and exclusive with conversation/template ownership.
     pub project_id: Option<String>,
-    pub workbench_kind: Option<String>,
+
     /// Canonical template-step owner. All three template columns are present together.
     pub template_id: Option<String>,
     pub template_run_id: Option<String>,

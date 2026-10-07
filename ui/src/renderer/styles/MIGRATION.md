@@ -91,8 +91,7 @@ slash-alpha —— `ring-` / `outline-` / `border-t-` / `border-b-` / `divide-` 
 
 theme 里没有名为 `border` 的颜色，所以 `border-border-` 后面**跟什么都不生成规则**：
 数字后缀（`border-border-1/2/3`）与命名后缀（`border-border-base`）一样死。门禁最初
-只按 `border-border-\d` 匹配，于是 `HTMLViewer.tsx` 里 3 处 `border-border-base`
-连棘轮带禁令一起漏过去了；现在规则是 `border-border-[a-z0-9]+`。
+只按 `border-border-\d` 匹配，会漏掉命名后缀；现在规则是 `border-border-[a-z0-9]+`。
 
 ```tsx
 // ❌ 一条 CSS 都没有（数字后缀与命名后缀都一样）

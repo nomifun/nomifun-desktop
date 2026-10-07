@@ -14,6 +14,7 @@ import {
   parseCreativeCanvasResponse,
   type CreativeCanvasSummary,
 } from '../../domain';
+import { saveBlobAs } from '@/renderer/utils/file/saveAs';
 import type { CreativeStudioCanvasArchivePort } from '../canvasServiceAdapter';
 
 export const CREATIVE_STUDIO_CANVAS_ARCHIVE_MIME =
@@ -29,7 +30,7 @@ export type CreativeStudioCanvasArchiveFetch = (
 export type CreativeStudioCanvasArchiveSave = (
   blob: Blob,
   fileName: string
-) => void;
+) => Promise<void>;
 
 const archiveExportEndpoint = (canvasId: string): string =>
   `/api/creative-studio/canvases/${encodeURIComponent(canvasId)}/archive`;
@@ -137,16 +138,11 @@ const parseArchiveFileName = (
   return `creative-studio-${canvasId}.nomifun-canvas.zip`;
 };
 
-const saveArchiveBlob: CreativeStudioCanvasArchiveSave = (blob, fileName) => {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.rel = 'noopener';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+const saveArchiveBlob: CreativeStudioCanvasArchiveSave = async (blob, fileName) => {
+  await saveBlobAs(blob, {
+    suggestedName: fileName,
+    mimeType: CREATIVE_STUDIO_CANVAS_ARCHIVE_MIME,
+  });
 };
 
 /** Connect the Canvas library to authenticated archive transport. */
@@ -185,7 +181,7 @@ export function createCreativeStudioHttpCanvasArchivePort(
             },
           });
         }
-        save(await response.blob(), parseArchiveFileName(response, canvasId));
+        await save(await response.blob(), parseArchiveFileName(response, canvasId));
       }
     },
   };

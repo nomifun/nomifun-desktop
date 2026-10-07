@@ -13,7 +13,7 @@ import type {
   PromptLibrarySource,
 } from './types';
 
-const SOURCES = new Set<PromptLibrarySource>(['catalog', 'preset', 'asset']);
+const SOURCES = new Set<PromptLibrarySource>(['catalog', 'asset']);
 const UNSAFE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 function record(value: unknown): Record<string, unknown> {
@@ -88,7 +88,7 @@ function nullableHttpsUrl(value: unknown, field: string): string | null {
   return url.toString();
 }
 
-export function parsePromptLibraryItem(value: unknown): PromptLibraryItem {
+function parsePromptLibraryItem(value: unknown): PromptLibraryItem {
   const item = record(value);
   return {
     id: text(item.id, 'id', 255),

@@ -161,7 +161,11 @@ impl OpenAIResponsesProvider {
                 sanitize_tool_schemas,
             ));
         }
-        if let Some(effort) = &request.reasoning_effort {
+        let reasoning_effort = request
+            .reasoning_effort
+            .as_ref()
+            .or(self.compat.reasoning_effort.as_ref());
+        if let Some(effort) = reasoning_effort {
             typed["reasoning"] = json!({ "effort": effort });
         }
         if let Some(id) = previous_response_id {
@@ -182,7 +186,7 @@ impl OpenAIResponsesProvider {
         if request.tools.is_empty() {
             object.remove("tools");
         }
-        if request.reasoning_effort.is_none() {
+        if reasoning_effort.is_none() {
             object.remove("reasoning");
         }
         if previous_response_id.is_none() {
@@ -615,18 +619,22 @@ impl LlmProvider for OpenAIResponsesProvider {
         }
 
         let (tx, rx) = mpsc::channel(64);
-        let client = client.clone();
-        let url_clone = url.clone();
         let redactor = nomifun_net::secret_redaction::SecretRedactor::new(&self.api_keys);
         tokio::spawn(async move {
-            let outcome = process_sse_stream(response, &tx, retain).await;
+            let Some(outcome) = crate::retry::until_receiver_closed(
+                &tx,
+                process_sse_stream(response, &tx, retain),
+            )
+            .await else {
+                return;
+            };
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,
                 || {
                     crate::retry::send_and_check(
                         &client,
-                        &url_clone,
+                        &url,
                         &headers,
                         &body,
                         &redactor,

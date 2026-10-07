@@ -1,10 +1,10 @@
-import { tryParseEntityId, type WebhookId } from '@/common/types/ids';
-import React, { useCallback, useEffect, useState } from 'react';
+import { tryParseEntityId } from '@/common/types/ids';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Checkbox, Empty, Select, Table, Tag } from '@arco-design/web-react';
+import { Button, Checkbox, Empty, Select, Table, Tag } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
-import type { ITagSetting, ITagSummary, IWebhook } from '@/common/adapter/ipcBridge';
+import type { ITagSetting, ITagSummary, IUpsertTagSettingParams, IWebhook } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 
 /** The three notifiable terminal events. Defaults to all three when a tag has
@@ -42,62 +42,62 @@ const RoutingRuleList: React.FC<RoutingRuleListProps> = ({ channels }) => {
   const [tags, setTags] = useState<ITagSummary[]>([]);
   const [settings, setSettings] = useState<Record<string, ITagSetting>>({});
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  // Reads and writes share one slot: a full DTO must not overwrite a newer edit.
+  const operation = useRef<object | null>(null);
 
   const loadData = useCallback(async () => {
+    if (operation.current) return;
+    const current = {};
+    operation.current = current;
     setLoading(true);
+    setError(false);
     try {
       const tagList = await ipcBridge.requirements.tags.invoke();
-      setTags(tagList);
-
-      // No list-all endpoint for tag settings exists — fetch per tag (best-effort).
-      const next: Record<string, ITagSetting> = {};
-      await Promise.all(
-        tagList.map(async (tg) => {
-          try {
-            next[tg.tag] = await ipcBridge.webhook.getTagSetting.invoke({ tag: tg.tag });
-          } catch {
-            // A tag may not have a setting yet — that is fine.
-          }
-        })
+      if (operation.current !== current) return;
+      // Missing rows return default DTOs; request failures are not defaults.
+      const entries = await Promise.all(
+        tagList.map(async ({ tag }) => [tag, await ipcBridge.webhook.getTagSetting.invoke({ tag })] as const)
       );
-      setSettings(next);
+      if (operation.current !== current) return;
+      setTags(tagList);
+      setSettings(Object.fromEntries(entries));
     } catch (e) {
+      if (operation.current !== current) return;
+      setError(true);
       if (isHandledAuthExpiredHttpError(e)) return;
       message.error(String(e));
     } finally {
-      setLoading(false);
+      if (operation.current === current) {
+        operation.current = null;
+        setLoading(false);
+      }
     }
   }, [message]);
 
   useEffect(() => {
     void loadData();
+    return () => { operation.current = null; };
   }, [loadData]);
 
-  const handleChannelChange = async (tag: string, webhookId: WebhookId | undefined) => {
+  const saveSetting = async (tag: string, updates: IUpsertTagSettingParams) => {
+    if (operation.current || error) return;
+    const current = {};
+    operation.current = current;
+    setLoading(true);
     try {
-      const result = await ipcBridge.webhook.setTagSetting.invoke({
-        tag,
-        updates: { webhook_id: webhookId ?? null },
-      });
+      const result = await ipcBridge.webhook.setTagSetting.invoke({ tag, updates });
+      if (operation.current !== current) return;
       setSettings((prev) => ({ ...prev, [tag]: result }));
       message.success(t('webhook.messages.updateOk'));
     } catch (e) {
-      if (isHandledAuthExpiredHttpError(e)) return;
+      if (operation.current !== current || isHandledAuthExpiredHttpError(e)) return;
       message.error(String(e));
-    }
-  };
-
-  const handleEventsChange = async (tag: string, events: string[]) => {
-    try {
-      const result = await ipcBridge.webhook.setTagSetting.invoke({
-        tag,
-        updates: { notify_events: events },
-      });
-      setSettings((prev) => ({ ...prev, [tag]: result }));
-      message.success(t('webhook.messages.updateOk'));
-    } catch (e) {
-      if (isHandledAuthExpiredHttpError(e)) return;
-      message.error(String(e));
+    } finally {
+      if (operation.current === current) {
+        operation.current = null;
+        setLoading(false);
+      }
     }
   };
 
@@ -109,7 +109,9 @@ const RoutingRuleList: React.FC<RoutingRuleListProps> = ({ channels }) => {
   const eventsFor = (setting?: ITagSetting): string[] =>
     setting ? setting.notify_events : DEFAULT_EVENTS;
 
-  const tableData: RuleRow[] = tags.map((tg) => ({ ...tg, setting: settings[tg.tag] }));
+  const tableData: RuleRow[] = tags.map((tg) => ({
+    ...tg, setting: Object.hasOwn(settings, tg.tag) ? settings[tg.tag] : undefined,
+  }));
 
   const eventOptions = EVENT_KINDS.map((k) => ({
     label: t(`requirements.status.${k}`),
@@ -139,15 +141,17 @@ const RoutingRuleList: React.FC<RoutingRuleListProps> = ({ channels }) => {
 
             {/* Events multi-select */}
             <Checkbox.Group
+              disabled={loading}
               value={selectedEvents}
               options={eventOptions}
-              onChange={(v) => void handleEventsChange(row.tag, v as string[])}
+              onChange={(v) => void saveSetting(row.tag, { notify_events: v as string[] })}
             />
 
             <span className='text-t-secondary text-13px'>{t('requirements.notify.ruleThen')}</span>
 
             {/* Channel select (clearChannel option => null bind) */}
             <Select
+              disabled={loading}
               size='small'
               placeholder={t('requirements.notify.selectChannel')}
               value={boundId}
@@ -155,11 +159,11 @@ const RoutingRuleList: React.FC<RoutingRuleListProps> = ({ channels }) => {
               options={channelOptions}
               onChange={(value) => {
                 if (value === undefined || value === CLEAR_WEBHOOK_VALUE) {
-                  void handleChannelChange(row.tag, undefined);
+                  void saveSetting(row.tag, { webhook_id: null });
                   return;
                 }
                 const webhookId = tryParseEntityId('webhook', value);
-                if (webhookId != null) void handleChannelChange(row.tag, webhookId);
+                if (webhookId != null) void saveSetting(row.tag, { webhook_id: webhookId });
               }}
             />
 
@@ -178,15 +182,22 @@ const RoutingRuleList: React.FC<RoutingRuleListProps> = ({ channels }) => {
   return (
     <div className='flex flex-col gap-12px'>
       {ctx}
-      <Table
-        rowKey='tag'
-        loading={loading}
-        columns={columns}
-        data={tableData}
-        border={{ wrapper: true, cell: false }}
-        pagination={false}
-        noDataElement={<Empty description={t('autowork.tagSessions.empty')} />}
-      />
+      {error ? (
+        <div>
+          <div className='text-t-secondary'>{t('webhook.messages.loadError')}</div>
+          <Button onClick={() => void loadData()}>{t('requirements.retry')}</Button>
+        </div>
+      ) : (
+        <Table
+          rowKey='tag'
+          loading={loading}
+          columns={columns}
+          data={tableData}
+          border={{ wrapper: true, cell: false }}
+          pagination={false}
+          noDataElement={<Empty description={t('autowork.tagSessions.empty')} />}
+        />
+      )}
       {/* Forward-looking, disabled hint row for the future global fallback rule. */}
       <div
         className='flex items-center gap-8px rd-6px px-12px py-10px text-13px text-t-tertiary'

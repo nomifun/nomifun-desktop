@@ -8,38 +8,12 @@ use nomifun_common::{
     AdaptationPolicy, AgentExecutionActorType, AgentExecutionEventKind, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus,
     ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
-    MAX_AGENT_EXECUTION_PARALLELISM, ParticipantAssignmentSource, PlanGate, ProviderId,
-    StepFailurePolicy,
+    MAX_AGENT_EXECUTION_PARALLELISM, ParticipantAssignmentSource, ProviderId, StepFailurePolicy,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::serde_util::{deserialize_optional_uuidv7, deserialize_uuidv7};
 use crate::webhook::double_option;
-
-pub(crate) fn deserialize_uuidv7_id<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-    nomifun_common::validate_uuidv7(&value)
-        .map(|_| value)
-        .map_err(serde::de::Error::custom)
-}
-
-pub(crate) fn deserialize_optional_uuidv7_id<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
-    value
-        .map(|value| {
-            nomifun_common::validate_uuidv7(&value)
-                .map(|_| value)
-                .map_err(serde::de::Error::custom)
-        })
-        .transpose()
-}
 
 /// A provider/model pair that may execute a participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +138,7 @@ impl ParticipantConstraints {
 /// reusable team member and exposes no update endpoint.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutionParticipant {
-    #[serde(deserialize_with = "deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "deserialize_uuidv7")]
     pub participant_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
@@ -176,7 +150,7 @@ pub struct ExecutionParticipant {
     )]
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
+    pub agent_snapshot: Option<crate::AgentResolvedSnapshot>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -210,7 +184,7 @@ impl<'de> Deserialize<'de> for ExecutionParticipant {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            #[serde(deserialize_with = "deserialize_uuidv7_id")]
+            #[serde(deserialize_with = "deserialize_uuidv7")]
             participant_id: String,
             #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
             execution_id: String,
@@ -222,7 +196,7 @@ impl<'de> Deserialize<'de> for ExecutionParticipant {
             )]
             preset_id: Option<String>,
             preset_revision: Option<i64>,
-            preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
+            agent_snapshot: Option<crate::AgentResolvedSnapshot>,
             #[serde(
                 default,
                 deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -260,7 +234,7 @@ impl<'de> Deserialize<'de> for ExecutionParticipant {
             source_agent_id: wire.source_agent_id,
             preset_id: wire.preset_id,
             preset_revision: wire.preset_revision,
-            preset_snapshot: wire.preset_snapshot,
+            agent_snapshot: wire.agent_snapshot,
             provider_id: wire.provider_id,
             model: wire.model,
             role: wire.role,
@@ -292,7 +266,6 @@ pub struct AgentExecution {
     pub lead_conversation_id: Option<String>,
     pub work_dir: Option<String>,
     pub delegation_policy: DelegationPolicy,
-    pub plan_gate: PlanGate,
     pub adaptation_policy: AdaptationPolicy,
     pub decision_policy: DecisionPolicy,
     pub max_parallel: i64,
@@ -352,7 +325,7 @@ pub enum StepControlPolicy {
 /// is not represented by a separate Assignment object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionStep {
-    #[serde(deserialize_with = "deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "deserialize_uuidv7")]
     pub step_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
@@ -369,7 +342,7 @@ pub struct ExecutionStep {
     pub fanout_group: Option<String>,
     pub control_policy: Option<StepControlPolicy>,
     pub failure_policy: StepFailurePolicy,
-    #[serde(default, deserialize_with = "deserialize_optional_uuidv7_id")]
+    #[serde(default, deserialize_with = "deserialize_optional_uuidv7")]
     pub assigned_participant_id: Option<String>,
     pub assignment_source: Option<ParticipantAssignmentSource>,
     pub assignment_score: Option<f64>,
@@ -399,15 +372,21 @@ pub struct ExecutionStepProfile {
     pub needs_long_context: bool,
     pub needs_high_reasoning: bool,
     pub bulk: bool,
+    /// Host-owned subtractive ceiling for a turn-scoped managed process
+    /// lifecycle. It never grants process authority; when true, an Attempt
+    /// may see only start/poll/input/close/resize/cancel from the process
+    /// capability it already inherited.
+    #[serde(default)]
+    pub managed_process_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionStepDependency {
     #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
-    #[serde(deserialize_with = "deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "deserialize_uuidv7")]
     pub blocker_step_id: String,
-    #[serde(deserialize_with = "deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "deserialize_uuidv7")]
     pub blocked_step_id: String,
     pub introduced_in_revision: i64,
     pub superseded_in_revision: Option<i64>,
@@ -417,14 +396,14 @@ pub struct ExecutionStepDependency {
 /// the prior transcript, output, error, token count, or actual participant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionAttempt {
-    #[serde(deserialize_with = "deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "deserialize_uuidv7")]
     pub attempt_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
-    #[serde(deserialize_with = "deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "deserialize_uuidv7")]
     pub step_id: String,
     pub attempt_no: i64,
-    #[serde(default, deserialize_with = "deserialize_optional_uuidv7_id")]
+    #[serde(default, deserialize_with = "deserialize_optional_uuidv7")]
     pub participant_id: Option<String>,
     #[serde(
         default,
@@ -464,9 +443,9 @@ pub struct AgentExecutionEvent {
     pub execution_id: String,
     pub sequence: i64,
     pub event_type: AgentExecutionEventKind,
-    #[serde(default, deserialize_with = "deserialize_optional_uuidv7_id")]
+    #[serde(default, deserialize_with = "deserialize_optional_uuidv7")]
     pub step_id: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_uuidv7_id")]
+    #[serde(default, deserialize_with = "deserialize_optional_uuidv7")]
     pub attempt_id: Option<String>,
     pub actor_type: AgentExecutionActorType,
     pub actor_id: Option<String>,
@@ -475,7 +454,7 @@ pub struct AgentExecutionEvent {
         deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
     )]
     pub actor_conversation_id: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_uuidv7_id")]
+    #[serde(default, deserialize_with = "deserialize_optional_uuidv7")]
     pub actor_attempt_id: Option<String>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_user_id")]
     pub on_behalf_of_user_id: String,
@@ -550,8 +529,6 @@ pub struct CreateAgentExecutionRequest {
     pub model_pool: ExecutionModelPool,
     #[serde(default = "default_delegation_policy")]
     pub delegation_policy: DelegationPolicy,
-    #[serde(default = "default_plan_gate")]
-    pub plan_gate: PlanGate,
     #[serde(default = "default_adaptation_policy")]
     pub adaptation_policy: AdaptationPolicy,
     #[serde(default = "default_decision_policy")]
@@ -578,10 +555,6 @@ fn default_delegation_policy() -> DelegationPolicy {
     DelegationPolicy::Automatic
 }
 
-fn default_plan_gate() -> PlanGate {
-    PlanGate::Automatic
-}
-
 fn default_adaptation_policy() -> AdaptationPolicy {
     AdaptationPolicy::Fixed
 }
@@ -593,7 +566,7 @@ fn default_decision_policy() -> DecisionPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReassignExecutionStepRequest {
-    #[serde(deserialize_with = "deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "deserialize_uuidv7")]
     pub participant_id: String,
     #[serde(default)]
     pub locked: bool,
@@ -652,8 +625,6 @@ pub struct ReplanAgentExecutionRequest {
     pub model_pool: Option<ExecutionModelPool>,
     #[serde(default)]
     pub delegation_policy: Option<DelegationPolicy>,
-    #[serde(default)]
-    pub plan_gate: Option<PlanGate>,
     #[serde(default)]
     pub adaptation_policy: Option<AdaptationPolicy>,
     #[serde(default)]
@@ -719,6 +690,51 @@ mod tests {
     const PARTICIPANT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const EXECUTION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+
+    #[test]
+    fn execution_event_optional_ids_preserve_null_and_validation_errors() {
+        let base = serde_json::json!({
+            "execution_id": EXECUTION_ID,
+            "sequence": 1,
+            "event_type": "created",
+            "actor_type": "system",
+            "on_behalf_of_user_id": PROVIDER_ID,
+            "payload": {},
+            "created_at": 1
+        });
+        let absent: AgentExecutionEvent = serde_json::from_value(base.clone()).unwrap();
+        assert!(absent.step_id.is_none());
+        assert!(absent.attempt_id.is_none());
+        assert!(absent.actor_attempt_id.is_none());
+
+        for field in ["step_id", "attempt_id", "actor_attempt_id"] {
+            for value in [serde_json::Value::Null, serde_json::json!(PARTICIPANT_ID)] {
+                let mut raw = base.clone();
+                raw[field] = value.clone();
+                let event: AgentExecutionEvent = serde_json::from_value(raw).unwrap();
+                assert_eq!(serde_json::to_value(event).unwrap()[field], value);
+            }
+            for (value, message) in [
+                (
+                    serde_json::json!("bad-id"),
+                    "UUID must be a canonical lowercase hyphenated UUID",
+                ),
+                (
+                    serde_json::json!("550e8400-e29b-41d4-a716-446655440000"),
+                    "UUID must be version 7",
+                ),
+                (
+                    serde_json::json!(42),
+                    "invalid type: integer `42`, expected a string",
+                ),
+            ] {
+                let mut raw = base.clone();
+                raw[field] = value;
+                let error = serde_json::from_value::<AgentExecutionEvent>(raw).unwrap_err();
+                assert_eq!(error.to_string(), message, "{field}");
+            }
+        }
+    }
 
     #[test]
     fn execution_request_ids_are_strict_at_deserialization() {
@@ -790,7 +806,6 @@ mod tests {
             "lead_conversation_id": CONVERSATION_ID,
             "work_dir": null,
             "delegation_policy": "automatic",
-            "plan_gate": "automatic",
             "adaptation_policy": "fixed",
             "decision_policy": "automatic",
             "max_parallel": 1,
@@ -823,6 +838,25 @@ mod tests {
     }
 
     #[test]
+    fn execution_commands_reject_removed_plan_gate() {
+        assert!(
+            serde_json::from_value::<CreateAgentExecutionRequest>(serde_json::json!({
+                "goal": "ship",
+                "model_pool": { "mode": "automatic" },
+                "plan_gate": "automatic"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ReplanAgentExecutionRequest>(serde_json::json!({
+                "expected_version": 1,
+                "plan_gate": "automatic"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn execution_participant_rejects_noncanonical_ids_by_field() {
         let valid = serde_json::json!({
             "participant_id": PARTICIPANT_ID,
@@ -830,7 +864,7 @@ mod tests {
             "source_agent_id": "0190f5fe-7c00-7a00-8000-000000000003",
             "preset_id": "0190f5fe-7c00-7a00-8000-000000000004",
             "preset_revision": 1,
-            "preset_snapshot": null,
+            "agent_snapshot": null,
             "provider_id": PROVIDER_ID,
             "model": "model-a",
             "role": null,
@@ -868,7 +902,7 @@ mod tests {
             "source_agent_id": "nomi",
             "preset_id": null,
             "preset_revision": null,
-            "preset_snapshot": null,
+            "agent_snapshot": null,
             "provider_id": null,
             "model": null,
             "role": null,

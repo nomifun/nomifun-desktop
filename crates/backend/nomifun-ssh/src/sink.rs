@@ -3,7 +3,7 @@
 //! A [`SshConnectionHandle`] owns one live SSH connection: a persistent shell for
 //! commands and cwd/env state, plus an SFTP session for file ops. The trait is
 //! reached through the `nomifun-ai-agent` re-export — this crate has no
-//! `nomi-agent`/`nomi-tools` dependency, only `nomi-ssh` (transport) and the seam.
+//! legacy Agent-loop dependency, only `nomi-ssh` (transport) and the seam.
 //!
 //! Connection identity and credentials are baked in at `connect`; the model never
 //! sees them. This mirrors the Sink pattern (`nomifun-requirement`).
@@ -17,14 +17,23 @@ use std::sync::Arc;
 use nomi_ssh::connection::{HostKeyPolicy, SshConnection, SshError};
 use nomi_ssh::credential::{Auth, SshCredential};
 use nomi_ssh::fs::RemoteFs;
+use nomi_ssh::limits::validate_path;
 use nomi_ssh::responder::AnswerRule;
-use nomi_ssh::shell::{RemoteShell, ShellOutcome};
+use nomi_ssh::shell::{RemoteShell, ShellOutcome, UnprivilegedShellError};
 use nomifun_ai_agent::{RemoteCommandOutput, RemoteFileStat, SshBackend};
 use zeroize::Zeroizing;
 
-use crate::pool::{SshConnectionPool, SshLink};
+use crate::pool::{SshActionLease, SshConnectionPool, SshLink};
 use crate::service::{DecryptedCredential, SshServiceError};
 use crate::state::SshLinkState;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SshActionDispatchError {
+    #[error("{0}")]
+    Rejected(String),
+    #[error("{0}")]
+    OutcomeUnknown(String),
+}
 
 /// Why a dial did not produce a usable link.
 ///
@@ -38,6 +47,8 @@ pub enum SshDialError {
     /// build does not implement, or the host row is gone.
     #[error("ssh credential is unusable: {0}")]
     Credential(String),
+    #[error("invalid SSH input: {0}")]
+    InvalidInput(String),
     #[error("ssh authentication failed: {0}")]
     Auth(String),
     #[error("ssh host key rejected: {0}")]
@@ -49,6 +60,13 @@ pub enum SshDialError {
     /// The pool is quiescing; it will not open new sockets it cannot close.
     #[error("the ssh connection pool is shutting down")]
     ShuttingDown,
+    /// Canonical AgentSession deletion is permanent for the process lifetime.
+    #[error("the AgentSession is retired and cannot acquire SSH resources")]
+    SessionRetired,
+    /// The exact link lost a close race. A later explicit acquire may create a
+    /// fresh link unless its AgentSession was also retired.
+    #[error("the SSH link is retiring and cannot be acquired")]
+    LinkRetired,
 }
 
 impl SshDialError {
@@ -64,9 +82,12 @@ impl SshDialError {
         match self {
             SshDialError::Unreachable(_) | SshDialError::Protocol(_) => true,
             SshDialError::Credential(_)
+            | SshDialError::InvalidInput(_)
             | SshDialError::Auth(_)
             | SshDialError::HostKey(_)
-            | SshDialError::ShuttingDown => false,
+            | SshDialError::ShuttingDown
+            | SshDialError::SessionRetired
+            | SshDialError::LinkRetired => false,
         }
     }
 }
@@ -79,6 +100,8 @@ impl From<SshError> for SshDialError {
             // never reached: the host, not the credential.
             SshError::Disconnected(m) => SshDialError::Unreachable(m),
             SshError::AuthFailed(m) => SshDialError::Auth(m),
+            SshError::TimedOut(m) => SshDialError::Unreachable(m),
+            SshError::InvalidInput(m) => SshDialError::InvalidInput(m),
             SshError::HostKeyUnknown { host, fingerprint } => SshDialError::HostKey(format!(
                 "host key for {host} is unknown (fingerprint {fingerprint})"
             )),
@@ -113,8 +136,9 @@ pub struct SshConnectionHandle {
 
 impl SshConnectionHandle {
     /// Dial, authenticate (host-key policy `AcceptNew` writes unknown keys to the
-    /// operator's known_hosts), open a persistent shell rooted at `remote_cwd`
-    /// (with the optional sudo answer rule installed), and open SFTP.
+    /// operator's known_hosts), open a persistent unprivileged shell rooted at
+    /// `remote_cwd`, and open SFTP. Sudo answer rules are installed only on the
+    /// short-lived shell created by the explicit `ssh/sudo` action.
     pub async fn connect(
         cred: DecryptedCredential,
         known_hosts: std::path::PathBuf,
@@ -126,9 +150,7 @@ impl SshConnectionHandle {
         let fingerprint = conn.fingerprint.clone();
         let conn = Arc::new(conn);
 
-        let shell = conn
-            .open_shell_with_rules(remote_cwd, sudo_rules(&cred))
-            .await?;
+        let shell = conn.open_shell(remote_cwd).await?;
         let fs = Arc::new(conn.open_sftp().await?);
 
         Ok(SshConnectionHandle {
@@ -166,9 +188,8 @@ impl SshConnectionHandle {
     pub(crate) async fn reopen_channels(
         &self,
         cwd: &str,
-        rules: Vec<AnswerRule>,
     ) -> Result<Self, SshDialError> {
-        let shell = self.conn.open_shell_with_rules(cwd, rules).await?;
+        let shell = self.conn.open_shell(cwd).await?;
         let fs = Arc::new(self.conn.open_sftp().await?);
         Ok(SshConnectionHandle {
             shell,
@@ -177,16 +198,93 @@ impl SshConnectionHandle {
             fingerprint: self.fingerprint.clone(),
         })
     }
+
+    pub(crate) async fn run_unprivileged(
+        &self,
+        command: &str,
+        timeout_ms: u64,
+    ) -> Result<ShellOutcome, SshActionDispatchError> {
+        self
+            .shell
+            .run_unprivileged(command, std::time::Duration::from_millis(timeout_ms))
+            .await
+            .map_err(|error| match error {
+                UnprivilegedShellError::Rejected(error) => {
+                    SshActionDispatchError::Rejected(error.to_string())
+                }
+                UnprivilegedShellError::OutcomeUnknown(error) => {
+                    SshActionDispatchError::OutcomeUnknown(format!(
+                        "ssh/exec dispatch did not produce a terminal receipt: {error}"
+                    ))
+                }
+            })
+    }
+
+    /// Authenticate sudo in a dedicated command, remove the responder, then
+    /// run untrusted input with `sudo -n` on the same PTY. A model command can
+    /// never print a fake prompt while a credential responder is installed.
+    pub(crate) async fn run_ephemeral_sudo(
+        &self,
+        cwd: &str,
+        command: &str,
+        timeout_ms: u64,
+        credential: &DecryptedCredential,
+    ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(timeout_ms);
+        let shell = self
+            .conn
+            .open_shell(cwd)
+            .await
+            .map_err(|error| SshActionDispatchError::Rejected(error.to_string()))?;
+        let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
+        let validation = match &credential.sudo_password {
+            Some(password) => {
+                let prompt = format!(
+                    "__NOMIFUN_SUDO_AUTH_{}__:",
+                    nomifun_common::generate_id()
+                );
+                let rule = AnswerRule::exact_once(
+                    &prompt,
+                    Zeroizing::new(password.as_str().to_owned()),
+                )
+                .map_err(|error| {
+                    SshActionDispatchError::Rejected(format!(
+                        "build exact sudo prompt responder: {error}"
+                    ))
+                })?;
+                let command = format!(
+                    "sudo -k -S -p {} -v",
+                    shell_single_quote(&prompt)
+                );
+                shell.run_with_rules(&command, remaining(), &[rule]).await
+            }
+            None => shell.run("sudo -k -n -v", remaining()).await,
+        }
+        .map_err(|error| SshActionDispatchError::Rejected(error.to_string()))?;
+        if validation.timed_out || validation.exit_code != 0 {
+            let _ = shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+            return Err(SshActionDispatchError::Rejected(
+                "sudo authentication failed without exposing credential output".into(),
+            ));
+        }
+        let elevated = format!("sudo -n -- sh -lc {}", shell_single_quote(command));
+        let result = shell
+            .run(&elevated, remaining())
+            .await
+            .map(remote_output)
+            .map_err(|error| {
+                SshActionDispatchError::OutcomeUnknown(format!(
+                    "ssh/sudo dispatch did not produce a terminal receipt: {error}"
+                ))
+            });
+        let _ = shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+        result
+    }
 }
 
-/// The host's sudo auto-answer rule, if it stored a sudo password. Rebuilt from a
-/// freshly decrypted credential every time a shell is opened, so nothing above
-/// the transport has to keep the password between dials.
-pub(crate) fn sudo_rules(cred: &DecryptedCredential) -> Vec<AnswerRule> {
-    match &cred.sudo_password {
-        Some(pw) => vec![AnswerRule::sudo(Zeroizing::new(pw.as_str().to_string()))],
-        None => Vec::new(),
-    }
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 /// The `SshBackend` the pool hands out: it resolves the link's *current* handle
@@ -217,7 +315,10 @@ impl SshLinkBackend {
     /// permanently dead link, and the operator fixing the host would change
     /// nothing. The host's dial gate bounds the retry rate, and a link that has
     /// left the pool (its host was deleted) is never revived.
-    async fn handle(&self) -> Result<Arc<SshConnectionHandle>, String> {
+    async fn handle(
+        &self,
+        _action_lease: &SshActionLease,
+    ) -> Result<Arc<SshConnectionHandle>, String> {
         if let Some(handle) = self.link.current_handle().await {
             return Ok(handle);
         }
@@ -244,25 +345,49 @@ impl SshLinkBackend {
     /// cwd is remembered for replay after a reconnect, a resync failure recycles
     /// the shell, and a lost transport starts the ladder now rather than at the
     /// next liveness tick.
-    async fn run(&self, command: &str, timeout_ms: u64) -> Result<RemoteCommandOutput, String> {
-        let handle = self.handle().await?;
-        match run_with_budget(handle.shell(), command, timeout_ms).await {
+    async fn run(
+        &self,
+        action_lease: &SshActionLease,
+        command: &str,
+        timeout_ms: u64,
+    ) -> Result<RemoteCommandOutput, String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let _command = self.link.command_slot(deadline).await?;
+        let handle = self.handle(action_lease).await?;
+        if handle.shell().needs_recovery().await && !handle.is_transport_closed() {
+            self.pool.recycle_shell(&self.link, "remote shell channel was retired after cancellation or failed recovery").await;
+        }
+        let handle = self.handle(action_lease).await?;
+        let shell = Arc::clone(handle.shell());
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("SSH command budget expired before input was submitted".into());
+        }
+        match shell.run(command, remaining).await {
             Ok(outcome) => {
-                if outcome.timed_out && outcome.cwd.is_empty() {
-                    // `RemoteShell::run` only withholds the cwd on a timeout it
-                    // could not resynchronize from: the transport is fine, the
-                    // shell is not, so recycling the channel is the fix — not a
-                    // redial, and certainly not swallowing it.
+                if shell.needs_recovery().await {
+                    // Terminal process exit and failed timeout recovery retire
+                    // only this channel; the authenticated transport is reusable.
                     self.pool
                         .recycle_shell(
                             &self.link,
-                            "remote shell could not be resynchronized after a timeout",
+                            "remote shell ended or could not be resynchronized after a timeout",
                         )
                         .await;
                 } else if !outcome.cwd.is_empty() {
                     self.link.remember_cwd(&outcome.cwd);
                 }
                 Ok(remote_output(outcome))
+            }
+            Err(e) if !shell.is_reusable().await && !handle.is_transport_closed() => {
+                let detail = e.to_string();
+                self.pool
+                    .recycle_shell(
+                        &self.link,
+                        "remote shell channel was retired after cancellation or failed recovery",
+                    )
+                    .await;
+                Err(detail)
             }
             Err(e @ SshError::Disconnected(_)) => {
                 let detail = e.to_string();
@@ -281,71 +406,80 @@ impl SshBackend for SshLinkBackend {
         command: &str,
         timeout_ms: u64,
     ) -> Result<RemoteCommandOutput, String> {
-        self.run(command, timeout_ms).await
+        let action_lease = self.pool.action_lease(&self.link)?;
+        self.run(&action_lease, command, timeout_ms).await
     }
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
-        self.handle()
+        let action_lease = self.pool.action_lease(&self.link)?;
+        let result = self
+            .handle(&action_lease)
             .await?
             .fs()
             .read_file(path)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        drop(action_lease);
+        result
     }
 
     async fn write_file(&self, path: &str, bytes: Vec<u8>) -> Result<(), String> {
-        self.handle()
+        let action_lease = self.pool.action_lease(&self.link)?;
+        let result = self
+            .handle(&action_lease)
             .await?
             .fs()
             .write_file_atomic(path, &bytes)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        drop(action_lease);
+        result
     }
 
     async fn grep(&self, pattern: &str, path: &str) -> Result<String, String> {
+        validate_backend_path(path)?;
+        let action_lease = self.pool.action_lease(&self.link)?;
         let out = self
-            .run(&grep_command(pattern, path), GREP_TIMEOUT_MS)
+            .run(&action_lease, &grep_command(pattern, path), GREP_TIMEOUT_MS)
             .await?;
-        Ok(out.stdout)
+        command_stdout(out, "search")
     }
 
     async fn list_files(&self, glob: &str) -> Result<Vec<String>, String> {
-        let out = self.run(&list_command(glob), LIST_TIMEOUT_MS).await?;
-        Ok(list_lines(&out.stdout))
+        validate_backend_path(glob)?;
+        let action_lease = self.pool.action_lease(&self.link)?;
+        let out = self
+            .run(&action_lease, &list_command(glob), LIST_TIMEOUT_MS)
+            .await?;
+        command_stdout(out, "listing").map(|stdout| list_lines(&stdout))
     }
 
     async fn stat(&self, path: &str) -> Result<RemoteFileStat, String> {
+        let action_lease = self.pool.action_lease(&self.link)?;
         let s = self
-            .handle()
+            .handle(&action_lease)
             .await?
             .fs()
             .stat(path)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(RemoteFileStat {
+        let result = RemoteFileStat {
             size: s.size,
             is_dir: s.is_dir,
-        })
+        };
+        drop(action_lease);
+        Ok(result)
     }
 }
 
 /// Budget for a `grep` submission — the tool has no timeout parameter, so this
 /// is the ceiling on a recursive search over a big tree.
 const GREP_TIMEOUT_MS: u64 = 30_000;
-/// Budget for a `ls -1d` submission.
+/// Budget for one POSIX glob expansion/listing submission.
 const LIST_TIMEOUT_MS: u64 = 15_000;
 
-async fn run_with_budget(
-    shell: &Arc<RemoteShell>,
-    command: &str,
-    timeout_ms: u64,
-) -> Result<ShellOutcome, SshError> {
-    shell
-        .run(command, std::time::Duration::from_millis(timeout_ms))
-        .await
-}
 
-fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
+pub(crate) fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
     RemoteCommandOutput {
         stdout: outcome.output,
         exit_code: outcome.exit_code,
@@ -353,21 +487,42 @@ fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
     }
 }
 
-/// ripgrep if present, else `grep -rn`. Pattern and path are single-quoted to
-/// keep them off the shell's parsing surface; `--color=never` keeps ANSI escapes
-/// out of the captured output.
+/// Operations without an outcome field must not present partial/failed output
+/// as a complete result. run_command keeps its explicit status-bearing API.
+fn command_stdout(out: RemoteCommandOutput, operation: &str) -> Result<String, String> {
+    if out.timed_out {
+        Err(format!("SSH {operation} timed out; no complete result is available"))
+    } else if out.exit_code != 0 {
+        Err(format!("SSH {operation} failed with exit status {}:\n{}", out.exit_code, out.stdout))
+    } else {
+        Ok(out.stdout)
+    }
+}
+
+fn validate_backend_path(path: &str) -> Result<(), String> {
+    validate_path(path).map_err(|error| SshError::InvalidInput(error.to_string()).to_string())
+}
+
+/// Select one engine by availability, never retry errors/no-match with another
+/// regex dialect. Normalize only no-match (1); preserve diagnostics and errors.
+/// All temporary positional parameters/status live in a subshell.
 fn grep_command(pattern: &str, path: &str) -> String {
+    let path = if path == "-" { "./-" } else { path };
     format!(
-        "rg --color=never -n -- {p} {d} 2>/dev/null || grep --color=never -rn -- {p} {d} 2>/dev/null || true",
+        "(if command -v rg >/dev/null 2>&1; then set -- rg --color=never --no-heading -n; elif [ -d {d} ]; then set -- grep --color=never -rnE; else set -- grep --color=never -nEh; fi; if \"$@\" -- {p} {d}; then :; else _nomi_search_status=$?; [ \"$_nomi_search_status\" -eq 1 ] || exit \"$_nomi_search_status\"; fi)",
         p = sh_quote(pattern),
         d = sh_quote(path),
     )
 }
 
-/// Rely on the remote shell's glob expansion; unmatched globs yield nothing
-/// (nullglob-ish via the `2>/dev/null` + filtering).
+/// A subshell keeps its loop variable out of the persistent session. printf
+/// emits literal names without ls's option or terminal-dependent quoting rules.
+/// Include broken symlinks, and skip patterns that match no existing entry.
 fn list_command(glob: &str) -> String {
-    format!("ls -1d {} 2>/dev/null || true", sh_quote_glob(glob))
+    format!(
+        "(for _nomi_glob_path in {}; do [ -e \"$_nomi_glob_path\" ] || [ -L \"$_nomi_glob_path\" ] || continue; printf '%s\\n' \"$_nomi_glob_path\"; done)",
+        sh_quote_glob(glob),
+    )
 }
 
 fn list_lines(output: &str) -> Vec<String> {
@@ -447,17 +602,25 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Glob patterns must NOT be single-quoted (that would disable expansion), but
-/// we still guard against shell metacharacters beyond glob wildcards by
-/// rejecting quotes/backticks/`$`/`;`. Anything suspicious is single-quoted
-/// (treated literally) instead.
+/// Leave glob operators and bracket-class characters active, while quoting
+/// everything that could start shell syntax, expansion, or another word.
+/// Tilde and backslash are literal characters, not extra shell expressions.
 fn sh_quote_glob(s: &str) -> String {
-    if s.contains(['\'', '`', '$', ';', '|', '&', '\n', '"']) {
-        sh_quote(s)
-    } else {
-        s.to_string()
+    let mut quoted = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if !(ch.is_ascii_alphanumeric()
+            || matches!(ch, '/' | '.' | '_' | '-' | '*' | '?' | '[' | ']' | '!' | '^' | ':'))
+        {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
     }
+    quoted
 }
+
+#[cfg(test)]
+#[path = "sink_command_tests.rs"]
+mod command_tests;
 
 #[cfg(test)]
 mod tests {
@@ -520,13 +683,23 @@ mod tests {
     }
 
     #[test]
-    fn glob_and_pattern_quoting_is_unchanged() {
+    fn glob_and_pattern_quoting_preserves_only_intended_shell_syntax() {
         // Pinned because these strings are what actually runs on the operator's
         // host; a "harmless" tidy-up here is a command-injection change.
         assert_eq!(sh_quote("a'b"), r#"'a'\''b'"#);
         assert_eq!(sh_quote_glob("*.rs"), "*.rs");
-        assert_eq!(sh_quote_glob("$(id)"), r#"'$(id)'"#);
-        assert!(grep_command("x", "/srv").starts_with("rg --color=never -n -- 'x' '/srv'"));
-        assert_eq!(list_command("*.rs"), "ls -1d *.rs 2>/dev/null || true");
+        assert_eq!(sh_quote_glob("$(id)"), r"\$\(id\)");
+        assert!(!grep_command("x", "/srv").contains('\n'), "one line for the persistent shell protocol");
+        let listing = list_command("*.rs");
+        assert!(listing.starts_with("(for _nomi_glob_path in *.rs;"));
+        assert!(!listing.contains('\n'), "one line for the persistent shell protocol");
     }
+
+    #[test]
+    fn generated_commands_reject_invalid_paths_before_shell_submission() {
+        assert!(validate_backend_path("/srv/**/*.rs").is_ok());
+        let error = validate_backend_path("bad\npath").expect_err("control characters are invalid");
+        assert!(error.contains("invalid SSH input"), "{error}");
+    }
+
 }

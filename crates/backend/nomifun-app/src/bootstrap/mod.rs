@@ -4,19 +4,19 @@
 //! (logging, work_dir resolution, builtin-skill materialization, database
 //! init) that subcommands compose to start the application.
 
-mod admin;
 mod bind;
 mod boot_log;
 mod builtin_skills;
+mod composition_cleanup;
 mod data_root;
 mod environment;
+mod nomi_core;
 mod relocation;
 mod server_lock;
 mod tracing_init;
 mod webui_dist;
 mod work_dir;
 
-pub use admin::{AdminBootstrap, ensure_admin_credentials};
 pub use bind::{PORT_FILE, PortAnnouncement, SCAN_SPAN, announce_bound_port, bind_with_fallback, write_port_file};
 pub use boot_log::{BootNoteLevel, record_boot_note};
 pub use data_root::{
@@ -26,7 +26,10 @@ pub use data_root::{
 };
 pub use environment::{
     ServerEnvironment, finalize_data_layer, init_data_layer, init_environment,
+    init_nomi_core_environment,
 };
+pub use nomi_core::NomiCoreApplication;
+pub use composition_cleanup::NomiCoreCompositionCleanupError;
 pub(crate) use environment::{
     acquire_distinct_work_root_lock, acquire_work_root_lock,
 };

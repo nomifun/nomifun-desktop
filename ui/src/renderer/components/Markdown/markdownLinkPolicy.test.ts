@@ -15,9 +15,21 @@ import {
 const markdownSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 
 describe('Markdown internal link policy', () => {
-  test('allows only the exact image model-management link', () => {
+  test('allows only exact model-management recovery links', () => {
     expect(getMarkdownInternalRoute(IMAGE_MODEL_MANAGEMENT_MARKDOWN_LINK)).toBe(
       IMAGE_MODEL_MANAGEMENT_ROUTE
+    );
+    expect(getMarkdownInternalRoute('nomifun://model-management/image-edit')).toBe(
+      '/models?section=image-edit'
+    );
+    expect(getMarkdownInternalRoute('nomifun://model-management/video')).toBe(
+      '/models?section=video'
+    );
+    expect(getMarkdownInternalRoute('nomifun://model-management/music')).toBe(
+      '/models?section=music'
+    );
+    expect(getMarkdownInternalRoute('nomifun://model-management/tts')).toBe(
+      '/models?section=tts'
     );
 
     for (const href of [
@@ -25,7 +37,8 @@ describe('Markdown internal link policy', () => {
       'nomifun://model-management/image?source=agent',
       'nomifun://model-management/image#configure',
       'NOMIFUN://model-management/image',
-      'nomifun://model-management/video',
+      'nomifun://model-management/video/',
+      'nomifun://model-management/unknown',
       'nomifun://settings',
       '/models?section=image',
       'https://nomifun.com/models?section=image',

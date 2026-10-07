@@ -57,6 +57,7 @@ import {
   isCreativeStudioPlanningSkillId,
 } from './planningSkills';
 import type { CreativeCanvasAgentOp } from './artifacts';
+import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
 import {
   projectCreativeCanvasAgentProposals,
   type CreativeCanvasProposalOverride,
@@ -171,6 +172,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const [messages, setMessages] = useState<readonly CreativeStudioAgentMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [selectedModel, setSelectedModel] = useState<CreativeModelSelectionRef | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [panelError, setPanelError] = useState<string | undefined>();
   const [loadRequest, setLoadRequest] = useState(0);
@@ -404,6 +406,12 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           }));
           return;
         }
+        if (event.type === 'paused') {
+          replaceRunningAssistant(transientAssistantId, (message) => ({
+            id: message.id, role: 'assistant', status: 'paused', text: message.text, pause: event.pause,
+          }));
+          return;
+        }
         if (event.type === 'history-reconciled') {
           classifyCreativeCanvasAgentHistory(session, event.history);
           reconciledHistory = copyHistory(event.history);
@@ -419,6 +427,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             status: 'failed',
             text: message.text,
             errorMessage: event.message,
+            error: event.error,
+            turnId: event.turnId,
+            timestamp: event.timestamp,
           }));
         }
       };
@@ -456,7 +467,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             return;
           }
           if (outcome.state === 'stopped') {
-            await persistSession(creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
+            await persistSession(reconciledHistory
+              ? creativeCanvasAgentSessionWithAuthoritativeHistory(session, reconciledHistory, now())
+              : creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
             if (mountedRef.current) {
               replaceRunningAssistant(transientAssistantId, (message) => ({
                 id: message.id,
@@ -470,7 +483,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
 
           const outcomeErrorMessage = errorMessage(outcome.error);
           if (terminalFailureObserved) {
-            await persistSession(creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
+            await persistSession(reconciledHistory
+              ? creativeCanvasAgentSessionWithAuthoritativeHistory(session, reconciledHistory, now())
+              : creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
           } else if (mountedRef.current) {
             replaceRunningAssistant(transientAssistantId, (message) => ({
               id: message.id,
@@ -484,11 +499,11 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             }));
           }
           if (!terminalFailureObserved && mountedRef.current) {
-            setPanelError(outcomeErrorMessage);
+            setPanelError(undefined);
           }
         } catch (error) {
           if (mountedRef.current) {
-            setPanelError(errorMessage(error));
+            setPanelError(undefined);
             replaceRunningAssistant(transientAssistantId, (message) => ({
               id: message.id,
               role: 'assistant',
@@ -526,6 +541,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       return () => abort.abort();
     }
     if (!activeSession) {
+      setActiveConversationId(null);
       durableHistoryRef.current = [];
       setAppliedProposalMessageIds([]);
       setMessages([]);
@@ -546,6 +562,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       return () => abort.abort();
     }
     if (!activeSession.model) {
+      setActiveConversationId(null);
       durableHistoryRef.current = [];
       setAppliedProposalMessageIds([]);
       setMessages([]);
@@ -580,6 +597,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           signal: abort.signal,
         });
         if (abort.signal.aborted || epoch !== loadEpochRef.current) return;
+        setActiveConversationId(resolution.binding.conversationId);
         const authority = classifyCreativeCanvasAgentHistory(activeSession, resolution.history);
         setAppliedProposalMessageIds([...resolution.appliedProposalMessageIds]);
         if (authority !== 'current') {
@@ -693,7 +711,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       ) {
         setPanelError(
           t('creativeStudio.agent.skillSelectionRequired', {
-            defaultValue: '请明确选择 1–3 个 Creative Studio 创作技能。',
+            defaultValue: '请明确选择 1–3 个创作技能。',
           })
         );
         return;
@@ -912,6 +930,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         i18n.resolvedLanguage ?? i18n.language
       )}
       activeSessionId={documentState.activeSessionId}
+      conversationId={activeConversationId ?? undefined}
       messages={messages}
       proposals={proposalProjection.proposals}
       draft={draft}
@@ -923,6 +942,17 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       isRunning={isRunning}
       errorMessage={panelError}
       disabled={props.disabled || isApplyingProposal}
+      agentSelector={
+        <ProductAgentBindingSelect
+          targetKind='creative_studio_canvas'
+          targetId={props.canvasId}
+          defaultTemplateKey='creative-studio.default'
+          compact
+          model={model ? { id: model.providerId, use_model: model.model } : undefined}
+          disabled={isRunning || isApplyingProposal}
+          conversationId={activeConversationId}
+        />
+      }
       onViewChange={setView}
       onNewSession={handleNewSession}
       onSelectSession={handleSelectSession}
@@ -956,7 +986,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       onStop={handleStop}
       onCollapse={props.onCollapse}
       onRetryLoad={handleRetryLoad}
-      onRetryMessage={handleRetryMessage}
+      onRetryMessage={activeSession?.pendingTurn && !isRunning ? handleRetryMessage : undefined}
       onOpenModelSettings={props.onOpenModelSettings}
     />
   );

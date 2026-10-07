@@ -9,7 +9,7 @@ import { toDisplayText } from '@/common/chat/displayText';
 import { Badge, Typography } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import FeedbackButton from '@/renderer/components/base/FeedbackButton';
+import ConversationErrorNote from './ConversationErrorNote';
 import { useConversationAgents } from '@/renderer/pages/conversation/hooks/useConversationAgents';
 
 const { Text } = Typography;
@@ -36,6 +36,10 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
 
   // Hide disconnected status from historical messages (no longer emitted but may exist in DB)
   if ((status as string) === 'disconnected') return null;
+  if (status === 'error') return <ConversationErrorNote
+    error={{ message: '', agentLabel: agentNameText || undefined }}
+    timestamp={message.created_at} turnId={message.turn_id} sessionId={message.conversation_id}
+  />;
 
   const getStatusBadge = () => {
     switch (status) {
@@ -61,14 +65,11 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
             text={t('messages.processReceipt.preparedAction', { defaultValue: 'Prepared next action' })}
           />
         );
-      case 'error':
-        return <Badge status='error' text={t('agent.status.error')} />;
       default:
         return <Badge status='default' text={t('agent.status.unknown')} />;
     }
   };
 
-  const isError = status === 'error';
   const isSuccess = status === 'connected' || status === 'authenticated' || status === 'session_active';
   const isPreparing = status === 'preparing' || status === 'prepared';
 
@@ -76,23 +77,17 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
     <div
       className='agent-status-message flex items-center gap-3 p-3 rounded-lg border'
       style={{
-        backgroundColor: isError
-          ? 'var(--color-danger-light-1)'
-          : isSuccess
+        backgroundColor: isSuccess
             ? 'var(--color-success-light-1)'
             : isPreparing
               ? 'transparent'
             : 'var(--color-primary-light-1)',
-        borderColor: isError
-          ? 'rgb(var(--danger-3))'
-          : isSuccess
+        borderColor: isSuccess
             ? 'rgb(var(--success-3))'
             : isPreparing
               ? 'transparent'
               : 'rgb(var(--primary-3))',
-        color: isError
-          ? 'rgb(var(--danger-6))'
-          : isSuccess
+        color: isSuccess
             ? 'rgb(var(--success-6))'
             : isPreparing
               ? 'var(--color-text-3)'
@@ -107,7 +102,6 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
 
       <div className='flex-1 flex items-center gap-6px'>
         {getStatusBadge()}
-        {isError && <FeedbackButton />}
       </div>
     </div>
   );

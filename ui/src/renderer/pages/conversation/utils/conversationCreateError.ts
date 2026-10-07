@@ -8,16 +8,24 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { parseError } from '@/common/utils';
 import type { TFunction } from 'i18next';
 
-export type WorkspacePathErrorCode =
+type WorkspacePathErrorCode =
   | 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED'
-  | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED';
+  | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
+  | 'WORKSPACE_DIRECTORY_UNAVAILABLE'
+  | 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE';
 
-export type ConversationCreateErrorCode = 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED';
-export type ConversationRuntimeWorkspaceErrorCode = 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED';
+type ConversationCreateErrorCode =
+  | 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED'
+  | 'WORKSPACE_DIRECTORY_UNAVAILABLE';
+type ConversationRuntimeWorkspaceErrorCode =
+  | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
+  | 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE';
 
 const BACKEND_ERROR_CODE_MAP: Record<string, WorkspacePathErrorCode> = {
   WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED: 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED',
   WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED: 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED',
+  WORKSPACE_DIRECTORY_UNAVAILABLE: 'WORKSPACE_DIRECTORY_UNAVAILABLE',
+  WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE: 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE',
 };
 
 const PROVIDER_ERROR_CODES = new Set(['PROVIDER_UNAVAILABLE']);
@@ -90,12 +98,22 @@ const getWorkspacePathErrorPayload = (error: unknown): EmbeddedBackendErrorPaylo
   return getEmbeddedBackendErrorPayload(error);
 };
 
-export const getWorkspacePathFromErrorDetails = (error: unknown): string | undefined => {
+const getConversationConfigurationErrorKey = (payload: EmbeddedBackendErrorPayload | undefined): string | undefined => {
+  const code = 'AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED';
+  const matches = payload?.code === code || (
+    payload?.code === 'CONFLICT'
+    && typeof payload.error === 'string'
+    && /^(?:Conflict:\s*)?AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED(?:\s*:|$)/.test(payload.error)
+  );
+  return matches ? `conversation.agentError.codes.${code}.body` : undefined;
+};
+
+const getWorkspacePathFromErrorDetails = (error: unknown): string | undefined => {
   const payload = getWorkspacePathErrorPayload(error);
   return getWorkspacePathFromDetails(payload?.details);
 };
 
-export const normalizeWorkspacePathErrorCode = (error: unknown): WorkspacePathErrorCode | undefined => {
+const normalizeWorkspacePathErrorCode = (error: unknown): WorkspacePathErrorCode | undefined => {
   const payload = getWorkspacePathErrorPayload(error);
   if (payload) {
     const mappedCode = payload.code ? BACKEND_ERROR_CODE_MAP[payload.code] : undefined;
@@ -107,21 +125,30 @@ export const normalizeWorkspacePathErrorCode = (error: unknown): WorkspacePathEr
   return undefined;
 };
 
-export const normalizeConversationCreateErrorCode = (error: unknown): ConversationCreateErrorCode | undefined => {
+const normalizeConversationCreateErrorCode = (error: unknown): ConversationCreateErrorCode | undefined => {
   const code = normalizeWorkspacePathErrorCode(error);
-  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED' ? code : undefined;
+  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED' || code === 'WORKSPACE_DIRECTORY_UNAVAILABLE'
+    ? code
+    : undefined;
 };
 
-export const normalizeConversationRuntimeWorkspaceErrorCode = (
+const normalizeConversationRuntimeWorkspaceErrorCode = (
   error: unknown
 ): ConversationRuntimeWorkspaceErrorCode | undefined => {
   const code = normalizeWorkspacePathErrorCode(error);
-  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED' ? code : undefined;
+  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
+    || code === 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE'
+    ? code
+    : undefined;
 };
 
 export const getConversationCreateErrorMessage = (error: unknown, t: TFunction): string => {
   const normalizedCode = normalizeConversationCreateErrorCode(error);
   const payload = getWorkspacePathErrorPayload(error);
+  const configurationKey = getConversationConfigurationErrorKey(payload);
+  if (configurationKey) {
+    return t(configurationKey);
+  }
   const workspacePath = getWorkspacePathFromErrorDetails(error);
   const rawMessage = payload?.error || parseError(error) || t('conversation.createFailed');
 
@@ -137,6 +164,10 @@ export const getConversationCreateErrorMessage = (error: unknown, t: TFunction):
 
 export const getConversationRuntimeWorkspaceErrorMessage = (error: unknown, t: TFunction): string => {
   const payload = getWorkspacePathErrorPayload(error);
+  const configurationKey = getConversationConfigurationErrorKey(payload);
+  if (configurationKey) {
+    return t(configurationKey);
+  }
   const providerKey = payload?.code ? providerErrorI18nKey(payload.code) : undefined;
   if (providerKey) {
     return t(providerKey);

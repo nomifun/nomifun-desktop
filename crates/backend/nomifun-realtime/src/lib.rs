@@ -5,7 +5,7 @@ pub mod manager;
 pub mod types;
 
 pub use broadcaster::{BroadcastEventBus, EventBroadcaster, UserEventEnvelope, UserEventSink};
-pub use handler::{TokenExtractor, WsHandlerState, parse_allowed_origins, ws_upgrade_handler};
+pub use handler::{TokenExtractor, WsHandlerState, parse_allowed_origins, ws_upgrade_handler,validate_attachment_origin};
 pub use manager::{TokenAuthenticator, WebSocketManager};
 pub use types::{
     ClientInfo, ConnectionId, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, PER_CONNECTION_BUFFER, WebSocketCloseCode,

@@ -1,25 +1,11 @@
 //! Session-scoped conversation operations exposed over HTTP.
 //!
 //! These DTOs back the per-conversation routes that read or mutate one live
-//! agent session: its mode, its model info, its workspace listing, and the
-//! side-question channel. They are engine-neutral — the enclosing routes
+//! agent session: its model info, workspace listing, and side-question channel.
+//! They are engine-neutral — the enclosing routes
 //! dispatch through `AgentRuntimeHandle`.
 
 use serde::{Deserialize, Serialize};
-
-/// Response for agent session mode.
-#[derive(Debug, Serialize)]
-pub struct AgentModeResponse {
-    pub mode: String,
-    pub initialized: bool,
-}
-
-/// Request body for setting session mode.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SetModeRequest {
-    pub mode: String,
-}
 
 /// Request body for setting the session model.
 #[derive(Debug, Deserialize)]
@@ -89,13 +75,6 @@ pub struct SideQuestionResponse {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn set_mode_request_serde() {
-        let json = json!({ "mode": "code" });
-        let req: SetModeRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.mode, "code");
-    }
 
     #[test]
     fn set_model_request_serde() {

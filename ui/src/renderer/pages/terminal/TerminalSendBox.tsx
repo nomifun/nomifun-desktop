@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Message } from '@arco-design/web-react';
 import SendBox from '@renderer/components/chat/SendBox';
@@ -46,6 +46,16 @@ interface TerminalSendBoxProps {
 const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminalApi, disabled }) => {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
+  const active = useRef(false);
+  const draftVersion = useRef(0);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+  const changeInput = useCallback((value: React.SetStateAction<string>) => {
+    draftVersion.current += 1;
+    setInput(value);
+  }, []);
 
   // Insert the path of each selected node into the command draft. A path with a
   // space is wrapped in double quotes so the shell treats it as one argument;
@@ -61,12 +71,12 @@ const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminal
       .map((p) => (/\s/.test(p) ? `"${p}"` : p));
     if (!tokens.length) return;
     const insertion = tokens.join(' ');
-    setInput((prev) => {
+    changeInput((prev) => {
       if (!prev) return insertion;
       const sep = /\s$/.test(prev) ? '' : ' ';
       return `${prev}${sep}${insertion}`;
     });
-  }, []);
+  }, [changeInput]);
 
   // The terminal workspace rail emits these on file selection / "add to command".
   // Both replace and append behave the same here: insert the path(s) into the
@@ -102,6 +112,9 @@ const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminal
   };
 
   const handleSend = async (message: string) => {
+    if (!active.current || disabled) return;
+    const api = terminalApi?.current;
+    const version = draftVersion.current;
     // Drop only trailing whitespace; preserve internal structure.
     const text = message.replace(/\s+$/, '');
     if (!text) return;
@@ -120,20 +133,28 @@ const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminal
         await writeToPty(`${body}\r`);
       }
     } catch (error) {
-      setInput(message);
-      Message.error(t('terminal.inputFailed', { defaultValue: 'Failed to send terminal input.' }));
+      if (active.current && terminalApi?.current === api) {
+        if (draftVersion.current === version) setInput(message);
+        Message.error(t('terminal.inputFailed', { defaultValue: 'Failed to send terminal input.' }));
+      }
       throw error;
     }
   };
 
+  const handleClear = () => {
+    onClearView?.();
+    changeInput('');
+  };
+
   const handleBuiltin = (name: string) => {
-    if (name === 'clear') {
-      onClearView?.();
-      setInput('');
-    } else if (name === 'interrupt') {
+    if (!active.current || disabled) return;
+    if (name === 'interrupt') {
+      const api = terminalApi?.current;
       // Send Ctrl-C (ETX) to the PTY.
       void writeToPty('\x03').catch(() => {
-        Message.error(t('terminal.inputFailed', { defaultValue: 'Failed to send terminal input.' }));
+        if (active.current && terminalApi?.current === api) {
+          Message.error(t('terminal.inputFailed', { defaultValue: 'Failed to send terminal input.' }));
+        }
       });
     }
   };
@@ -154,11 +175,12 @@ const TerminalSendBox: React.FC<TerminalSendBoxProps> = ({ onClearView, terminal
     <SendBox
       className='terminal-sendbox-compact'
       value={input}
-      onChange={setInput}
+      onChange={changeInput}
       onSend={handleSend}
       disabled={disabled}
       enableBtw={false}
       slash_commands={quickCommands}
+      onClearContext={handleClear}
       onSlashBuiltinCommand={handleBuiltin}
       sendButtonPrefix={enterHint}
       placeholder={t('terminal.composerPlaceholder')}

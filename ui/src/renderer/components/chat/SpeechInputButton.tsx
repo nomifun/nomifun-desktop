@@ -18,6 +18,7 @@ import {
 } from '@/renderer/services/speechToTextConfig';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { modelSupportsTask } from '@/common/utils/providerModels';
+import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 
 type SpeechInputButtonProps = {
   disabled?: boolean;
@@ -82,7 +83,7 @@ const formatSpeechDuration = (durationMs: number): string => {
 
 const getTooltipKey = (availability: SpeechInputAvailability, isListening: boolean, isProcessing: boolean) => {
   if (isProcessing) {
-    return 'conversation.chat.speech.processing';
+    return 'conversation.chat.speech.cancelTooltip';
   }
   if (isListening) {
     return 'conversation.chat.speech.stopTooltip';
@@ -100,6 +101,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
   const { data: providers } = useProvidersQuery();
   const {
     availability,
+    cancel,
     clearError,
     errorCode,
     errorMessage,
@@ -177,7 +179,22 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
       clearError();
       return;
     }
-    Message.error(detail ? `${baseMessage}: ${detail}` : baseMessage);
+    const message = detail ? `${baseMessage}: ${detail}` : baseMessage;
+    if (errorCode === 'permission-denied' || errorCode === 'recording-unsupported') {
+      Message.error({
+        duration: 6000,
+        content: (
+          <span className='inline-flex items-center gap-8px'>
+            <span>{message}</span>
+            <a className='font-600 text-primary-6 no-underline' href={capabilityPermissionsHref('voice-input')}>
+              {t('conversation.chat.speech.openPermissionSettings')}
+            </a>
+          </span>
+        ),
+      });
+    } else {
+      Message.error(message);
+    }
     clearError();
   }, [clearError, errorCode, errorMessage, t]);
 
@@ -195,6 +212,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
       stopRecording();
       return;
     }
+    if (isProcessing) { cancel(); return; }
 
     void startRecording();
   };
@@ -240,7 +258,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
           size='small'
           shape='circle'
           className={`speech-input-button ${isRecording ? 'speech-input-button--listening' : ''} ${isProcessing ? 'speech-input-button--processing' : ''}`}
-          disabled={disabled || isProcessing}
+          disabled={disabled}
           onClick={handleClick}
           aria-label={ariaLabel}
           icon={icon}

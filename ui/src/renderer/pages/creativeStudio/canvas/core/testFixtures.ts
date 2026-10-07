@@ -32,13 +32,6 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     naturalSize: null,
     composer: null,
   },
-  panorama: {
-    assetId: null,
-    projection: 'equirectangular',
-    yaw: 0,
-    pitch: 0,
-    fieldOfView: 75,
-  },
   text: {
     text: '',
     format: 'plain',
@@ -79,11 +72,10 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     trimEndMs: null,
     composer: null,
   },
-  director: {
-    sceneId: null,
-    cameraId: null,
-    timelineMs: 0,
-    durationMs: 0,
+  timeline: {
+    title: 'Timeline 1',
+    muted: false,
+    clips: [],
   },
   group: {
     title: 'Group',

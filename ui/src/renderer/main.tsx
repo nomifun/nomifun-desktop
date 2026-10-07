@@ -22,6 +22,7 @@ import { ThemeProvider } from './hooks/context/ThemeContext';
 
 // Arco Design
 import { ConfigProvider } from '@arco-design/web-react';
+import { modalDefaults } from './components/base/modalDefaults';
 // Configure Arco Design to use React 18's createRoot, fixing Message component's CopyReactDOM.render error
 import '@arco-design/web-react/es/_util/react-19-adapter';
 import '@arco-design/web-react/dist/css/arco.css';
@@ -42,7 +43,7 @@ import './styles/modal-contract.css';
 import { configService } from '@/common/config/configService';
 import { application } from '@/common/adapter/ipcBridge';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
-import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { initializeAgentBrowserStorageGeneration, initializeBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 configService.initialize().catch((err) => {
   console.error('Failed to initialize config:', err);
 });
@@ -83,7 +84,11 @@ const Config: React.FC<PropsWithChildren> = ({ children }) => {
   } = useTranslation();
   const arcoLocale = arcoLocales[language] ?? enUS;
 
-  return React.createElement(ConfigProvider, { theme: { primaryColor: '#4E5969' }, locale: arcoLocale }, children);
+  return React.createElement(ConfigProvider, {
+    theme: { primaryColor: '#4E5969' },
+    locale: arcoLocale,
+    componentConfig: { Modal: modalDefaults },
+  }, children);
 };
 
 const Main = () => {
@@ -106,13 +111,18 @@ const Main = () => {
     setConfigReady(false);
     setConfigError(null);
     // Prefetch `/api/agents` in parallel with configService.initialize() and
-    // seed the shared SWR cache so the Guid page's model/mode selectors can
+    // seed the shared SWR cache so the Guid page's model selector can
     // read `handshake.available_models` on the very first render — without
     // waiting for a session to be created.
     void Promise.all([
       application.systemInfo
         .invoke()
-        .then((info) => setBrowserStorageGeneration(info.storageGeneration))
+        // Physical dataset identity preserves domain preferences. Agent state
+        // additionally requires the current backend's canonical generation.
+        .then((info) => {
+          initializeBrowserStorageGeneration(info?.storageGeneration);
+          initializeAgentBrowserStorageGeneration(info?.agentDataGeneration);
+        })
         .catch((err) => {
           console.error('Failed to initialize browser storage generation:', err);
           throw err;
@@ -147,15 +157,12 @@ const Main = () => {
     void repairAllCronJobTimeZonesOnce();
   }, [ready, status]);
 
-  const router = (
-    <Router
-      layout={
-        <ConversationHistoryProvider>
-          <Layout sider={<Sider />} />
-        </ConversationHistoryProvider>
-      }
-    />
+  const layout = (
+    <ConversationHistoryProvider>
+      <Layout sider={<Sider />} />
+    </ConversationHistoryProvider>
   );
+  const router = <Router layout={layout} />;
 
   if (!ready) {
     return <AppLoader />;

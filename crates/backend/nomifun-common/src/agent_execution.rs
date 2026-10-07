@@ -222,20 +222,6 @@ impl Default for DelegationPolicy {
 }
 
 string_enum! {
-    /// Whether a generated plan must be approved before execution starts.
-    pub enum PlanGate {
-        Automatic => "automatic",
-        RequireApproval => "require_approval",
-    }
-}
-
-impl Default for PlanGate {
-    fn default() -> Self {
-        Self::Automatic
-    }
-}
-
-string_enum! {
     /// Whether a running execution may expand or revise its plan autonomously.
     pub enum AdaptationPolicy {
         Fixed => "fixed",
@@ -448,7 +434,7 @@ mod tests {
     fn values_round_trip_without_fallbacks() {
         for (wire, expected) in [
             ("planning", AgentExecutionStatus::Planning),
-            ("awaiting_approval", AgentExecutionStatus::AwaitingApproval),
+            ("running", AgentExecutionStatus::Running),
             ("completed_with_failures", AgentExecutionStatus::CompletedWithFailures),
         ] {
             assert_eq!(wire.parse::<AgentExecutionStatus>().unwrap(), expected);
@@ -465,10 +451,6 @@ mod tests {
     #[test]
     fn only_explicitly_reopenable_execution_results_can_return_to_running() {
         assert!(AgentExecutionStatus::Planning.can_transition_to(AgentExecutionStatus::Running));
-        assert!(
-            AgentExecutionStatus::Running
-                .can_transition_to(AgentExecutionStatus::AwaitingApproval)
-        );
         assert!(AgentExecutionStatus::Running.can_transition_to(AgentExecutionStatus::Paused));
         assert!(
             AgentExecutionStatus::Paused.can_transition_to(AgentExecutionStatus::WaitingInput)

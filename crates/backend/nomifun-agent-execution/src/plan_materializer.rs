@@ -10,6 +10,7 @@ use nomifun_common::{
 };
 use nomifun_db::{NewAgentExecutionStep, NewAgentExecutionStepDependency};
 
+use crate::control_steps::MAX_JUDGE_CANDIDATES;
 use crate::participant_router::{rank_participants, score_participant};
 
 pub(crate) struct MaterializedPlan {
@@ -214,7 +215,7 @@ fn validate_step(step: &PlannedExecutionStep) -> Result<(), AppError> {
             None,
             Some(StepControlPolicy::Judge { candidate_count, .. }),
         ) if !step.depends_on.is_empty()
-            && candidate_count.is_none_or(|count| count > 0) => {}
+            && candidate_count.is_none_or(|count| (1..=MAX_JUDGE_CANDIDATES).contains(&count)) => {}
         (
             ExecutionStepKind::Loop,
             None,
@@ -295,6 +296,17 @@ fn validate_dag(steps: &[PlannedExecutionStep]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn judge_candidate_limit_is_checked_before_persistence() {
+        for (count, valid) in [(0, false), (1, true), (MAX_JUDGE_CANDIDATES, true), (usize::MAX, false)] {
+            let step: PlannedExecutionStep = serde_json::from_value(serde_json::json!({
+                "title": "judge", "spec": "select a candidate", "kind": "judge", "depends_on": [0],
+                "control_policy": {"kind": "judge", "aggregation": "borda", "candidate_count": count}
+            })).unwrap();
+            assert_eq!(validate_step(&step).is_ok(), valid, "candidate_count={count}");
+        }
+    }
 
     #[test]
     fn cycle_is_rejected_before_persistence() {

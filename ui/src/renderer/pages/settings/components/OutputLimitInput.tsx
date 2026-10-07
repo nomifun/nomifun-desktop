@@ -23,7 +23,7 @@ export const OUTPUT_LIMIT_PRESETS = [
   131_072,
 ] as const;
 
-export const OUTPUT_LIMIT_UNIT_MULTIPLIERS = {
+const OUTPUT_LIMIT_UNIT_MULTIPLIERS = {
   tokens: 1,
   k: 1_000,
   m: 1_000_000,
@@ -39,9 +39,8 @@ interface OutputLimitInputProps {
 }
 
 export const normalizeOutputLimit = (value: unknown): number | undefined => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
-  const normalized = Math.trunc(value);
-  return normalized > 0 ? normalized : undefined;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= MAX_OUTPUT_LIMIT_TOKENS
+    ? value : undefined;
 };
 
 export const outputLimitFromDisplayValue = (
@@ -65,7 +64,7 @@ export const displayValueFromOutputLimit = (
   return normalized === undefined ? undefined : normalized / OUTPUT_LIMIT_UNIT_MULTIPLIERS[unit];
 };
 
-export const formatOutputLimit = (value: number): string => new Intl.NumberFormat().format(value);
+const formatOutputLimit = (value: number): string => new Intl.NumberFormat().format(value);
 
 const isOutputLimitPreset = (value: number | undefined): boolean =>
   value !== undefined && (OUTPUT_LIMIT_PRESETS as readonly number[]).includes(value);
@@ -120,7 +119,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
       {
         value: PROVIDER_DEFAULT_VALUE,
         label: t('settings.outputLimitDefaultOption', {
-          defaultValue: 'Default (provider decides)',
+          defaultValue: 'Default (provider/model)',
         }),
       },
       ...OUTPUT_LIMIT_PRESETS.map((preset) => ({
@@ -161,6 +160,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
       <Select
         value={selectValue}
         options={presetOptions}
+        aria-label={t('settings.outputLimit', { defaultValue: '最大输出（tokens）' })}
         style={{ width: '100%' }}
         getPopupContainer={() => document.body}
         onChange={(nextValue) => {
@@ -199,6 +199,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
             })}
             onChange={(nextValue) => {
               const nextLimit = outputLimitFromDisplayValue(nextValue, unit);
+              if (typeof nextValue === 'number' && nextLimit === undefined) return;
               if (nextLimit === undefined) setCustomActive(false);
               onChange?.(nextLimit);
             }}
@@ -223,7 +224,7 @@ export const OutputLimitInput: React.FC<OutputLimitInputProps> = ({ value, onCha
       >
         {normalizedValue === undefined
           ? t('settings.outputLimitProviderDefault', {
-              defaultValue: 'Leave unset to use the provider default.',
+              defaultValue: 'Leave unset to use the provider/model default.',
             })
           : t('settings.outputLimitConverted', {
               value: formatOutputLimit(normalizedValue),

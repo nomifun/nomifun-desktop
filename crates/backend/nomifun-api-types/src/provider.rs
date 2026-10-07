@@ -350,6 +350,45 @@ pub struct ProbeProviderConnectionResponse {
     pub candidates: Vec<ProbeCandidateResult>,
 }
 
+/// Semantic dimension of a declared context value. An input ceiling must not
+/// have the independently declared output ceiling subtracted from it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum ModelContextLimitKind {
+    InputOnly,
+    Combined,
+}
+
+/// Field-level origin of advisory token limits from a provider catalog.
+/// These are response field paths, not inferred limits or user preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct ModelTokenLimitSources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context_limit_kind: Option<ModelContextLimitKind>,
+}
+
+/// Evidence supporting a model catalog's suggested tasks. A live model ID is
+/// not itself a task declaration: name-based suggestions remain inferred even
+/// when the ID came from a provider's current catalog.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTaskSource {
+    ProviderDeclared,
+    OfficialDocumentation,
+    Inferred,
+}
+
 /// A fetched model entry with one fixed wire shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
@@ -360,6 +399,12 @@ pub struct ModelInfo {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<ModelTask>,
+    /// Absent means unknown, including catalogs produced by an older host.
+    /// Only explicit provider declarations or exact documented profiles may
+    /// initialize a task without asking the user to confirm its purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tasks_source: Option<ModelTaskSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traits: Vec<ModelTrait>,
     /// Input context window the provider's own catalog declared for this model,
@@ -374,6 +419,25 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
+    /// Provider-declared maximum output tokens. Absent when unknown; this is
+    /// an import suggestion, never permission to replace an existing manual
+    /// ceiling or an explicit provider-default (`None`) configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub token_limit_sources: Option<ModelTokenLimitSources>,
+}
+
+/// Where the offered model IDs came from. Documentation suggestions do not
+/// prove account access or that a provider's live catalog was refreshed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCatalogSource {
+    Remote,
+    OfficialDocumentation,
 }
 
 /// Response for `POST /api/providers/:id/models`.
@@ -381,6 +445,9 @@ pub struct ModelInfo {
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct FetchModelsResponse {
     pub models: Vec<ModelInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub catalog_source: Option<ModelCatalogSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub fixed_base_url: Option<String>,
@@ -462,9 +529,13 @@ mod tests {
                 id: "gpt-5".into(),
                 name: None,
                 tasks: vec![ModelTask::Chat],
+                tasks_source: None,
                 traits: vec![ModelTrait::VisionInput],
                 context_limit: None,
+                output_limit: None,
+                token_limit_sources: None,
             }],
+            catalog_source: None,
             fixed_base_url: None,
         };
         let value = serde_json::to_value(response).unwrap();
@@ -482,6 +553,45 @@ mod tests {
     }
 
     #[test]
+    fn model_catalog_source_is_typed_and_optional_for_existing_responses() {
+        let older: FetchModelsResponse = serde_json::from_value(json!({"models": []})).unwrap();
+        assert_eq!(older.catalog_source, None);
+        for (source, value) in [
+            (ModelCatalogSource::Remote, "remote"),
+            (ModelCatalogSource::OfficialDocumentation, "official_documentation"),
+        ] {
+            let response = FetchModelsResponse {
+                models: Vec::new(),
+                catalog_source: Some(source),
+                fixed_base_url: None,
+            };
+            let serialized = serde_json::to_value(&response).unwrap();
+            assert_eq!(serialized["catalog_source"], value);
+            let decoded: FetchModelsResponse = serde_json::from_value(serialized).unwrap();
+            assert_eq!(decoded, response);
+        }
+    }
+
+    #[test]
+    fn model_task_source_distinguishes_declared_documented_inferred_and_unknown() {
+        let older: ModelInfo = serde_json::from_value(json!({
+            "id": "unknown-model", "tasks": ["chat"]
+        })).unwrap();
+        assert_eq!(older.tasks_source, None);
+        assert!(serde_json::to_value(&older).unwrap().get("tasks_source").is_none());
+        for (source, value) in [
+            (ModelTaskSource::ProviderDeclared, "provider_declared"),
+            (ModelTaskSource::OfficialDocumentation, "official_documentation"),
+            (ModelTaskSource::Inferred, "inferred"),
+        ] {
+            let model = ModelInfo { tasks_source: Some(source), ..older.clone() };
+            let serialized = serde_json::to_value(&model).unwrap();
+            assert_eq!(serialized["tasks_source"], value);
+            assert_eq!(serde_json::from_value::<ModelInfo>(serialized).unwrap(), model);
+        }
+    }
+
+    #[test]
     fn catalog_context_limit_is_optional_in_both_directions() {
         // A payload produced before the field existed must still deserialize
         // under `deny_unknown_fields`, and an undeclared window must be absent
@@ -492,18 +602,26 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(older.context_limit, None);
+        assert_eq!(older.output_limit, None);
+        assert_eq!(older.token_limit_sources, None);
         let value = serde_json::to_value(&older).unwrap();
         assert!(
             !value.as_object().unwrap().contains_key("context_limit"),
             "an unknown window must be omitted, not serialized as null: {value}"
         );
+        assert!(!value.as_object().unwrap().contains_key("output_limit"));
+        assert!(!value.as_object().unwrap().contains_key("token_limit_sources"));
 
         let declared: ModelInfo = serde_json::from_value(json!({
             "id": "gemini-3.1-pro",
-            "context_limit": 1_048_576_i64
+            "context_limit": 1_048_576_i64,
+            "output_limit": 65_536_i64,
+            "token_limit_sources": {"context_limit":"inputTokenLimit", "output_limit":"outputTokenLimit"}
         }))
         .unwrap();
         assert_eq!(declared.context_limit, Some(1_048_576));
+        assert_eq!(declared.output_limit, Some(65_536));
+        assert_eq!(declared.token_limit_sources.as_ref().unwrap().output_limit.as_deref(), Some("outputTokenLimit"));
         assert_eq!(
             serde_json::to_value(&declared).unwrap()["context_limit"],
             json!(1_048_576_i64)

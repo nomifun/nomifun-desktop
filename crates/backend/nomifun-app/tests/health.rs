@@ -3,7 +3,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use nomifun_app::{AppConfig, AppServices};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::AppServices;
 
 fn build_request(method: &str, uri: &str) -> Request<Body> {
     Request::builder()
@@ -19,9 +20,23 @@ async fn response_json(body: Body) -> serde_json::Value {
 }
 
 async fn build_app() -> axum::Router {
+    let root = tempfile::Builder::new()
+        .prefix("nomifun-health-e2e-")
+        .tempdir()
+        .unwrap()
+        .keep();
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
-    nomifun_app::create_router(&services).await
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    nomifun_app::compatibility::create_router(&services).await
 }
 
 #[tokio::test]

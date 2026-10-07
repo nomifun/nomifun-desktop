@@ -20,7 +20,7 @@ import {
   type CreativeTemplateHttpRequest,
 } from './templateApi';
 
-export const CREATIVE_STUDIO_TEMPLATE_RUNS_ENDPOINT = '/api/creative-studio/template-runs';
+const CREATIVE_STUDIO_TEMPLATE_RUNS_ENDPOINT = '/api/creative-studio/template-runs';
 
 export interface CreateCreativeTemplateRunRequest {
   templateRunId: string;

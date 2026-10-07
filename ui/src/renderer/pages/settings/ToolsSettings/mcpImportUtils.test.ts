@@ -18,7 +18,7 @@ describe('MCP import utils', () => {
     expect(servers[0].transport).toEqual({
       type: 'stdio',
       command: 'npx',
-      args: ['@playwright/mcp@latest'],
+      args: ['-y', '@playwright/mcp@latest'],
       env: {},
     });
     expect(servers[0].original_json.includes('"mcpServers"')).toBe(true);
@@ -104,5 +104,76 @@ describe('MCP import utils', () => {
     expect(servers).toHaveLength(1);
     expect(servers[0].enabled).toBe(true);
     expect(servers[0].market_needs_configuration).toBe(false);
+  });
+
+  test('accepts streamable HTTP type and URL aliases used by market configs', () => {
+    const servers = toImportableMcpServersFromConfig({
+      mcpServers: {
+        search: {
+          type: 'streamableHttp',
+          baseUrl: 'https://example.com/mcp',
+          headers: { Authorization: 'Bearer sample123' },
+        },
+      },
+    });
+
+    expect(servers).toHaveLength(1);
+    expect(servers[0].transport).toEqual({
+      type: 'streamable_http',
+      url: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer sample123' },
+    });
+  });
+
+  test('accepts nested transport objects and common endpoint aliases', () => {
+    const servers = toImportableMcpServersFromConfig({
+      mcpServers: {
+        docs: {
+          transport: {
+            type: 'streamable-http',
+            endpoint: 'https://example.com/docs/mcp',
+          },
+        },
+      },
+    });
+
+    expect(servers[0].transport).toEqual({
+      type: 'streamable_http',
+      url: 'https://example.com/docs/mcp',
+      headers: undefined,
+    });
+  });
+
+  test('rejects malformed env and header maps instead of silently dropping them', () => {
+    expect(
+      toImportableMcpServersFromConfig({
+        mcpServers: { bad: { command: 'npx', args: ['demo'], env: { PORT: 1234 } } },
+      })
+    ).toEqual([]);
+    expect(
+      toImportableMcpServersFromConfig({
+        mcpServers: { bad: { url: 'https://example.com/mcp', headers: ['not-a-map'] } },
+      })
+    ).toEqual([]);
+  });
+
+  test('rejects unknown explicit transport types', () => {
+    expect(
+      toImportableMcpServersFromConfig({
+        mcpServers: { bad: { type: 'websocket', url: 'wss://example.com/mcp' } },
+      })
+    ).toEqual([]);
+  });
+
+  test('makes market npx commands non-interactive without duplicating yes flags', () => {
+    const withoutFlag = toImportableMcpServersFromConfig({
+      mcpServers: { rednote: { command: 'npx', args: ['rednote-mcp', '--stdio'] } },
+    });
+    const withFlag = toImportableMcpServersFromConfig({
+      mcpServers: { memory: { command: 'npx', args: ['--yes', '@modelcontextprotocol/server-memory'] } },
+    });
+
+    expect(withoutFlag[0].transport).toMatchObject({ args: ['-y', 'rednote-mcp', '--stdio'] });
+    expect(withFlag[0].transport).toMatchObject({ args: ['--yes', '@modelcontextprotocol/server-memory'] });
   });
 });

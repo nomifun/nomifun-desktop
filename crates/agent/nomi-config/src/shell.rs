@@ -11,24 +11,9 @@ use nomi_process_runtime::{
     ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, ShellKind,
     Transport, normalize_request,
 };
-use tokio::process::Command;
+#[cfg(target_os = "macos")]
+use nomi_process_runtime::SandboxPolicy;
 use uuid::Uuid;
-
-const POWERSHELL_EXE: &str = "powershell.exe";
-const POWERSHELL_ARGS: &[&str] = &[
-    "-NoLogo",
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-];
-const SH_ARGS: &[&str] = &["-c"];
-
-pub struct ShellInfo {
-    pub program: &'static str,
-    pub args_before_command: &'static [&'static str],
-    pub syntax_name: &'static str,
-}
 
 #[derive(Clone)]
 pub struct SupervisedShell {
@@ -75,8 +60,19 @@ impl SupervisedShell {
         )
     }
 
-    pub fn supervisor(&self) -> &Arc<ProcessSupervisor> {
-        &self.supervisor
+    #[cfg(target_os = "macos")]
+    pub fn standalone_macos_confined(cwd_root: PathBuf) -> Self {
+        let supervisor = ProcessSupervisor::new(nomi_process_runtime::SupervisorConfig::default());
+        Self {
+            supervisor,
+            capability: CapabilityPolicy {
+                cwd_roots: vec![cwd_root.clone()],
+                sandbox: SandboxPolicy::MacSeatbelt {
+                    write_roots: vec![cwd_root],
+                },
+            },
+            invocation_id: Uuid::now_v7(),
+        }
     }
 
     /// Execute one shell command under the shared exact process-tree
@@ -91,11 +87,8 @@ impl SupervisedShell {
         env: &HashMap<String, String>,
         timeout: Option<Duration>,
     ) -> Result<SupervisedShellOutput, SupervisedShellError> {
-        let started_at = Instant::now();
-        let deadline = timeout.and_then(|duration| started_at.checked_add(duration));
-        let request = ProcessRequest {
-            owner: ProcessOwner::new(self.invocation_id, Uuid::now_v7()),
-            command: CommandSpec::Shell {
+        self.output_command(
+            CommandSpec::Shell {
                 shell: if cfg!(windows) {
                     ShellKind::PowerShell
                 } else {
@@ -103,6 +96,39 @@ impl SupervisedShell {
                 },
                 script: command.to_owned(),
             },
+            cwd,
+            env,
+            timeout,
+        )
+        .await
+    }
+
+    /// Execute one exact program/argv vector under the same process-tree
+    /// ownership and timeout contract as [`Self::output`], without a shell.
+    pub async fn output_program(
+        &self,
+        program: OsString,
+        args: Vec<OsString>,
+        cwd: &Path,
+        env: &HashMap<String, String>,
+        timeout: Option<Duration>,
+    ) -> Result<SupervisedShellOutput, SupervisedShellError> {
+        self.output_command(CommandSpec::Program { program, args }, cwd, env, timeout)
+            .await
+    }
+
+    async fn output_command(
+        &self,
+        command: CommandSpec,
+        cwd: &Path,
+        env: &HashMap<String, String>,
+        timeout: Option<Duration>,
+    ) -> Result<SupervisedShellOutput, SupervisedShellError> {
+        let started_at = Instant::now();
+        let deadline = timeout.and_then(|duration| started_at.checked_add(duration));
+        let request = ProcessRequest {
+            owner: ProcessOwner::new(self.invocation_id, Uuid::now_v7()),
+            command,
             cwd: cwd.to_path_buf(),
             env: env
                 .iter()
@@ -191,141 +217,73 @@ fn output_stream_text(output: &OutputSnapshot, stream: OutputStream) -> String {
         .collect()
 }
 
-pub fn shell_info() -> ShellInfo {
-    if cfg!(windows) {
-        ShellInfo {
-            program: POWERSHELL_EXE,
-            args_before_command: POWERSHELL_ARGS,
-            syntax_name: "PowerShell",
-        }
-    } else {
-        ShellInfo {
-            program: "sh",
-            args_before_command: SH_ARGS,
-            syntax_name: "POSIX sh",
-        }
-    }
-}
-
-pub fn shell_command_args(command_str: &str) -> Vec<String> {
-    let info = shell_info();
-    let mut args = info
-        .args_before_command
-        .iter()
-        .map(|arg| (*arg).to_owned())
-        .collect::<Vec<_>>();
-    args.push(shell_command_payload(command_str));
-    args
-}
-
-pub fn shell_command_builder(command_str: &str) -> Command {
-    let info = shell_info();
-    let mut cmd = Command::new(info.program);
-    cmd.args(shell_command_args(command_str));
-    // CREATE_NO_WINDOW: don't flash a console window when the host is a GUI app.
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000);
-    cmd
-}
-
-fn shell_command_payload(command_str: &str) -> String {
-    if cfg!(windows) {
-        powershell_payload(command_str)
-    } else {
-        command_str.to_owned()
-    }
-}
-
-#[cfg(windows)]
-fn powershell_payload(command_str: &str) -> String {
-    format!(
-        "$ErrorActionPreference = 'Stop'\n\
-         $global:LASTEXITCODE = $null\n\
-         try {{\n\
-         & {{\n\
-         {command_str}\n\
-         }}\n\
-         if ($null -ne $global:LASTEXITCODE) {{ exit $global:LASTEXITCODE }}\n\
-         if (-not $?) {{ exit 1 }}\n\
-         exit 0\n\
-         }} catch {{\n\
-         [Console]::Error.WriteLine($_.Exception.Message)\n\
-         exit 1\n\
-         }}"
-    )
-}
-
-#[cfg(not(windows))]
-fn powershell_payload(command_str: &str) -> String {
-    command_str.to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn shell_info_returns_platform_appropriate_values() {
-        let info = shell_info();
-        if cfg!(windows) {
-            assert_eq!(info.program, "powershell.exe");
-            assert_eq!(info.args_before_command, POWERSHELL_ARGS);
-            assert_eq!(info.syntax_name, "PowerShell");
-        } else {
-            assert_eq!(info.program, "sh");
-            assert_eq!(info.args_before_command, SH_ARGS);
-            assert_eq!(info.syntax_name, "POSIX sh");
-        }
-    }
-
     #[tokio::test]
-    async fn shell_command_builder_allows_env_and_cwd() {
-        let tmp = std::env::temp_dir();
-        let cmd_str = if cfg!(windows) {
-            "Write-Output $env:MY_VAR"
+    async fn supervised_shell_passes_environment_and_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("proof.txt"), "local-file").unwrap();
+        let shell = SupervisedShell::standalone(temp.path().to_path_buf());
+        let command = if cfg!(windows) {
+            "Write-Output $env:NOMI_TEST_VALUE; Get-Content proof.txt"
         } else {
-            "echo $MY_VAR"
+            "printf '%s\\n' \"$NOMI_TEST_VALUE\"; cat proof.txt"
         };
-        let output = shell_command_builder(cmd_str)
-            .env("MY_VAR", "test_value")
-            .current_dir(&tmp)
-            .output()
+        let env = HashMap::from([("NOMI_TEST_VALUE".into(), "test-value".into())]);
+        let output = shell.output(command, temp.path(), &env, Some(Duration::from_secs(10))).await.unwrap();
+        assert!(output.success, "{}", output.stderr);
+        assert!(output.stdout.contains("test-value"));
+        assert!(output.stdout.contains("local-file"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_program_preserves_literal_argv() {
+        let directory = tempfile::tempdir().unwrap();
+        let shell = SupervisedShell::standalone(directory.path().to_path_buf());
+        let literal = "literal ; $(touch must-not-exist) space";
+        let output = shell
+            .output_program(
+                OsString::from("/bin/sh"),
+                ["-c", "printf '%s' \"$1\"", "nomi-hook", literal]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                directory.path(),
+                &HashMap::new(),
+                Some(Duration::from_secs(5)),
+            )
             .await
-            .expect("builder failed");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("test_value"));
+            .unwrap();
+
+        assert!(output.success, "{output:?}");
+        assert_eq!(output.stdout, literal);
+        assert!(!directory.path().join("must-not-exist").exists());
     }
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn shell_command_builder_accepts_powershell_syntax_on_windows() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("proof.txt"), "ok").unwrap();
-        let output = shell_command_builder(
+    async fn supervised_shell_accepts_powershell_syntax() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("proof.txt"), "ok").unwrap();
+        let shell = SupervisedShell::standalone(temp.path().to_path_buf());
+        let output = shell.output(
             "if (Test-Path proof.txt) { Get-Content proof.txt } else { exit 9 }",
-        )
-        .current_dir(tmp.path())
-        .output()
-        .await
-        .expect("builder failed");
-
-        assert!(
-            output.status.success(),
-            "status: {:?}",
-            output.status.code()
-        );
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("ok"), "stdout: {stdout}");
+            temp.path(), &HashMap::new(), Some(Duration::from_secs(10)),
+        ).await.unwrap();
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.stdout.trim(), "ok");
     }
 
-    #[cfg(windows)]
     #[tokio::test]
-    async fn shell_command_builder_preserves_native_exit_code_on_windows() {
-        let output = shell_command_builder("cmd /c exit 7")
-            .output()
-            .await
-            .expect("builder failed");
-
-        assert_eq!(output.status.code(), Some(7));
+    async fn supervised_shell_preserves_nonzero_exit_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = SupervisedShell::standalone(temp.path().to_path_buf());
+        let command = if cfg!(windows) { "cmd /c exit 7" } else { "exit 7" };
+        let output = shell.output(command, temp.path(), &HashMap::new(), Some(Duration::from_secs(10))).await.unwrap();
+        assert!(!output.success);
+        assert_eq!(output.code, Some(7));
     }
 }

@@ -15,11 +15,8 @@ import {
   GridFour,
   Group,
   HandDrag,
-  History,
   Loading,
-  Magic,
   MenuFold,
-  PanoramaHorizontal,
   Pic,
   Platte,
   Redo,
@@ -43,30 +40,30 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativeResourceDialog from '../../components/CreativeResourceDialog';
 import styles from './CreativeCanvasChrome.module.css';
+import CreativeCanvasTitle from './CreativeCanvasTitle';
 import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
   CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
-  toggleCreativeCanvasBottomPanel,
   toggleCreativeCanvasPanel,
   toggleCreativeCanvasTool,
-  type CreativeCanvasBottomView,
   type CreativeCanvasChromeBackground,
   type CreativeCanvasChromeNodeKind,
   type CreativeCanvasChromeProps,
   type CreativeCanvasChromeSaveStatus,
   type CreativeCanvasLeftView,
+  type CreativeCanvasResourceView,
   type CreativeCanvasRightView,
 } from './types';
 
 const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
   text: 'creativeStudio.canvas.nodeKinds.text',
   image: 'creativeStudio.canvas.nodeKinds.image',
-  panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
-  director: 'creativeStudio.canvas.nodeKinds.director',
+  timeline: 'creativeStudio.canvas.nodeKinds.timeline',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
@@ -88,11 +85,6 @@ const RIGHT_LABEL_KEYS: Record<CreativeCanvasRightView, string> = {
   properties: 'creativeStudio.canvas.panels.right.properties',
 };
 
-const BOTTOM_LABEL_KEYS: Record<CreativeCanvasBottomView, string> = {
-  history: 'creativeStudio.canvas.panels.bottom.history',
-  timeline: 'creativeStudio.canvas.panels.bottom.timeline',
-};
-
 const SAVE_LABEL_KEYS: Record<CreativeCanvasChromeSaveStatus, string> = {
   idle: 'creativeStudio.canvas.save.status.idle',
   dirty: 'creativeStudio.canvas.save.status.dirty',
@@ -104,10 +96,16 @@ const SAVE_LABEL_KEYS: Record<CreativeCanvasChromeSaveStatus, string> = {
 
 const iconProps = {
   theme: 'outline' as const,
-  size: 17,
+  size: 18,
   fill: 'currentColor',
-  strokeWidth: 3,
+  strokeWidth: 3.5,
 };
+
+const RESOURCE_VIEWS = [
+  'assets',
+  'prompts',
+  'templates',
+] as const satisfies readonly CreativeCanvasResourceView[];
 
 const RIGHT_PANEL_DEFAULT_WIDTH = 390;
 const RIGHT_PANEL_MIN_WIDTH = 320;
@@ -160,14 +158,12 @@ function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
       return <Text {...iconProps} />;
     case 'image':
       return <Pic {...iconProps} />;
-    case 'panorama':
-      return <PanoramaHorizontal {...iconProps} />;
     case 'video':
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
-    case 'director':
-      return <Magic {...iconProps} />;
+    case 'timeline':
+      return <Timeline {...iconProps} />;
     case 'group':
       return <Group {...iconProps} />;
   }
@@ -190,15 +186,11 @@ function rightIcon(view: CreativeCanvasRightView): React.ReactNode {
   return view === 'assistant' ? <Robot {...iconProps} /> : <Setting {...iconProps} />;
 }
 
-function bottomIcon(view: CreativeCanvasBottomView): React.ReactNode {
-  return view === 'history' ? <History {...iconProps} /> : <Timeline {...iconProps} />;
-}
-
 function saveIcon(status: CreativeCanvasChromeSaveStatus): React.ReactNode {
-  if (status === 'saving') return <Loading className={styles.spin} {...iconProps} />;
-  if (status === 'saved') return <CheckOne {...iconProps} />;
-  if (status === 'conflict' || status === 'error') return <Error {...iconProps} />;
-  return <Dot {...iconProps} />;
+  if (status === 'saving') return <Loading className={styles.spin} {...iconProps} size={14} />;
+  if (status === 'saved') return <CheckOne {...iconProps} size={14} />;
+  if (status === 'conflict' || status === 'error') return <Error {...iconProps} size={14} />;
+  return <Dot {...iconProps} size={14} />;
 }
 
 interface ChromeIconButtonProps {
@@ -310,11 +302,48 @@ export const CreativeCanvasBackgroundMenu: React.FC<CreativeCanvasBackgroundMenu
   );
 };
 
+export interface CreativeCanvasResourceDialogProps {
+  view: CreativeCanvasResourceView | null;
+  content?: React.ReactNode;
+  popupContainer?: HTMLElement | null;
+  onClose(): void;
+}
+
+/** One presentation contract for the three canvas resource libraries. */
+export const CreativeCanvasResourceDialog: React.FC<
+  CreativeCanvasResourceDialogProps
+> = ({ view, content, popupContainer, onClose }) => {
+  const { t } = useTranslation();
+  if (!view) return null;
+  const title =
+    view === 'prompts'
+      ? '选择提示词'
+      : view === 'templates'
+        ? t('creativeStudio.templates.workspace.title', {
+            defaultValue: '模板工作台',
+          })
+        : t(LEFT_LABEL_KEYS.assets);
+
+  return (
+    <CreativeResourceDialog
+      kind={view}
+      title={title}
+      scope='canvas'
+      contentClassName={styles.canvasResourceContent}
+      popupContainer={popupContainer}
+      onClose={onClose}
+    >
+      {content}
+    </CreativeResourceDialog>
+  );
+};
+
 const stopChromeEvent = (event: React.SyntheticEvent) => event.stopPropagation();
 
 const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
   const { t } = useTranslation();
   const rightOpen = props.rightView !== null;
+  const canvasPanelOpen = props.leftOpen && props.leftView === 'canvas';
   const saveIsAlert = props.saveStatus === 'conflict' || props.saveStatus === 'error';
   const rootRef = useRef<HTMLElement>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
@@ -323,9 +352,11 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
   const [rightPanelWidthDraft, setRightPanelWidthDraft] = useState(
     props.rightPanelWidth ?? RIGHT_PANEL_DEFAULT_WIDTH
   );
-  const leftSlot = props.slots?.left?.[props.leftView];
+  const leftSlot = props.slots?.left?.canvas;
+  const resourceSlot = props.resourceView
+    ? props.slots?.left?.[props.resourceView]
+    : null;
   const rightSlot = props.rightView ? props.slots?.right?.[props.rightView] : null;
-  const bottomSlot = props.bottomView ? props.slots?.bottom?.[props.bottomView] : null;
   const widthBounds = rightPanelWidthBounds(containerWidth);
   const rightPanelWidth = clampRightPanelWidth(
     rightPanelWidthDraft,
@@ -337,6 +368,14 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
     onPointerUp: stopChromeEvent,
     onDoubleClick: stopChromeEvent,
     onWheel: stopChromeEvent,
+  };
+
+  const handleNodeAdd = (kind: CreativeCanvasChromeNodeKind): void => {
+    // Node creation controls are actions, not a request to open the Canvas
+    // outline. Keep the rail compact after creating a node when the outline
+    // bubble was already expanded.
+    if (canvasPanelOpen) props.onLeftPanelOpenChange(false);
+    props.onAddNode(kind);
   };
 
   const collapseResourcesLabel = t(
@@ -534,35 +573,70 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       }
       data-creative-canvas-chrome
       data-compact={props.compact || undefined}
-      data-left-open={props.leftOpen}
+      data-left-open={canvasPanelOpen}
       data-left-view={props.leftView}
+      data-resource-view={props.resourceView ?? 'closed'}
       data-right-view={props.rightView ?? 'closed'}
-      data-bottom-view={props.bottomView ?? 'closed'}
       aria-label={t('creativeStudio.canvas.chrome.workspaceControls')}
     >
       <header className={styles.topBar} data-canvas-no-zoom {...chromeEventProps}>
-        <button
-          type='button'
-          className={styles.backButton}
-          disabled={props.disabled}
-          onClick={props.onBackToCanvases}
-        >
-          <ArrowLeft {...iconProps} />
-          <span className={styles.backLabel}>
-            {t('creativeStudio.canvas.chrome.backToLibrary')}
-          </span>
-        </button>
-
-        <div className={styles.projectIdentity}>
-          <h1 title={props.canvasTitle}>{props.canvasTitle}</h1>
-          <div
-            className={styles.saveState}
-            data-save-status={props.saveStatus}
-            role={saveIsAlert ? 'alert' : 'status'}
-            aria-live='polite'
+        <div className={styles.topPrimaryActions}>
+          <button
+            type='button'
+            className={styles.backButton}
+            aria-label={t('creativeStudio.canvas.chrome.backToLibrary')}
+            disabled={props.disabled}
+            onClick={props.onBackToCanvases}
           >
-            {saveIcon(props.saveStatus)}
-            <span>{props.saveMessage ?? t(SAVE_LABEL_KEYS[props.saveStatus])}</span>
+            <ArrowLeft {...iconProps} />
+            <span className={styles.backLabel}>
+              {t('creativeStudio.canvas.chrome.backToLibrary')}
+            </span>
+          </button>
+
+          <div className={styles.projectIdentity}>
+            <CreativeCanvasTitle key={props.canvasId} title={props.canvasTitle} disabled={props.disabled} onRename={props.onRenameCanvas} />
+            <div
+              className={styles.saveState}
+              data-save-status={props.saveStatus}
+              role={saveIsAlert ? 'alert' : 'status'}
+              aria-live='polite'
+            >
+              {saveIcon(props.saveStatus)}
+              <span>{props.saveMessage ?? t(SAVE_LABEL_KEYS[props.saveStatus])}</span>
+            </div>
+          </div>
+
+          <span className={styles.divider} aria-hidden='true' />
+
+          <div className={styles.headerEditActions}>
+            <ChromeIconButton
+              label={t('creativeStudio.canvas.actions.panTool')}
+              icon={<HandDrag {...iconProps} />}
+              active={props.tool === 'pan'}
+              disabled={props.disabled}
+              onClick={() => props.onToolChange(toggleCreativeCanvasTool(props.tool))}
+            />
+            <ChromeIconButton
+              label={t('creativeStudio.canvas.actions.undo')}
+              icon={<Undo {...iconProps} />}
+              disabled={props.disabled || !props.canUndo}
+              onClick={props.onUndo}
+            />
+            <ChromeIconButton
+              label={t('creativeStudio.canvas.actions.redo')}
+              icon={<Redo {...iconProps} />}
+              disabled={props.disabled || !props.canRedo}
+              onClick={props.onRedo}
+            />
+            {props.slots?.toolbarTrailing ? (
+              <>
+                <span className={styles.divider} aria-hidden='true' />
+                <div className={styles.customEditActions}>
+                  {props.slots.toolbarTrailing}
+                </div>
+              </>
+            ) : null}
           </div>
         </div>
 
@@ -588,41 +662,71 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       <aside
         className={styles.leftPanel}
         aria-label={t('creativeStudio.canvas.chrome.resourcePanel')}
-        data-left-open={props.leftOpen}
+        data-left-open={canvasPanelOpen}
         data-canvas-no-zoom
         {...chromeEventProps}
       >
         <nav
           className={styles.leftTabs}
           aria-label={t('creativeStudio.canvas.chrome.resources')}
-          role='tablist'
+          role='toolbar'
         >
-          {(['canvas', 'assets', 'prompts', 'templates'] as const).map((view) => {
+          <Tooltip content={t(LEFT_LABEL_KEYS.canvas)} position='right' mini>
+            <button
+              type='button'
+              id='creative-canvas-left-tab-canvas'
+              aria-label={t(LEFT_LABEL_KEYS.canvas)}
+              aria-pressed={canvasPanelOpen}
+              aria-expanded={canvasPanelOpen}
+              aria-controls='creative-canvas-left-panel-body'
+              data-active={canvasPanelOpen || undefined}
+              disabled={props.disabled}
+              onClick={() => {
+                if (canvasPanelOpen) {
+                  props.onLeftPanelOpenChange(false);
+                  return;
+                }
+                props.onLeftViewChange('canvas');
+              }}
+            >
+              {leftIcon('canvas')}
+              <span className={styles.tabLabel}>{t(LEFT_LABEL_KEYS.canvas)}</span>
+            </button>
+          </Tooltip>
+
+          <span className={styles.railDivider} aria-hidden='true' />
+
+          {CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map((kind) => {
+            const label = t(NODE_LABEL_KEYS[kind]);
+            return (
+              <Tooltip key={kind} content={label} position='right' mini>
+                <button
+                  type='button'
+                  aria-label={label}
+                  data-node-kind={kind}
+                  disabled={props.disabled}
+                  onClick={() => handleNodeAdd(kind)}
+                >
+                  {nodeIcon(kind)}
+                  <span className={styles.tabLabel}>{label}</span>
+                </button>
+              </Tooltip>
+            );
+          })}
+
+          <span className={styles.railDivider} aria-hidden='true' />
+
+          {RESOURCE_VIEWS.map((view) => {
             const label = t(LEFT_LABEL_KEYS[view]);
             return (
               <Tooltip key={view} content={label} position='right' mini>
                 <button
                   type='button'
-                  role='tab'
-                  id={`creative-canvas-left-tab-${view}`}
                   aria-label={label}
-                  aria-selected={props.leftOpen && props.leftView === view}
-                  aria-expanded={props.leftOpen && props.leftView === view}
-                  aria-controls='creative-canvas-left-panel-body'
-                  data-active={
-                    props.leftOpen && props.leftView === view
-                      ? true
-                      : undefined
-                  }
+                  aria-haspopup='dialog'
+                  aria-expanded={props.resourceView === view}
                   disabled={props.disabled}
-                  title={label}
-                  onClick={() => {
-                    if (props.leftOpen && props.leftView === view) {
-                      props.onLeftPanelOpenChange(false);
-                      return;
-                    }
-                    props.onLeftViewChange(view);
-                  }}
+                  onClick={() => props.onResourceViewChange(view)}
                 >
                   {leftIcon(view)}
                   <span className={styles.tabLabel}>{label}</span>
@@ -630,7 +734,8 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
               </Tooltip>
             );
           })}
-          {props.leftOpen ? (
+
+          {canvasPanelOpen ? (
             <Tooltip content={collapseResourcesLabel} position='right' mini>
               <button
                 type='button'
@@ -649,10 +754,10 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           className={styles.panelBody}
           id='creative-canvas-left-panel-body'
           role='tabpanel'
-          aria-labelledby={`creative-canvas-left-tab-${props.leftView}`}
-          aria-hidden={!props.leftOpen}
-          hidden={!props.leftOpen}
-          data-left-panel-body={props.leftView}
+          aria-labelledby='creative-canvas-left-tab-canvas'
+          aria-hidden={!canvasPanelOpen}
+          hidden={!canvasPanelOpen}
+          data-left-panel-body='canvas'
         >
           {leftSlot}
         </div>
@@ -732,108 +837,12 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
         </aside>
       ) : null}
 
-      {props.bottomView ? (
-        <section
-          className={styles.bottomPanel}
-          aria-label={t(BOTTOM_LABEL_KEYS[props.bottomView])}
-          data-canvas-no-zoom
-          {...chromeEventProps}
-        >
-          <header className={styles.panelHeader}>
-            <div
-              className={styles.panelTabs}
-              role='tablist'
-              aria-label={t('creativeStudio.canvas.chrome.bottomPanel')}
-            >
-              {(['history', 'timeline'] as const).map((view) => (
-                <button
-                  key={view}
-                  type='button'
-                  role='tab'
-                  aria-selected={props.bottomView === view}
-                  data-active={props.bottomView === view || undefined}
-                  disabled={props.disabled}
-                  onClick={() => props.onBottomViewChange(view)}
-                >
-                  {bottomIcon(view)}
-                  <span>{t(BOTTOM_LABEL_KEYS[view])}</span>
-                </button>
-              ))}
-            </div>
-            <ChromeIconButton
-              label={t('creativeStudio.canvas.chrome.closeBottomPanel')}
-              icon={<Close {...iconProps} />}
-              disabled={props.disabled}
-              onClick={() => props.onBottomViewChange(null)}
-            />
-          </header>
-          <div
-            className={styles.panelBody}
-            role='tabpanel'
-            data-bottom-panel-body={props.bottomView}
-          >
-            {bottomSlot}
-          </div>
-        </section>
-      ) : null}
-
-      <div className={styles.toolbarPositioner}>
-        <div
-          className={styles.toolDock}
-          role='toolbar'
-          aria-label={t('creativeStudio.canvas.chrome.toolbar')}
-          data-canvas-no-zoom
-          {...chromeEventProps}
-        >
-          <ChromeIconButton
-            label={t('creativeStudio.canvas.actions.panTool')}
-            icon={<HandDrag {...iconProps} />}
-            active={props.tool === 'pan'}
-            disabled={props.disabled}
-            onClick={() => props.onToolChange(toggleCreativeCanvasTool(props.tool))}
-          />
-
-          <span className={styles.divider} aria-hidden='true' />
-
-          <ChromeIconButton
-            label={t('creativeStudio.canvas.actions.undo')}
-            icon={<Undo {...iconProps} />}
-            disabled={props.disabled || !props.canUndo}
-            onClick={props.onUndo}
-          />
-          <ChromeIconButton
-            label={t('creativeStudio.canvas.actions.redo')}
-            icon={<Redo {...iconProps} />}
-            disabled={props.disabled || !props.canRedo}
-            onClick={props.onRedo}
-          />
-
-          <span className={styles.divider} aria-hidden='true' />
-
-          {CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map((kind) => (
-            <ChromeIconButton
-              key={kind}
-              label={t(NODE_LABEL_KEYS[kind])}
-              icon={nodeIcon(kind)}
-              disabled={props.disabled}
-              onClick={() => props.onAddNode(kind)}
-            />
-          ))}
-
-          <span className={styles.divider} aria-hidden='true' />
-
-          <ChromeIconButton
-            label={t(BOTTOM_LABEL_KEYS.history)}
-            icon={<History {...iconProps} />}
-            active={props.bottomView !== null}
-            disabled={props.disabled}
-            onClick={() =>
-              props.onBottomViewChange(toggleCreativeCanvasBottomPanel(props.bottomView))
-            }
-          />
-          {props.slots?.toolbarTrailing}
-        </div>
-      </div>
+      <CreativeCanvasResourceDialog
+        view={props.resourceView}
+        content={resourceSlot}
+        popupContainer={props.resourceDialogPopupContainer}
+        onClose={() => props.onResourceViewChange(null)}
+      />
     </section>
   );
 };

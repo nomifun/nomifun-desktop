@@ -233,10 +233,9 @@ fn main() -> Result<ExitCode> {
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-web"]);
     cli.host = args.host.clone();
     cli.port = args.port;
-    // Map known self-export/default locations onto the channel default and
-    // run the one-shot legacy layout migration (`NomiFun/Nomi<suffix>` →
-    // `NomiFun<suffix>`); explicit deployments (Docker `/data`, systemd
-    // `/var/lib/nomifun`) pass through verbatim.
+    // Normalize only this application's published historical default
+    // locations to the one canonical channel root. Explicit Web deployments
+    // (for example /data) remain literal and no parallel Agent root is probed.
     cli.data_dir =
         nomifun_app::bootstrap::resolve_startup_data_root(args.data_dir.clone());
     cli.local = insecure_no_auth;
@@ -287,34 +286,30 @@ async fn serve(
 
     // Boot the backend in-process (env → data layer → services), then mount the
     // real API router with the SPA as the fallback for non-/api routes.
-    let env = nomifun_app::bootstrap::init_environment(&cli, &merged_path)?;
-    let database = nomifun_app::bootstrap::init_data_layer(&env.config).await?;
-    let services = nomifun_app::AppServices::from_config(database, &env.config)
-        .await?
-        .with_boot_reconciliation_authority(
-            env.boot_reconciliation_authority(),
-            &env.config,
-        )
-        .await?;
-    if let Err(error) = nomifun_app::bootstrap::finalize_data_layer(&env.config) {
-        return Err(services.cleanup_after_startup_failure(error).await);
-    }
+    let env = nomifun_app::bootstrap::init_nomi_core_environment(&cli, &merged_path)?;
+    let application =
+        nomifun_app::bootstrap::NomiCoreApplication::compose(&env).await?;
 
     // First-run admin provisioning. No-op in local mode and once an admin
     // exists; otherwise a fresh authenticated install would have no way to set
     // the first password (the in-band setup routes are local-only). Returns
     // whether the install still awaits interactive first-run setup.
-    let needs_first_run_setup = match nomifun_app::bootstrap::ensure_admin_credentials(
-        &services,
-        nomifun_app::bootstrap::AdminBootstrap {
-            username: Some(args.admin_user.clone()),
-            password: args.admin_password.clone(),
-        },
-    )
-    .await
+    let needs_first_run_setup = match application
+        .ensure_admin_credentials(
+            Some(&args.admin_user),
+            args.admin_password.as_deref(),
+        )
+        .await
     {
-        Ok(value) => value,
-        Err(error) => return Err(services.cleanup_after_startup_failure(error).await),
+        Ok(needs_first_run_setup) => needs_first_run_setup,
+        Err(error) => {
+            return Err(match application.close().await {
+                Ok(()) => error,
+                Err(cleanup_error) => anyhow::anyhow!(
+                    "{error:#}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
+                ),
+            });
+        }
     };
     if needs_first_run_setup && !ip.is_loopback() {
         tracing::warn!(
@@ -325,7 +320,7 @@ async fn serve(
         );
     }
 
-    let mut app = nomifun_app::create_router(&services).await;
+    let mut app = application.router();
     if !args.api_only {
         app = app.fallback_service(spa_with_api_404(&args.dist));
     }
@@ -346,7 +341,14 @@ async fn serve(
     let (actual_port, listener) =
         match nomifun_app::bootstrap::bind_with_fallback(ip, args.port).await {
             Ok(value) => value,
-            Err(error) => return Err(services.cleanup_after_startup_failure(error).await),
+            Err(error) => {
+                return Err(match application.close().await {
+                    Ok(()) => error,
+                    Err(cleanup_error) => anyhow::anyhow!(
+                        "{error:#}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
+                    ),
+                });
+            }
         };
     if actual_port != args.port {
         tracing::warn!(
@@ -356,13 +358,7 @@ async fn serve(
         );
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
-    // Tell the robot gateway where devices can reach us. The router already
-    // serves `/robot/*`, but until this snapshot lands the advertiser reports no
-    // endpoint, so every OTA response hands the device an empty websocket URL.
-    // Uses the port actually bound unless `NOMIFUN_ROBOT_ADVERTISE` states one —
-    // a container whose port is remapped (`-p 9000:8787`) must advertise the
-    // host-side port, which this process cannot know.
-    nomifun_app::lan_endpoint::publish_robot_endpoint(&services, actual_port, robot_advertise);
+    application.publish_robot_endpoint(actual_port, robot_advertise);
     // ConnectInfo gives the rate limiter each client's real peer address. Without
     // it every browser in the deployment collapses into one shared "unknown"
     // bucket: a single user's login failures 429-lock everyone out, and aggregate
@@ -371,15 +367,19 @@ async fn serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(nomifun_app::commands::shutdown_signal())
     .await
     {
-        return Err(services.cleanup_after_startup_failure(error.into()).await);
+        return Err(match application.close().await {
+            Ok(()) => error.into(),
+            Err(cleanup_error) => anyhow::anyhow!(
+                "{error}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
+            ),
+        });
     }
 
-    let browser_shutdown = services.shutdown_browser_platform().await;
-    services.database.close().await;
+    application.close().await?;
     drop(env);
-    browser_shutdown?;
     Ok(ExitCode::SUCCESS)
 }
 

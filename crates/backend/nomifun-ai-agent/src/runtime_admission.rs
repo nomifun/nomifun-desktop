@@ -1,0 +1,111 @@
+//! Compile-time compatibility policy for the single official Runtime.
+//!
+//! Capability authority remains with the Kernel. This policy only checks that
+//! the source-integrated implementation can consume a compiled Snapshot and
+//! its effective Session overlays.
+
+use std::collections::BTreeSet;
+
+use nomifun_agent_contracts::{ContributionSourceKind, ResolvedSnapshotEnvelope};
+use nomifun_common::AppError;
+use serde_json::Value;
+
+pub trait RuntimeAdmission: Send + Sync {
+    fn validate_snapshot(&self, snapshot: &ResolvedSnapshotEnvelope) -> Result<(), AppError>;
+
+    fn validate_session_extra(&self, extra: &Value) -> Result<(), AppError>;
+}
+
+pub struct RuntimeSupport {
+    pub enabled_capabilities: Option<BTreeSet<String>>,
+    pub skills: bool,
+    pub mcp: bool,
+}
+
+impl RuntimeSupport {
+    pub fn platform() -> Self {
+        Self {
+            enabled_capabilities: None,
+            skills: true,
+            mcp: true,
+        }
+    }
+
+    pub fn enabled_only(capabilities: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            enabled_capabilities: Some(capabilities.into_iter().collect()),
+            skills: false,
+            mcp: false,
+        }
+    }
+
+    pub fn initial_only(capabilities: impl IntoIterator<Item = String>) -> Self {
+        Self::enabled_only(capabilities)
+    }
+}
+
+fn unsupported(feature: &str) -> AppError {
+    AppError::Conflict(format!("The official Runtime does not support {feature}"))
+}
+
+impl RuntimeAdmission for RuntimeSupport {
+    fn validate_snapshot(&self, snapshot: &ResolvedSnapshotEnvelope) -> Result<(), AppError> {
+        let content = &snapshot.content;
+        if let Some(supported) = &self.enabled_capabilities {
+            for item in &content.enabled_capabilities {
+                if !supported.contains(item.capability.id.as_ref()) {
+                    return Err(unsupported(item.capability.id.as_ref()));
+                }
+            }
+        }
+        for (allowed, selected, feature) in [
+            (self.skills, !content.skill_locks.is_empty(), "Skills"),
+            (
+                self.mcp,
+                !content.mcp_tool_locks.is_empty()
+                    || content.enabled_capabilities.iter().any(|entry| {
+                        entry.contribution_lock.source_kind == ContributionSourceKind::McpBinding
+                    }),
+                "MCP",
+            ),
+        ] {
+            if !allowed && selected {
+                return Err(unsupported(feature));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_session_extra(&self, extra: &Value) -> Result<(), AppError> {
+        // Extension selections are canonical Snapshot facts. Historical extra
+        // aliases cannot create or mirror Skill/MCP authority, even when empty.
+        for key in ["skills", "session_enabled_skills", "mcp_server_ids", "mcp_servers", "selected_mcp_server_ids"] {
+            if extra.get(key).is_some() { return Err(unsupported("retired extension selection fields in Session extra")); }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restricted_support_rejects_overlay_aliases() {
+        let policy = RuntimeSupport::enabled_only([]);
+        for key in [
+            "skills",
+            "session_enabled_skills",
+            "mcp_server_ids",
+            "mcp_servers",
+            "selected_mcp_server_ids",
+        ] {
+            for value in [serde_json::json!(["selected"]), Value::Null, serde_json::json!({})] {
+                let extra = serde_json::json!({key: value});
+                assert!(policy.validate_session_extra(&extra).is_err(), "{extra}");
+            }
+            assert!(policy.validate_session_extra(&serde_json::json!({key: []})).is_err());
+            assert!(RuntimeSupport::platform().validate_session_extra(&serde_json::json!({key: []})).is_err());
+        }
+    }
+}

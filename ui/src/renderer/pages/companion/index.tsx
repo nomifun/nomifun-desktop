@@ -11,7 +11,7 @@ import { parseCompanionId, type CompanionId, type ConversationId } from '@/commo
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
-import type { ICompanionProfile, IResponseMessage } from '@/common/adapter/ipcBridge';
+import type { ICompanionProfile, ICompanionWithStatus, IResponseMessage } from '@/common/adapter/ipcBridge';
 import { extractResponseTextChunk } from '@/common/chat/displayText';
 import MarkdownView from '@/renderer/components/Markdown';
 import LocalImageView from '@/renderer/components/media/LocalImageView';
@@ -33,6 +33,7 @@ import ChannelTelegramLogo from '@/renderer/assets/channel-logos/telegram.svg';
 import ChannelWecomLogo from '@/renderer/assets/channel-logos/wecom.svg';
 import ChannelWeixinLogo from '@/renderer/assets/channel-logos/weixin.svg';
 import CompanionAvatar from './CompanionAvatar';
+import CompanionSwitcher from './CompanionSwitcher';
 import { browserNarrationFor } from './browserNarration';
 import { getDeskSpecFor } from './characters';
 import { customFigureMetaOf } from './characters/customMeta';
@@ -42,9 +43,12 @@ import {
   resolveDeskRestoreLayout,
   type MonitorLayout,
 } from './deskRestoreGeometry';
-import { placeResizedWindow, type GeomRect } from './windowGeometry';
+import { placeResizedWindow, translateAnchorAfterDrag, type GeomRect } from './windowGeometry';
+import { COMPANION_TOOLTIP_GUTTER, companionContentPosition, companionNativePosition, withCompanionTooltipGutters } from './companionWindowSize';
 import { buildCompanionMenuEntries, type CompanionMenuAction } from './companionNativeMenu';
 import { useCompanionClickThrough } from './useCompanionClickThrough';
+import { switchCompanionDesktopWindow } from './companionWindowSwitch';
+import { isQuickPanelDragOrigin } from './companionQuickPanelDrag';
 import { createCompanionBarRevealController, type CompanionBarRevealController } from './companionBarReveal';
 import { shouldCaptureWholeCompanionWindow } from './companionCapturePolicy';
 import {
@@ -59,6 +63,8 @@ import {
 import { classifyPublicMessageDelivery } from '../conversation/platforms/publicMessageDelivery';
 import { reconcileConversationTurnAfterAcceptedReplay } from '../conversation/platforms/reconcileConversationTurnAfterStreamTerminal';
 import { getConversationOrNull } from '../conversation/utils/conversationCache';
+import { toHistoryEntry, type HistoryEntry } from '../nomi/workspace/tabs/HistoryTab/historyFormat';
+import { BookOpen, Down, Drag, MessageOne, More, Plus, Right, Send, SettingTwo } from '@icon-park/react';
 import './companion.css';
 
 const BUBBLE_MS = 12_000;
@@ -132,6 +138,20 @@ const parseCompanionIdFromHash = (): CompanionId | null => {
   }
 };
 
+/** Development-only browser visual harness for the production companion DOM. */
+const isWebVisualPreview = (): boolean => {
+  if (process.env.NODE_ENV === 'production' || typeof window === 'undefined') return false;
+  const query = window.location.hash.split('?')[1] ?? '';
+  return new URLSearchParams(query).get('preview') === '1';
+};
+
+/** Lets visual QA inspect the real empty state instead of the development sample turns. */
+const isWebEmptyHistoryPreview = (): boolean => {
+  if (!isWebVisualPreview() || typeof window === 'undefined') return false;
+  const query = window.location.hash.split('?')[1] ?? '';
+  return new URLSearchParams(query).get('empty') === '1';
+};
+
 /**
  * The desktop-companion window page (route #/companion?companion_id={companion_id}, window label
  * "companion-{companion_id}"). Renders that companion's character on a transparent always-on-top
@@ -162,6 +182,14 @@ const CompanionPage: React.FC = () => {
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   /** 展开时预解析的会话 id（供粘贴上传关联；best-effort）。 */
   const [composerThreadId, setComposerThreadId] = useState<ConversationId | null>(null);
+  const [roster, setRoster] = useState<ICompanionWithStatus[]>([]);
+  const [compactSwitchOpen, setCompactSwitchOpen] = useState(false);
+  const [switchingCompanionId, setSwitchingCompanionId] = useState<CompanionId | null>(null);
+  const switchingCompanionRef = useRef<CompanionId | null>(null);
+  const [quickHistory, setQuickHistory] = useState<HistoryEntry[]>([]);
+  const [quickMoreOpen, setQuickMoreOpen] = useState(false);
+  const quickMoreMenuRef = useRef<HTMLDivElement | null>(null);
+  const quickMoreTriggerRef = useRef<HTMLButtonElement | null>(null);
   /** 拖拽图片到桌宠窗时的高亮态（由 Tauri 原生 onDragDropEvent 驱动）。 */
   const [dragOver, setDragOver] = useState(false);
   /** 正在拖动伙伴 / 刚拖完：冻结点击穿透轮询以根除拖动闪动。 */
@@ -249,6 +277,27 @@ const CompanionPage: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (!quickMoreOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && (quickMoreMenuRef.current?.contains(target) || quickMoreTriggerRef.current?.contains(target))) return;
+      setQuickMoreOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setQuickMoreOpen(false);
+        quickMoreTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', dismiss, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [quickMoreOpen]);
+
   const handleCompanionHoverChange = useCallback((over: boolean) => {
     barRevealControllerRef.current?.handleHoverChange(over);
   }, []);
@@ -308,8 +357,10 @@ const CompanionPage: React.FC = () => {
       // an already-visible companion keeps its current focus state.
       const wasVisible = await win.isVisible();
       let target: { x: number; y: number } | null = null;
+      let savedContentPosition: { x: number; y: number } | null = null;
       if (!opts?.skipPosition && cfg.appearance.companion_x != null && cfg.appearance.companion_y != null) {
-        target = { x: cfg.appearance.companion_x, y: cfg.appearance.companion_y };
+        savedContentPosition = { x: cfg.appearance.companion_x, y: cfg.appearance.companion_y };
+        target = companionNativePosition(savedContentPosition, await win.scaleFactor());
         // A saved position can point at no connected monitor: configs written
         // by older builds (launch-time scale bug doubled the coords every
         // start on Retina) or a since-unplugged external display. Restoring
@@ -327,6 +378,7 @@ const CompanionPage: React.FC = () => {
               return overlapX >= MIN_REACHABLE && overlapY >= MIN_REACHABLE;
             });
             if (!onScreen) {
+              savedContentPosition = null;
               const p = (await primaryMonitor()) ?? monitors[0];
               target = {
                 x: p.position.x + p.size.width - size.width - 24,
@@ -349,6 +401,7 @@ const CompanionPage: React.FC = () => {
       // (compounding every launch until the companion is off-screen). Once visible
       // the scale is correct; this second call is idempotent elsewhere.
       if (target) {
+        if (savedContentPosition) target = companionNativePosition(savedContentPosition, await win.scaleFactor());
         await win.setPosition(new PhysicalPosition(target.x, target.y));
       }
     } catch (e) {
@@ -356,8 +409,8 @@ const CompanionPage: React.FC = () => {
     }
   }, []);
 
-  // Match the native window to the character's desk spec (full-figure
-  // characters use a taller window; the other five keep the classic 240x320).
+  // Match the native window to the character's compact desk spec (custom
+  // full-figure characters may still use a taller window than built-ins).
   // Bottom-anchored and monitor-clamped — and only at actual size changes, so
   // a user's deliberate half-off-screen placement is never disturbed by
   // ordinary restores. Must run AFTER applyWindowState's show(): before the
@@ -372,8 +425,9 @@ const CompanionPage: React.FC = () => {
       const { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors } = await import('@tauri-apps/api/window');
       const win = getCurrentWindow();
       const desk = getDeskSpecFor(cfg.character, customFigureMetaOf(cfg));
+      const nativeDesk = withCompanionTooltipGutters({ width: desk.windowWidth, height: desk.windowHeight });
       const [pos, size, scale] = await Promise.all([win.outerPosition(), win.outerSize(), win.scaleFactor()]);
-      const target = { width: Math.round(desk.windowWidth * scale), height: Math.round(desk.windowHeight * scale) };
+      const target = { width: Math.round(nativeDesk.width * scale), height: Math.round(nativeDesk.height * scale) };
       // outerSize === innerSize for companion windows (decorations(false) + shadow(false)).
       if (size.width === target.width && size.height === target.height) return;
       let monitors: { x: number; y: number; width: number; height: number }[] = [];
@@ -398,11 +452,11 @@ const CompanionPage: React.FC = () => {
       // 'bottom' (default): live character switch — the window and the saved
       // coords are the same generation, so anchor the bottom edge and grow up.
       // 'top-left': cold-start restore — saved coords are the TALL window's
-      // top-left, but the freshly created window is still 240x320; bottom-
+      // top-left, but the freshly created window is still the built-in desk size; bottom-
       // anchoring from that small rect would climb 280px every launch and
       // compound through the onMoved persistence. Keep the top-left, clamp only.
       const anchorRect =
-        opts?.anchor === 'top-left'
+        opts?.anchor === 'top-left' && cfg.appearance.companion_x != null
           ? { x: pos.x, y: pos.y, width: achieved.width, height: achieved.height }
           : { x: pos.x, y: pos.y, width: size.width, height: size.height };
       const next = placeResizedWindow(anchorRect, achieved, monitors);
@@ -428,6 +482,8 @@ const CompanionPage: React.FC = () => {
     }
     if (mode !== null) expandedWindowRestoreRetriesRef.current = 0;
     const queued = expandedWindowQueueRef.current.then(async () => {
+      // Coalesce obsolete queued layouts instead of replaying old open/close requests.
+      if (mode !== expandedWindowRequestedModeRef.current) return;
       const cfg = profileRef.current;
       const { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors } = await import('@tauri-apps/api/window');
       const win = getCurrentWindow();
@@ -455,12 +511,14 @@ const CompanionPage: React.FC = () => {
           // Fall back to browser screen metrics below.
         }
 
+        if (mode !== expandedWindowRequestedModeRef.current) return;
+
         if (!mode) {
           const session = expandedWindowSessionRef.current;
           if (!session) return;
           const deskNow = cfg ? getDeskSpecFor(cfg.character, customFigureMetaOf(cfg)) : null;
           const logicalDesk = deskNow
-            ? { width: deskNow.windowWidth, height: deskNow.windowHeight }
+            ? withCompanionTooltipGutters({ width: deskNow.windowWidth, height: deskNow.windowHeight })
             : {
                 width: session.anchor.width / session.scaleFactor,
                 height: session.anchor.height / session.scaleFactor,
@@ -536,14 +594,15 @@ const CompanionPage: React.FC = () => {
         const host = hostMonitor?.workArea ?? fallbackHost;
         const deskNow = getDeskSpecFor(cfg.character, customFigureMetaOf(cfg));
         const reservePx = deskNow.figureHeight + 84;
-        const screenWidth = host.width / scale;
+        const screenWidth = host.width / scale - COMPANION_TOOLTIP_GUTTER * 2;
         const screenHeight = host.height / scale;
         const clampPx = (min: number, value: number, max: number) => Math.round(Math.max(min, Math.min(max, value)));
+        const chatContent = withCompanionTooltipGutters({ width: clampPx(500, screenWidth * 0.34, 700), height: 0 });
         const targetSize = {
-          width: Math.max(session.anchor.width, Math.round(clampPx(360, screenWidth * 0.3, 560) * scale)),
+          width: Math.max(session.anchor.width, Math.round(chatContent.width * scale)),
           height: Math.max(
             session.anchor.height,
-            Math.round(clampPx(440, Math.max(screenHeight * 0.6, reservePx + 220), 720) * scale)
+            Math.round(clampPx(600, Math.max(screenHeight * 0.78, reservePx + 340), 840) * scale)
           ),
         };
         const workAreas = monitors.map((monitor) => monitor.workArea);
@@ -610,6 +669,24 @@ const CompanionPage: React.FC = () => {
       if (retryTimer) clearTimeout(retryTimer);
     };
   }, [companionId]);
+
+  const refreshRoster = useCallback(() => {
+    void ipcBridge.companion.listCompanions
+      .invoke()
+      .then(setRoster)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshRoster();
+    const unsubs = [
+      ipcBridge.companion.onCompanionCreated.on(refreshRoster),
+      ipcBridge.companion.onCompanionDeleted.on(refreshRoster),
+      ipcBridge.companion.onConfigUpdated.on(refreshRoster),
+      ipcBridge.companion.onMoodChanged.on(refreshRoster),
+    ];
+    return () => unsubs.forEach((unsubscribe) => unsubscribe());
+  }, [refreshRoster]);
 
   // Initial load (with retry — the embedded backend may still be booting)
   // + WS subscriptions.
@@ -923,11 +1000,6 @@ const CompanionPage: React.FC = () => {
           armBubbleDismiss(STREAM_STALL_MS, () => endTurn(''));
           break;
         }
-        case 'permission':
-          // The bubble has no confirmation UI — route the user to the full
-          // chat surface where MessagePermission renders.
-          endTurn(t('nomi.companion.needsConfirm'));
-          break;
         case 'finish': {
           // The engine emits exactly one finish per turn; close even when the
           // turn produced no prose (tool-only turn → friendly fallback). Keep
@@ -982,11 +1054,15 @@ const CompanionPage: React.FC = () => {
         lastLocalMoveAt.current = Date.now();
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
+          if (internalWindowLayoutRef.current || expandedWindowSessionRef.current) return;
           lastLocalMoveAt.current = Date.now();
           // Merge-patch only this companion's position: never clobbers concurrent
           // edits (settings toggles in the main window) the way a full PUT does.
-          void ipcBridge.companion.patchCompanion
-            .invoke({ companion_id: companionId, patch: { appearance: { companion_x: payload.x, companion_y: payload.y } } })
+          void getCurrentWindow().scaleFactor()
+            .then((scale) => {
+              const position = companionContentPosition(payload, scale);
+              return ipcBridge.companion.patchCompanion.invoke({ companion_id: companionId, patch: { appearance: { companion_x: position.x, companion_y: position.y } } });
+            })
             .then((saved) => {
               profileRef.current = saved;
               setProfile(saved);
@@ -1001,7 +1077,7 @@ const CompanionPage: React.FC = () => {
     };
   }, [companionId]);
 
-  // Reply and composer continue to share one expanded companion rectangle.
+  // Only reply/composer surfaces resize the native window. Name tooltips are DOM-only.
   // Memory uses its own native window and never participates here.
   const hasBubble = bubble.length > 0;
   const expandedMode: ExpandedWindowMode | null = hasBubble || composerOpen ? 'chat' : null;
@@ -1130,11 +1206,13 @@ const CompanionPage: React.FC = () => {
 
   const startDrag = useCallback(async (e: React.MouseEvent) => {
     if (e.button !== 0 || !isTauriRuntime()) return;
+    e.preventDefault();
     setDragging(true); // 冻结点击穿透轮询，根除拖动闪动
     let ended = false;
     let unlistenMoved: (() => void) | undefined;
     let silence: ReturnType<typeof setTimeout> | null = null;
     let safety: ReturnType<typeof setTimeout> | null = null;
+    let finalizeExpandedDrag: (() => Promise<void>) | null = null;
     const end = () => {
       if (ended) return;
       ended = true;
@@ -1144,6 +1222,9 @@ const CompanionPage: React.FC = () => {
       if (safety) clearTimeout(safety);
       unlistenMoved?.();
       setDragging(false);
+      const finalize = finalizeExpandedDrag;
+      finalizeExpandedDrag = null;
+      if (finalize) void finalize();
     };
     // 多信号界定拖动结束：松手(pointerup/mouseup) 为主；onMoved 停止 220ms 兜底
     // （模态移动循环下 mouseup 可能不达 webview）；6s 安全超时防全漏导致永久冻结。
@@ -1156,16 +1237,54 @@ const CompanionPage: React.FC = () => {
     safety = setTimeout(end, 6000);
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      unlistenMoved = await getCurrentWindow().onMoved(bumpSilence);
+      const nativeWindow = getCurrentWindow();
+      const expandedSession = expandedWindowSessionRef.current;
+      if (expandedSession) {
+        const windowStart = await nativeWindow.outerPosition();
+        const anchorStart = { ...expandedSession.anchor };
+        finalizeExpandedDrag = async () => {
+          try {
+            const windowEnd = await nativeWindow.outerPosition();
+            const nextAnchor = translateAnchorAfterDrag(anchorStart, windowStart, windowEnd);
+            const activeSession = expandedWindowSessionRef.current;
+            if (activeSession) activeSession.anchor = nextAnchor;
+            lastLocalMoveAt.current = Date.now();
+            if (companionId) {
+              const savedPosition = companionContentPosition(nextAnchor, await nativeWindow.scaleFactor());
+              await ipcBridge.companion.patchCompanion.invoke({
+                companion_id: companionId,
+                patch: {
+                  appearance: {
+                    companion_x: savedPosition.x,
+                    companion_y: savedPosition.y,
+                  },
+                },
+              });
+            }
+          } catch (error) {
+            console.warn('expanded companion drag position could not be persisted:', error);
+          }
+        };
+      }
+      unlistenMoved = await nativeWindow.onMoved(bumpSilence);
       if (ended) {
         unlistenMoved();
+        const finalize = finalizeExpandedDrag;
+        finalizeExpandedDrag = null;
+        if (finalize) void finalize();
         return;
       }
-      await getCurrentWindow().startDragging();
+      await nativeWindow.startDragging();
+      bumpSilence();
     } catch {
       end(); // startDragging 抛错则立即解冻
     }
-  }, []);
+  }, [companionId]);
+
+  const startQuickPanelDrag = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isQuickPanelDragOrigin(event.target)) return;
+    void startDrag(event);
+  }, [startDrag]);
 
   const openMainAt = useCallback(async (path: string) => {
     if (!isTauriRuntime()) return;
@@ -1515,7 +1634,6 @@ const CompanionPage: React.FC = () => {
     if ((!text && attachedFiles.length === 0) || deliveryPendingRef.current) return;
     if (retryPendingTurn()) return;
     const files = attachedFiles;
-    setComposerOpen(false);
     setComposerText('');
     setAttachedFiles([]);
     submitTurn(text, files);
@@ -1524,19 +1642,148 @@ const CompanionPage: React.FC = () => {
   /** 展开 composer：把迷你输入迁入 composer（并清空迷你框，单一来源防重复发送）、
    *  预解析会话 id（供粘贴上传关联，best-effort）。 */
   const openComposer = useCallback(() => {
+    setCompactSwitchOpen(false);
     setComposerOpen(true);
     setComposerText((prev) => (prev ? prev : input));
     setInput('');
-    void ensureThread()
-      .then(setComposerThreadId)
-      .catch(() => {});
+    if (profileRef.current?.model) {
+      void ensureThread()
+        .then(setComposerThreadId)
+        .catch(() => {});
+    }
   }, [input, ensureThread]);
 
   /** 收起 composer：丢弃未发送的附件，避免隐形累积。 */
   const collapseComposer = useCallback(() => {
     setComposerOpen(false);
     setAttachedFiles([]);
+    setQuickMoreOpen(false);
   }, []);
+
+  useEffect(() => {
+    if (!composerOpen || !composerThreadId) {
+      setQuickHistory([]);
+      return;
+    }
+    let cancelled = false;
+    void ipcBridge.database.getConversationMessages
+      .invoke({
+        conversation_id: composerThreadId,
+        cursor: '',
+        page_size: 6,
+        content_mode: 'compact',
+      })
+      .then((page) => {
+        if (cancelled) return;
+        const entries = (page.items ?? [])
+          .map(toHistoryEntry)
+          .filter((entry): entry is HistoryEntry => entry?.kind === 'text')
+          .sort((left, right) => left.createdAt - right.createdAt)
+          .slice(-2);
+        setQuickHistory(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setQuickHistory([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bubble, composerOpen, composerThreadId]);
+
+  const activateCompanionWindow = useCallback(
+    async (targetId: CompanionId) => {
+      if (!companionId || targetId === companionId || switchingCompanionRef.current) return;
+      if (isWebVisualPreview()) {
+        setCompanionId(targetId);
+        return;
+      }
+      const targetProfile = roster.find((item) => item.companion_id === targetId);
+      if (!targetProfile) return;
+      switchingCompanionRef.current = targetId;
+      setSwitchingCompanionId(targetId);
+      try {
+        const [{ Window, getCurrentWindow, PhysicalPosition }, { invoke }] = await Promise.all([
+          import('@tauri-apps/api/window'),
+          import('@tauri-apps/api/core'),
+        ]);
+        const currentWindow = getCurrentWindow();
+        const result = await switchCompanionDesktopWindow({
+          currentId: companionId,
+          targetId,
+          roster: roster.map((item) => ({
+            companion_id: item.companion_id,
+            enabled: Boolean(item.appearance.companion_enabled),
+          })),
+          getCurrentPosition: async () => {
+            try {
+              // A reply may have expanded the source. Transfer its compact content
+              // origin, not the temporary chat rectangle or transparent gutter.
+              const position = expandedWindowSessionRef.current?.anchor ?? await currentWindow.outerPosition();
+              return companionContentPosition(position, await currentWindow.scaleFactor());
+            } catch {
+              return null;
+            }
+          },
+          getWindow: (id) => Window.getByLabel(`companion-${id}`),
+          enableTarget: async (id, position) => {
+            await ipcBridge.companion.patchCompanion.invoke({
+              companion_id: id,
+              patch: {
+                appearance: {
+                  companion_enabled: true,
+                  ...(position ? { companion_x: position.x, companion_y: position.y } : {}),
+                },
+              },
+            });
+          },
+          disableCurrent: async (id) => {
+            try {
+              const next = await ipcBridge.companion.patchCompanion.invoke({
+                companion_id: id,
+                patch: { appearance: { companion_enabled: false } },
+              });
+              setProfile(next);
+              await applyWindowState(next);
+            } catch (error) {
+              // The target is already visible and focused. Keeping both windows
+              // is a safer degradation than treating a successful activation as
+              // failed and navigating away from the desktop flow.
+              console.warn('companion quick switch could not hide source window:', error);
+            }
+          },
+          syncWindows: async (specs) => {
+            await invoke('sync_companion_windows', {
+              specs: specs.map((item) => ({
+                companion_id: item.companion_id,
+                enabled: item.enabled,
+              })),
+            });
+          },
+          placeTarget: async (target, position) => {
+            try {
+              const nativePosition = companionNativePosition(position, await target.scaleFactor());
+              await target.setPosition(new PhysicalPosition(nativePosition.x, nativePosition.y));
+            } catch (error) {
+              console.warn('companion quick switch could not inherit source position:', error);
+            }
+          },
+          wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        });
+        if (result === 'missing') {
+          throw new Error(`companion window unavailable: ${targetId}`);
+        }
+        refreshRoster();
+      } catch (error) {
+        console.error('companion quick switch failed:', error);
+        popBubble(t('nomi.companion.switchFailed'));
+        await openMainAt(`/nomi?companion=${encodeURIComponent(targetId)}&mode=cohabit`).catch(() => {});
+      } finally {
+        switchingCompanionRef.current = null;
+        setSwitchingCompanionId(null);
+      }
+    },
+    [applyWindowState, companionId, openMainAt, popBubble, refreshRoster, roster, t]
+  );
 
   /** 气泡「× 忽略」：立即隐藏气泡；若仍在生成（本地或远程 IM 回合）则一并停掉后端，
    *  避免无谓生成与残片回闪。 */
@@ -1604,37 +1851,35 @@ const CompanionPage: React.FC = () => {
   const runMenuAction = useCallback(
     (action: CompanionMenuAction) => {
       if (action === 'open-chat') {
-        // 聊天已迁进「会话」：解析（幂等 ensure）该伙伴的唯一会话并在主窗口打开标准
-        // /conversation/:id（旧的 /nomi?tab=chat 已废除）。未配置对话模型时 ensureThread
-        // 返回 400 → 回退到管理中心总览引导配置。
-        void (async () => {
-          try {
-            const cid = await ensureThread();
-            await openMainAt(`/conversation/${cid}`);
-          } catch {
-            await openMainAt(
-              companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=overview` : '/nomi'
-            );
-          }
-        })();
+        void openMainAt(
+          companionId
+            ? `/nomi?companion=${encodeURIComponent(companionId)}&mode=cohabit`
+            : '/nomi?mode=cohabit'
+        );
         return;
       }
       if (action === 'open-memories') {
         // Lands on this companion's 记忆&知识库 tab. Memory is per-companion now —
         // the former shared/private scope switch is gone.
         void openMainAt(
-          companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=memory` : '/nomi?tab=memory'
+          companionId
+            ? `/nomi?companion=${encodeURIComponent(companionId)}&mode=manage&tab=memory`
+            : '/nomi?mode=manage&tab=memory'
         );
         return;
       }
       if (action === 'open-config') {
         // 设置 tab was folded into 总览; identity/persona/model all live there now.
-        void openMainAt(companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=overview` : '/nomi');
+        void openMainAt(
+          companionId
+            ? `/nomi?companion=${encodeURIComponent(companionId)}&mode=manage&tab=overview`
+            : '/nomi?mode=manage&tab=overview'
+        );
         return;
       }
       void hideCompanion();
     },
-    [companionId, ensureThread, hideCompanion, openMainAt]
+    [companionId, hideCompanion, openMainAt]
   );
 
   const openNativeContextMenu = useCallback(async () => {
@@ -1658,6 +1903,25 @@ const CompanionPage: React.FC = () => {
   }, [runMenuAction, t]);
 
   const desk = getDeskSpecFor(profile?.character, customFigureMetaOf(profile));
+  const visibleQuickHistory: HistoryEntry[] =
+    quickHistory.length > 0 || !isWebVisualPreview() || isWebEmptyHistoryPreview()
+      ? quickHistory
+      : [
+          {
+            key: 'preview-user',
+            role: 'user',
+            createdAt: Date.now() - 60_000,
+            kind: 'text',
+            text: '明天下午去公园，别让我忘了。',
+          },
+          {
+            key: 'preview-companion',
+            role: 'companion',
+            createdAt: Date.now(),
+            kind: 'text',
+            text: '记住了，出发前我提醒你看看天气。',
+          },
+        ];
 
   // 反应控件：□ 打断（本地或远程 IM 回合生成中）+ × 忽略（有气泡时）。从气泡上移到输入条
   // 发送按钮右侧的固定位置——气泡随内容伸缩、原位置动态难点中，固定常驻更易选中（点 5）。
@@ -1678,7 +1942,7 @@ const CompanionPage: React.FC = () => {
           </svg>
         </button>
       )}
-      {bubble && (
+      {bubble && !composerOpen && (
         <button
           type='button'
           className='nomi-companion-reaction'
@@ -1696,7 +1960,7 @@ const CompanionPage: React.FC = () => {
     </>
   );
 
-  if (!isTauriRuntime()) {
+  if (!isTauriRuntime() && !isWebVisualPreview()) {
     return (
       <div className='nomi-companion-web-hint'>
         <CompanionAvatar
@@ -1714,9 +1978,13 @@ const CompanionPage: React.FC = () => {
 
   return (
     <div
-      className='nomi-companion-window'
+      className={`nomi-companion-window${composerOpen ? ' is-quick-open' : ''}`}
       // 气泡可用高度 = 100vh − 预留（立绘高 + 输入条/边距）。让正文吃满窗口剩余空间又不压到立绘。
-      style={{ '--companion-reserve': `${desk.figureHeight + 84}px` } as React.CSSProperties}
+      style={{
+        '--companion-reserve': `${desk.figureHeight + 84}px`,
+        '--companion-desk-width': `${desk.windowWidth}px`,
+        '--companion-tooltip-gutter': `${isTauriRuntime() ? COMPANION_TOOLTIP_GUTTER : 0}px`,
+      } as React.CSSProperties}
       onContextMenu={(e) => {
         e.preventDefault();
         // 同步捕获：不等下个轮询 tick，先确保这次右键不会被透明穿透状态影响。
@@ -1771,6 +2039,229 @@ const CompanionPage: React.FC = () => {
           </div>
         </div>
       )}
+      {composerOpen && (
+        <div
+          className={`nomi-companion-quick ${dragOver ? 'is-dragover' : ''}`}
+          data-companion-hit
+          onClick={(event) => event.stopPropagation()}
+          onMouseDown={startQuickPanelDrag}
+        >
+          <aside className='nomi-companion-quick__rail' aria-label={t('nomi.workspace.switchCompanion', { defaultValue: '切换伙伴' })}>
+            {roster.map((item) => (
+              <button
+                key={item.companion_id}
+                type='button'
+                className='nomi-companion-quick__roster-item'
+                aria-pressed={item.companion_id === companionId}
+                title={item.name}
+                onClick={() => void activateCompanionWindow(item.companion_id)}
+              >
+                <CompanionAvatar
+                  character={item.character}
+                  companionId={item.companion_id}
+                  customFigure={customFigureMetaOf(item)}
+                  mood={(item.status.mood as RabbitMood) || 'content'}
+                  activity='idle'
+                  size={40}
+                />
+                <span>{item.name}</span>
+                {item.model ? <i className='is-online' /> : <i />}
+              </button>
+            ))}
+            <button
+              ref={quickMoreTriggerRef}
+              type='button'
+              className='nomi-companion-quick__roster-item is-more'
+              title={t('common.more', { defaultValue: '更多' })}
+              aria-haspopup='menu'
+              aria-expanded={quickMoreOpen}
+              onClick={() => setQuickMoreOpen((open) => !open)}
+            >
+              <More theme='outline' size='18' fill='currentColor' />
+              <span>{t('common.more', { defaultValue: '更多' })}</span>
+            </button>
+          </aside>
+
+          {quickMoreOpen && (
+            <div
+              ref={quickMoreMenuRef}
+              className='nomi-companion-quick__more-menu'
+              role='menu'
+              aria-label={t('common.more', { defaultValue: '更多' })}
+              data-no-window-drag
+            >
+              <button
+                type='button'
+                role='menuitem'
+                onClick={() => {
+                  setQuickMoreOpen(false);
+                  void openMainAt(
+                    companionId
+                      ? `/nomi?companion=${encodeURIComponent(companionId)}&mode=cohabit`
+                      : '/nomi?mode=cohabit'
+                  );
+                }}
+              >
+                <BookOpen theme='outline' size='16' fill='currentColor' />
+                <span>{t('nomi.companion.openFullCohabit', { defaultValue: '打开完整相处页' })}</span>
+                <Right theme='outline' size='13' fill='currentColor' />
+              </button>
+              <button
+                type='button'
+                role='menuitem'
+                onClick={() => {
+                  setQuickMoreOpen(false);
+                  void openMainAt(
+                    companionId
+                      ? `/nomi?companion=${encodeURIComponent(companionId)}&mode=manage&tab=overview`
+                      : '/nomi?mode=manage'
+                  );
+                }}
+              >
+                <SettingTwo theme='outline' size='16' fill='currentColor' />
+                <span>{t('nomi.companion.manage', { defaultValue: '管理伙伴' })}</span>
+                <Right theme='outline' size='13' fill='currentColor' />
+              </button>
+            </div>
+          )}
+
+          <section className='nomi-companion-quick__main'>
+            <header className='nomi-companion-quick__header'>
+              <CompanionAvatar
+                character={profile?.character}
+                mood={mood}
+                activity={activity}
+                size={48}
+                companionId={companionId ?? undefined}
+                customFigure={customFigureMetaOf(profile)}
+              />
+              <div className='nomi-companion-quick__identity'>
+                <strong>{profile?.name || 'Nomi'}</strong>
+                <span>
+                  {roster.find((item) => item.companion_id === companionId)?.status.level
+                    ? `Lv ${roster.find((item) => item.companion_id === companionId)?.status.level} · `
+                    : ''}
+                  {t(`nomi.moods.${mood}`, { defaultValue: mood })}
+                </span>
+              </div>
+              <span
+                className='nomi-companion-quick__drag-hint'
+                title={t('nomi.companion.moveWindow')}
+                aria-hidden='true'
+              >
+                <Drag theme='outline' size='15' fill='currentColor' />
+              </span>
+              <div className='nomi-companion-quick__header-actions'>
+                <button type='button' title={t('nomi.companion.collapse')} onClick={collapseComposer}>
+                  <Down theme='outline' size='16' fill='currentColor' />
+                </button>
+              </div>
+            </header>
+
+            <div className='nomi-companion-quick__history'>
+              {visibleQuickHistory.length > 0 ? visibleQuickHistory.map((entry) => (
+                <div
+                  key={entry.key}
+                  className={`nomi-companion-quick__message is-${entry.role}`}
+                >
+                  {entry.role === 'companion' && (
+                    <CompanionAvatar
+                      character={profile?.character}
+                      mood={mood}
+                      activity='idle'
+                      size={30}
+                      companionId={companionId ?? undefined}
+                      customFigure={customFigureMetaOf(profile)}
+                    />
+                  )}
+                  <span>{entry.text}</span>
+                </div>
+              )) : (
+                <div className='nomi-companion-quick__empty'>
+                  <CompanionAvatar
+                    character={profile?.character}
+                    mood={mood}
+                    activity='idle'
+                    size={54}
+                    companionId={companionId ?? undefined}
+                    customFigure={customFigureMetaOf(profile)}
+                  />
+                  <strong>{t('nomi.companion.quickEmptyTitle', {
+                    name: profile?.name || 'Nomi',
+                    defaultValue: '和 {{name}} 打个招呼',
+                  })}</strong>
+                  <span>{t('nomi.companion.quickEmptyHint', {
+                    defaultValue: '最近的相处会保留在这里，随时接着聊。',
+                  })}</span>
+                </div>
+              )}
+              {bubble && (
+                <div className='nomi-companion-quick__live'>
+                  <MarkdownView hiddenCodeCopyButton>{bubble}</MarkdownView>
+                </div>
+              )}
+            </div>
+
+            {attachedFiles.length > 0 && (
+              <div className='nomi-companion-composer__thumbs'>
+                {attachedFiles.map((path, index) => (
+                  <div key={`${path}-${index}`} className='nomi-companion-composer__thumb'>
+                    <LocalImageView src={path} alt='' />
+                    <button
+                      className='nomi-companion-composer__thumb-x'
+                      title={t('nomi.companion.collapse')}
+                      onClick={() => setAttachedFiles((previous) => previous.filter((_, itemIndex) => itemIndex !== index))}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className='nomi-companion-quick__composer'>
+              <button
+                type='button'
+                className='nomi-companion-composer__attach'
+                title={t('nomi.companion.attachImage')}
+                disabled={sendboxUpload.isUploading}
+                onClick={pickImages}
+              >
+                {sendboxUpload.isUploading
+                  ? <span className='nomi-companion-spinner' aria-hidden='true' />
+                  : <Plus theme='outline' size='15' fill='currentColor' />}
+              </button>
+              <textarea
+                className='nomi-companion-composer__input'
+                rows={1}
+                value={composerText}
+                placeholder={t('nomi.companion.chatPlaceholder', { name: profile?.name || 'Nomi' })}
+                autoFocus
+                onChange={(event) => setComposerText(event.target.value)}
+                onFocus={onComposerFocus}
+                onPaste={onComposerPaste}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendComposer();
+                  }
+                }}
+              />
+              <button
+                type='button'
+                className='nomi-companion-composer__send'
+                aria-label={t('nomi.companion.send')}
+                title={t('nomi.companion.send')}
+                disabled={(!composerText.trim() && attachedFiles.length === 0) || sendboxUpload.isUploading}
+                onClick={() => void sendComposer()}
+              >
+                <Send theme='outline' size='17' fill='currentColor' strokeWidth={3} />
+              </button>
+              {reactionControls}
+            </div>
+          </section>
+        </div>
+      )}
       <div className='nomi-companion-stage-shell'>
         <div className='nomi-companion-stage'>
           <div
@@ -1784,6 +2275,7 @@ const CompanionPage: React.FC = () => {
               mood={mood}
               activity={activity}
               size={desk.figureHeight}
+              displayMode='full'
               companionId={companionId ?? undefined}
               customFigure={customFigureMetaOf(profile)}
               figureHitRef={figureHitRef}
@@ -1791,118 +2283,43 @@ const CompanionPage: React.FC = () => {
           </div>
         </div>
       </div>
-      {composerOpen ? (
+      {!composerOpen && (
         <div
-          className={`nomi-companion-composer ${dragOver ? 'is-dragover' : ''}`}
-          data-companion-hit
-          onClick={(e) => e.stopPropagation()}
-        >
-          {attachedFiles.length > 0 && (
-            <div className='nomi-companion-composer__thumbs'>
-              {attachedFiles.map((path, i) => (
-                <div key={`${path}-${i}`} className='nomi-companion-composer__thumb'>
-                  <LocalImageView src={path} alt='' />
-                  <button
-                    className='nomi-companion-composer__thumb-x'
-                    title={t('nomi.companion.collapse')}
-                    onClick={() => setAttachedFiles((prev) => prev.filter((_, idx) => idx !== i))}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <textarea
-            className='nomi-companion-composer__input'
-            value={composerText}
-            placeholder={t('nomi.companion.chatPlaceholder', { name: profile?.name || 'Nomi' })}
-            autoFocus
-            onChange={(e) => setComposerText(e.target.value)}
-            onFocus={onComposerFocus}
-            onPaste={onComposerPaste}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                void sendComposer();
-              }
-            }}
-          />
-          <div className='nomi-companion-composer__bar'>
-            <button
-              type='button'
-              className='nomi-companion-composer__attach'
-              title={t('nomi.companion.attachImage')}
-              disabled={sendboxUpload.isUploading}
-              onClick={pickImages}
-            >
-              {sendboxUpload.isUploading ? (
-                <span className='nomi-companion-spinner' aria-hidden='true' />
-              ) : (
-                <svg
-                  width='16'
-                  height='16'
-                  viewBox='0 0 24 24'
-                  fill='none'
-                  stroke='currentColor'
-                  strokeWidth='2'
-                  strokeLinecap='round'
-                  strokeLinejoin='round'
-                >
-                  <path d='M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48' />
-                </svg>
-              )}
-            </button>
-            <div className='spacer' />
-            <button className='nomi-companion-composer__ghost' onClick={collapseComposer}>
-              {t('nomi.companion.collapse')}
-            </button>
-            <button
-              className='nomi-companion-composer__send'
-              disabled={
-                (!composerText.trim() && attachedFiles.length === 0) ||
-                sendboxUpload.isUploading
-              }
-              onClick={() => void sendComposer()}
-            >
-              {t('nomi.companion.send')}
-            </button>
-            {reactionControls}
-          </div>
-        </div>
-      ) : (
-        <div
-          className={`nomi-companion-chatbar ${input || barRevealed ? 'is-active' : ''}`}
+          className={`nomi-companion-chatbar ${input || barRevealed || compactSwitchOpen ? 'is-active' : ''}`}
           // 常驻命中候选；隐藏态 pointer-events:none 会被 companionHitTarget 跳过，
           // CSS hover 先显示但 React reveal 尚未赶上时也不会出现「看得到却穿透」。
           data-companion-hit
         >
+          <CompanionSwitcher
+            companionId={companionId}
+            profile={profile}
+            roster={roster}
+            switchingCompanionId={switchingCompanionId}
+            open={compactSwitchOpen}
+            onOpenChange={setCompactSwitchOpen}
+            onSwitch={(id) => void activateCompanionWindow(id)}
+            onShowAll={openComposer}
+          />
           <input
             value={input}
+            aria-label={t('nomi.companion.chatPlaceholder', { name: profile?.name || 'Nomi' })}
             placeholder={t('nomi.companion.chatPlaceholder', { name: profile?.name || 'Nomi' })}
             onChange={(e) => setInput(e.target.value)}
+            onFocus={() => setCompactSwitchOpen(false)}
             onPaste={onComposerPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter') void sendChat();
             }}
           />
-          <div className='nomi-companion-iconbtn' title={t('nomi.companion.expand')} onClick={openComposer}>
-            <svg
-              width='14'
-              height='14'
-              viewBox='0 0 24 24'
-              fill='none'
-              stroke='currentColor'
-              strokeWidth='2'
-              strokeLinecap='round'
-              strokeLinejoin='round'
-            >
-              <polyline points='15 3 21 3 21 9' />
-              <polyline points='9 21 3 21 3 15' />
-              <line x1='21' y1='3' x2='14' y2='10' />
-              <line x1='3' y1='21' x2='10' y2='14' />
-            </svg>
-          </div>
+          <button
+            type='button'
+            className='nomi-companion-iconbtn'
+            aria-label={t('nomi.companion.openQuickPanel')}
+            title={t('nomi.companion.openQuickPanel')}
+            onClick={openComposer}
+          >
+            <MessageOne theme='outline' size='15' fill='currentColor' />
+          </button>
           <button
             className='nomi-companion-send'
             disabled={!input.trim()}

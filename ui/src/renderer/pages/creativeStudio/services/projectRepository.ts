@@ -66,7 +66,7 @@ export function isCreativeProjectRepositoryError(
   );
 }
 
-export function toCreativeProjectRepositoryError(
+function toCreativeProjectRepositoryError(
   error: unknown
 ): CreativeProjectRepositoryError {
   if (isCreativeProjectRepositoryError(error)) return error;

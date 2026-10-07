@@ -5,6 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -18,7 +19,7 @@ use nomi_process_runtime::{
 };
 #[cfg(target_os = "macos")]
 use nomi_process_runtime::SandboxPolicy;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use nomi_process_runtime::ShellKind;
 
 fn helper_binary() -> &'static str {
@@ -81,12 +82,17 @@ async fn wait_for_terminal(
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
 async fn output_arrival_wakes_a_running_poll_before_the_yield_deadline() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    #[cfg(unix)]
+    let process = request("/bin/cat", Vec::<OsString>::new());
+    #[cfg(windows)]
+    let process = helper_request(&["echo-stdin"]);
     let handle = supervisor
-        .start(helper_request(&["echo-stdin"]))
+        .start(process)
         .await
-        .expect("echo helper should start");
+        .expect("echo process should start");
     let began = Instant::now();
     let poll = supervisor.poll_until_activity(
         &handle.owner,
@@ -120,18 +126,22 @@ async fn output_arrival_wakes_a_running_poll_before_the_yield_deadline() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn unix_pipe_preserves_zero_and_nonzero_exit_codes() {
     for expected in [0, 7] {
         let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let process = request(
+            "/bin/sh",
+            [
+                OsString::from("-c"),
+                OsString::from(format!("exit {expected}")),
+            ],
+        );
         let handle = supervisor
-            .start(helper_request(&["exit", &expected.to_string()]))
+            .start(process)
             .await
-            .expect("Unix pipe helper should start");
+            .expect("Unix quick-exit shell should start");
 
-        // A freshly linked Rust helper can spend more than 250 ms in dyld on
-        // current macOS debug builds even though the lifecycle wakeup is
-        // immediate. Keep the bound far below the 30-second poll deadline
-        // without making loader startup part of the process-runtime contract.
         let quick_exit_bound = if cfg!(target_os = "macos") {
             Duration::from_secs(1)
         } else {
@@ -156,6 +166,66 @@ async fn unix_pipe_preserves_zero_and_nonzero_exit_codes() {
 }
 
 #[tokio::test]
+#[cfg(target_os = "macos")]
+#[serial_test::serial(unix_process_contract)]
+async fn macos_concurrent_quick_shells_each_commit_and_report_their_exit() {
+    let long_supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let long_handle = long_supervisor
+        .start(request("/bin/cat", Vec::<OsString>::new()))
+        .await
+        .expect("long-running peer should start");
+    let mut starts = tokio::task::JoinSet::new();
+    for index in 0..16 {
+        starts.spawn(async move {
+            let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+            let mut process = request("unused", []);
+            process.command = CommandSpec::Shell {
+                shell: ShellKind::Posix,
+                script: "printf '%s' \"$NOMIFUN_MACOS_SHELL_VALUE\"; exit 7".to_owned(),
+            };
+            let value = format!("quick-shell-{index}");
+            process.env.insert(
+                OsString::from("NOMIFUN_MACOS_SHELL_VALUE"),
+                OsString::from(&value),
+            );
+            let handle = supervisor
+                .start(process)
+                .await
+                .unwrap_or_else(|error| panic!("quick shell {index} failed to start: {error:?}"));
+            let outcome = wait_for_terminal(&supervisor, &handle).await;
+            let ProcessOutcome::Exited {
+                code,
+                output,
+                cleanup,
+                ..
+            } = outcome
+            else {
+                panic!("quick shell {index} did not exit truthfully: {outcome:?}");
+            };
+            assert_eq!(code, Some(7));
+            assert_eq!(output.text(), value);
+            assert!(cleanup.reaped);
+        });
+    }
+    while let Some(result) = starts.join_next().await {
+        result.expect("quick-shell task must not panic");
+    }
+    long_supervisor
+        .close_stdin(&long_handle.owner, &long_handle.session_id)
+        .await
+        .expect("long-running peer stdin should close");
+    let outcome = wait_for_terminal(&long_supervisor, &long_handle).await;
+    assert!(matches!(
+        outcome,
+        ProcessOutcome::Exited {
+            code: Some(0),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
 async fn elapsed_process_deadline_rejects_start_before_user_code_runs() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let marker = directory.path().join("must-not-run.marker");
@@ -181,7 +251,166 @@ async fn elapsed_process_deadline_rejects_start_before_user_code_runs() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
+async fn running_deadline_preserves_partial_file_effect_and_reports_reaped_timeout() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let marker = directory.path().join("partial-effect.marker");
+    let mut process = helper_request(&[
+        "write-file-then-sleep",
+        marker
+            .to_str()
+            .expect("temporary marker path should be UTF-8"),
+        "60000",
+    ]);
+    process.cwd = directory.path().canonicalize().expect("canonical cwd");
+    process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+    process.policy.deadline = Some(Instant::now() + Duration::from_secs(1));
+    process.policy.interrupt_grace = Duration::from_millis(50);
+    process.policy.terminate_grace = Duration::from_millis(50);
+    process.policy.reap_grace = Duration::from_millis(500);
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor
+        .start(process)
+        .await
+        .expect("partial-effect helper should start before its deadline");
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_for_terminal(&supervisor, &handle),
+    )
+    .await
+    .expect("deadline cleanup must remain bounded");
+    let ProcessOutcome::TimedOut { cleanup, .. } = outcome else {
+        panic!("running deadline must produce TimedOut, got {outcome:?}");
+    };
+    assert!(cleanup.reaped);
+    #[cfg(windows)]
+    {
+        assert!(!cleanup.interrupt_attempted,"a no-window pipe owner has no supported console interrupt");
+        assert!(cleanup.errors.is_empty(),"unsupported cleanup stages must be skipped, not attempted and hidden");
+    }
+    assert_eq!(
+        fs::read(&marker).expect("the pre-timeout effect should remain observable"),
+        b"partial effect before timeout\n"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
+async fn concurrent_starts_reserve_capacity_before_spawn_and_release_after_cleanup() {
+    const MAX_SESSIONS: usize = 2;
+    const ATTEMPTS: usize = 32;
+    let directory = Arc::new(tempfile::tempdir().expect("temporary directory"));
+    let supervisor = ProcessSupervisor::new(SupervisorConfig {
+        max_sessions: MAX_SESSIONS,
+        ..SupervisorConfig::default()
+    });
+    let barrier = Arc::new(tokio::sync::Barrier::new(ATTEMPTS + 1));
+    let mut starts = tokio::task::JoinSet::new();
+    for index in 0..ATTEMPTS {
+        let directory = directory.clone();
+        let supervisor = supervisor.clone();
+        let barrier = barrier.clone();
+        starts.spawn(async move {
+            let marker = directory.path().join(format!("attempt-{index:02}.pid"));
+            let mut process = helper_request(&[
+                "write-pid-then-sleep",
+                marker.to_str().expect("marker path should be UTF-8"),
+                "60000",
+            ]);
+            process.cwd = directory.path().canonicalize().expect("canonical cwd");
+            process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+            process.policy.interrupt_grace = Duration::from_millis(10);
+            process.policy.terminate_grace = Duration::from_millis(20);
+            process.policy.reap_grace = Duration::from_millis(500);
+            barrier.wait().await;
+            (index, supervisor.start(process).await)
+        });
+    }
+    barrier.wait().await;
+
+    let mut handles = Vec::new();
+    let mut capacity_rejections = 0;
+    while let Some(joined) = starts.join_next().await {
+        let (index, result) = joined.expect("start task should join");
+        match result {
+            Ok(handle) => handles.push((index, handle)),
+            Err(error) if error.code() == "capacity_exhausted" => capacity_rejections += 1,
+            Err(error) => panic!("unexpected concurrent start error: {error:?}"),
+        }
+    }
+    assert_eq!(handles.len(), MAX_SESSIONS);
+    assert_eq!(capacity_rejections, ATTEMPTS - MAX_SESSIONS);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count = fs::read_dir(directory.path())
+                .expect("marker directory should be readable")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "pid"))
+                .count();
+            if count == MAX_SESSIONS {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("admitted helpers should publish readiness");
+    assert_eq!(
+        fs::read_dir(directory.path())
+            .expect("marker directory should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "pid"))
+            .count(),
+        MAX_SESSIONS,
+        "capacity-rejected starts must not execute user code"
+    );
+
+    for (_, handle) in handles {
+        let outcome = supervisor
+            .cancel(&handle.owner, &handle.session_id)
+            .await
+            .expect("admitted helper cleanup should succeed");
+        let ProcessOutcome::Cancelled { cleanup, .. } = outcome else {
+            panic!("admitted helper should settle as Cancelled");
+        };
+        assert!(cleanup.reaped);
+    }
+
+    let reuse_marker = directory.path().join("reuse.pid");
+    let mut reuse = helper_request(&[
+        "write-pid-then-sleep",
+        reuse_marker
+            .to_str()
+            .expect("reuse marker path should be UTF-8"),
+        "60000",
+    ]);
+    reuse.cwd = directory.path().canonicalize().expect("canonical cwd");
+    reuse.capability = CapabilityPolicy::local_owner(reuse.cwd.clone());
+    reuse.policy.interrupt_grace = Duration::from_millis(10);
+    reuse.policy.terminate_grace = Duration::from_millis(20);
+    reuse.policy.reap_grace = Duration::from_millis(500);
+    let handle = supervisor
+        .start(reuse)
+        .await
+        .expect("cleanup should release one capacity slot");
+    let outcome = supervisor
+        .cancel(&handle.owner, &handle.session_id)
+        .await
+        .expect("reused capacity helper cleanup should succeed");
+    assert!(matches!(
+        outcome,
+        ProcessOutcome::Cancelled {
+            cleanup: nomi_process_runtime::CleanupReport { reaped: true, .. },
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn public_supervisor_preserves_exit_codes_with_nofile_soft_limit_128() {
     let mut command = tokio::process::Command::new(low_fd_harness_binary());
     command.arg(helper_binary()).kill_on_drop(true);
@@ -202,6 +431,7 @@ async fn public_supervisor_preserves_exit_codes_with_nofile_soft_limit_128() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn public_supervisor_closes_inherited_high_fd_sentinel() {
     let mut command = tokio::process::Command::new(fd_sentinel_harness_binary());
     command.arg(helper_binary()).kill_on_drop(true);
@@ -222,6 +452,7 @@ async fn public_supervisor_closes_inherited_high_fd_sentinel() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn unix_pipe_round_trips_stdin_and_close_stdin_delivers_eof() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor
@@ -248,6 +479,109 @@ async fn unix_pipe_round_trips_stdin_and_close_stdin_delivers_eof() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_process_contract)]
+async fn macos_preserves_unicode_executable_path_argv_environment_and_cwd() {
+    let directory = tempfile::tempdir().expect("temporary working directory");
+    let cwd = directory.path().join("中文 workspace 'quoted'");
+    fs::create_dir(&cwd).expect("complex working directory");
+    let cwd = cwd.canonicalize().expect("canonical working directory");
+    let executable = cwd.join("工具 helper 'quoted'");
+    fs::copy(helper_binary(), &executable).expect("copy helper with executable permissions");
+    let first = OsString::from("中文 spaced \\");
+    let second = OsString::from(r#"quote " and literal $(exit 99)"#);
+    let env_key = OsString::from("NOMIFUN_MACOS_ENV_CASE");
+    let env_value = OsString::from("值 'quoted' $HOME");
+    let mut process = request(
+        executable,
+        [
+            OsString::from("print-args-env-cwd"),
+            first.clone(),
+            second.clone(),
+            env_key.clone(),
+            cwd.as_os_str().to_owned(),
+        ],
+    );
+    process.cwd = cwd.clone();
+    process.capability = CapabilityPolicy::local_owner(cwd.clone());
+    process.env.insert(env_key, env_value.clone());
+
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("complex macOS path should spawn");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
+        panic!("complex macOS path helper must exit, got {outcome:?}");
+    };
+    assert_eq!(code, Some(0));
+    assert!(cleanup.reaped);
+    let expected = [first, second, env_value, cwd.into_os_string()]
+        .into_iter()
+        .map(|field| {
+            let field = field.to_string_lossy();
+            format!("{}:{field}\n", field.len())
+        })
+        .collect::<String>();
+    assert_eq!(output.text(), expected);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_process_contract)]
+async fn macos_posix_shell_preserves_literal_environment_and_exit_status() {
+    let mut process = request("unused", []);
+    process.command = CommandSpec::Shell {
+        shell: ShellKind::Posix,
+        script: "printf '%s' \"$NOMIFUN_MACOS_SHELL_VALUE\"; exit 7".to_owned(),
+    };
+    let value = "中文 'quoted' $(exit 99) $HOME \\";
+    process.env.insert("NOMIFUN_MACOS_SHELL_VALUE".into(), value.into());
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("POSIX shell should start");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
+        panic!("POSIX shell must exit, got {outcome:?}");
+    };
+    assert_eq!(code, Some(7));
+    assert_eq!(output.text(), value);
+    assert!(cleanup.reaped);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_process_contract)]
+async fn macos_seatbelt_bare_program_keeps_requested_path_and_literal_spaces() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().expect("isolated executable fixture");
+    let cwd = fixture.path().canonicalize().expect("canonical workspace");
+    let blocked = cwd.join("blocked");
+    let runnable = cwd.join("bin");
+    fs::create_dir(&blocked).unwrap();
+    fs::create_dir(&runnable).unwrap();
+    let name = "literal helper with spaces";
+    fs::copy(helper_binary(), blocked.join(name)).unwrap();
+    fs::set_permissions(blocked.join(name), fs::Permissions::from_mode(0o644)).unwrap();
+    fs::copy(helper_binary(), runnable.join(name)).unwrap();
+    fs::copy(helper_binary(), cwd.join(name)).unwrap();
+    // A non-executable earlier PATH entry must not shadow a later executable.
+    // Relative entries resolve under the requested cwd, not the host checkout.
+    for path in [std::env::join_paths([&blocked, &runnable]).unwrap(), OsString::from("blocked:bin"), OsString::new()] {
+        let mut process = request(name, [OsString::from("exit"), OsString::from("7")]);
+        process.cwd = cwd.clone();
+        process.env.insert("PATH".into(), path);
+        process.capability = CapabilityPolicy { cwd_roots: vec![cwd.clone()],
+            sandbox: SandboxPolicy::MacSeatbelt { write_roots: vec![cwd.clone()] } };
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor.start(process).await.expect("literal spaced name must retain execvp semantics");
+        let ProcessOutcome::Exited { code, cleanup, .. } = wait_for_terminal(&supervisor, &handle).await else {
+            panic!("literal helper must exit with its actual status");
+        };
+        assert_eq!(code, Some(7));
+        assert!(cleanup.reaped);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_process_contract)]
 async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
     // Darwin's trusted temporary directories are intentionally writable in
     // the profile. Keep both fixtures beside the checkout so `outside` really
@@ -312,6 +646,7 @@ async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_process_contract)]
 async fn macos_seatbelt_rejects_tmpdir_override_before_user_code_runs() {
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace = workspace.path().canonicalize().expect("canonical workspace");
@@ -347,6 +682,7 @@ async fn macos_seatbelt_rejects_tmpdir_override_before_user_code_runs() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn invalid_executable_is_a_stable_spawn_failure_without_a_session() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let missing = Path::new("/definitely/not/a/nomifun-executable");
@@ -368,6 +704,7 @@ async fn invalid_executable_is_a_stable_spawn_failure_without_a_session() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn cancel_removes_the_leader_and_same_group_grandchild() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("grandchild.pid");
@@ -405,6 +742,7 @@ async fn cancel_removes_the_leader_and_same_group_grandchild() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn ignored_sigint_escalates_to_sigterm_and_removes_the_group() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("interrupt-ignoring-grandchild.pid");
@@ -451,6 +789,7 @@ async fn ignored_sigint_escalates_to_sigterm_and_removes_the_group() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn leader_exit_does_not_publish_success_while_same_group_descendant_survives() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("leader-first-grandchild.pid");
@@ -488,6 +827,7 @@ async fn leader_exit_does_not_publish_success_while_same_group_descendant_surviv
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn observable_setsid_escape_is_lost_instead_of_waiting_for_fake_pipe_eof() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("escaped-descendant.pid");
@@ -533,7 +873,10 @@ async fn observable_setsid_escape_is_lost_instead_of_waiting_for_fake_pipe_eof()
 
 #[cfg(unix)]
 async fn wait_for_pid_marker(path: &Path) -> u32 {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // A freshly linked macOS debug helper may pay one-time dyld and validation
+    // cost before its user code runs. Poll immediately, but keep that loader
+    // cost outside the process cleanup and wakeup SLAs asserted elsewhere.
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(contents) = fs::read_to_string(path)
                 && let Ok(pid) = contents.trim().parse::<u32>()
@@ -721,6 +1064,10 @@ async fn windows_cancel_reaps_the_leader_and_grandchild_within_five_seconds() {
     let grandchild = ExactWindowsProcess::open(grandchild_pid)
         .expect("grandchild exact process handle should open");
 
+    let interrupt_error = supervisor.interrupt(&handle.owner,&handle.session_id).await
+        .expect_err("explicit pipe interrupt remains truthfully unsupported");
+    assert!(interrupt_error.to_string().contains("no truthful console interrupt contract"));
+
     let cancellation_started = Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
@@ -734,7 +1081,8 @@ async fn windows_cancel_reaps_the_leader_and_grandchild_within_five_seconds() {
     let ProcessOutcome::Cancelled { cleanup, .. } = outcome else {
         panic!("Windows Job cancellation should be terminal Cancelled, got {outcome:?}");
     };
-    assert!(cleanup.interrupt_attempted);
+    assert!(!cleanup.interrupt_attempted,"cleanup selects only the pipe owner's supported stages");
+    assert!(cleanup.errors.is_empty(),"no unsupported signal was attempted or hidden");
     assert!(cleanup.terminate_attempted || cleanup.force_kill_attempted);
     assert!(cleanup.reaped);
     assert!(
@@ -800,16 +1148,17 @@ async fn windows_leader_exit_waits_for_job_descendant_cleanup_before_success() {
 #[tokio::test]
 async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
     let directory = tempfile::tempdir().expect("temporary working directory should be created");
-    let cwd = directory
-        .path()
-        .canonicalize()
-        .expect("temporary working directory should canonicalize");
-    let first = OsString::from("涓枃 spaced \\");
+    let cwd = directory.path().join("中文🙂 workspace 'quoted'");
+    fs::create_dir(&cwd).expect("complex working directory");
+    let cwd = cwd.canonicalize().expect("temporary working directory should canonicalize");
+    let executable = cwd.join("工具🙂 helper 'quoted'.exe");
+    fs::copy(helper_binary(), &executable).expect("copy native helper into the complex path");
+    let first = OsString::from("中文🙂 spaced $(exit 99) | & ; `tick` \\");
     let second = OsString::from(r#"quote " and trailing \\"#);
     let env_key = OsString::from("NOMIFUN_WINDOWS_ENV_CASE");
-    let env_value = OsString::from("鍊?value");
+    let env_value = OsString::from("值🙂 'quoted' $env:USERPROFILE $(exit 99)");
     let mut process = request(
-        helper_binary(),
+        executable,
         [
             OsString::from("print-args-env-cwd"),
             first.clone(),
@@ -830,10 +1179,12 @@ async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
         .await
         .expect("complex Windows argv/env/cwd helper should start");
     let outcome = wait_for_terminal(&supervisor, &handle).await;
-    let ProcessOutcome::Exited { code, output, .. } = outcome else {
+    let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
         panic!("complex Windows argv/env/cwd helper should exit, got {outcome:?}");
     };
     assert_eq!(code, Some(0));
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty());
     let expected = [first, second, env_value, cwd.into_os_string()]
         .into_iter()
         .map(|field| {
@@ -842,6 +1193,93 @@ async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
         })
         .collect::<String>();
     assert_eq!(output.text(), expected);
+    println!("WINDOWS_LITERAL_ARGV_EVIDENCE pid={} output={:?} cleanup={cleanup:?}", handle.pid, output.text());
+    assert!(supervisor.shutdown().await.is_exact());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires the unchanged Windows ACP 936 fixture and Bun"]
+async fn windows_acp936_pipe_streams_keep_exact_bytes_and_frozen_encoding() {
+    use nomi_process_runtime::OutputStream;
+    use std::sync::Mutex;
+    // SAFETY: GetACP only reads the host's current ANSI code page.
+    assert_eq!(unsafe { windows_sys::Win32::Globalization::GetACP() }, 936,
+        "do not change host settings to make this opt-in fixture eligible");
+    let script = r#"
+const go = new Promise(resolve => process.stdin.once('data', resolve));
+process.stdout.write(Buffer.from([0xd6]));
+await Bun.sleep(40);
+process.stdout.write(Buffer.from([0xd0, 0xce, 0xc4, 10]));
+process.stdin.resume();
+await go;
+process.stdin.pause();
+const error = Buffer.from('UTF8:中文🙂\n');
+process.stderr.write(error.subarray(0, 12));
+await Bun.sleep(40);
+process.stderr.write(error.subarray(12));
+"#;
+    let expected_stdout = [0xd6, 0xd0, 0xce, 0xc4, 10];
+    let expected_stderr = "UTF8:中文🙂\n".as_bytes();
+    // These are two retention contracts, not repeated statistical samples.
+    for limit in [21, 8] {
+        let workspace = tempfile::tempdir().expect("isolated mixed-encoding cwd");
+        let mut process = request("bun", [OsString::from("-e"), script.into()]);
+        process.cwd = workspace.path().canonicalize().unwrap();
+        process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+        process.policy.output_limit_bytes = limit;
+        process.policy.deadline = Some(Instant::now() + Duration::from_secs(10));
+        let observed = Arc::new(Mutex::new(Vec::<(OutputStream, Vec<u8>)>::new()));
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor.start_with_output_observer(process, {
+            let observed = observed.clone();
+            Arc::new(move |stream, bytes| observed.lock().unwrap().push((stream, bytes.to_vec())))
+        }).await.expect("the original mixed-encoding process should start");
+        let exact_process = ExactWindowsProcess::open(handle.pid).unwrap();
+        // Gate stderr on actual stdout transport observation, not a timing guess.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let count: usize = observed.lock().unwrap().iter()
+                    .filter(|(stream, _)| *stream == OutputStream::Stdout)
+                    .map(|(_, bytes)| bytes.len()).sum();
+                if count == expected_stdout.len() { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("stdout must be observed before the input gate opens");
+        supervisor.write(&handle.owner, &handle.session_id, b"go\n").await.unwrap();
+        supervisor.close_stdin(&handle.owner, &handle.session_id).await.unwrap();
+        let outcome = wait_for_terminal(&supervisor, &handle).await;
+        let ProcessOutcome::Exited { code, output, cleanup, .. } = &outcome else {
+            panic!("the original process must exit: {outcome:?}");
+        };
+        assert_eq!(*code, Some(0));
+        assert!(cleanup.reaped);
+        exact_process.wait_terminated(Duration::from_secs(1), "mixed-encoding writer").await;
+        for (stream, expected) in [(OutputStream::Stdout, expected_stdout.as_slice()), (OutputStream::Stderr, expected_stderr)] {
+            let actual: Vec<u8> = observed.lock().unwrap().iter()
+                .filter(|(kind, _)| *kind == stream).flat_map(|(_, bytes)| bytes.iter().copied()).collect();
+            assert_eq!(actual, expected, "the real pipe bytes must match for {stream:?}");
+        }
+        assert_eq!(output.next_cursor.offset(), 21);
+        assert_eq!(output.retained_bytes, limit);
+        assert_eq!(output.dropped_bytes, (21 - limit) as u64);
+        assert_eq!(output.encoding.source_encoding, "mixed");
+        assert_eq!(output.encoding.decode_errors, 1, "one ACP fallback diagnostic is expected");
+        assert_eq!(output.text(), if limit == 21 { "中文\nUTF8:中文🙂\n" } else { "文🙂\n" });
+        let mut expected_raw = expected_stdout.to_vec();
+        expected_raw.extend_from_slice(expected_stderr);
+        assert_eq!(output.raw_bytes(), expected_raw[21-limit..]);
+        let PollResult::Finished(ProcessOutcome::Exited { output: empty, .. }) = supervisor.poll(
+            &handle.owner, &handle.session_id, output.next_cursor, Instant::now()
+        ).await.unwrap() else { panic!("the original terminal must stay frozen"); };
+        assert!(empty.chunks.is_empty());
+        assert_eq!(empty.next_cursor, output.next_cursor);
+        assert_eq!(empty.encoding, output.encoding);
+        assert_eq!(empty.retained_bytes, limit);
+        assert_eq!(empty.dropped_bytes, output.dropped_bytes);
+        assert!(supervisor.shutdown().await.is_exact());
+        println!("WINDOWS_MIXED_PIPE_EVIDENCE limit={limit} pid={} terminal={outcome:?} empty={empty:?}", handle.pid);
+    }
 }
 
 #[cfg(windows)]
@@ -853,6 +1291,8 @@ async fn windows_powershell_preserves_final_native_and_pipeline_status() {
         ("Write-Output before; cmd /c exit 7", 7),
         ("Get-DefinitelyMissingNomifunCommand", 1),
         ("Write-Error bad -ErrorAction Continue", 1),
+        ("'literal `$()' | ForEach-Object { Write-Output ($_ + ' piped') }", 0),
+        ("Write-Output before | ForEach-Object { throw 'PIPELINE_FAILED' }", 1),
     ] {
         let mut process = request(helper_binary(), Vec::<OsString>::new());
         process.command = CommandSpec::Shell {
@@ -865,11 +1305,182 @@ async fn windows_powershell_preserves_final_native_and_pipeline_status() {
             .await
             .unwrap_or_else(|error| panic!("PowerShell script failed to start: {script}: {error}"));
         let outcome = wait_for_terminal(&supervisor, &handle).await;
-        let ProcessOutcome::Exited { code, .. } = outcome else {
+        let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
             panic!("PowerShell script should exit: {script}: {outcome:?}");
         };
         assert_eq!(code, Some(expected), "PowerShell script: {script}");
+        assert!(cleanup.reaped);
+        assert!(cleanup.errors.is_empty());
+        if script.starts_with("'literal") {
+            assert_eq!(output.text(), "literal `$() piped\r\n");
+        }
+        if script.contains("PIPELINE_FAILED") {
+            assert!(output.text().contains("PIPELINE_FAILED"), "pipeline failure must remain observable");
+        }
+        println!("WINDOWS_POWERSHELL_STATUS_EVIDENCE pid={} script={script:?} code={code:?} output={:?} cleanup={cleanup:?}", handle.pid, output.text());
+        assert!(supervisor.shutdown().await.is_exact());
     }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_program_powershell_initializes_under_managed_owner() {
+    let workspace = tempfile::tempdir().expect("isolated PowerShell workspace");
+    fs::write(workspace.path().join("normal.txt"), b"fixture")
+        .expect("create a bounded workspace entry");
+    let powershell = std::path::PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")),
+    )
+    .join("System32")
+    .join("WindowsPowerShell")
+    .join("v1.0")
+    .join("powershell.exe");
+    let resolved = std::env::var_os("PATH").into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("powershell.exe"))
+        .find(|candidate| candidate.is_file())
+        .expect("PowerShell should be present on PATH");
+    assert_eq!(fs::canonicalize(resolved).unwrap(), fs::canonicalize(&powershell).unwrap());
+    for program in [OsString::from("powershell.exe"), powershell.into_os_string()] {
+        let mut process = request(
+            program,
+            [
+                "-NoProfile",
+                "-Command",
+                "Get-ChildItem -Force | Select-Object Mode, Name, Attributes, LinkType | Format-Table -AutoSize",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        process.cwd = workspace.path().to_path_buf();
+        process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor
+            .start(process)
+            .await
+            .expect("managed PowerShell program should start");
+        let outcome = wait_for_terminal(&supervisor, &handle).await;
+        let ProcessOutcome::Exited { code, output, .. } = outcome else {
+            panic!("managed PowerShell program should exit, got {outcome:?}");
+        };
+        assert_eq!(code, Some(0), "PowerShell startup/output: {}", output.text());
+        assert!(output.text().contains("normal.txt"));
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_shell_reports_full_cwd_and_explicit_hidden_flags() {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let prefix = format!("{} 中文 ", "long-path-".repeat(14));
+    let workspace = tempfile::Builder::new().prefix(&prefix).tempdir().unwrap();
+    fs::write(workspace.path().join(".dot-note"), b"dot").unwrap();
+    fs::OpenOptions::new().write(true).create_new(true).attributes(2)
+        .open(workspace.path().join("hidden.txt")).unwrap();
+    let scripts = [
+        "(Get-Location).Path",
+        "Get-ChildItem -LiteralPath . -Force | ForEach-Object { [pscustomobject]@{Name=$_.Name;Attributes=$_.Attributes.ToString();Hidden=[bool]($_.Attributes -band [IO.FileAttributes]::Hidden);System=[bool]($_.Attributes -band [IO.FileAttributes]::System);LinkType=$_.LinkType} } | ConvertTo-Json -Compress",
+    ];
+    for (index, script) in scripts.into_iter().enumerate() {
+        let mut process = request(helper_binary(), Vec::<OsString>::new());
+        process.command = CommandSpec::Shell { shell:ShellKind::PowerShell, script:script.into() };
+        process.cwd = workspace.path().to_path_buf();
+        process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor.start(process).await.unwrap();
+        let ProcessOutcome::Exited { code, output, .. } = wait_for_terminal(&supervisor, &handle).await else {
+            panic!("observation command must exit");
+        };
+        assert_eq!(code, Some(0), "{}", output.text());
+        if index == 0 {
+            assert_eq!(output.text().trim(), workspace.path().to_str().unwrap());
+        } else {
+            let entries: serde_json::Value = serde_json::from_str(&output.text()).unwrap();
+            for name in [".dot-note", "hidden.txt"] {
+                let entry = entries.as_array().unwrap().iter().find(|entry| entry["Name"] == name).unwrap();
+                let attributes = fs::metadata(workspace.path().join(name)).unwrap().file_attributes();
+                assert_eq!(entry["Hidden"], attributes & 2 != 0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_utf8_file_read_and_literal_search_preserve_text_and_errors() {
+    let workspace = tempfile::Builder::new().prefix("UTF8 资料 ").tempdir().unwrap();
+    fs::create_dir(workspace.path().join("资料 空格")).unwrap();
+    let file = workspace.path().join("资料 空格/样本.txt");
+    let content = "alpha\r\nneedle-验收-42\r\n第三行\r\nomega\r\n";
+    fs::write(&file,content.as_bytes()).unwrap();
+    let scripts = [
+        "$ErrorActionPreference='Stop'; [Console]::Write((Get-Content -LiteralPath '资料 空格/样本.txt' -Encoding UTF8 -Raw))",
+        "$ErrorActionPreference='Stop'; Select-String -LiteralPath '资料 空格/样本.txt' -Pattern 'needle-验收-42' -SimpleMatch -Encoding UTF8 -ErrorAction Stop | ForEach-Object { [Console]::Write($_.Line) }",
+        "$ErrorActionPreference='Stop'; Select-String -LiteralPath '资料 空格/样本.txt' -Pattern 'MISSING_NEEDLE' -SimpleMatch -Encoding UTF8 -ErrorAction Stop",
+        "$ErrorActionPreference='Stop'; Select-String -LiteralPath '资料 空格/missing.txt' -Pattern 'MISSING_NEEDLE' -SimpleMatch -Encoding UTF8 -ErrorAction Stop",
+    ];
+    for (index,script) in scripts.into_iter().enumerate() {
+        let mut process = request(helper_binary(),Vec::<OsString>::new());
+        process.command=CommandSpec::Shell { shell:ShellKind::PowerShell,script:script.into() };
+        process.cwd=workspace.path().to_path_buf();
+        process.capability=CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+        let supervisor=ProcessSupervisor::new(SupervisorConfig::default());
+        let handle=supervisor.start(process).await.unwrap();
+        let ProcessOutcome::Exited { code,output,.. } = wait_for_terminal(&supervisor,&handle).await else {
+            panic!("the scoped read/search must settle");
+        };
+        match index {
+            0 => { assert_eq!(code,Some(0)); assert_eq!(output.text().as_bytes(),content.as_bytes()); }
+            1 => { assert_eq!(code,Some(0)); assert_eq!(output.text(),"needle-验收-42"); }
+            2 => { assert_eq!(code,Some(0)); assert!(output.text().is_empty()); }
+            _ => { assert_ne!(code,Some(0),"a missing file is not a successful empty search"); assert!(!output.text().is_empty(),"the error must remain visible"); }
+        }
+        assert_eq!(fs::read(&file).unwrap(),content.as_bytes());
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_cmd_c_preserves_a_quoted_workspace_path() {
+    let workspace = tempfile::Builder::new().prefix("命令 repo ").tempdir().unwrap();
+    fs::create_dir(workspace.path().join("资料 空格")).unwrap();
+    let content = b"CMD_QUOTED_PATH_185\r\n";
+    let file = workspace.path().join("资料 空格/样本.txt");
+    fs::write(&file, content).unwrap();
+    let mut process = request("cmd.exe", ["/d", "/c", "type \"资料 空格\\样本.txt\""].map(OsString::from));
+    process.cwd = workspace.path().to_path_buf();
+    process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("cmd starts");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, .. } = outcome else {
+        panic!("cmd should exit: {outcome:?}");
+    };
+    assert_eq!(code, Some(0), "cmd output: {}", output.text());
+    assert_eq!(output.text().as_bytes(), content);
+    assert_eq!(fs::read(file).unwrap(), content);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_powershell_autoloads_hash_cmdlet_under_managed_owner() {
+    let workspace = tempfile::Builder::new().prefix("任务 hash ").tempdir().unwrap();
+    fs::write(workspace.path().join("normal.txt"), b"fixture").unwrap();
+    let script = "$ErrorActionPreference = 'Stop'; (Get-FileHash -LiteralPath 'normal.txt' -Algorithm SHA256).Hash";
+    let mut process = request("powershell.exe", ["-NoProfile", "-Command", script].map(OsString::from));
+    process.cwd = workspace.path().to_path_buf();
+    process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("hash command starts");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, .. } = outcome else {
+        panic!("hash command should exit: {outcome:?}");
+    };
+    assert_eq!(code, Some(0), "hash cmdlet output: {}", output.text());
+    let hash = output.text().trim().to_owned();
+    assert_eq!(hash.len(), 64, "SHA-256 must actually be returned: {hash}");
+    assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
 }
 
 #[cfg(windows)]

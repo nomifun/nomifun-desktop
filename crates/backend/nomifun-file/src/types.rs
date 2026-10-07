@@ -70,6 +70,7 @@ pub struct FileMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentUpdateEvent {
     pub file_path: String,
+    /// Missing content requests reconciliation from disk; it is not empty text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     pub workspace: String,

@@ -421,6 +421,11 @@ unsafe fn register_observer(
             notifications.push(cf);
         }
     }
+    if notifications.is_empty() {
+        // A created observer without subscriptions cannot invalidate a cache.
+        CFRelease(obs as *const c_void);
+        return None;
+    }
     let src = AXObserverGetRunLoopSource(obs);
     if src.is_null() {
         CFRelease(obs as *const c_void);
@@ -439,11 +444,20 @@ unsafe fn register_observer(
 /// The last walk, kept so repeated `observe`s on an unchanged window re-serve
 /// instead of re-walking the tree.
 struct CachedWalk {
+    opts: ObserveOpts,
     entries: Vec<ElementEntry>,
     app_name: Option<String>,
     window_title: Option<String>,
     pid: Option<i32>,
     truncated: bool,
+}
+
+impl CachedWalk {
+    fn matches(&self, opts: &ObserveOpts) -> bool {
+        self.opts.pid == opts.pid
+            && self.opts.max_depth == opts.max_depth
+            && self.opts.node_budget == opts.node_budget
+    }
 }
 
 struct State {
@@ -502,7 +516,7 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
             && state.observer.is_some()
             && !state.dirty.load(Ordering::Relaxed)
         {
-            if let Some(c) = &state.cached {
+            if let Some(c) = state.cached.as_ref().filter(|c| c.matches(opts)) {
                 return Ok(Snapshot {
                     generation: state.current_gen,
                     entries: c.entries.clone(),
@@ -565,6 +579,7 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
 
         let text = format_entries(&entries);
         state.cached = Some(CachedWalk {
+            opts: opts.clone(),
             entries: entries.clone(),
             app_name: app_name.clone(),
             window_title: window_title.clone(),
@@ -601,12 +616,30 @@ fn do_invoke(
             })
         }
     };
-    if generation != state.current_gen {
-        return Err(A11yError::Stale(format!(
-            "ref [{r}] is from an older snapshot (the UI may have changed); re-run observe and \
-             use a fresh [ref]"
-        )));
-    }
+    let cached = state.cached.as_ref().ok_or_else(|| {
+        A11yError::Stale(format!(
+            "ref [{r}] has no retained snapshot; re-run observe before acting"
+        ))
+    })?;
+    let frontmost_observation = cached.opts.pid.is_none();
+    let current_frontmost_pid = if frontmost_observation {
+        unsafe {
+            let app = focused_app()?;
+            pid_of(app.ptr())
+        }
+    } else {
+        None
+    };
+    validate_invoke_snapshot(
+        r,
+        generation,
+        state.current_gen,
+        state.dirty.load(Ordering::Relaxed),
+        state.observer.is_some(),
+        frontmost_observation,
+        state.observed_pid,
+        current_frontmost_pid,
+    )?;
     let elem = state
         .registry
         .get(&r)
@@ -641,6 +674,45 @@ fn do_invoke(
             )))
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_invoke_snapshot(
+    r: u32,
+    generation: SnapshotGen,
+    current_generation: SnapshotGen,
+    dirty: bool,
+    observer_active: bool,
+    frontmost_observation: bool,
+    observed_pid: Option<i32>,
+    current_frontmost_pid: Option<i32>,
+) -> Result<(), A11yError> {
+    if generation != current_generation {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] is from an older snapshot (the UI may have changed); re-run observe and \
+             use a fresh [ref]"
+        )));
+    }
+    if dirty {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] was invalidated by an Accessibility window, focus, layout or value change; \
+             re-run observe before acting"
+        )));
+    }
+    if !observer_active {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] has no live Accessibility change observer; re-run observe and do not act \
+             on an unfenced snapshot"
+        )));
+    }
+    if frontmost_observation && current_frontmost_pid != observed_pid {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] belongs to pid {:?}, but the frontmost application is now pid {:?}; \
+             re-run observe before acting",
+            observed_pid, current_frontmost_pid
+        )));
+    }
+    Ok(())
 }
 
 fn do_focus(pid: i32) -> Result<Effect, A11yError> {
@@ -784,5 +856,100 @@ impl ActorHandle {
         self.send(Cmd::Focus(pid, tx))?;
         rx.recv()
             .map_err(|_| A11yError::Backend("AX actor dropped the reply".to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_walk_requires_the_same_observe_options() {
+        let cached = CachedWalk {
+            opts: ObserveOpts::default(),
+            entries: Vec::new(),
+            app_name: None,
+            window_title: None,
+            pid: Some(7),
+            truncated: false,
+        };
+        assert!(cached.matches(&ObserveOpts::default()));
+        for opts in [
+            ObserveOpts { max_depth: 1, ..Default::default() },
+            ObserveOpts { node_budget: 1, ..Default::default() },
+            ObserveOpts { pid: Some(7), ..Default::default() },
+        ] {
+            assert!(!cached.matches(&opts));
+        }
+    }
+
+    #[test]
+    fn invoke_rejects_dirty_unobserved_and_replaced_frontmost_snapshots() {
+        let validate = |dirty, observer_active, observed_pid, current_pid| {
+            validate_invoke_snapshot(
+                7,
+                SnapshotGen(3),
+                SnapshotGen(3),
+                dirty,
+                observer_active,
+                true,
+                observed_pid,
+                current_pid,
+            )
+        };
+        assert!(validate(true, true, Some(11), Some(11))
+            .unwrap_err()
+            .to_string()
+            .contains("invalidated"));
+        assert!(validate(false, false, Some(11), Some(11))
+            .unwrap_err()
+            .to_string()
+            .contains("no live Accessibility change observer"));
+        assert!(validate(false, true, Some(11), Some(12))
+            .unwrap_err()
+            .to_string()
+            .contains("frontmost application"));
+        assert!(validate(false, true, Some(11), None)
+            .unwrap_err()
+            .to_string()
+            .contains("frontmost application"));
+        assert!(validate(false, true, Some(11), Some(11)).is_ok());
+    }
+
+    #[test]
+    fn explicit_pid_snapshot_ignores_other_frontmost_app_but_not_generation_or_dirty_state() {
+        assert!(validate_invoke_snapshot(
+            7,
+            SnapshotGen(3),
+            SnapshotGen(3),
+            false,
+            true,
+            false,
+            Some(11),
+            None,
+        )
+        .is_ok());
+        assert!(validate_invoke_snapshot(
+            7,
+            SnapshotGen(2),
+            SnapshotGen(3),
+            false,
+            true,
+            false,
+            Some(11),
+            None,
+        )
+        .is_err());
+        assert!(validate_invoke_snapshot(
+            7,
+            SnapshotGen(3),
+            SnapshotGen(3),
+            true,
+            true,
+            false,
+            Some(11),
+            None,
+        )
+        .is_err());
     }
 }

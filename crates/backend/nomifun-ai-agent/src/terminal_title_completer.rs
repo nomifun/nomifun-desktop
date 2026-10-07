@@ -18,10 +18,6 @@ use nomifun_terminal::TerminalTitleCompleter;
 
 use crate::factory::provider_config::{one_shot_completion, resolve_provider_config, user_message};
 
-/// The reply is a single short line; a tiny budget keeps the call cheap and
-/// prevents a runaway model from emitting a paragraph instead of a title.
-const TITLE_MAX_TOKENS: u32 = 64;
-
 /// System prompt: produce ONE short work-content title — no quotes, no trailing
 /// punctuation, no explanation — in the same language as the input.
 const TITLE_SYSTEM: &str = "\
@@ -68,6 +64,12 @@ impl TerminalTitleCompleter for LiveTerminalTitleCompleter {
             &self.workspace,
         )
         .await?;
-        one_shot_completion(&cfg, TITLE_SYSTEM, vec![user_message(content)], TITLE_MAX_TOKENS).await
+        one_shot_completion(
+            &cfg,
+            TITLE_SYSTEM,
+            vec![user_message(content)],
+            None,
+        )
+        .await
     }
 }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Error, History, Loading, Magic, MenuFold, Plus, Robot } from '@icon-park/react';
+import { History, Loading, Magic, MenuFold, Plus, Robot } from '@icon-park/react';
 import { Button, Tooltip } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,6 +13,7 @@ import CreativeStudioAgentComposer from './CreativeStudioAgentComposer';
 import CreativeStudioAgentMessages from './CreativeStudioAgentMessages';
 import styles from './CreativeStudioAgentPanel.module.css';
 import type { CreativeStudioAgentPanelProps } from './types';
+import ConversationErrorNote from '@/renderer/pages/conversation/Messages/components/ConversationErrorNote';
 
 const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props) => {
   const { t } = useTranslation();
@@ -39,24 +40,16 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
 
     if (props.loadState === 'failed') {
       return (
-        <div className={styles.state} data-agent-panel-state='failed' role='alert'>
-          <Error theme='outline' size='24' />
-          <strong>
-            {t('creativeStudio.agent.loadErrorTitle', {
-              defaultValue: 'Could not load Agent',
-            })}
-          </strong>
-          <span>
-            {props.errorMessage ??
-              t('creativeStudio.agent.loadErrorFallback', {
-                defaultValue: 'Conversation loading failed. Try again.',
-              })}
-          </span>
-          {props.onRetryLoad && (
-            <Button size='small' onClick={props.onRetryLoad}>
+        <div className={styles.state} data-agent-panel-state='failed'>
+          <ConversationErrorNote
+            error={{ message: props.errorMessage ?? '', code: 'CONVERSATION_PREPARATION_FAILED' }}
+            rawDetail={props.errorMessage}
+            sessionId={props.conversationId}
+            feedback={false}
+            recoveryAction={props.onRetryLoad ? <button type='button' className='message-error-note__retry' onClick={props.onRetryLoad}>
               {t('creativeStudio.agent.retry', { defaultValue: 'Retry' })}
-            </Button>
-          )}
+            </button> : undefined}
+          />
         </div>
       );
     }
@@ -121,6 +114,7 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
 
     return (
       <CreativeStudioAgentMessages
+        conversationId={props.conversationId}
         messages={props.messages}
         proposals={props.proposals}
         proposalApplyDisabled={props.isRunning || props.disabled === true}
@@ -154,6 +148,11 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
           </span>
         </div>
         <div className={styles.headerActions}>
+          {props.agentSelector ? (
+            <div className={styles.agentEntry} data-agent-entry>
+              {props.agentSelector}
+            </div>
+          ) : null}
           <Tooltip
             content={
               props.view === 'history'
@@ -229,9 +228,13 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
       <section className={styles.body}>{renderBody()}</section>
 
       {props.loadState === 'ready' && props.errorMessage ? (
-        <div className={styles.inlineError} data-agent-panel-error role='alert'>
-          <Error theme='outline' size='15' />
-          <span>{props.errorMessage}</span>
+        <div className='mx-8px mb-8px' data-agent-panel-error>
+          <ConversationErrorNote
+            error={{ message: props.errorMessage, code: 'CONVERSATION_SEND_FAILED' }}
+            rawDetail={props.errorMessage}
+            sessionId={props.conversationId}
+            feedback={false}
+          />
         </div>
       ) : null}
 

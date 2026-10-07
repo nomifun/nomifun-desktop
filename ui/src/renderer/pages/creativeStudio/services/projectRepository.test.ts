@@ -13,6 +13,7 @@ import {
   CreativeProjectRepositoryError,
 } from './projectRepository';
 import {
+  preloadCreativeProject,
   sortCreativeProjectSummaries,
   upsertCreativeProjectSummary,
 } from './useCreativeProjects';
@@ -147,6 +148,30 @@ describe('legacy Creative Studio repository adapter', () => {
 });
 
 describe('legacy hook cache helpers', () => {
+  test('deduplicates an intent preload before the Canvas route mounts', async () => {
+    const preloadId = '0198f8bb-8424-7b3d-8f17-bc6a1676f199';
+    const detail = {
+      project: { ...project, projectId: preloadId },
+      document: createEmptyCreativeProjectDocument(preloadId),
+    };
+    let loads = 0;
+    const repository = createCreativeProjectRepository(
+      apiStub({
+        getProject: async () => {
+          loads += 1;
+          return detail;
+        },
+      })
+    );
+
+    const first = preloadCreativeProject(preloadId, repository);
+    const second = preloadCreativeProject(preloadId, repository);
+
+    expect(first).toBe(second);
+    expect(await first).toEqual(detail);
+    expect(loads).toBe(1);
+  });
+
   test('sorts newest first and upserts by authoritative project id', () => {
     const older = { ...project, projectId: '0198f8bb-8424-7b3d-8f17-bc6a1676f113', updatedAt: 100 };
     expect(sortCreativeProjectSummaries([older, project]).map((item) => item.projectId)).toEqual([

@@ -50,7 +50,14 @@ async fn stat_and_list_work() {
     // /tmp always has entries in a running system; at minimum it should not error.
     let _ = entries;
     let canon = fs.canonicalize("/tmp/../tmp").await.expect("canonicalize");
-    assert_eq!(canon, "/tmp", "canonicalize should resolve to /tmp, got {canon}");
+    let expected = std::fs::canonicalize("/tmp")
+        .expect("local /tmp must resolve")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        canon, expected,
+        "SFTP canonicalize must match the host's physical /tmp path"
+    );
 }
 
 /// An atomic write starts by creating a sibling temp file, so a missing *parent

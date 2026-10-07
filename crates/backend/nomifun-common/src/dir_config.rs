@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file::{publish_new_file, replace_file, write_new_and_publish};
 use crate::error::AppError;
 
 /// Config file under the data dir holding pre-boot directory overrides.
@@ -268,58 +269,7 @@ fn write_atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .unwrap_or("dir-config"),
         uuid::Uuid::now_v7()
     ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file(&temp, path)?;
-        sync_parent_directory(parent)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::fs::rename(source, target)
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    write_new_and_publish(&temp, path, bytes, replace_file)
 }
 
 /// Atomically publish a minimal work-dir config only when no active config
@@ -346,164 +296,12 @@ pub fn install_work_dir_if_absent(
         ".{DIR_CONFIG_FILE}.repair-{}",
         uuid::Uuid::now_v7()
     ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
-        use std::io::Write;
-        file.write_all(&json)?;
-        file.sync_all()?;
-        drop(file);
-        publish_new_file(&temp, &path)?;
-        sync_parent_directory(data_dir)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result.map_err(|error| {
+    write_new_and_publish(&temp, &path, &json, publish_new_file).map_err(|error| {
         AppError::Internal(format!(
             "atomically install recovered dir-config {}: {error}",
             path.display()
         ))
     })
-}
-
-#[cfg(target_os = "macos")]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "target path contains a NUL byte",
-            )
-        },
-    )?;
-    if unsafe {
-        libc::renamex_np(
-            source.as_ptr(),
-            target.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "target path contains a NUL byte",
-            )
-        },
-    )?;
-    if unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "macos"))
-))]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(source, target)?;
-    std::fs::remove_file(source)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(source, target)?;
-    std::fs::remove_file(source)
-}
-
-#[cfg(windows)]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    } != 0
-    {
-        return Ok(());
-    }
-
-    let error = std::io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(80 | 183)) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            error,
-        ))
-    } else {
-        Err(error)
-    }
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
-    OpenOptions::new().read(true).open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -515,6 +313,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nomifun-dircfg-{tag}-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn atomic_publish_only_cleans_up_its_own_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("staging");
+        let target = dir.path().join("config");
+        std::fs::write(&temp, b"other writer").unwrap();
+        let error = write_new_and_publish(&temp, &target, b"new", publish_new_file).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&temp).unwrap(), b"other writer");
+        assert!(!target.exists());
+
+        let owned_temp = dir.path().join("owned-staging");
+        std::fs::write(&target, b"existing config").unwrap();
+        assert!(write_new_and_publish(&owned_temp, &target, b"new", publish_new_file).is_err());
+        assert!(!owned_temp.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing config");
     }
 
     #[test]

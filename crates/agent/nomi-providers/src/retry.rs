@@ -40,10 +40,6 @@ where
     }
 }
 
-async fn emit_if_open(tx: &mpsc::Sender<LlmEvent>, event: LlmEvent) -> bool {
-    matches!(until_receiver_closed(tx, tx.send(event)).await, Some(Ok(())))
-}
-
 /// Retry bounded initial failures before any response is exposed locally:
 /// connection failures and transient gateway/service 500/502/503/504
 /// responses. The upstream may still have spent work before returning an
@@ -141,18 +137,6 @@ pub async fn send_and_check(
     Ok(response)
 }
 
-/// Sleep with exponential backoff and log the retry attempt.
-/// Returns the next backoff duration.
-pub async fn backoff_sleep(attempt: u32, current_backoff: Duration) -> Duration {
-    tracing::warn!(
-        attempt,
-        max = MAX_STREAM_RETRIES,
-        "retrying provider stream after an empty retryable failure"
-    );
-    tokio::time::sleep(current_backoff).await;
-    (current_backoff * 2).min(MAX_BACKOFF)
-}
-
 /// Cancellation-aware retry backoff. The downstream close signal interrupts
 /// the timer, so a timed-out consumer never waits out a provider retry delay.
 async fn backoff_sleep_until_closed(
@@ -221,14 +205,14 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut, R>(
         StreamOutcome::Ok => return,
         StreamOutcome::FailedPartial(e) => {
             // Content already emitted — replaying would duplicate it.
-            emit_if_open(tx, LlmEvent::Error(e.to_string())).await;
+            let _ = tx.send(LlmEvent::Error(e.to_string())).await;
             return;
         }
         StreamOutcome::FailedEmpty(e) => e,
     };
 
     if !initial_err.is_retryable() {
-        emit_if_open(tx, LlmEvent::Error(initial_err.to_string())).await;
+        let _ = tx.send(LlmEvent::Error(initial_err.to_string())).await;
         return;
     }
 
@@ -286,7 +270,7 @@ pub async fn finish_stream_with_retry<S, SFut, P, PFut, R>(
             status = status.unwrap_or_default(),
             "provider empty-stream retry ended with an error"
         );
-        emit_if_open(tx, LlmEvent::Error(err.to_string())).await;
+        let _ = tx.send(LlmEvent::Error(err.to_string())).await;
     }
 }
 
@@ -626,29 +610,17 @@ mod tests {
         assert!(matches!(e, ProviderError::Parse(_)));
     }
 
-    // --- backoff_sleep tests ---
-
-    #[tokio::test]
-    async fn test_backoff_sleep_doubles_duration() {
-        tokio::time::pause();
-
-        let next = backoff_sleep(1, Duration::from_secs(1)).await;
-        assert_eq!(next, Duration::from_secs(2));
-
-        let next = backoff_sleep(2, Duration::from_secs(4)).await;
-        assert_eq!(next, Duration::from_secs(8));
-    }
-
-    #[tokio::test]
-    async fn test_backoff_sleep_caps_at_max() {
-        tokio::time::pause();
-
-        // 10s * 2 = 20s, but MAX_BACKOFF is 15s
-        let next = backoff_sleep(1, Duration::from_secs(10)).await;
-        assert_eq!(next, Duration::from_secs(15));
-
-        // Already at max
-        let next = backoff_sleep(2, Duration::from_secs(15)).await;
-        assert_eq!(next, Duration::from_secs(15));
+    #[tokio::test(start_paused = true)]
+    async fn active_retry_backoff_doubles_and_caps_at_max() {
+        let (tx, _rx) = mpsc::channel(1);
+        for (seconds, next_seconds) in [(1, 2), (4, 8), (10, 15), (15, 15)] {
+            let start = tokio::time::Instant::now();
+            let current = Duration::from_secs(seconds);
+            assert_eq!(
+                backoff_sleep_until_closed(&tx, 1, current).await,
+                Some(Duration::from_secs(next_seconds))
+            );
+            assert_eq!(start.elapsed(), current);
+        }
     }
 }

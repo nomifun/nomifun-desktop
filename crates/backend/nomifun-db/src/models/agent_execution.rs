@@ -7,7 +7,6 @@ pub struct AgentExecutionRow {
     pub user_id: String,
     pub goal: String,
     pub status: String,
-    pub plan_gate: String,
     pub adaptation_policy: String,
     pub decision_policy: String,
     pub delegation_policy: String,
@@ -30,9 +29,12 @@ pub struct AgentExecutionParticipantRow {
     pub participant_id: String,
     pub execution_id: String,
     pub source_agent_id: String,
+    /// Immutable Agent launch snapshot. The snapshot is the only persisted
+    /// runtime projection; provider/model columns remain the materialized
+    /// execution binding.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,
@@ -145,8 +147,9 @@ pub struct AgentExecutionEventRow {
     pub published_at: Option<TimestampMs>,
 }
 
-/// Owner-facing attempt view. `conversation_id` is derived from the active
-/// attempt link; it is intentionally absent from the physical attempt table.
+/// Owner-facing attempt view. `conversation_id` is derived from the typed
+/// `attempt` or `automation` link; it is intentionally absent from the
+/// physical attempt table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionAttemptDetailRow {
     pub attempt: AgentExecutionAttemptRow,
@@ -154,7 +157,7 @@ pub struct AgentExecutionAttemptDetailRow {
 }
 
 /// Owner-facing step view. Current attempt data is derived by attempt_no and
-/// the attempt conversation is derived from `conversation_execution_links`.
+/// the concrete AgentSession is derived from `conversation_execution_links`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionStepDetailRow {
     pub step: AgentExecutionStepRow,

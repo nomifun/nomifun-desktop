@@ -28,7 +28,7 @@ describe('SshHostStatusPill structure', () => {
     expect(pillSource.includes('text-12px')).toBe(true);
     expect(pillSource.includes("data-testid='ssh-host-status-pill'")).toBe(true);
     // A disabled Arco button swallows pointer events, so the tooltip needs a
-    // wrapper span (same treatment as AutoWork / IDMM / Knowledge).
+    // wrapper span (same treatment as other capability controls).
     expect(pillSource.includes("<span className='inline-flex'>{button}</span>")).toBe(true);
   });
 
@@ -110,8 +110,8 @@ describe('SshHostStatusPill structure', () => {
 
   test('mounted in the existing nomi headerExtra beside the cron manager', () => {
     expect(conversationSource.includes('<SshHostStatusPill')).toBe(true);
-    expect(conversationSource.includes('ssh_host_id')).toBe(true);
-    expect(conversationSource.includes('sshHostIdOf(conversation)')).toBe(true);
+    expect(conversationSource.includes('<SshHostStatusPill conversation={conversation}')).toBe(true);
+    expect(pillSource.includes('conversationSshHostId(conversation)')).toBe(true);
   });
 
   test('the shared chat layout was not touched to make room for this pill', () => {

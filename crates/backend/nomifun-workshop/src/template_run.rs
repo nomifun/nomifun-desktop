@@ -1028,7 +1028,7 @@ mod tests {
                         task: CreativeTemplateTextTask::Chat,
                     }),
                     instruction: "保持系列一致".into(),
-                    max_tokens: 4096,
+                    max_tokens: Some(4096),
                 },
             },
             CreativeTemplateStep::GenerateImages {

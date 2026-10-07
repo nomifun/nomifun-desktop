@@ -115,7 +115,7 @@ async fn create_execution_from_template(
     let Json(request) = json_body(body)?;
     let actor = AgentExecutionActor::user(user.id.clone());
     let execution = engine
-        .create_from_template(&user.id, &actor, execution_template_id.as_str(), request)
+        .create_from_template_http(&user.id, &actor, execution_template_id.as_str(), request)
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(execution))))
 }

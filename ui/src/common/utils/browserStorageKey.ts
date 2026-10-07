@@ -9,9 +9,11 @@ import type {
   EntityKind,
   SessionTarget,
 } from '@/common/types/ids';
-import { parseEntityId } from '@/common/types/ids';
+import { CANONICAL_UUID_V7 } from '@/common/types/ids';
+import { uuidv7 } from './uuidv7';
 
 export const BROWSER_STORAGE_SCHEMA_VERSION = 1 as const;
+export const BROWSER_STORAGE_GENERATION_STORAGE_KEY = 'nomifun_browser_storage_generation_v1';
 
 export type BrowserStorageEntityKind = EntityKind;
 
@@ -26,8 +28,25 @@ export type BrowserStorageFeature =
   | 'cron-unread'
   | (string & {});
 
+export type BrowserStoragePersistence = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+
 const KEY_ROOT = 'nomifun';
 let storageGeneration: string | null = null;
+let provisionalStorageGeneration: string | null = null;
+let agentDataGeneration: number | null = null;
+
+/** Initialize only from the authenticated current backend's canonical schema. */
+export function initializeAgentBrowserStorageGeneration(value: unknown): void {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new TypeError('Agent data generation must be a positive integer from system info');
+  }
+  agentDataGeneration = value as number;
+}
+
+function agentGenerationSegment(): string {
+  if (agentDataGeneration === null) throw new Error('Agent browser storage generation has not been initialized');
+  return encodeSegment(`agent-data:${agentDataGeneration}`);
+}
 
 /**
  * Sets the identity of the currently mounted backend dataset.
@@ -36,13 +55,103 @@ let storageGeneration: string | null = null;
  * bootstrap. Keeping the generation in every entity-scoped key prevents
  * browser state surviving a reset or restore from binding to a new graph.
  */
-export function setBrowserStorageGeneration(value: string): void {
-  try {
-    parseEntityId('user', value);
-  } catch {
+export function setBrowserStorageGeneration(value: unknown): void {
+  if (!isCanonicalBrowserStorageGeneration(value)) {
     throw new TypeError('storage generation must be a canonical lowercase UUIDv7 string');
   }
   storageGeneration = value;
+}
+
+/**
+ * Storage generation is a dataset identity, not a user identity. Keep its
+ * runtime check explicit so a future change to another entity parser cannot
+ * loosen this boundary accidentally.
+ */
+export function isCanonicalBrowserStorageGeneration(value: unknown): value is string {
+  return typeof value === 'string' && CANONICAL_UUID_V7.test(value);
+}
+
+function defaultBrowserStorage(): BrowserStoragePersistence | undefined {
+  try {
+    return typeof localStorage === 'undefined' ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function readPersistedStorageGeneration(storage: BrowserStoragePersistence | undefined): string | null {
+  if (!storage) return null;
+
+  try {
+    const value = storage.getItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY);
+    if (value === null) return null;
+    if (isCanonicalBrowserStorageGeneration(value)) return value;
+
+    // Do not let a legacy or corrupted value poison the next bootstrap.
+    try {
+      storage.removeItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY);
+    } catch {
+      // Storage cleanup is best effort; the generated value still remains safe.
+    }
+  } catch {
+    // Storage can be unavailable in a sandboxed or opaque-origin webview.
+  }
+
+  return null;
+}
+
+function persistStorageGeneration(storage: BrowserStoragePersistence | undefined, value: string): void {
+  if (!storage) return;
+  try {
+    storage.setItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY, value);
+  } catch {
+    // Browser persistence is an optimization; in-memory initialization remains valid.
+  }
+}
+
+/**
+ * Initialize the generation used by browser-local state during renderer
+ * bootstrap.
+ *
+ * The backend value is authoritative whenever it is valid. A malformed or
+ * temporarily unavailable backend value must not crash the renderer before
+ * the backend can finish its bootstrap, so a previously persisted canonical
+ * value is used as a provisional fallback. If no usable value exists, mint a
+ * fresh UUIDv7 with WebCrypto and persist it when browser storage is usable.
+ *
+ * `setBrowserStorageGeneration` remains strict; this function never normalizes
+ * or accepts a non-canonical value.
+ */
+export function initializeBrowserStorageGeneration(
+  backendValue: unknown,
+  storage: BrowserStoragePersistence | undefined = defaultBrowserStorage(),
+): string {
+  if (isCanonicalBrowserStorageGeneration(backendValue)) {
+    setBrowserStorageGeneration(backendValue);
+    provisionalStorageGeneration = null;
+    persistStorageGeneration(storage, backendValue);
+    return backendValue;
+  }
+
+  // Keep one provisional generation for this renderer lifetime when browser
+  // persistence is unavailable or the backend is still bootstrapping.
+  if (!storage && provisionalStorageGeneration) {
+    setBrowserStorageGeneration(provisionalStorageGeneration);
+    return provisionalStorageGeneration;
+  }
+
+  const persisted = readPersistedStorageGeneration(storage);
+  if (persisted) {
+    setBrowserStorageGeneration(persisted);
+    provisionalStorageGeneration = persisted;
+    return persisted;
+  }
+
+  const generated = uuidv7();
+  setBrowserStorageGeneration(generated);
+  provisionalStorageGeneration = generated;
+  persistStorageGeneration(storage, generated);
+  return generated;
 }
 
 export function getBrowserStorageGeneration(): string {
@@ -61,6 +170,18 @@ export function browserStorageGenerationKey(feature: BrowserStorageFeature): str
     encodeSegment(feature),
   ].join('|');
 }
+
+/** Agent drafts and launch state also expire at an Agent-only clean cut. */
+export function agentBrowserStorageGenerationKey(feature: BrowserStorageFeature): string {
+  return `${browserStorageGenerationKey(feature)}|${agentGenerationSegment()}`;
+}
+
+const AGENT_ENTITIES = new Set<BrowserStorageEntityKind>([
+  'conversation', 'agent-session', 'agent-preset', 'agent', 'preset', 'preset-tag',
+  'resolved-snapshot', 'message', 'remote-binding', 'execution', 'execution-participant',
+  'execution-step', 'execution-attempt', 'execution-template', 'execution-template-participant',
+  'conversation-artifact', 'persisted-artifact', 'creation-task', 'channel-session',
+]);
 
 function encodeSegment(value: string): string {
   return `${value.length}:${value}`;
@@ -84,14 +205,16 @@ export function browserStorageKey(
   entityId: string
 ): string {
   const generation = getBrowserStorageGeneration();
-  return [
+  const segments = [
     KEY_ROOT,
     `v${BROWSER_STORAGE_SCHEMA_VERSION}`,
     encodeSegment(generation),
     encodeSegment(feature),
     encodeSegment(entityKind),
     encodeSegment(String(entityId)),
-  ].join('|');
+  ];
+  if (AGENT_ENTITIES.has(entityKind) || feature === 'companion-turn-delivery') segments.push(agentGenerationSegment());
+  return segments.join('|');
 }
 
 export function sessionStorageKey(feature: BrowserStorageFeature, target: SessionTarget): string {

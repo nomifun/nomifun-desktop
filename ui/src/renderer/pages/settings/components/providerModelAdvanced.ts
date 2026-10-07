@@ -4,18 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ModelTask } from '@/common/protocolBindings/ModelTask';
-import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import { MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
+import type { ModelTask } from '@/common/protocolBindings/ModelTask';
+import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource';
+import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
 import type {
-  EndpointRootShape,
-  ModelProtocolManifestResponse,
-  ProtocolDescriptor,
-  ProtocolEndpointDescriptor,
-  ProtocolRecommendation,
+EndpointRootShape,
+ModelProtocolManifestResponse,
+ProtocolDescriptor,
+ProtocolEndpointDescriptor
 } from '@/common/types/provider/modelProtocolManifest';
-import type { ProviderModelCapabilityInput as CanonicalProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
 import type { ProviderConnectionInput as CanonicalProviderConnectionInput } from '@/common/types/provider/providerConnection';
+import type { ProviderModelCapabilityInput as CanonicalProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
+import {
+  isSessionReasoningEffort,
+  protocolSupportsReasoningEffort,
+  reasoningEffortsForProtocol,
+  type SessionReasoningEffort,
+} from '@/common/types/reasoningEffort';
 
 /** The endpoint fields owned by a task capability on the wire. */
 export const CAPABILITY_ENDPOINT_FIELDS = [
@@ -33,9 +39,7 @@ export const isCapabilityEndpointField = (value: string): value is CapabilityEnd
 /** UI code consumes the backend-owned manifest types without redefining them. */
 export type CapabilityEndpointDescriptor = ProtocolEndpointDescriptor;
 export type CapabilityProtocolDescriptor = ProtocolDescriptor;
-export type CapabilityProtocolRecommendation = ProtocolRecommendation;
 export type ModelProtocolManifest = ModelProtocolManifestResponse;
-export type CapabilityRootShape = EndpointRootShape;
 
 export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolManifest>>;
 
@@ -43,6 +47,8 @@ export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolMa
 export interface ModelCapabilityDraft {
   task: ModelTask;
   traits: ModelTrait[];
+  /** UI-only ownership: automatic catalog routes may change with model selection. */
+  routeSource: 'automatic' | 'user' | 'persisted';
   /**
    * UI-only ownership for protocol-dependent fields. Runtime never sees this
    * value: it exists so an async recommendation may update its own previous
@@ -60,29 +66,49 @@ export interface ModelCapabilityDraft {
   providerParamsJson: string;
   contextLimit?: number;
   outputLimit?: number;
+  /** Includes an explicit choice to remove a limit and use provider defaults. */
+  contextLimitSource?: 'user';
+  outputLimitSource?: 'user';
+  compactionThresholdPct?: number;
 }
 
 export type ModelCapabilityDraftPatch = Partial<
-  Omit<ModelCapabilityDraft, 'task' | 'transportSource'>
+  Omit<ModelCapabilityDraft, 'task' | 'routeSource' | 'transportSource'>
 >;
 
 export interface ModelDefinitionDraft {
   model: string;
   displayName?: string;
   capabilities: ModelCapabilityDraft[];
+  /** UI-only catalog evidence; an explicit acknowledgement never changes a call route. */
+  catalogTaskConflict?: {
+    model: string;
+    configuredTasks: ModelTask[];
+    declaredTasks: ModelTask[];
+    acknowledged: boolean;
+  };
 }
+
+export type CatalogTasksSource = ModelTaskSource;
 
 export interface CatalogCapabilitySuggestion {
   model: string;
   displayName?: string;
   tasks: ModelTask[];
+  /** Missing provenance and model-name heuristics cannot establish a call purpose. */
+  tasksSource?: CatalogTasksSource;
   traits: ModelTrait[];
   /** Context window the provider's catalog declares, when it declares one. */
   contextLimit?: number;
+  /** Output window explicitly declared by the provider, never a generic fallback. */
+  outputLimit?: number;
+  contextLimitKind?: 'input_only' | 'combined';
 }
 
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
 export type ProviderConnectionInput = CanonicalProviderConnectionInput;
+export type ModelReasoningEffort = SessionReasoningEffort;
+export { protocolSupportsReasoningEffort, reasoningEffortsForProtocol };
 
 /** Persisted connection metadata used while resolving a capability. */
 export interface ProviderConnectionDescriptor {
@@ -99,11 +125,14 @@ export type CapabilityValidationError =
   | 'manifest_unavailable'
   | 'protocol_required'
   | 'protocol_not_registered'
+  | 'protocol_task_mismatch'
+  | 'catalog_task_conflict'
   | 'auth_scheme_incompatible'
   | 'connection_role_required'
   | 'connection_missing'
   | 'base_url_required'
   | 'output_ceiling_required'
+  | 'invalid_token_limit'
   | 'cross_origin_consent_required'
   | 'invalid_provider_params';
 
@@ -160,6 +189,7 @@ export const isDuplicateModelId = (value: string, existing: readonly string[]): 
 export const emptyCapabilityDraft = (task: ModelTask): ModelCapabilityDraft => ({
   task,
   traits: [],
+  routeSource: 'automatic',
   transportSource: 'blank',
   protocol: '',
   connectionRole: 'default',
@@ -172,7 +202,110 @@ export const emptyCapabilityDraft = (task: ModelTask): ModelCapabilityDraft => (
   providerParamsJson: '',
   contextLimit: undefined,
   outputLimit: undefined,
+  compactionThresholdPct: undefined,
 });
+
+/** A dedicated task entry is explicit intent; a generic entry has no default purpose. */
+export const createModelDefinitionDraft = (initialTask?: ModelTask): ModelDefinitionDraft => ({
+  model: '',
+  capabilities: initialTask ? [{ ...emptyCapabilityDraft(initialTask), routeSource: 'user' }] : [],
+});
+
+/** A newly typed ID has no catalog evidence; keep only purposes the user already chose. */
+export const changeModelDefinitionId = (
+  definition: ModelDefinitionDraft,
+  model: string
+): ModelDefinitionDraft => {
+  if (normalizeModelId(model) === normalizeModelId(definition.model)) return { ...definition, model };
+  return {
+    model,
+    capabilities: definition.capabilities.filter((capability) => capability.routeSource !== 'automatic'),
+  };
+};
+
+export const catalogTasksAreVerified = (suggestion: CatalogCapabilitySuggestion): boolean =>
+  suggestion.tasksSource === 'provider_declared' || suggestion.tasksSource === 'official_documentation';
+
+/** An incomplete catalog remains advisory, so a manual route can be acknowledged and kept. */
+export const catalogTaskConflicts = (
+  definition: ModelDefinitionDraft,
+  suggestion: CatalogCapabilitySuggestion
+): ModelTask[] =>
+  catalogTasksAreVerified(suggestion) && suggestion.tasks.length > 0
+    ? [...new Set(definition.capabilities.map((capability) => capability.task))].filter(
+        (task) => !suggestion.tasks.includes(task)
+      )
+    : [];
+
+/** Ignore stale catalog evidence and invalidate acknowledgement when purposes change. */
+export const getCatalogTaskConflict = (
+  definition: ModelDefinitionDraft
+): ModelDefinitionDraft['catalogTaskConflict'] => {
+  const conflict = definition.catalogTaskConflict;
+  if (!conflict || normalizeModelId(conflict.model) !== normalizeModelId(definition.model)) return undefined;
+  const configuredTasks = [...new Set(definition.capabilities.map((capability) => capability.task))].filter(
+    (task) => !conflict.declaredTasks.includes(task)
+  );
+  if (configuredTasks.length === 0) return undefined;
+  const samePurposes = configuredTasks.length === conflict.configuredTasks.length &&
+    configuredTasks.every((task) => conflict.configuredTasks.includes(task));
+  return { ...conflict, configuredTasks, acknowledged: conflict.acknowledged && samePurposes };
+};
+
+export const acknowledgeCatalogTaskConflict = (definition: ModelDefinitionDraft): ModelDefinitionDraft => {
+  const conflict = getCatalogTaskConflict(definition);
+  return conflict ? { ...definition, catalogTaskConflict: { ...conflict, acknowledged: true } } : definition;
+};
+
+const sameTaskSet = (left: readonly ModelTask[], right: readonly ModelTask[]): boolean => {
+  const leftTasks = new Set(left);
+  const rightTasks = new Set(right);
+  return leftTasks.size === rightTasks.size && [...leftTasks].every((task) => rightTasks.has(task));
+};
+
+/**
+ * Reconcile evidence for a manually typed ID or an asynchronously loaded
+ * catalog without choosing a purpose or importing any model configuration.
+ * Acknowledgement belongs to the exact model and both task sets, never to a
+ * stale catalog response or a different configured call purpose.
+ */
+export const withCatalogTaskEvidence = (
+  definition: ModelDefinitionDraft,
+  suggestion?: CatalogCapabilitySuggestion
+): ModelDefinitionDraft => {
+  if (
+    !suggestion ||
+    !catalogTasksAreVerified(suggestion) ||
+    suggestion.tasks.length === 0 ||
+    normalizeModelId(definition.model) !== normalizeModelId(suggestion.model)
+  ) return definition;
+
+  const configuredTasks = catalogTaskConflicts(definition, suggestion);
+  if (configuredTasks.length === 0) {
+    if (!definition.catalogTaskConflict) return definition;
+    const { catalogTaskConflict: _previousEvidence, ...reconciled } = definition;
+    return reconciled;
+  }
+
+  const declaredTasks = [...new Set(suggestion.tasks)];
+  const previous = definition.catalogTaskConflict;
+  if (
+    previous &&
+    normalizeModelId(previous.model) === normalizeModelId(definition.model) &&
+    sameTaskSet(previous.configuredTasks, configuredTasks) &&
+    sameTaskSet(previous.declaredTasks, declaredTasks)
+  ) return definition;
+
+  return {
+    ...definition,
+    catalogTaskConflict: {
+      model: normalizeModelId(suggestion.model),
+      configuredTasks,
+      declaredTasks,
+      acknowledged: false,
+    },
+  };
+};
 
 export const capabilityDraftFromResponse = (capability: {
   task: ModelTask;
@@ -188,9 +321,11 @@ export const capabilityDraftFromResponse = (capability: {
   provider_params?: unknown;
   context_limit?: number;
   output_limit?: number;
+  compaction_threshold_pct?: number;
 }): ModelCapabilityDraft => ({
   task: capability.task,
   traits: capability.traits ?? [],
+  routeSource: 'persisted',
   transportSource: 'persisted',
   protocol: capability.protocol,
   connectionRole: capability.connection_role,
@@ -206,6 +341,7 @@ export const capabilityDraftFromResponse = (capability: {
       : '',
   contextLimit: capability.context_limit,
   outputLimit: capability.output_limit,
+  compactionThresholdPct: capability.compaction_threshold_pct,
 });
 
 /** Append one task without disturbing any existing task draft. */
@@ -215,7 +351,7 @@ export const addCapabilityTask = (
 ): ModelCapabilityDraft[] =>
   capabilities.some((capability) => capability.task === task)
     ? [...capabilities]
-    : [...capabilities, emptyCapabilityDraft(task)];
+    : [...capabilities, { ...emptyCapabilityDraft(task), routeSource: 'user' }];
 
 /** Remove exactly one task while preserving every remaining task draft. */
 export const removeCapabilityTask = (
@@ -223,46 +359,13 @@ export const removeCapabilityTask = (
   task: ModelTask
 ): ModelCapabilityDraft[] => capabilities.filter((capability) => capability.task !== task);
 
-/**
- * Would removing this task throw away work the user cannot get back?
- *
- * A task's capability IS its configuration, so removing the task deletes its
- * protocol, endpoints, traits and limits with it. That is fine for a draft the
- * user just added and never touched — nagging there would be noise — but not for
- * one they configured, or one loaded from the server.
- *
- * `'recommendation'` transport deliberately does not count: it was filled in
- * automatically the moment the task was added, so it is not the user's work.
- */
-export const capabilityHasConfiguration = (capability: ModelCapabilityDraft): boolean =>
-  capability.transportSource === 'user' ||
-  capability.transportSource === 'persisted' ||
-  capability.traits.length > 0 ||
-  capability.contextLimit !== undefined ||
-  capability.outputLimit !== undefined ||
-  capability.allowCrossOriginCredentials ||
-  Boolean(capability.baseUrlOverride.trim()) ||
-  Boolean(capability.endpoint.trim()) ||
-  Boolean(capability.pollEndpoint.trim()) ||
-  Boolean(capability.contentEndpoint.trim()) ||
-  Boolean(capability.realtimeEndpoint.trim()) ||
-  Boolean(capability.providerParamsJson.trim());
-
 const CATALOG_TRAITS_BY_TASK: Readonly<Record<ModelTask, readonly ModelTrait[]>> = {
-  chat: [
-    'vision_input',
-    'video_input',
-    'audio_input',
-    'audio_output',
-    'streaming',
-    'function_calling',
-    'reasoning',
-    'web_search',
-  ],
-  realtime_conversation: ['audio_input', 'audio_output', 'realtime', 'streaming'],
+  chat: ['vision_input', 'video_input', 'audio_input', 'web_search'],
+  realtime_conversation: [],
   image_generation: [],
   image_edit: [],
   video_generation: [],
+  music_generation: [],
   speech_synthesis: [],
   speech_recognition: [],
   embedding: [],
@@ -273,77 +376,82 @@ const CATALOG_TRAITS_BY_TASK: Readonly<Record<ModelTask, readonly ModelTrait[]>>
 export const resolveModelInputChange = (model: string, option?: unknown): string | undefined =>
   option === undefined ? model : undefined;
 
-/** Directory entries without an explicit task are never treated as universal. */
-export const catalogSuggestionsForTask = <T extends { tasks: readonly ModelTask[] }>(
-  suggestions: readonly T[],
-  task: ModelTask | undefined
-): T[] => (task ? suggestions.filter((suggestion) => suggestion.tasks.includes(task)) : []);
+const withDeclaredContextKind = (raw: string, kind: CatalogCapabilitySuggestion['contextLimitKind']): string => {
+  if (kind !== 'input_only' && kind !== 'combined') return raw;
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok || Object.prototype.hasOwnProperty.call(parsed.value, '_nomifun_context_limit_kind')) return raw;
+  return JSON.stringify({ ...parsed.value, _nomifun_context_limit_kind: kind }, null, 2);
+};
 
 /**
- * Adopt a catalog entry's model id, enriching the task it was chosen for.
+ * Select any catalog model without making metadata a prerequisite.
  *
- * Non-destructive by contract. This used to return a single fresh capability,
- * which silently discarded every other declared task, plus that task's own
- * protocol/endpoint work, the moment a user clicked a suggestion. The catalog is
- * advisory, so it may never overwrite configuration the user already entered.
- *
- * Traits and the context window are the fields it owns, and only when the entry
- * actually declares this task: an entry that says nothing about the task says
- * nothing about its capabilities either. A window the user already chose wins —
- * they may be correcting the provider, which is the whole point of the field.
- *
- * A verified unified image model is the narrow exception to single-task
- * adoption: when the catalog explicitly declares both image generation and
- * image editing, add the missing sibling draft too. This keeps models such as
- * Ark Seedream selectable after references are attached while leaving opaque
- * endpoint ids and unrelated multi-task catalogs untouched.
+ * Verified catalog tasks replace automatic routes on each selection. Missing
+ * or inferred task metadata leaves a generic form awaiting purpose selection.
+ * Explicit entry intent and configured routes remain authoritative when
+ * selecting another model, with a conflict acknowledgement when facts differ.
+ * Token windows and traits are advisory metadata, never capability switches.
  */
-export const applyCatalogSuggestionForTask = (
+export const applyCatalogSuggestion = (
   definition: ModelDefinitionDraft,
-  suggestion: CatalogCapabilitySuggestion,
-  task: ModelTask
+  suggestion: CatalogCapabilitySuggestion
 ): ModelDefinitionDraft => {
-  const declaresTask = suggestion.tasks.includes(task);
-  const traits = declaresTask
-    ? MODEL_TRAIT_ORDER.filter(
-        (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[task].includes(trait)
-      )
-    : [];
-  const declaredWindow =
-    declaresTask && suggestion.contextLimit && suggestion.contextLimit > 0
-      ? suggestion.contextLimit
-      : undefined;
-  const known = definition.capabilities.some((capability) => capability.task === task);
-  const selectedCapabilities = known
-    ? definition.capabilities.map((capability) =>
-        capability.task === task && declaresTask
-          ? {
-              ...capability,
-              traits,
-              contextLimit: capability.contextLimit ?? declaredWindow,
-            }
-          : capability
-      )
-    : [
-        ...definition.capabilities,
-        { ...emptyCapabilityDraft(task), traits, contextLimit: declaredWindow },
-      ];
-  const declaresUnifiedImageTasks =
-    declaresTask &&
-    (task === 'image_generation' || task === 'image_edit') &&
-    suggestion.tasks.includes('image_generation') &&
-    suggestion.tasks.includes('image_edit');
-  const capabilities = declaresUnifiedImageTasks
-    ? addCapabilityTask(
-        selectedCapabilities,
-        task === 'image_generation' ? 'image_edit' : 'image_generation'
-      )
-    : selectedCapabilities;
-  return {
+  const metadataTasks = [...new Set(suggestion.tasks)];
+  const declaredTasks = catalogTasksAreVerified(suggestion) ? metadataTasks : [];
+  const adoptsCatalogRoutes = definition.capabilities.every((capability) =>
+    capability.routeSource === 'automatic' &&
+    capability.transportSource !== 'persisted' &&
+    capability.contextLimitSource !== 'user' && capability.outputLimitSource !== 'user'
+  );
+  const selectedCapabilities = adoptsCatalogRoutes
+    ? declaredTasks.map((task) => ({
+        ...(definition.capabilities.find((capability) => capability.task === task) ?? emptyCapabilityDraft(task)),
+        // Previous catalog hints describe a different model. Same-task
+        // recommendation transport can stay; stale model limits cannot.
+        traits: [],
+        contextLimit: undefined,
+        outputLimit: undefined,
+        providerParamsJson: '',
+      }))
+    : definition.capabilities;
+  const capabilities = selectedCapabilities.map((capability) => {
+    if (!metadataTasks.includes(capability.task)) return capability;
+    const declaredWindow = isValidModelTokenLimit(suggestion.contextLimit) ? suggestion.contextLimit : undefined;
+    const declaredOutput = isValidModelTokenLimit(suggestion.outputLimit) ? suggestion.outputLimit : undefined;
+    const persisted = capability.transportSource === 'persisted';
+    const adoptsContext = !persisted && capability.contextLimit === undefined &&
+      capability.contextLimitSource !== 'user' && declaredWindow !== undefined;
+    return {
+      ...capability,
+      traits: persisted ? capability.traits : MODEL_TRAIT_ORDER.filter(
+        (trait) => suggestion.traits.includes(trait) && CATALOG_TRAITS_BY_TASK[capability.task].includes(trait)
+      ),
+      contextLimit: capability.contextLimit ?? (
+        persisted || capability.contextLimitSource === 'user' ? undefined : declaredWindow
+      ),
+      outputLimit: capability.outputLimit ?? (
+        persisted || capability.outputLimitSource === 'user' ? undefined : declaredOutput
+      ),
+      providerParamsJson: adoptsContext
+        ? withDeclaredContextKind(capability.providerParamsJson, suggestion.contextLimitKind)
+        : capability.providerParamsJson,
+    };
+  });
+  const selected: ModelDefinitionDraft = {
     model: suggestion.model,
     ...(suggestion.displayName ? { displayName: suggestion.displayName } : {}),
     capabilities,
   };
+  const configuredTasks = catalogTaskConflicts(selected, suggestion);
+  if (configuredTasks.length > 0) {
+    selected.catalogTaskConflict = {
+      model: suggestion.model,
+      configuredTasks,
+      declaredTasks,
+      acknowledged: false,
+    };
+  }
+  return selected;
 };
 
 /**
@@ -411,7 +519,10 @@ const resetCapabilityTransport = (
   contentEndpoint: '',
   realtimeEndpoint: '',
   allowCrossOriginCredentials: false,
-  providerParamsJson: '',
+  // Parameters are authored model configuration, not credential destinations.
+  // Keep them exact; incompatible reasoning is rejected by validation instead
+  // of silently downgrading the model when its transport changes.
+  providerParamsJson: capability.providerParamsJson,
 });
 
 const TRANSPORT_DRAFT_FIELDS = new Set<keyof ModelCapabilityDraft>([
@@ -434,6 +545,9 @@ export const patchCapabilityDraft = (
   ...capability,
   ...patch,
   task: capability.task,
+  routeSource: 'user',
+  ...(Object.prototype.hasOwnProperty.call(patch, 'contextLimit') ? { contextLimitSource: 'user' as const } : {}),
+  ...(Object.prototype.hasOwnProperty.call(patch, 'outputLimit') ? { outputLimitSource: 'user' as const } : {}),
   ...(Object.keys(patch).some((key) =>
     TRANSPORT_DRAFT_FIELDS.has(key as keyof ModelCapabilityDraft)
   )
@@ -452,8 +566,8 @@ export const changeCapabilityProtocol = (
 ): ModelCapabilityDraft => {
   const normalizedProtocol = protocol.trim();
   if (normalizedProtocol === capability.protocol.trim()) {
-    return capability.transportSource === 'recommendation' || capability.transportSource === 'blank'
-      ? { ...capability, transportSource: 'user' }
+    return capability.routeSource !== 'user' || capability.transportSource === 'recommendation' || capability.transportSource === 'blank'
+      ? { ...capability, routeSource: 'user', transportSource: 'user' }
       : capability;
   }
   const recommendation = manifest?.recommendation;
@@ -469,6 +583,7 @@ export const changeCapabilityProtocol = (
 
   return {
     ...resetCapabilityTransport(capability, 'user'),
+    routeSource: 'user',
     protocol: normalizedProtocol,
     connectionRole,
     baseUrlOverride,
@@ -738,6 +853,37 @@ export const withProviderParamChainRounds = (raw: string, enabled: boolean): str
   return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
 };
 
+export const providerParamReasoningEffort = (raw: string): ModelReasoningEffort | undefined => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return undefined;
+  const effort = parsed.value.reasoning_effort;
+  return typeof effort === 'string' && matchesReasoningEffort(effort) ? effort : undefined;
+};
+
+const matchesReasoningEffort = (value: string): value is ModelReasoningEffort =>
+  isSessionReasoningEffort(value);
+
+/**
+ * Store one normalized model default in the canonical task-scoped params.
+ * `undefined` means Auto and removes the key so provider/system defaults stay
+ * authoritative. Malformed JSON is preserved byte-for-byte.
+ */
+export const withProviderParamReasoningEffort = (
+  raw: string,
+  effort: ModelReasoningEffort | undefined
+): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return raw;
+  const next = { ...parsed.value };
+  if (effort) next.reasoning_effort = effort;
+  else delete next.reasoning_effort;
+  return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
+};
+
+/** The wire's integer range, not a universal context/output recommendation. */
+export const isValidModelTokenLimit = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 0xffff_ffff;
+
 export const validateModelDefinition = (
   definition: ModelDefinitionDraft,
   manifests: ModelProtocolManifestMap,
@@ -753,6 +899,8 @@ export const validateModelDefinition = (
   if (!normalizeModelId(definition.model)) errors.push({ code: 'model_required' });
   else if (isDuplicateModelId(definition.model, existingModelIds)) errors.push({ code: 'duplicate_model' });
   if (definition.capabilities.length === 0) errors.push({ code: 'capability_required' });
+  const catalogConflict = getCatalogTaskConflict(definition);
+  if (catalogConflict && !catalogConflict.acknowledged) errors.push({ code: 'catalog_task_conflict' });
 
   for (const capability of definition.capabilities) {
     if (loadingTasks.includes(capability.task)) {
@@ -770,13 +918,15 @@ export const validateModelDefinition = (
       errors.push({ task: capability.task, code: 'protocol_not_registered' });
     }
     const descriptor = protocolDescriptorForDraft(capability, manifest);
+    if (descriptor && !descriptor.supported_tasks.includes(capability.task)) {
+      errors.push({ task: capability.task, code: 'protocol_task_mismatch' });
+    }
+    if ([capability.contextLimit, capability.outputLimit].some(
+      (limit) => limit !== undefined && !isValidModelTokenLimit(limit)
+    )) errors.push({ task: capability.task, code: 'invalid_token_limit' });
     if (
       descriptor?.requires_output_ceiling &&
-      !(
-        typeof capability.outputLimit === 'number' &&
-        Number.isFinite(capability.outputLimit) &&
-        capability.outputLimit > 0
-      )
+      !isValidModelTokenLimit(capability.outputLimit)
     ) {
       errors.push({ task: capability.task, code: 'output_ceiling_required' });
     }
@@ -818,8 +968,20 @@ export const validateModelDefinition = (
     ) {
       errors.push({ task: capability.task, code: 'cross_origin_consent_required' });
     }
-    if (!parseProviderParams(capability.providerParamsJson).ok) {
+    const providerParams = parseProviderParams(capability.providerParamsJson);
+    if (!providerParams.ok) {
       errors.push({ task: capability.task, code: 'invalid_provider_params' });
+    } else if (providerParams.value.reasoning_effort !== undefined) {
+      const effort = providerParams.value.reasoning_effort;
+      if (
+        capability.task !== 'chat' ||
+        !protocolSupportsReasoningEffort(capability.protocol) ||
+        typeof effort !== 'string' ||
+        !matchesReasoningEffort(effort) ||
+        !reasoningEffortsForProtocol(capability.protocol).includes(effort)
+      ) {
+        errors.push({ task: capability.task, code: 'invalid_provider_params' });
+      }
     }
   }
   return { valid: errors.length === 0, errors };
@@ -828,7 +990,7 @@ export const validateModelDefinition = (
 const optionalTrimmed = (value: string): string | undefined => value.trim() || undefined;
 
 /** Serialize one complete task capability for the canonical full-save request. */
-export const capabilityInputFromDraft = (
+const capabilityInputFromDraft = (
   capability: ModelCapabilityDraft
 ): ProviderModelCapabilityInput | undefined => {
   const providerParams = parseProviderParams(capability.providerParamsJson);
@@ -858,6 +1020,9 @@ export const capabilityInputFromDraft = (
       : {}),
     ...(capability.outputLimit && capability.outputLimit > 0
       ? { output_limit: capability.outputLimit }
+      : {}),
+    ...(capability.task === 'chat' && capability.compactionThresholdPct !== undefined
+      ? { compaction_threshold_pct: capability.compactionThresholdPct }
       : {}),
   };
 };

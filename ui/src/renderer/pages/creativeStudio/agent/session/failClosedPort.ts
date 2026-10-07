@@ -6,7 +6,7 @@
 
 import type { CreativeStudioAgentSessionPersistencePort } from './types';
 
-export const CREATIVE_STUDIO_AGENT_SESSION_BACKEND_GAP = Object.freeze({
+const CREATIVE_STUDIO_AGENT_SESSION_BACKEND_GAP = Object.freeze({
   code: 'ATOMIC_EXCLUSIVE_SESSION_BINDING_UNAVAILABLE',
   requiredContract: Object.freeze([
     'An authenticated owner-scoped resolve-or-create operation keyed by canvasId and sessionId',

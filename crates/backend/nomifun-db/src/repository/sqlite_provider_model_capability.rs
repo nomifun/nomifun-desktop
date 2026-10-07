@@ -7,6 +7,86 @@ use crate::error::DbError;
 use crate::models::{NewProviderModelCapability, ProviderModelCapabilityRow};
 use crate::repository::provider_model_capability::IProviderModelCapabilityRepository;
 
+const TECHNICAL_CAPABILITY_ORDER: [&str; 3] = ["function_calling", "reasoning", "streaming"];
+
+fn unsupported_technical_capabilities(
+    health: Option<&str>,
+) -> Result<Vec<String>, DbError> {
+    let Some(health) = health else {
+        return Ok(Vec::new());
+    };
+    let value: serde_json::Value = serde_json::from_str(health)
+        .map_err(|error| DbError::Conflict(format!("invalid capability health JSON: {error}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| DbError::Conflict("capability health must be a JSON object".into()))?;
+    let Some(values) = object.get("unsupported_technical_capabilities") else {
+        return Ok(Vec::new());
+    };
+    let values = values.as_array().ok_or_else(|| {
+        DbError::Conflict("unsupported technical capabilities must be an array".into())
+    })?;
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        let capability = value.as_str().ok_or_else(|| {
+            DbError::Conflict("unsupported technical capability must be a string".into())
+        })?;
+        if !TECHNICAL_CAPABILITY_ORDER.contains(&capability) {
+            return Err(DbError::Conflict(format!(
+                "unknown unsupported technical capability {capability:?}"
+            )));
+        }
+        if result.iter().any(|existing| existing == capability) {
+            return Err(DbError::Conflict(format!(
+                "duplicate unsupported technical capability {capability:?}"
+            )));
+        }
+        result.push(capability.to_owned());
+    }
+    result.sort_by_key(|capability| {
+        TECHNICAL_CAPABILITY_ORDER
+            .iter()
+            .position(|known| known == capability)
+            .expect("validated technical capability")
+    });
+    Ok(result)
+}
+
+fn health_with_unsupported_capabilities(
+    health: Option<&str>,
+    unsupported: &[String],
+) -> Result<Option<String>, DbError> {
+    if health.is_none() && unsupported.is_empty() {
+        return Ok(None);
+    }
+    let mut value = match health {
+        Some(health) => serde_json::from_str::<serde_json::Value>(health).map_err(|error| {
+            DbError::Conflict(format!("invalid capability health JSON: {error}"))
+        })?,
+        None => serde_json::json!({"status": "unknown"}),
+    };
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| DbError::Conflict("capability health must be a JSON object".into()))?;
+    if unsupported.is_empty() {
+        object.remove("unsupported_technical_capabilities");
+    } else {
+        object.insert(
+            "unsupported_technical_capabilities".into(),
+            serde_json::Value::Array(
+                unsupported
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|error| DbError::Conflict(format!("serialize capability health: {error}")))
+}
+
 #[derive(Clone, Debug)]
 pub struct SqliteProviderModelCapabilityRepository {
     pool: SqlitePool,
@@ -47,6 +127,13 @@ fn validate_capabilities(capabilities: &[NewProviderModelCapability<'_>]) -> Res
             return Err(DbError::Conflict(format!(
                 "capability '{task}' connection_role must not be blank"
             )));
+        }
+        if let Some(pct) = capability.compaction_threshold_pct {
+            if task != "chat" || !(50..=95).contains(&pct) {
+                return Err(DbError::Conflict(
+                    "compaction_threshold_pct is supported only for Chat and must be 50-95".into(),
+                ));
+            }
         }
         let traits: serde_json::Value = serde_json::from_str(capability.traits)
             .map_err(|error| DbError::Conflict(format!("invalid capability traits: {error}")))?;
@@ -105,8 +192,8 @@ pub(crate) async fn replace_for_model_tx(
                 (provider_id, model, task, traits, protocol, connection_role, \
                  base_url_override, endpoint, poll_endpoint, content_endpoint, \
                  realtime_endpoint, allow_cross_origin_credentials, provider_params, \
-                 context_limit, output_limit, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 context_limit, output_limit, compaction_threshold_pct, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(provider_id, model, task) DO UPDATE SET \
                  health = NULL, \
                  health_checked_at = NULL, \
@@ -122,6 +209,7 @@ pub(crate) async fn replace_for_model_tx(
                  provider_params = excluded.provider_params, \
                  context_limit = excluded.context_limit, \
                  output_limit = excluded.output_limit, \
+                 compaction_threshold_pct = excluded.compaction_threshold_pct, \
                  updated_at = excluded.updated_at \
              WHERE NOT ( \
                  provider_model_capabilities.traits IS excluded.traits AND \
@@ -136,7 +224,8 @@ pub(crate) async fn replace_for_model_tx(
                      IS excluded.allow_cross_origin_credentials AND \
                  provider_model_capabilities.provider_params IS excluded.provider_params AND \
                  provider_model_capabilities.context_limit IS excluded.context_limit AND \
-                 provider_model_capabilities.output_limit IS excluded.output_limit \
+                 provider_model_capabilities.output_limit IS excluded.output_limit AND \
+                 provider_model_capabilities.compaction_threshold_pct IS excluded.compaction_threshold_pct \
              )",
         )
         .bind(provider_id)
@@ -154,6 +243,7 @@ pub(crate) async fn replace_for_model_tx(
         .bind(capability.provider_params)
         .bind(capability.context_limit)
         .bind(capability.output_limit)
+        .bind(capability.compaction_threshold_pct)
         .bind(now)
         .bind(now)
         .execute(&mut **transaction)
@@ -280,6 +370,25 @@ impl IProviderModelCapabilityRepository for SqliteProviderModelCapabilityReposit
         task: &str,
         health_json: Option<&str>,
     ) -> Result<bool, DbError> {
+        let mut transaction = self.pool.begin().await?;
+        let current: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT capability.health FROM provider_model_capabilities capability \
+             JOIN providers provider ON provider.provider_id = capability.provider_id \
+             WHERE capability.provider_id = ? AND capability.model = ? \
+               AND capability.task = ? AND provider.config_revision = ?",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .bind(task)
+        .bind(expected_config_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(current) = current else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let unsupported = unsupported_technical_capabilities(current.as_deref())?;
+        let merged_health = health_with_unsupported_capabilities(health_json, &unsupported)?;
         let now = now_ms();
         let checked_at = health_json.map(|_| now);
         let result = sqlx::query(
@@ -291,15 +400,112 @@ impl IProviderModelCapabilityRepository for SqliteProviderModelCapabilityReposit
                    WHERE provider_id = ? AND config_revision = ?\
                )",
         )
-        .bind(health_json)
+        .bind(merged_health.as_deref())
         .bind(checked_at)
         .bind(provider_id)
         .bind(model)
         .bind(task)
         .bind(provider_id)
         .bind(expected_config_revision)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    async fn mark_technical_capability_unsupported(
+        &self,
+        provider_id: &str,
+        expected_config_revision: i64,
+        model: &str,
+        task: &str,
+        capability: &str,
+    ) -> Result<bool, DbError> {
+        if !TECHNICAL_CAPABILITY_ORDER.contains(&capability) {
+            return Err(DbError::Conflict(format!(
+                "unknown technical capability {capability:?}"
+            )));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let current: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT model_capability.health \
+             FROM provider_model_capabilities model_capability \
+             JOIN providers provider ON provider.provider_id = model_capability.provider_id \
+             WHERE model_capability.provider_id = ? AND model_capability.model = ? \
+               AND model_capability.task = ? AND provider.config_revision = ?",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .bind(task)
+        .bind(expected_config_revision)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(current) = current else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let mut unsupported = unsupported_technical_capabilities(current.as_deref())?;
+        if !unsupported.iter().any(|known| known == capability) {
+            unsupported.push(capability.to_owned());
+            unsupported.sort_by_key(|known| {
+                TECHNICAL_CAPABILITY_ORDER
+                    .iter()
+                    .position(|candidate| candidate == known)
+                    .expect("validated technical capability")
+            });
+        }
+        let health = health_with_unsupported_capabilities(current.as_deref(), &unsupported)?
+            .expect("an unsupported capability always creates health JSON");
+        let result = sqlx::query(
+            "UPDATE provider_model_capabilities \
+             SET health = ?, health_checked_at = ? \
+             WHERE provider_id = ? AND model = ? AND task = ? \
+               AND EXISTS (SELECT 1 FROM providers \
+                   WHERE provider_id = ? AND config_revision = ?)",
+        )
+        .bind(health)
+        .bind(now_ms())
+        .bind(provider_id)
+        .bind(model)
+        .bind(task)
+        .bind(provider_id)
+        .bind(expected_config_revision)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod music_tests {
+    use super::*;
+    use crate::{IProviderModelRepository, NewProviderModel, SqliteProviderModelRepository};
+
+    #[tokio::test]
+    async fn music_catalog_round_trip_keeps_speech_a_separate_capability() {
+        let db = crate::init_database_memory().await.unwrap();
+        let provider = nomifun_common::ProviderId::new().into_string();
+        sqlx::query("INSERT INTO providers (provider_id,platform,name,base_url,auth_scheme,credentials_encrypted,enabled,created_at,updated_at) VALUES (?,'minimax','Media','https://example.invalid','bearer','',1,0,0)")
+            .bind(&provider).execute(db.pool()).await.unwrap();
+        let models = SqliteProviderModelRepository::new(db.pool().clone());
+        for (model, task, protocol) in [("music-2.5", "music_generation", "minimax.music"), ("speech-02-hd", "speech_synthesis", "minimax.tts")] {
+            let revision: i64 = sqlx::query_scalar("SELECT config_revision FROM providers WHERE provider_id=?")
+                .bind(&provider).fetch_one(db.pool()).await.unwrap();
+            let capabilities = [NewProviderModelCapability { task, protocol, traits: "[]", connection_role: "default", provider_params: "{}", ..Default::default() }];
+            models.save(&provider, revision, &NewProviderModel { model, enabled: true, capabilities: &capabilities, ..Default::default() }).await.unwrap();
+        }
+        let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+        assert_eq!(capabilities.get(&provider,"music-2.5","music_generation").await.unwrap().unwrap().protocol,"minimax.music");
+        assert!(capabilities.get(&provider,"music-2.5","speech_synthesis").await.unwrap().is_none());
+        assert!(capabilities.get(&provider,"speech-02-hd","speech_synthesis").await.unwrap().is_some());
     }
 }

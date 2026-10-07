@@ -1,6 +1,6 @@
 {
   "siderTitle": "Assets",
-  "subtitle": "One place to manage the images, videos and text you collect in the Creative Workshop — upload, group, tag, batch-organize and reuse.",
+  "subtitle": "One place to manage the images, videos and text you collect in the $t(agentSettings.template.creativeStudio.default.name) — upload, group, tag, batch-organize and reuse.",
   "actionFailed": "Action failed",
   "cancel": "Cancel",
   "sort": {

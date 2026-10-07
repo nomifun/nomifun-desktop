@@ -1,0 +1,414 @@
+use nomifun_agent_contracts::{
+    ActionId, CapabilityId, CanonicalErrorCode, ContributionId, DigestHex, ExecutionRoleId,
+    McpServerId, McpToolKey, PackageId, AgentModuleId, ResourceBindingId, ServiceKeyId, SkillId,
+    VersionString,
+};
+use thiserror::Error;
+
+/// Typed failure returned by a capability implementation after the Kernel has
+/// admitted the invocation.
+///
+/// `code` is the stable, machine-readable contract. `message` is diagnostic
+/// text for the trusted host boundary and must never be parsed to recover the
+/// code. Provider/model adapters are responsible for exposing only a safe,
+/// redacted projection of the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapabilityExecutionFailure {
+    pub code: CanonicalErrorCode,
+    pub message: String,
+}
+
+impl CapabilityExecutionFailure {
+    pub fn new(
+        code: impl Into<CanonicalErrorCode>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum KernelError {
+    #[error("artifact envelope for package {package_id:?} failed digest verification")]
+    InvalidManifestDigest { package_id: PackageId },
+    #[error("{field} has invalid semantic version {value:?}")]
+    InvalidVersion {
+        field: &'static str,
+        value: VersionString,
+    },
+    #[error(
+        "package {package_id:?} requires host contract {required:?}, but the host provides {actual:?}"
+    )]
+    HostContractVersionMismatch {
+        package_id: PackageId,
+        required: VersionString,
+        actual: VersionString,
+    },
+    #[error("plugin source kind is not enabled for mount {mount_id:?}")]
+    SourceNotAllowed { mount_id: AgentModuleId },
+    #[error("plugin registration for mount {mount_id:?} is invalid: {reason}")]
+    InvalidRegistration {
+        mount_id: AgentModuleId,
+        reason: String,
+    },
+    #[error("JSON schema for {subject} is invalid: {reason}")]
+    InvalidJsonSchema { subject: String, reason: String },
+    #[error("configuration for mount {mount_id:?} is invalid: {reason}")]
+    InvalidPluginConfig {
+        mount_id: AgentModuleId,
+        reason: String,
+    },
+    #[error("duplicate package id {package_id:?}")]
+    DuplicatePackage { package_id: PackageId },
+    #[error("duplicate agent module id {mount_id:?}")]
+    DuplicateMount { mount_id: AgentModuleId },
+    #[error("duplicate capability id {capability_id:?}")]
+    DuplicateCapability { capability_id: CapabilityId },
+    #[error("duplicate contribution id {contribution_id:?}")]
+    DuplicateContribution { contribution_id: ContributionId },
+    #[error("duplicate skill id {skill_id:?}")]
+    DuplicateSkill { skill_id: SkillId },
+    #[error("duplicate MCP tool mapping {server_id:?}/{tool_key:?}")]
+    DuplicateMcpTool {
+        server_id: McpServerId,
+        tool_key: McpToolKey,
+    },
+    #[error("MCP capability {capability_id:?} has more than one tool mapping")]
+    DuplicateMcpCapability { capability_id: CapabilityId },
+    #[error("duplicate execution-role contract {role_id:?}")]
+    DuplicateRoleContract { role_id: ExecutionRoleId },
+    #[error("execution-role contract {role_id:?} is invalid: {reason}")]
+    InvalidRoleContract {
+        role_id: ExecutionRoleId,
+        reason: String,
+    },
+    #[error("execution-role provider {role_id:?} is not bound")]
+    RoleProviderNotBound { role_id: ExecutionRoleId },
+    #[error("execution-role provider {role_id:?} is unavailable on mount {mount_id:?}")]
+    RoleProviderUnavailable {
+        role_id: ExecutionRoleId,
+        mount_id: AgentModuleId,
+    },
+    #[error("execution-role member {capability_id:?} is not provided by {role_id:?}")]
+    RoleProviderMemberUnavailable {
+        role_id: ExecutionRoleId,
+        capability_id: CapabilityId,
+    },
+    #[error("duplicate role provider for {role_id:?} on mount {mount_id:?}")]
+    DuplicateRoleProvider {
+        role_id: ExecutionRoleId,
+        mount_id: AgentModuleId,
+    },
+    #[error("role provider for {role_id:?} on mount {mount_id:?} is invalid: {reason}")]
+    InvalidRoleProvider {
+        role_id: ExecutionRoleId,
+        mount_id: AgentModuleId,
+        reason: String,
+    },
+    #[error(
+        "package {package_id:?} requires missing package {dependency_id:?}@{dependency_version:?}"
+    )]
+    MissingPackageDependency {
+        package_id: PackageId,
+        dependency_id: PackageId,
+        dependency_version: VersionString,
+    },
+    #[error("package dependency graph contains a cycle")]
+    PackageDependencyCycle,
+    #[error("capability {capability_id:?} requires missing capability {dependency_id:?}")]
+    MissingCapabilityDependency {
+        capability_id: CapabilityId,
+        dependency_id: CapabilityId,
+    },
+    #[error("capability dependency graph contains a cycle")]
+    CapabilityDependencyCycle,
+    #[error("skill {skill_id:?} requires missing capability {capability_id:?}")]
+    MissingSkillCapability {
+        skill_id: SkillId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "MCP mapping {server_id:?}/{tool_key:?} targets a missing capability {capability_id:?}"
+    )]
+    MissingMcpCapability {
+        server_id: McpServerId,
+        tool_key: McpToolKey,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "MCP mapping {server_id:?}/{tool_key:?} has invalid materialized provenance: {reason}"
+    )]
+    InvalidMcpMaterialization {
+        server_id: McpServerId,
+        tool_key: McpToolKey,
+        reason: String,
+    },
+    #[error("duplicate service provider for {service_id:?}")]
+    DuplicateServiceProvider { service_id: ServiceKeyId },
+    #[error("mount {mount_id:?} requires missing service {service_id:?}@{version:?}")]
+    MissingService {
+        mount_id: AgentModuleId,
+        service_id: ServiceKeyId,
+        version: VersionString,
+    },
+    #[error(
+        "mount {mount_id:?} requires service {service_id:?}@{required:?}, but provider has {actual:?}"
+    )]
+    ServiceVersionMismatch {
+        mount_id: AgentModuleId,
+        service_id: ServiceKeyId,
+        required: VersionString,
+        actual: VersionString,
+    },
+    #[error("service dependency graph contains a cycle")]
+    ServiceDependencyCycle,
+    #[error("runtime service {service_id:?} has an unexpected Rust type")]
+    ServiceTypeMismatch { service_id: ServiceKeyId },
+    #[error(
+        "registration for mount {mount_id:?} did not export declared service {service_id:?}"
+    )]
+    MissingRuntimeServiceExport {
+        mount_id: AgentModuleId,
+        service_id: ServiceKeyId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} exported undeclared service {service_id:?}"
+    )]
+    UndeclaredRuntimeServiceExport {
+        mount_id: AgentModuleId,
+        service_id: ServiceKeyId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} has no handler for capability {capability_id:?}"
+    )]
+    MissingCapabilityHandler {
+        mount_id: AgentModuleId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} has an undeclared handler for {capability_id:?}"
+    )]
+    UndeclaredCapabilityHandler {
+        mount_id: AgentModuleId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} has no Context factory for capability {capability_id:?}"
+    )]
+    MissingCapabilityContextFactory {
+        mount_id: AgentModuleId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} exported an undeclared Context factory for {capability_id:?}"
+    )]
+    UndeclaredCapabilityContextFactory {
+        mount_id: AgentModuleId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} has no Resource factory for capability {capability_id:?}"
+    )]
+    MissingCapabilityResourceFactory {
+        mount_id: AgentModuleId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} exported an undeclared Resource factory for {capability_id:?}"
+    )]
+    UndeclaredCapabilityResourceFactory {
+        mount_id: AgentModuleId,
+        capability_id: CapabilityId,
+    },
+    #[error("preset revision is invalid: {reason}")]
+    InvalidPresetRevision { reason: String },
+    #[error("preset surface {surface} is not declared")]
+    SurfaceNotDeclared { surface: String },
+    #[error("capability {capability_id:?} is not materialized")]
+    CapabilityNotMaterialized { capability_id: CapabilityId },
+    #[error("skill {skill_id:?}@{version:?} is not materialized")]
+    SkillNotMaterialized {
+        skill_id: SkillId,
+        version: VersionString,
+    },
+    #[error("skill {skill_id:?} is unavailable to the Agent on surface {surface}")]
+    SkillUnavailableOnSurface { skill_id: SkillId, surface: String },
+    #[error("capability {capability_id:?} is unavailable on surface {surface}")]
+    CapabilityUnavailableOnSurface {
+        capability_id: CapabilityId,
+        surface: String,
+    },
+    #[error("capability {capability_id:?} is unavailable on target {target}/{surface}")]
+    CapabilityUnavailableOnPlatform {
+        capability_id: CapabilityId,
+        target: String,
+        surface: String,
+    },
+    #[error("capability {capability_id:?} requires unavailable runtime feature {feature}")]
+    RuntimeFeatureUnavailable {
+        capability_id: CapabilityId,
+        feature: String,
+    },
+    #[error("capability ceiling contains conflict between {left:?} and {right:?}")]
+    CapabilityConflict {
+        left: CapabilityId,
+        right: CapabilityId,
+    },
+    #[error("capability module {capability_id:?} is not directly authorable ({policy})")]
+    CapabilityNotAuthorable {
+        capability_id: CapabilityId,
+        policy: String,
+    },
+    #[error("capability module {capability_id:?} requires an explicit non-empty action grant")]
+    ActionGrantRequired { capability_id: CapabilityId },
+    #[error("capability action {action_id:?} is not declared by {capability_id:?}")]
+    ActionNotDeclared {
+        capability_id: CapabilityId,
+        action_id: ActionId,
+    },
+    #[error("resource binding {binding_id:?} is missing")]
+    ResourceBindingMissing {
+        binding_id: ResourceBindingId,
+    },
+    #[error(
+        "capability {capability_id:?} received undeclared resource binding {binding_id:?} of kind {resource_kind}"
+    )]
+    UnexpectedResourceBinding {
+        capability_id: CapabilityId,
+        binding_id: ResourceBindingId,
+        resource_kind: String,
+    },
+    #[error("resource binding {binding_id:?} belongs to another principal")]
+    ResourceOwnerMismatch {
+        binding_id: ResourceBindingId,
+    },
+    #[error("capability {capability_id:?} is missing resource kind {resource_kind}")]
+    CapabilityResourceNotBound {
+        capability_id: CapabilityId,
+        resource_kind: String,
+    },
+    #[error("skill {skill_id:?} requires direct capability selection {capability_id:?}")]
+    SkillRequiresCapability {
+        skill_id: SkillId,
+        capability_id: CapabilityId,
+    },
+    #[error("snapshot digest construction failed: {reason}")]
+    Digest { reason: String },
+    #[error("snapshot contract validation failed: {reason}")]
+    SnapshotValidation { reason: String },
+    #[error("capability {capability_id:?} is not in the frozen snapshot ceiling")]
+    CapabilityNotInPreset { capability_id: CapabilityId },
+    #[error("capability {capability_id:?} exact provenance drifted: {reason}")]
+    CapabilityProvenanceDrift {
+        capability_id: CapabilityId,
+        reason: String,
+    },
+    #[error("skill {skill_id:?} exact provenance drifted: {reason}")]
+    SkillProvenanceDrift {
+        skill_id: SkillId,
+        reason: String,
+    },
+    #[error("capability {capability_id:?} is not active")]
+    CapabilityNotActive { capability_id: CapabilityId },
+    #[error("registry generation counter is exhausted")]
+    RegistryGenerationExhausted,
+    #[error("capability handler failed: {reason}")]
+    CapabilityExecution { reason: String },
+    // Do not include the trusted host diagnostic in Display. Kernel errors are
+    // sometimes logged or converted by outer application layers; exposing the
+    // message here would silently recreate the string-leak boundary this typed
+    // variant is meant to remove. Trusted diagnostics remain available through
+    // `capability_execution_failure()` for explicit internal handling.
+    #[error("capability handler failed with {failure_code}", failure_code = .failure.code.as_ref())]
+    CapabilityExecutionFailed {
+        failure: CapabilityExecutionFailure,
+    },
+    #[error("kernel registry lock is poisoned")]
+    RegistryPoisoned,
+    #[error(
+        "compiled snapshot expects registry generation {expected_generation}/{expected_digest:?}, current is {actual_generation}/{actual_digest:?}"
+    )]
+    RegistryGenerationMismatch {
+        expected_generation: u64,
+        expected_digest: DigestHex,
+        actual_generation: u64,
+        actual_digest: DigestHex,
+    },
+}
+
+impl KernelError {
+    pub fn canonical_code(&self) -> CanonicalErrorCode {
+        use nomifun_agent_contracts::{
+            CAPABILITY_NOT_ACTIVE, CAPABILITY_NOT_IN_PRESET, CAPABILITY_NOT_MATERIALIZED,
+            CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND,
+            PRESET_REVISION_DIGEST_MISMATCH, RESOURCE_OWNER_MISMATCH,
+        };
+
+        let code = match self {
+            Self::CapabilityNotInPreset { .. } => CAPABILITY_NOT_IN_PRESET,
+            Self::CapabilityProvenanceDrift { .. }
+            | Self::SkillProvenanceDrift { .. } => CAPABILITY_NOT_MATERIALIZED,
+            Self::CapabilityNotActive { .. } => {
+                CAPABILITY_NOT_ACTIVE
+            }
+            Self::CapabilityUnavailableOnPlatform { .. }
+            | Self::SkillUnavailableOnSurface { .. }
+            | Self::CapabilityUnavailableOnSurface { .. } => CAPABILITY_UNAVAILABLE_ON_PLATFORM,
+            Self::ResourceOwnerMismatch { .. } => RESOURCE_OWNER_MISMATCH,
+            Self::ResourceBindingMissing { .. }
+            | Self::UnexpectedResourceBinding { .. }
+            | Self::CapabilityResourceNotBound { .. } => PRESET_RESOURCE_NOT_BOUND,
+            Self::InvalidPresetRevision { .. }
+            | Self::Digest { .. }
+            | Self::SnapshotValidation { .. } => PRESET_REVISION_DIGEST_MISMATCH,
+            Self::CapabilityExecutionFailed { failure } => {
+                return failure.code.clone();
+            }
+            _ => CAPABILITY_NOT_MATERIALIZED,
+        };
+        CanonicalErrorCode::from(code)
+    }
+
+    /// Construct a typed capability failure without collapsing its canonical
+    /// code into display text.
+    pub fn capability_execution_failed(
+        code: impl Into<CanonicalErrorCode>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::CapabilityExecutionFailed {
+            failure: CapabilityExecutionFailure::new(code, message),
+        }
+    }
+
+    pub fn capability_execution_failure(
+        &self,
+    ) -> Option<&CapabilityExecutionFailure> {
+        match self {
+            Self::CapabilityExecutionFailed { failure } => Some(failure),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_capability_failure_preserves_canonical_code_without_string_parsing() {
+        let error = KernelError::capability_execution_failed(
+            "ROBOT_OFFLINE",
+            "the bound robot is offline; api_key=sk-private",
+        );
+
+        assert_eq!(error.canonical_code().as_ref(), "ROBOT_OFFLINE");
+        let failure = error.capability_execution_failure().unwrap();
+        assert_eq!(failure.code.as_ref(), "ROBOT_OFFLINE");
+        assert!(failure.message.contains("sk-private"));
+        assert_eq!(error.to_string(), "capability handler failed with ROBOT_OFFLINE");
+        assert!(!error.to_string().contains("sk-private"));
+    }
+}

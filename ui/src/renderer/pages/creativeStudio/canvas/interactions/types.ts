@@ -16,10 +16,9 @@ export type CanvasNodeOpenMode =
   | 'edit-text'
   | 'compose'
   | 'preview-media'
-  | 'open-director'
   | 'inspect-group';
 
-export type CanvasDropImportKind = 'image' | 'video';
+type CanvasDropImportKind = 'image' | 'video';
 
 /**
  * Effects which belong to the product shell rather than the canonical canvas
@@ -74,8 +73,6 @@ export type CanvasIntegrationIntent =
       file: File;
       kind: CanvasDropImportKind;
       worldPosition: CanvasPoint;
-      /** Source parity: a real 2:1 image asks after upload metadata is known. */
-      panoramaChoice: 'after-upload-if-2-to-1' | 'not-applicable';
     }
   | {
       type: 'asset/import-feedback';

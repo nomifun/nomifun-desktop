@@ -9,21 +9,21 @@
  * - `template`: Expands into a prompt template text
  * - `builtin`: Executes a built-in application action (e.g., /open for file picker)
  */
-export type SlashCommandKind = 'template' | 'builtin';
+type SlashCommandKind = 'template' | 'builtin';
 
 /**
  * Defines what happens when the user selects a slash command from the menu.
  * - `execute`: run the command immediately
  * - `insert`: insert `/<name> ` into the input
  */
-export type SlashCommandSelectionBehavior = 'execute' | 'insert';
+type SlashCommandSelectionBehavior = 'execute' | 'insert';
 
 /**
  * Indicates where the slash command originates from.
  * - `agent`: Advertised by the agent runtime
  * - `builtin`: Built into the application
  */
-export type SlashCommandSource = 'agent' | 'builtin';
+type SlashCommandSource = 'agent' | 'builtin';
 
 /**
  * Represents a single slash command item in the autocomplete list.

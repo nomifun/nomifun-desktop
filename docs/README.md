@@ -3,8 +3,8 @@
 This folder contains the current technical, operator, and contributor
 documentation for **NomiFun**. Normative current behavior lives under
 `architecture/` and `contributing/`. The `continuity/` area is retained for
-historical decisions, handoff context, and release audits; it does not override
-the current architecture or contributor standards.
+historical decisions, continuity context, and release audits; it does not
+override the current architecture or contributor standards.
 
 > New to the project? Start with
 > [Getting Started -> Introduction](getting-started/introduction.md).
@@ -28,7 +28,7 @@ the current architecture or contributor standards.
 | Community expectations | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) |
 | Report a security issue | [../SECURITY.md](../SECURITY.md) |
 | Release notes and release process | [../CHANGELOG.md](../CHANGELOG.md), [../RELEASING.md](../RELEASING.md) |
-| Continue Browser Platform release work | [continuity/07-browser-platform-handoff.zh.md](continuity/07-browser-platform-handoff.zh.md) |
+| Understand Agent sessions, logs and content | [Current Agent Session architecture](architecture/agent-session.md) |
 
 ## Current Documentation
 
@@ -39,13 +39,13 @@ docs/
 ├── architecture/         current system architecture and implementation map
 ├── reference/            configuration, API overview, troubleshooting, FAQ
 ├── contributing/         development, project structure, data/ID standards, build/package notes
-├── continuity/           historical decisions, handoff notes, and release audits
+├── continuity/           historical decisions, continuity notes, and release audits
 ├── skills/               exported skill docs for external agents
 └── images/               screenshot manifest and referenced images
 ```
 
 Current top-level user surfaces include conversations, terminals, extensible
-model management, Creative Studio, presets, MCP, open capabilities,
+model management, Creation, presets, MCP, open capabilities,
 requirements/AutoWork, scheduled tasks, companions, knowledge, and
 feature-gated computer/browser automation. The frontend source of truth is
 `ui/src/renderer/components/layout/Router.tsx`.

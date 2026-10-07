@@ -51,16 +51,19 @@ describe('Creative Template workspace page', () => {
     expect(html.includes('Private')).toBe(false);
   });
 
-  test('keeps the focused template surface on a fixed light stone palette', () => {
+  test('keeps the warm palette in light mode while dark mode follows the shared theme', () => {
+    expect(css.includes(":global(:root:not([data-theme='dark'])) .page")).toBe(true);
     expect(css.includes('--color-bg-1: #f4f2ed')).toBe(true);
     expect(css.includes('--dialog-fill-0: #f4f2ed')).toBe(true);
     expect(css.includes('--nomi-modal-control-bg: #ffffff')).toBe(true);
     expect(css.includes('--primary-6: 87, 83, 78')).toBe(true);
     expect(css.includes('color-scheme: light')).toBe(true);
+    expect(css.includes(":global([data-theme='dark']) .page")).toBe(true);
+    expect(css.includes('color-scheme: dark')).toBe(true);
     expect(css.includes('.editorModal')).toBe(true);
-    expect(css.includes('--app-sider-width')).toBe(true);
-    expect(css.includes('max-height: calc(100vh - 24px)')).toBe(true);
-    expect(css.includes('max-height: calc(100vh - 144px)')).toBe(true);
+    expect(css.includes('--app-sider-width')).toBe(false);
+    expect(css.includes('max-height: calc(100vh - 24px)')).toBe(false);
+    expect(css.includes('max-height: calc(100vh - 144px)')).toBe(false);
     expect(css.includes('.runModal')).toBe(true);
     expect(css.includes('.reviewModal')).toBe(true);
   });

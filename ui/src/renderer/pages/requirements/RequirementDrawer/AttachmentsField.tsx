@@ -56,8 +56,18 @@ const AttachmentsField: React.FC<AttachmentsFieldProps> = ({
   const [message, messageCtx] = useArcoMessage();
   const [open, setOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // click-to-upload (file input) in-flight flag
-  const [attachUploading, setAttachUploading] = useState(false);
+  const latestRef = useRef({ value, onChange });
+  latestRef.current = { value, onChange };
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  // Multiple file-input requests can overlap; finishing one must not enable Save.
+  const [inputUploadCount, setInputUploadCount] = useState(0);
+  const attachUploading = inputUploadCount > 0;
   // drag/paste go through an HTTP upload that doesn't surface in `value` until
   // it lands — track those via the shared 'requirement' upload store too.
   const { isUploading: attachmentUploadsInFlight } = useUploadState('requirement');
@@ -71,15 +81,22 @@ const AttachmentsField: React.FC<AttachmentsFieldProps> = ({
 
   const handleFilesAdded = useCallback(
     (files: FileMetadata[]) => {
+      if (!mountedRef.current) return;
       const images = files.filter((f) => imageExts.includes(getFileExtension(f.name)));
       if (images.length < files.length) {
         message.warning(t('requirements.form.attachmentsOnlyImages'));
       }
       if (images.length > 0) {
-        onChange([...value, ...images.map((f) => ({ source_path: f.path, file_name: f.name }))]);
+        const next = [
+          ...latestRef.current.value,
+          ...images.map((f) => ({ source_path: f.path, file_name: f.name })),
+        ];
+        // Advance synchronously: another upload may finish before React renders.
+        latestRef.current.value = next;
+        latestRef.current.onChange(next);
       }
     },
-    [message, t, onChange, value]
+    [message, t]
   );
 
   const { dragHandlers, isFileDragging } = useDragUpload({
@@ -97,30 +114,30 @@ const AttachmentsField: React.FC<AttachmentsFieldProps> = ({
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const fileList = e.target.files;
       if (!fileList || fileList.length === 0) return;
-      setAttachUploading(true);
+      setInputUploadCount((count) => count + 1);
       try {
         const processed = await FileService.processDroppedFiles(fileList, undefined, 'requirement');
         handleFilesAdded(processed);
       } catch (err) {
+        if (!mountedRef.current) return;
         message.error(
           err instanceof Error && err.message === 'FILE_TOO_LARGE'
             ? t('requirements.form.attachmentTooLarge')
             : String(err)
         );
       } finally {
-        setAttachUploading(false);
+        if (mountedRef.current) setInputUploadCount((count) => count - 1);
       }
       e.target.value = '';
     },
     [handleFilesAdded, message, t]
   );
 
-  const removeAdded = useCallback(
-    (index: number) => {
-      onChange(value.filter((_, j) => j !== index));
-    },
-    [onChange, value]
-  );
+  const removeAdded = useCallback((index: number) => {
+    const next = latestRef.current.value.filter((_, j) => j !== index);
+    latestRef.current.value = next;
+    latestRef.current.onChange(next);
+  }, []);
 
   const toggleOpen = useCallback(() => setOpen((o) => !o), []);
   const onHeaderKeyDown = useCallback((e: React.KeyboardEvent) => {

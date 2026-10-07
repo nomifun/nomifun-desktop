@@ -8,7 +8,7 @@ use crate::models::{
     UpsertProviderConnectionParams,
 };
 use crate::repository::provider::{CreateProviderParams, UpdateProviderParams};
-use crate::repository::sqlite_provider_model::save_model_tx;
+use crate::repository::sqlite_provider_model::{fetch_row, save_model_tx};
 use crate::repository::sqlite_provider_model_capability::{
     bump_provider_config_revision_tx, clear_health_for_connection_role_tx,
 };
@@ -144,6 +144,155 @@ async fn fetch_provider_tx(
     )
 }
 
+async fn lock_provider_revision_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider_id: &str,
+    expected_config_revision: i64,
+) -> Result<(), DbError> {
+    let locked = sqlx::query(
+        "UPDATE providers SET config_revision = config_revision \
+         WHERE provider_id = ? AND config_revision = ?",
+    )
+    .bind(provider_id)
+    .bind(expected_config_revision)
+    .execute(&mut **transaction)
+    .await?;
+    if locked.rows_affected() == 0 {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE provider_id = ?)")
+                .bind(provider_id)
+                .fetch_one(&mut **transaction)
+                .await?;
+        return if exists {
+            Err(DbError::Conflict(format!(
+                "provider invocation graph changed while updating provider; expected revision {expected_config_revision}"
+            )))
+        } else {
+            Err(DbError::NotFound(format!("Provider '{provider_id}' not found")))
+        };
+    }
+    Ok(())
+}
+
+fn validate_graph_models(
+    models: &[NewProviderModel<'_>],
+    display_names: &[Option<String>],
+) -> Result<(), DbError> {
+    if models.is_empty() {
+        return Err(DbError::Conflict("provider graph must have at least one model".into()));
+    }
+    if models.len() != display_names.len() {
+        return Err(DbError::Conflict("provider graph model display names must match the model count".into()));
+    }
+    let mut identities = HashSet::with_capacity(models.len());
+    for model in models {
+        if model.model.trim().is_empty() || !identities.insert(model.model) {
+            return Err(DbError::Conflict(format!(
+                "provider graph model '{}' is blank or duplicated", model.model
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn save_graph_models_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider_id: &str,
+    models: &[NewProviderModel<'_>],
+    display_names: &[Option<String>],
+    now: i64,
+) -> Result<(Vec<ProviderModelRow>, bool), DbError> {
+    validate_graph_models(models, display_names)?;
+    let mut stored_models = Vec::with_capacity(models.len());
+    let mut configuration_changed = false;
+    for (model, display_name) in models.iter().zip(display_names) {
+        let (_, changed) = save_model_tx(transaction, provider_id, model, now).await?;
+        configuration_changed |= changed;
+        sqlx::query(
+            "UPDATE provider_models SET display_name = ? \
+             WHERE provider_id = ? AND model = ?",
+        )
+        .bind(display_name.as_deref())
+        .bind(provider_id)
+        .bind(model.model)
+        .execute(&mut **transaction)
+        .await?;
+        stored_models.push(fetch_row(transaction, provider_id, model.model).await?);
+    }
+    Ok((stored_models, configuration_changed))
+}
+
+async fn upsert_named_connections_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider_id: &str,
+    connections: &[UpsertProviderConnectionParams<'_>],
+    now: i64,
+) -> Result<bool, DbError> {
+    let mut roles = HashSet::with_capacity(connections.len());
+    let mut configuration_changed = false;
+    for connection in connections {
+        let role = connection.role.trim();
+        if role.is_empty() || role == "default" || !roles.insert(role) {
+            return Err(DbError::Conflict(format!(
+                "provider named connection role '{role}' is invalid or duplicated"
+            )));
+        }
+        let base_url = connection.base_url.trim();
+        if base_url.is_empty() {
+            return Err(DbError::Conflict(format!(
+                "provider named connection role '{role}' base_url must not be blank"
+            )));
+        }
+        let auth_scheme = connection.auth_scheme.trim();
+        if auth_scheme.is_empty() {
+            return Err(DbError::Conflict(format!(
+                "provider named connection role '{role}' auth_scheme must not be blank"
+            )));
+        }
+        let existing = sqlx::query_as::<_, ProviderConnectionRow>(
+            "SELECT * FROM provider_connections WHERE provider_id = ? AND role = ?",
+        )
+        .bind(provider_id)
+        .bind(role)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let invocation_changed = existing.as_ref().map_or(true, |existing| {
+            existing.base_url != base_url
+                || existing.auth_scheme != auth_scheme
+                || existing.credentials_encrypted != connection.credentials_encrypted
+                || existing.extra != connection.extra
+        });
+        sqlx::query(
+            "INSERT INTO provider_connections \
+                (connection_id, provider_id, role, label, base_url, auth_scheme, \
+                 credentials_encrypted, extra, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(provider_id, role) DO UPDATE SET \
+                label = excluded.label, base_url = excluded.base_url, \
+                auth_scheme = excluded.auth_scheme, \
+                credentials_encrypted = excluded.credentials_encrypted, \
+                extra = excluded.extra, updated_at = excluded.updated_at",
+        )
+        .bind(nomifun_common::generate_id())
+        .bind(provider_id)
+        .bind(role)
+        .bind(connection.label)
+        .bind(base_url)
+        .bind(auth_scheme)
+        .bind(connection.credentials_encrypted)
+        .bind(connection.extra)
+        .bind(now)
+        .bind(now)
+        .execute(&mut **transaction)
+        .await?;
+        if invocation_changed {
+            clear_health_for_connection_role_tx(transaction, provider_id, role).await?;
+            configuration_changed = true;
+        }
+    }
+    Ok(configuration_changed)
+}
+
 #[async_trait::async_trait]
 impl IProviderRepository for SqliteProviderRepository {
     async fn list(&self) -> Result<Vec<Provider>, DbError> {
@@ -169,52 +318,31 @@ impl IProviderRepository for SqliteProviderRepository {
         initial_model: &NewProviderModel<'_>,
         connections: &[UpsertProviderConnectionParams<'_>],
     ) -> Result<(Provider, ProviderModelRow), DbError> {
+        let (provider, mut models) = self
+            .create_graph(params, std::slice::from_ref(initial_model), &[None], connections)
+            .await?;
+        Ok((provider, models.remove(0)))
+    }
+
+    async fn create_graph(
+        &self,
+        params: CreateProviderParams<'_>,
+        models: &[NewProviderModel<'_>],
+        display_names: &[Option<String>],
+        connections: &[UpsertProviderConnectionParams<'_>],
+    ) -> Result<(Provider, Vec<ProviderModelRow>), DbError> {
+        validate_graph_models(models, display_names)?;
         let now = nomifun_common::now_ms();
         let mut transaction = self.pool.begin().await?;
         let provider = insert_provider_row_tx(&mut transaction, &params, now).await?;
-        let mut roles = HashSet::with_capacity(connections.len());
-        for connection in connections {
-            let role = connection.role.trim();
-            if role.is_empty() || role == "default" || !roles.insert(role) {
-                return Err(DbError::Conflict(format!(
-                    "provider named connection role '{role}' is invalid or duplicated"
-                )));
-            }
-            let base_url = connection.base_url.trim();
-            if base_url.is_empty() {
-                return Err(DbError::Conflict(format!(
-                    "provider named connection role '{role}' base_url must not be blank"
-                )));
-            }
-            let auth_scheme = connection.auth_scheme.trim();
-            if auth_scheme.is_empty() {
-                return Err(DbError::Conflict(format!(
-                    "provider named connection role '{role}' auth_scheme must not be blank"
-                )));
-            }
-            sqlx::query(
-                "INSERT INTO provider_connections \
-                    (connection_id, provider_id, role, label, base_url, auth_scheme, \
-                     credentials_encrypted, extra, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(nomifun_common::generate_id())
-            .bind(&provider.provider_id)
-            .bind(role)
-            .bind(connection.label)
-            .bind(base_url)
-            .bind(auth_scheme)
-            .bind(connection.credentials_encrypted)
-            .bind(connection.extra)
-            .bind(now)
-            .bind(now)
-            .execute(&mut *transaction)
+        upsert_named_connections_tx(&mut transaction, &provider.provider_id, connections, now)
             .await?;
-        }
-        let (model, _) =
-            save_model_tx(&mut transaction, &provider.provider_id, initial_model, now).await?;
+        let (stored_models, _) = save_graph_models_tx(
+            &mut transaction, &provider.provider_id, models, display_names, now,
+        )
+        .await?;
         transaction.commit().await?;
-        Ok((provider, model))
+        Ok((provider, stored_models))
     }
 
     async fn update(
@@ -223,29 +351,18 @@ impl IProviderRepository for SqliteProviderRepository {
         expected_config_revision: i64,
         params: UpdateProviderParams<'_>,
     ) -> Result<Provider, DbError> {
+        self.update_with_connections(id, expected_config_revision, params, &[]).await
+    }
+
+    async fn update_with_connections(
+        &self,
+        id: &str,
+        expected_config_revision: i64,
+        params: UpdateProviderParams<'_>,
+        connections: &[UpsertProviderConnectionParams<'_>],
+    ) -> Result<Provider, DbError> {
         let mut transaction = self.pool.begin().await?;
-        let locked = sqlx::query(
-            "UPDATE providers SET config_revision = config_revision \
-             WHERE provider_id = ? AND config_revision = ?",
-        )
-        .bind(id)
-        .bind(expected_config_revision)
-        .execute(&mut *transaction)
-        .await?;
-        if locked.rows_affected() == 0 {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE provider_id = ?)")
-                    .bind(id)
-                    .fetch_one(&mut *transaction)
-                    .await?;
-            return if exists {
-                Err(DbError::Conflict(format!(
-                    "provider invocation graph changed while updating provider; expected revision {expected_config_revision}"
-                )))
-            } else {
-                Err(DbError::NotFound(format!("Provider '{id}' not found")))
-            };
-        }
+        lock_provider_revision_tx(&mut transaction, id, expected_config_revision).await?;
         let existing = fetch_provider_tx(&mut transaction, id).await?;
         let default_invocation_changed = params
             .base_url
@@ -259,7 +376,7 @@ impl IProviderRepository for SqliteProviderRepository {
             || params
                 .bedrock_config
                 .is_some_and(|value| value != existing.bedrock_config.as_deref());
-        let graph_changed = default_invocation_changed
+        let mut graph_changed = default_invocation_changed
             || params
                 .enabled
                 .is_some_and(|value| value != existing.enabled);
@@ -297,12 +414,34 @@ impl IProviderRepository for SqliteProviderRepository {
         if default_invocation_changed {
             clear_health_for_connection_role_tx(&mut transaction, id, "default").await?;
         }
+        graph_changed |= upsert_named_connections_tx(&mut transaction, id, connections, now).await?;
         if graph_changed {
             bump_provider_config_revision_tx(&mut transaction, id).await?;
         }
         let provider = fetch_provider_tx(&mut transaction, id).await?;
         transaction.commit().await?;
         Ok(provider)
+    }
+
+    async fn save_graph_models(
+        &self,
+        provider_id: &str,
+        expected_config_revision: i64,
+        models: &[NewProviderModel<'_>],
+        display_names: &[Option<String>],
+    ) -> Result<Vec<ProviderModelRow>, DbError> {
+        validate_graph_models(models, display_names)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_provider_revision_tx(&mut transaction, provider_id, expected_config_revision).await?;
+        let (stored_models, configuration_changed) = save_graph_models_tx(
+            &mut transaction, provider_id, models, display_names, nomifun_common::now_ms(),
+        )
+        .await?;
+        if configuration_changed {
+            bump_provider_config_revision_tx(&mut transaction, provider_id).await?;
+        }
+        transaction.commit().await?;
+        Ok(stored_models)
     }
 
     async fn clone_graph(
@@ -375,11 +514,11 @@ impl IProviderRepository for SqliteProviderRepository {
                 "INSERT INTO provider_model_capabilities \
                     (provider_id, model, task, traits, protocol, connection_role, \
                      base_url_override, endpoint, poll_endpoint, content_endpoint, realtime_endpoint, \
-                     allow_cross_origin_credentials, provider_params, context_limit, output_limit, \
+                     allow_cross_origin_credentials, provider_params, context_limit, output_limit, compaction_threshold_pct, \
                      created_at, updated_at) \
                  SELECT ?, model, task, traits, protocol, connection_role, \
                      base_url_override, endpoint, poll_endpoint, content_endpoint, realtime_endpoint, \
-                     allow_cross_origin_credentials, provider_params, context_limit, output_limit, ?, ? \
+                     allow_cross_origin_credentials, provider_params, context_limit, output_limit, compaction_threshold_pct, ?, ? \
                  FROM provider_model_capabilities WHERE provider_id = ? AND model = ?",
             )
             .bind(&new_id)
@@ -422,134 +561,6 @@ impl IProviderRepository for SqliteProviderRepository {
         Ok(provider)
     }
 
-    async fn save_managed_graph(
-        &self,
-        params: CreateProviderParams<'_>,
-        models: &[NewProviderModel<'_>],
-    ) -> Result<Provider, DbError> {
-        validate_provider_params(&params)?;
-        let Some(provider_id) = params.provider_id else {
-            return Err(DbError::Conflict(
-                "managed provider graph requires an explicit provider_id".into(),
-            ));
-        };
-        let provider_id = nomifun_common::ProviderId::parse(provider_id)
-            .map_err(|error| {
-                DbError::Conflict(format!("invalid provider_id '{provider_id}': {error}"))
-            })?
-            .into_string();
-        if models.is_empty() {
-            return Err(DbError::Conflict(
-                "managed provider graph must contain at least one model".into(),
-            ));
-        }
-        let mut names = HashSet::with_capacity(models.len());
-        for model in models {
-            if !names.insert(model.model) {
-                return Err(DbError::Conflict(format!(
-                    "managed provider model '{}' is duplicated",
-                    model.model
-                )));
-            }
-        }
-
-        let mut transaction = self.pool.begin().await?;
-        let now = nomifun_common::now_ms();
-        // Managed reconciliation validates and writes inside this transaction,
-        // so serialize it on the same provider graph lock as user mutations.
-        let parent_lock = sqlx::query(
-            "UPDATE providers SET config_revision = config_revision WHERE provider_id = ?",
-        )
-        .bind(&provider_id)
-        .execute(&mut *transaction)
-        .await?;
-        let existing = if parent_lock.rows_affected() > 0 {
-            sqlx::query_as::<_, Provider>("SELECT * FROM providers WHERE provider_id = ?")
-                .bind(&provider_id)
-                .fetch_optional(&mut *transaction)
-                .await?
-        } else {
-            None
-        };
-        let provider_existed = existing.is_some();
-        let mut graph_changed = false;
-        let mut default_invocation_changed = false;
-        if let Some(existing) = existing {
-            default_invocation_changed = params.platform != existing.platform
-                || params.base_url != existing.base_url
-                || params.auth_scheme.trim() != existing.auth_scheme
-                || params.credentials_encrypted != existing.credentials_encrypted
-                || params.bedrock_config != existing.bedrock_config.as_deref();
-            graph_changed = default_invocation_changed || params.enabled != existing.enabled;
-            sqlx::query(
-                "UPDATE providers SET platform = ?, name = ?, base_url = ?, auth_scheme = ?, \
-                 credentials_encrypted = ?, enabled = ?, bedrock_config = ?, sort_order = ?, \
-                 updated_at = ? WHERE provider_id = ?",
-            )
-            .bind(params.platform)
-            .bind(params.name)
-            .bind(params.base_url)
-            .bind(params.auth_scheme.trim())
-            .bind(params.credentials_encrypted)
-            .bind(params.enabled)
-            .bind(params.bedrock_config)
-            .bind(params.sort_order.unwrap_or(existing.sort_order))
-            .bind(now)
-            .bind(&provider_id)
-            .execute(&mut *transaction)
-            .await?;
-        } else {
-            let normalized = CreateProviderParams {
-                provider_id: Some(&provider_id),
-                ..params
-            };
-            insert_provider_row_tx(&mut transaction, &normalized, now).await?;
-        }
-
-        for model in models {
-            let (_, changed) = save_model_tx(&mut transaction, &provider_id, model, now).await?;
-            graph_changed |= changed;
-        }
-        if default_invocation_changed {
-            clear_health_for_connection_role_tx(&mut transaction, &provider_id, "default").await?;
-        }
-        let placeholders = vec!["?"; models.len()].join(", ");
-        let delete_caps_sql = format!(
-            "DELETE FROM provider_model_capabilities WHERE provider_id = ? \
-             AND model NOT IN ({placeholders})"
-        );
-        let mut delete_caps = sqlx::query(&delete_caps_sql).bind(&provider_id);
-        for model in models {
-            delete_caps = delete_caps.bind(model.model);
-        }
-        let deleted_capabilities = delete_caps
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-        graph_changed |= deleted_capabilities > 0;
-
-        let delete_models_sql = format!(
-            "DELETE FROM provider_models WHERE provider_id = ? AND model NOT IN ({placeholders})"
-        );
-        let mut delete_models = sqlx::query(&delete_models_sql).bind(&provider_id);
-        for model in models {
-            delete_models = delete_models.bind(model.model);
-        }
-        let deleted_models = delete_models
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-        graph_changed |= deleted_models > 0;
-
-        if provider_existed && graph_changed {
-            bump_provider_config_revision_tx(&mut transaction, &provider_id).await?;
-        }
-
-        let provider = fetch_provider_tx(&mut transaction, &provider_id).await?;
-        transaction.commit().await?;
-        Ok(provider)
-    }
-
     async fn delete(&self, id: &str) -> Result<(), DbError> {
         let mut transaction = self.pool.begin().await?;
 
@@ -569,8 +580,10 @@ impl IProviderRepository for SqliteProviderRepository {
         let hard_binding_exists: bool = sqlx::query_scalar(
             "SELECT \
                 EXISTS(\
-                    SELECT 1 FROM conversations \
-                    WHERE json_extract(model, '$.provider_id') = ?1\
+                    SELECT 1 FROM agent_preset_revisions revision, \
+                         json_tree(revision.payload_json) route \
+                    WHERE route.type = 'object' \
+                      AND json_extract(route.value, '$.provider_id') = ?1\
                 ) \
                 OR EXISTS(\
                     SELECT 1 FROM agent_execution_template_participants \
@@ -623,6 +636,11 @@ impl IProviderRepository for SqliteProviderRepository {
                 OR key = 'knowledge.autogenModel' \
                 OR key = 'knowledge.retrieval' \
                 OR key = 'models.default.imageGeneration' \
+                OR key = 'models.default.imageEdit' \
+                OR key = 'models.default.vision' \
+                OR key = 'models.default.videoGeneration' \
+                OR key = 'models.default.musicGeneration' \
+                OR key = 'models.default.speechSynthesis' \
                 OR key = 'tools.speechToText' \
                 OR key = 'tools.textToSpeech' \
                 OR key LIKE 'channels.%.defaultModel'",
@@ -637,79 +655,50 @@ impl IProviderRepository for SqliteProviderRepository {
             }
         }
 
+        // IDMM is per canonical AgentSession and stores its bounded domain
+        // record under a namespaced client-preference key.  A deleted bypass
+        // provider must not leave the supervisor in a model tier that can no
+        // longer run.  Downgrade only that tier to deterministic rules while
+        // preserving its intervention history and every unrelated setting.
+        let idmm_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM client_preferences \
+             WHERE key GLOB 'agent_session.idmm.*'",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut idmm_updates = Vec::new();
+        for (key, value) in idmm_rows {
+            let mut parsed: serde_json::Value = serde_json::from_str(&value).map_err(|error| {
+                DbError::Conflict(format!("invalid IDMM preference '{key}': {error}"))
+            })?;
+            let selected = parsed
+                .pointer("/config/bypass_model/provider_id")
+                .and_then(serde_json::Value::as_str);
+            if selected != Some(id) {
+                continue;
+            }
+            let config = parsed
+                .get_mut("config")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| DbError::Conflict(format!("invalid IDMM preference '{key}'")))?;
+            config.insert("bypass_model".to_owned(), serde_json::json!({}));
+            if config.get("mode").and_then(serde_json::Value::as_str)
+                == Some("rule_plus_model")
+            {
+                config.insert("mode".to_owned(), serde_json::json!("rule_only"));
+            }
+            if let Some(revision) = parsed.get("revision").and_then(serde_json::Value::as_u64) {
+                parsed["revision"] = serde_json::json!(revision.saturating_add(1));
+            }
+            idmm_updates.push((key, parsed.to_string()));
+        }
+
         sqlx::query("DELETE FROM providers WHERE provider_id = ?")
             .bind(id)
             .execute(&mut *transaction)
             .await?;
 
-        // Soft logical references are repaired explicitly in the same
-        // transaction. SQLite owns no cascade or relation semantics.
-        sqlx::query(
-            "UPDATE conversations \
-             SET execution_model_pool = CASE \
-                    WHEN json_extract(execution_model_pool, '$.mode') = 'single' \
-                        THEN NULL \
-                    ELSE (\
-                        SELECT CASE \
-                            WHEN COUNT(*) = 0 THEN NULL \
-                            ELSE json_object(\
-                                'mode', 'range', \
-                                'models', json(json_group_array(json(item.value)))\
-                            ) \
-                        END \
-                        FROM json_each(conversations.execution_model_pool, '$.models') item \
-                        WHERE json_extract(item.value, '$.provider_id') <> ?1 \
-                          AND EXISTS (\
-                              SELECT 1 FROM providers provider \
-                              WHERE provider.provider_id = json_extract(item.value, '$.provider_id')\
-                          )\
-                    ) \
-                 END, \
-                 updated_at = MAX(updated_at, ?2) \
-             WHERE execution_model_pool IS NOT NULL \
-               AND (\
-                    (json_extract(execution_model_pool, '$.mode') = 'single' \
-                     AND json_extract(execution_model_pool, '$.model.provider_id') = ?1) \
-                    OR \
-                    (json_extract(execution_model_pool, '$.mode') = 'range' \
-                     AND EXISTS (\
-                         SELECT 1 FROM json_each(execution_model_pool, '$.models') target \
-                         WHERE json_extract(target.value, '$.provider_id') = ?1\
-                     ))\
-               )",
-        )
-        .bind(id)
-        .bind(nomifun_common::now_ms())
-        .execute(&mut *transaction)
-        .await?;
-
         let now = nomifun_common::now_ms();
-        sqlx::query(
-            "UPDATE conversations \
-             SET extra = json_remove(\
-                    extra, \
-                    CASE \
-                        WHEN json_extract(extra, '$.idmm.fault_watch.bypass_model.provider_id') = ?1 \
-                        THEN '$.idmm.fault_watch.bypass_model' \
-                        ELSE '$.__nomifun_noop_idmm_fault_bypass' \
-                    END, \
-                    CASE \
-                        WHEN json_extract(extra, '$.idmm.decision_watch.bypass_model.provider_id') = ?1 \
-                        THEN '$.idmm.decision_watch.bypass_model' \
-                        ELSE '$.__nomifun_noop_idmm_decision_bypass' \
-                    END\
-                 ), \
-                 updated_at = MAX(updated_at, ?2) \
-             WHERE json_valid(extra) \
-               AND (\
-                    json_extract(extra, '$.idmm.fault_watch.bypass_model.provider_id') = ?1 \
-                    OR json_extract(extra, '$.idmm.decision_watch.bypass_model.provider_id') = ?1\
-               )",
-        )
-        .bind(id)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
         sqlx::query(
             "UPDATE terminal_sessions \
              SET idmm = json_remove(\
@@ -763,9 +752,20 @@ impl IProviderRepository for SqliteProviderRepository {
                 ProviderPreferenceDeleteAction::Keep => unreachable!(),
             }
         }
+        for (key, value) in idmm_updates {
+            sqlx::query(
+                "UPDATE client_preferences \
+                 SET value = ?, updated_at = MAX(updated_at, ?) WHERE key = ?",
+            )
+            .bind(value)
+            .bind(now)
+            .bind(key)
+            .execute(&mut *transaction)
+            .await?;
+        }
 
-        // Cascade the provider delete to the catalog tables in the same
-        // transaction.
+        // Cascade the provider delete to its current catalog tables in the
+        // same transaction.
         sqlx::query("DELETE FROM provider_model_capabilities WHERE provider_id = ?")
             .bind(id)
             .execute(&mut *transaction)
@@ -778,11 +778,6 @@ impl IProviderRepository for SqliteProviderRepository {
             .bind(id)
             .execute(&mut *transaction)
             .await?;
-        sqlx::query("UPDATE preset_model_preferences SET provider_id = NULL WHERE provider_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-
         transaction.commit().await?;
         Ok(())
     }

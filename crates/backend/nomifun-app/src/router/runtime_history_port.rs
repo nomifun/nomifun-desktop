@@ -1,0 +1,143 @@
+//! Scoped read-only adapter for canonical AgentSession history and one Runtime codec.
+use super::super::engine_session_host::{EngineSessionHost, EngineTurnReceipt};
+use nomifun_chat_model_broker::{ChatCausality, ChatContentPart, ChatMessage, ChatRole};
+use nomifun_agent_runtime::{
+    AgentEngineError, AgentHistoryPage, AgentHistoryPort, AgentRecordedTurn,
+};
+use serde_json::Value;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+
+pub(super) struct HistoryPort {
+    pub host: Arc<EngineSessionHost>,
+    pub receipt: EngineTurnReceipt,
+    pub cancellation: CancellationToken,
+}
+
+impl std::fmt::Debug for HistoryPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AgentHistoryPort(scoped)")
+    }
+}
+fn invalid() -> AgentEngineError {
+    AgentEngineError::ContextAssembly(
+        "Historical turn unavailable or outside the admitted history contract".into(),
+    )
+}
+
+impl HistoryPort {
+    fn require_causality(&self, causality: &ChatCausality) -> Result<(), AgentEngineError> {
+        if causality.agent_session_id.as_ref() != self.receipt.session().session().conversation_id
+            || causality.turn_operation_id.as_ref() != self.receipt.operation_id()
+            || causality.causation_event_id.as_ref() != self.receipt.root_message_id()
+            || causality.resolved_snapshot_ref != self.receipt.session().snapshot().snapshot_ref
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentHistoryPort for HistoryPort {
+    async fn model_snapshot_compatible(
+        &self,
+        causality: &ChatCausality,
+        source: &nomifun_agent_contracts::ResolvedSnapshotRef,
+    ) -> Result<bool, AgentEngineError> {
+        self.require_causality(causality)?;
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        let compatible = self.host
+            .historical_model_binding_compatible(self.receipt.session(), source)
+            .await.map_err(|_| invalid())?;
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        Ok(compatible)
+    }
+    async fn read_previous(
+        &self,
+        causality: &ChatCausality,
+        before_operation: Option<&str>,
+    ) -> Result<AgentHistoryPage, AgentEngineError> {
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        self.require_causality(causality)?;
+        let window = self
+            .host
+            .read_history_before(&self.receipt, 1, before_operation)
+            .await
+            .map_err(|_| invalid())?;
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        Self::project(window)
+    }
+
+    async fn read_exact(
+        &self,
+        causality: &ChatCausality,
+        operation: &str,
+    ) -> Result<Option<AgentHistoryPage>, AgentEngineError> {
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        self.require_causality(causality)?;
+        let window = self.host.read_history_exact(&self.receipt, operation).await
+            .map_err(|_| invalid())?;
+        if self.cancellation.is_cancelled() {
+            return Err(AgentEngineError::Cancelled);
+        }
+        Ok(Some(Self::project(window)?))
+    }
+}
+
+impl HistoryPort {
+    fn project(mut window: super::super::engine_history::EngineHistoryWindow) -> Result<AgentHistoryPage, AgentEngineError> {
+        if window.turns.len() > 1 { return Err(invalid()); }
+        let Some(turn) = window.turns.pop() else {
+            return Ok(AgentHistoryPage {
+                turn: None,
+                has_older: window.has_older,
+            });
+        };
+        let root: Value = serde_json::from_str(&turn.root_content_json).map_err(|_| invalid())?;
+        let text = root
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?;
+        let receipt: Value =
+            serde_json::from_str(&turn.request_payload_json).map_err(|_| invalid())?;
+        let files =
+            super::super::runtime_attachments::references(&receipt).map_err(|_| invalid())?;
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(ChatContentPart::Text { text: text.into() });
+        }
+        if let Some(description) = super::super::runtime_attachments::description(&files, true) {
+            content.push(description);
+        }
+        if content.is_empty() {
+            return Err(invalid());
+        }
+        let events = super::super::unified_runtime_history::decode_turn_events(
+            turn.records, &turn.receipt_status, turn.unstarted_terminal,
+        ).map_err(|_| invalid())?.unwrap_or_default();
+        Ok(AgentHistoryPage {
+            has_older: window.has_older,
+            turn: Some(AgentRecordedTurn {
+                operation_id: turn.operation_id,
+                receipt_status: turn.receipt_status,
+                requirement: ChatMessage {
+                    role: ChatRole::User,
+                    content,
+                    provider_round_id: None,
+                },
+                events,
+            }),
+        })
+    }
+}

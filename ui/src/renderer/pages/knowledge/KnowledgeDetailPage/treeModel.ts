@@ -31,7 +31,20 @@ function fileNode(
   };
 }
 
-export function sortKnowledgeTreeNodes(nodes: IKnowledgeTreeEntry[]): IKnowledgeTreeEntry[] {
+function firstKnowledgeTreeFilePath(
+  nodes: readonly IKnowledgeTreeEntry[]
+): string | null {
+  for (const node of nodes) {
+    if (node.is_file) return node.rel_path;
+    const childPath = node.children
+      ? firstKnowledgeTreeFilePath(node.children)
+      : null;
+    if (childPath) return childPath;
+  }
+  return null;
+}
+
+function sortKnowledgeTreeNodes(nodes: IKnowledgeTreeEntry[]): IKnowledgeTreeEntry[] {
   return nodes
     .map((node) => (node.children ? { ...node, children: sortKnowledgeTreeNodes(node.children) } : node))
     .sort((a, b) => {
@@ -167,17 +180,6 @@ export function preserveKnowledgeTreeChildren(
     });
 
   return preserve(nextNodes);
-}
-
-export function firstKnowledgeFilePath(nodes: IKnowledgeTreeEntry[]): string | null {
-  for (const node of nodes) {
-    if (node.is_file) return node.rel_path;
-    if (node.children?.length) {
-      const found = firstKnowledgeFilePath(node.children);
-      if (found) return found;
-    }
-  }
-  return null;
 }
 
 export function parentDirOfKnowledgePath(relPath: string | null): string {
@@ -399,7 +401,10 @@ export function knowledgeTreeViewReducer(
       // tree-changed event may be racing this snapshot after an external move;
       // switching to the first file here would destroy the active draft before
       // the old→new locator mapping arrives.
-      const selectedPath = state.selectedPath ?? action.files[0]?.rel_path ?? null;
+      const selectedPath =
+        state.selectedPath ??
+        action.files[0]?.rel_path ??
+        firstKnowledgeTreeFilePath(action.tree);
       return {
         ...state,
         files: action.files,

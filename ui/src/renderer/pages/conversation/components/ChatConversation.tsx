@@ -4,81 +4,116 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
-import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import type { IProvider, TChatConversation } from '@/common/config/storage';
+import { parseError } from '@/common/utils';
+import { uuidv7 } from '@/common/utils';
+import type {
+  AgentHandoffMode,
+  AgentSwitchSelection,
+  PreviewAgentSessionSwitchResponse,
+} from '@/common/types/agentPlatform';
 import { CronJobManager } from '@/renderer/pages/cron';
-import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
+import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import { Message } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Navigate, useNavigate } from 'react-router-dom';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
-import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
-import { configService } from '@/common/config/configService';
-import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
-import { resolveHealModel } from '../platforms/nomi/healConversationModel';
 import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
-import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
-import GuidCollaboratorSelector from '@/renderer/pages/guid/components/GuidCollaboratorSelector';
-import {
-  toAppliedCollaborationTemplate,
-  type AppliedCollaborationTemplate,
-} from '@/renderer/components/collaboration/collaborationTemplateModel';
-import CollaborationPolicyControl, {
-  type CollaborationPolicyValue,
-} from '@/renderer/components/collaboration/CollaborationPolicyControl';
-import type { TExecutionModelPool, TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
 import { ExecutionProvider } from '../execution/ExecutionContext';
 import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import SshHostStatusPill from './SshHostStatusPill';
+import SystemPermissionReminder from './SystemPermissionReminder';
 import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
-import { useExecutionModelPool } from '../execution/useExecutionModelPool';
-import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
-
-/** Check whether a specific skill is mounted on the conversation. */
-const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: string): boolean => {
-  const skills = (conversation?.extra as { skills?: string[] } | undefined)?.skills;
-  return skills?.includes(skillName) ?? false;
-};
-
-/** Host id of an SSH-bound session, or undefined for every other conversation. */
-const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | undefined =>
-  (conversation?.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
-
-const buildConversationModelPool = (
-  mainRef: TExecutionModelRef | null,
-  collaborators: TExecutionModelRef[],
-): TExecutionModelPool | null => {
-  if (!mainRef?.provider_id || !mainRef.model) return null;
-  const seen = new Set<string>();
-  const models = [mainRef, ...collaborators].filter((candidate) => {
-    if (!candidate.provider_id || !candidate.model) return false;
-    const key = `${candidate.provider_id}\u0000${candidate.model}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  return models.length === 1 ? { mode: 'single', model: models[0] } : { mode: 'range', models };
-};
+import GuidAgentSelector from '@/renderer/pages/guid/components/GuidAgentSelector';
+import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
+import {
+  isExecutableAgentPreset,
+  saveNomiDefaultModel,
+} from '@/renderer/pages/guid/hooks/agentSelectionUtils';
+import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
+import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
+import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
+import { useCreationDraft } from '@/renderer/creation/useCreationDraft';
+import type { CreationMode } from '@/renderer/creation/types';
+import {
+  filterConversationAgentPresets,
+  isConversationAgentTemplate,
+} from '@/renderer/components/agent/conversationAgentCatalog';
+import AgentSwitchDialog from './AgentSwitchDialog';
+import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
+import { officialConversationTemplateKey } from './conversationAgentIdentity';
+import {
+  capabilityOf,
+  capabilitySupportsTechnicalCapability,
+} from '@/common/utils/providerModels';
+import {
+  reasoningEffortsForProtocol,
+  type SessionReasoningEffort,
+} from '@/common/types/reasoningEffort';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
+
+const CompanionConversationRedirect: React.FC<{ conversationId: NomiConversation['id'] }> = ({ conversationId }) => {
+  const [target, setTarget] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ipcBridge.companion.listCompanions
+      .invoke()
+      .then(async (companions) => {
+        const sessions = await Promise.all(
+          companions.map(async (companion) => ({
+            companionId: companion.companion_id,
+            session: await ipcBridge.companion.getCompanionSession
+              .invoke({ companion_id: companion.companion_id })
+              .catch(() => ({ conversation_id: null })),
+          }))
+        );
+        const owner = sessions.find((item) => item.session.conversation_id === conversationId);
+        if (!cancelled) {
+          setTarget(owner
+            ? `/nomi?companion=${encodeURIComponent(owner.companionId)}&mode=cohabit`
+            : '/nomi?mode=cohabit');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTarget('/nomi?mode=cohabit');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
+  return target ? <Navigate replace to={target} /> : <div className='size-full bg-1' />;
+};
 
 const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
-  collaborationControlNode: React.ReactNode;
-  presetPresetName?: string;
+  agentSelectorNode?: React.ReactNode;
+  currentAgentLabel: string;
+  modelSelectionDisabled?: boolean;
+  reasoningEffort?: SessionReasoningEffort;
+  reasoningEffortUpdating?: boolean;
+  onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
 }> = ({
   conversation,
   chatLayoutProps,
   modelSelection,
-  collaborationControlNode,
-  presetPresetName,
+  agentSelectorNode,
+  currentAgentLabel,
+  modelSelectionDisabled,
+  reasoningEffort,
+  reasoningEffortUpdating,
+  onReasoningEffortChange,
 }) => {
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
@@ -93,15 +128,18 @@ const NomiConversationLayout: React.FC<{
         conversation_id={conversation.id}
         workspace={conversation.extra.workspace}
         modelSelection={modelSelection}
-        session_mode={conversation.extra?.session_mode}
+        agentSelectorNode={agentSelectorNode}
         cron_job_id={conversation.cron_job_id}
-        loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-        loadedMcpStatuses={
-          (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
-        }
-        agent_name={presetPresetName}
-        collaboratorSelectorNode={collaborationControlNode}
+        agent_name={currentAgentLabel}
+        currentAgent={conversation.preset_id
+          ? { presetId: conversation.preset_id, label: currentAgentLabel }
+          : undefined}
+        modelSelectionDisabled={modelSelectionDisabled}
+        reasoningEffort={reasoningEffort}
+        reasoningEffortUpdating={reasoningEffortUpdating}
+        onReasoningEffortChange={onReasoningEffortChange}
         isProcessing={isConversationProcessing(conversation)}
+        creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
       />
     </ExecutionConversationLayout>
   );
@@ -111,259 +149,271 @@ const NomiConversationPanel: React.FC<{
   conversation: NomiConversation;
   sliderTitle: React.ReactNode;
 }> = ({ conversation, sliderTitle }) => {
-  const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
-    const pool = conversation.execution_model_pool;
-    return pool?.mode === 'range' ? pool.models.slice(1) : [];
-  });
-  const [collaborationPolicy, setCollaborationPolicy] = useState<CollaborationPolicyValue>({
-    delegationPolicy: conversation.delegation_policy ?? 'automatic',
-    decisionPolicy: conversation.decision_policy ?? 'automatic',
-  });
-  const [selectedCollaborationTemplate, setSelectedCollaborationTemplate] =
-    useState<AppliedCollaborationTemplate | null>(null);
-  useEffect(() => {
-    setCollaborationPolicy({
-      delegationPolicy: conversation.delegation_policy ?? 'automatic',
-      decisionPolicy: conversation.decision_policy ?? 'automatic',
+  const hasPreset = Boolean(conversation.preset_id);
+  const navigate = useNavigate();
+  const creation = useCreationDraft(conversation.id);
+  useEffect(() => ipcBridge.agentPlatform.sessions.onAgentChanged.on((event) => {
+    if (String(event.agent_session_id) !== String(conversation.id)) return;
+    void refreshConversationCache(conversation.id).catch((error) => {
+      console.error('[ChatConversation] Failed to refresh switched Agent:', error);
     });
-  }, [conversation.decision_policy, conversation.delegation_policy]);
-
-  const storedExecutionTemplateId = conversation.execution_template_id ?? null;
-  useEffect(() => {
-    if (!storedExecutionTemplateId) {
-      setSelectedCollaborationTemplate(null);
-      return;
-    }
-    let cancelled = false;
-    void ipcBridge.agentExecutionTemplate.get
-      .invoke({ execution_template_id: storedExecutionTemplateId })
-      .then((template) => {
-        if (!cancelled) {
-          setSelectedCollaborationTemplate(toAppliedCollaborationTemplate(template));
-        }
-      })
-      .catch((error) => {
-        console.error('[ChatConversation] Failed to resolve collaboration template:', error);
-        if (!cancelled) setSelectedCollaborationTemplate(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [storedExecutionTemplateId]);
-  const { configuredPairs, allPairs, isLoading: isModelCatalogLoading } = useExecutionModelPool();
-  const collaboratorReconciliation = useMemo(
-    () => (isModelCatalogLoading ? null : reconcileModelRefs(collaborators, configuredPairs, allPairs)),
-    [allPairs, collaborators, configuredPairs, isModelCatalogLoading],
+  }), [conversation.id]);
+  const { library: agentLibrary, presets: savedAgentPresets, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useAgentPresets();
+  const conversationAgentPresets = useMemo(
+    () => filterConversationAgentPresets(savedAgentPresets, agentLibrary?.active_bindings ?? []),
+    [agentLibrary?.active_bindings, savedAgentPresets],
   );
-  const activeCollaborators = collaboratorReconciliation?.active ?? [];
-
-  const persistModelPool = useCallback(
-    async (mainRef: TExecutionModelRef | null, collabs: TExecutionModelRef[]) => {
-      const execution_model_pool = buildConversationModelPool(mainRef, collabs);
-      if (!execution_model_pool) return;
-      try {
-        await ipcBridge.conversation.update.invoke({
-          conversation_id: conversation.id,
-          updates: { execution_model_pool },
-        });
-      } catch (err) {
-        console.error('[ChatConversation] Failed to persist execution model pool:', err);
-      }
-    },
-    [conversation.id],
+  const executableAgentPresets = useMemo(
+    () => conversationAgentPresets.filter(isExecutableAgentPreset),
+    [conversationAgentPresets],
   );
-
+  const conversationOfficialTemplates = useMemo(
+    () => (agentLibrary?.official_templates ?? []).filter(isConversationAgentTemplate),
+    [agentLibrary?.official_templates],
+  );
+  const officialTemplateKey = officialConversationTemplateKey(conversation.extra);
+  const frozenAgentSelection = useMemo<GuidAgentSelection>(() =>
+    officialTemplateKey
+      ? { kind: 'template', templateKey: officialTemplateKey }
+      : conversation.preset_id
+      ? { kind: 'preset', presetId: conversation.preset_id }
+      : { kind: 'template', templateKey: 'chat.minimal' },
+    [conversation.preset_id, officialTemplateKey],
+  );
   const { t } = useTranslation();
-  const onSelectModel = useCallback(
-    async (_provider: IProvider, modelName: string) => {
-      const selected = {
-        ..._provider,
-        use_model: modelName,
-      } as TProviderWithModel;
-      // Kill the running agent on model switch; it will be rebuilt with the
-      // new model on the next message.
-      await ipcBridge.conversation.stop.invoke({
-        conversation_id: conversation.id,
-      });
-      const execution_model_pool = buildConversationModelPool(
-        { provider_id: _provider.id, model: modelName },
-        activeCollaborators,
-      );
-      if (!execution_model_pool) return false;
-      const ok = await ipcBridge.conversation.update.invoke({
-        conversation_id: conversation.id,
-        // The lead model and its collaboration authority are one atomic
-        // Conversation preference update; never expose a mixed intermediate
-        // state to Gateway delegation.
-        updates: { model: selected, execution_model_pool, execution_template_id: null },
-      });
-      if (ok) {
-        setSelectedCollaborationTemplate(null);
-        void saveNomiDefaultModel(_provider.id, modelName);
-      }
-      return Boolean(ok);
-    },
-    [activeCollaborators, conversation.id],
+  const [modelSwitching, setModelSwitching] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<SessionReasoningEffort | undefined>(
+    conversation.reasoning_effort
   );
+  const [reasoningEffortUpdating, setReasoningEffortUpdating] = useState(false);
+  const reasoningEffortUpdatingRef = useRef(false);
+  useEffect(() => {
+    setReasoningEffort(conversation.reasoning_effort);
+  }, [conversation.reasoning_effort]);
+  const modelSwitchingRef = useRef(false);
+  const onSelectModel = useCallback(async (provider: IProvider, modelName: string) => {
+    if (modelSwitchingRef.current) return false;
+    modelSwitchingRef.current = true;
+    setModelSwitching(true);
+    try {
+      const switched = await ipcBridge.conversation.switchModel.invoke({
+        conversation_id: conversation.id,
+        provider_id: provider.id,
+        model: modelName,
+      });
+      if (!switched) return false;
+      await saveNomiDefaultModel(provider.id, modelName);
+      const capability = capabilityOf(provider, modelName, 'chat');
+      const options = capabilitySupportsTechnicalCapability(capability, 'reasoning')
+        ? reasoningEffortsForProtocol(capability?.protocol)
+        : [];
+      if (reasoningEffort !== undefined && !options.includes(reasoningEffort)) {
+        setReasoningEffort(undefined);
+      }
+      void refreshConversationCache(conversation.id).catch((error) => {
+        console.error('[ChatConversation] Failed to refresh switched model:', error);
+      });
+      Message.success(t('agent.model.switchSuccess'));
+      return true;
+    } catch (error) {
+      console.error('[ChatConversation] Failed to switch model:', error);
+      Message.error(`${t('agent.model.switchFailed')}: ${parseError(error)}`);
+      return false;
+    } finally {
+      modelSwitchingRef.current = false;
+      setModelSwitching(false);
+    }
+  }, [conversation.id, reasoningEffort, t]);
 
   const modelSelection = useNomiModelSelection({
     initialModel: conversation.model,
     onSelectModel,
   });
 
-  // Main model reference used by the collaboration selector.
-  const mainModelRef = useMemo<TExecutionModelRef | null>(
-    () =>
-      modelSelection.current_model
-        ? {
-            provider_id: modelSelection.current_model.id,
-            model: modelSelection.current_model.use_model,
-          }
-        : null,
-    [modelSelection.current_model?.id, modelSelection.current_model?.use_model],
-  );
+  const onReasoningEffortChange = useCallback(async (
+    next: SessionReasoningEffort | undefined
+  ) => {
+    if (reasoningEffortUpdatingRef.current) return;
+    if (isConversationProcessing(conversation)) {
+      Message.warning(t('conversation.chat.modelSwitchAfterTurn'));
+      return;
+    }
+    const previous = reasoningEffort;
+    reasoningEffortUpdatingRef.current = true;
+    setReasoningEffortUpdating(true);
+    setReasoningEffort(next);
+    try {
+      const updated = await ipcBridge.agentPlatform.sessions.updateReasoning.invoke({
+        agent_session_id: conversation.id,
+        reasoning_effort: next,
+      });
+      setReasoningEffort(updated.reasoning_effort);
+      await refreshConversationCache(conversation.id);
+    } catch (error) {
+      setReasoningEffort(previous);
+      console.error('[ChatConversation] Failed to update reasoning effort:', error);
+      Message.error(`${t('conversation.reasoningEffort.updateFailed')}: ${parseError(error)}`);
+    } finally {
+      reasoningEffortUpdatingRef.current = false;
+      setReasoningEffortUpdating(false);
+    }
+  }, [conversation, reasoningEffort, t]);
 
-  const onCollaboratorsChange = useCallback(
-    (next: TExecutionModelRef[]) => {
-      setCollaboratorsState(next);
-      void persistModelPool(mainModelRef, next);
-    },
-    [mainModelRef, persistModelPool],
-  );
+  const { info: presetPresetInfo } = useAgentInfo(conversation);
+  const [agentSwitch, setAgentSwitch] = useState<{
+    selection: GuidAgentSelection;
+    preview?: PreviewAgentSessionSwitchResponse;
+    mode: AgentHandoffMode;
+    loading: boolean;
+    applying: boolean;
+    error?: string;
+    errorCode?: string;
+  } | null>(null);
+  const switchCurrentConversationAgent = useCallback((selection: GuidAgentSelection) => {
+    if (isConversationProcessing(conversation)) {
+      Message.warning(t('conversation.chat.agentSwitch.waitForTurn'));
+      return;
+    }
+    if (
+      (selection.kind === 'preset'
+        && frozenAgentSelection.kind === 'preset'
+        && selection.presetId === frozenAgentSelection.presetId)
+      || (selection.kind === 'template'
+        && frozenAgentSelection.kind === 'template'
+        && selection.templateKey === frozenAgentSelection.templateKey)
+    ) {
+      return;
+    }
+    const wireSelection: AgentSwitchSelection = selection.kind === 'preset'
+      ? { kind: 'preset', preset_id: selection.presetId }
+      : { kind: 'template', template_key: selection.templateKey };
+    // Keeping this flow mounted is intentional: creation.draft and the normal
+    // composer draft remain owned by the current Conversation surface.
+    setAgentSwitch({ selection, mode: 'context_only', loading: true, applying: false });
+    void ipcBridge.agentPlatform.sessions.previewAgentSwitch.invoke({
+      agent_session_id: conversation.id,
+      request: { selection: wireSelection },
+    }).then((preview) => {
+      setAgentSwitch((current) => current && ({
+        ...current,
+        preview,
+        mode: preview.handoff.available ? 'continue_task' : 'context_only',
+        loading: false,
+        error: undefined,
+        errorCode: undefined,
+      }));
+    }).catch((error) => {
+      const errorCode = isBackendHttpError(error) ? error.code : undefined;
+      const message = errorCode
+        ? t(`conversation.chat.agentSwitch.blockers.${errorCode}`, {
+            defaultValue: parseError(error),
+          })
+        : parseError(error);
+      setAgentSwitch((current) => current && ({
+        ...current,
+        loading: false,
+        error: t('conversation.chat.agentSwitch.failed', { error: message }),
+        errorCode,
+      }));
+    });
+  }, [conversation, creation.draft, frozenAgentSelection, t]);
 
-  const persistCollaborationTemplate = useCallback(
-    async (next: AppliedCollaborationTemplate | null) => {
-      const previous = selectedCollaborationTemplate;
-      setSelectedCollaborationTemplate(next);
-      try {
-        await ipcBridge.conversation.update.invoke({
-          conversation_id: conversation.id,
-          updates: {
-            execution_template_id: next?.execution_template_id ?? null,
-          },
-        });
-      } catch (error) {
-        setSelectedCollaborationTemplate(previous);
-        console.error('[ChatConversation] Failed to persist collaboration template:', error);
-        Message.error(t('common.failed', { defaultValue: '保存协作方案失败' }));
-      }
-    },
-    [conversation.id, selectedCollaborationTemplate, t],
-  );
+  const confirmCurrentConversationAgentSwitch = useCallback(() => {
+    if (!agentSwitch?.preview || !agentSwitch.preview.can_apply || agentSwitch.applying) return;
+    const wireSelection: AgentSwitchSelection = agentSwitch.selection.kind === 'preset'
+      ? { kind: 'preset', preset_id: agentSwitch.selection.presetId }
+      : { kind: 'template', template_key: agentSwitch.selection.templateKey };
+    setAgentSwitch((current) => current && ({
+      ...current,
+      applying: true,
+      error: undefined,
+      errorCode: undefined,
+    }));
+    void ipcBridge.agentPlatform.sessions.applyAgentSwitch.invoke({
+      agent_session_id: conversation.id,
+      idempotency_key: uuidv7(),
+      request: {
+        selection: wireSelection,
+        handoff_mode: agentSwitch.mode,
+        expected_binding_version: agentSwitch.preview.expected_binding_version,
+      },
+    }).then(async (result) => {
+      await refreshConversationCache(conversation.id);
+      setAgentSwitch(null);
+      Message.success(t('conversation.chat.agentSwitch.success', {
+        agent: agentSwitch.selection.kind === 'template'
+          ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[agentSwitch.selection.templateKey]}.name`)
+          : result.current_agent_label,
+      }));
+    }).catch((error) => {
+      const errorCode = isBackendHttpError(error) ? error.code : undefined;
+      const message = errorCode
+        ? t(`conversation.chat.agentSwitch.blockers.${errorCode}`, {
+            defaultValue: parseError(error),
+          })
+        : parseError(error);
+      setAgentSwitch((current) => current && ({
+        ...current,
+        applying: false,
+        error: t('conversation.chat.agentSwitch.failed', { error: message }),
+        errorCode,
+      }));
+    });
+  }, [agentSwitch, conversation.id, t]);
 
-  useEffect(() => {
-    if (!collaboratorReconciliation || collaboratorReconciliation.removed.length === 0) return;
-    if (sameModelRefs(collaborators, collaboratorReconciliation.retained)) return;
-    setCollaboratorsState(collaboratorReconciliation.retained);
-    void persistModelPool(mainModelRef, collaboratorReconciliation.retained);
-  }, [collaboratorReconciliation, collaborators, mainModelRef, persistModelPool]);
-
-  const onCollaborationPolicyChange = useCallback(
-    async (next: CollaborationPolicyValue) => {
-      setCollaborationPolicy(next);
-      try {
-        await ipcBridge.conversation.update.invoke({
-          conversation_id: conversation.id,
-          updates: {
-            delegation_policy: next.delegationPolicy,
-            decision_policy: next.decisionPolicy,
-          },
-        });
-      } catch (error) {
-        console.error('[ChatConversation] Failed to persist collaboration policy:', error);
-      }
-    },
-    [conversation.id],
-  );
-
-  // Conversation collaboration models, reusable plans, and policy share one
-  // toolbar entry. Their existing callbacks stay independent so this remains
-  // a presentation-only merge.
-  const collaborationControlNode = (
-    <GuidCollaboratorSelector
-      value={activeCollaborators}
-      onChange={onCollaboratorsChange}
-      mainModel={mainModelRef}
-      selectedTemplate={selectedCollaborationTemplate}
-      workDir={conversation.extra?.workspace}
-      onTemplateApply={(template) => void persistCollaborationTemplate(template)}
-      onTemplateClear={() => void persistCollaborationTemplate(null)}
-      className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'
-      triggerLabel={t('collaboration.policy.button', { defaultValue: 'Collaboration' })}
-      triggerActive={collaborationPolicy.delegationPolicy !== 'disabled'}
-      panelFooter={
-        <CollaborationPolicyControl
-          runtimeType={conversation.type}
-          delegationPolicy={collaborationPolicy.delegationPolicy}
-          decisionPolicy={collaborationPolicy.decisionPolicy}
-          onChange={onCollaborationPolicyChange}
-          embedded
-        />
-      }
+  const frozenPresetId = conversation.preset_id;
+  const resolvePreset = useCallback(async () => {
+    if (!frozenPresetId) throw new Error(t('conversation.chat.frozenAgentUnavailable'));
+    return frozenPresetId;
+  }, [frozenPresetId, t]);
+  const frozenCreativeAgent = officialTemplateKey === 'creative-studio.default';
+  const selectCreationMode = (mode: CreationMode) => {
+    if (frozenCreativeAgent) {
+      creation.setMode(mode);
+      return;
+    }
+    void navigate(`/guid?creation=${mode}`, {
+      state: {
+        resetSessionOptions: true,
+        selectedAgentTemplateKey: 'creative-studio.default',
+        ...(conversation.extra?.workspace ? { workspace: conversation.extra.workspace } : {}),
+      },
+    });
+  };
+  const exitCreation = () => creation.setMode(null);
+  const currentAgentLabel = officialTemplateKey
+    ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[officialTemplateKey]}.name`)
+    : presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent';
+  const agentSelectorNode = (
+    <GuidAgentSelector
+      presets={executableAgentPresets}
+      officialTemplates={conversationOfficialTemplates}
+      selection={frozenAgentSelection}
+      selectedLabelOverride={currentAgentLabel}
+      isLoading={agentsLoading}
+      loadError={agentsError}
+      onRetry={refreshAgents}
+      disabled={isConversationProcessing(conversation) || agentSwitch?.applying === true}
+      disabledReason={t('conversation.chat.agentSwitch.waitForTurn')}
+      onSelectPreset={(presetId) => switchCurrentConversationAgent({ kind: 'preset', presetId })}
+      onSelectTemplate={(templateKey) => switchCurrentConversationAgent({ kind: 'template', templateKey })}
     />
   );
-
-  // Heal against exact enabled Chat capabilities, with no name heuristics.
-  // While capability data is unavailable/loading `chatGroups` is empty, so resolveHealModel is a
-  // no-op, so a transient error can never trigger a destructive model swap.
-  const { groups: healGroups } = useModelsForTask('chat');
-  const healPool = useMemo(
-    () => ({
-      providers: healGroups.map((group) => group.provider),
-      getAvailableModels: (p: IProvider) =>
-        healGroups.find((group) => group.provider.id === p.id)?.models ?? [],
-    }),
-    [healGroups],
+  const presetResourceKinds = new Set(
+    conversation.agent_snapshot?.required_resource_kinds ?? []
   );
-  const { providers: healProviders, getAvailableModels: healGetAvailable } = healPool;
-  useEffect(() => {
-    if (!healProviders.length) return;
-    const saved = configService.get('nomi.defaultModel');
-    const heal = resolveHealModel(
-      conversation.model,
-      healProviders,
-      healGetAvailable,
-      saved,
-    );
-    if (!heal) return;
-    void (async () => {
-      const selected = {
-        ...heal.provider,
-        use_model: heal.use_model,
-      } as TProviderWithModel;
-      const execution_model_pool = buildConversationModelPool(
-        { provider_id: heal.provider.id, model: heal.use_model },
-        activeCollaborators,
-      );
-      if (!execution_model_pool) return;
-      const ok = await ipcBridge.conversation.update.invoke({
-        conversation_id: conversation.id,
-        updates: { model: selected, execution_model_pool, execution_template_id: null },
-      });
-      if (ok) {
-        setSelectedCollaborationTemplate(null);
-        void saveNomiDefaultModel(heal.provider.id, heal.use_model);
-        Message.info(
-          t('conversation.chat.modelHealedToDefault', {
-            model: heal.use_model,
-          }),
-        );
-      }
-    })();
-    // Re-evaluate when the conversation or provider list changes.
-  }, [
-    activeCollaborators,
-    conversation.id,
-    conversation.model?.id,
-    conversation.model?.use_model,
-    healProviders,
-    healGetAvailable,
-    t,
-  ]);
-
-  const workspaceEnabled = Boolean(conversation.extra?.workspace);
-  const { info: presetPresetInfo } = usePresetInfo(conversation);
-  const sshHostId = sshHostIdOf(conversation);
+  const workspaceEnabled =
+    Boolean(conversation.extra?.workspace) &&
+    (!hasPreset || presetResourceKinds.has('workspace'));
+  const knowledgeEnabled =
+    !hasPreset || presetResourceKinds.has('knowledge_base');
+  const knowledgeActions = conversation.agent_snapshot
+    ?.enabled_capability_actions?.knowledge ?? [];
+  const knowledgeWritebackAvailable = knowledgeActions.some((action) =>
+    action === 'knowledge/write' || action === 'knowledge/autogen'
+  );
+  const hideAdvancedControls = hasPreset &&
+    (conversation.agent_snapshot?.enabled_capabilities.length ?? 0) === 0;
 
   const chatLayoutProps = {
     title: conversation.name,
@@ -371,38 +421,71 @@ const NomiConversationPanel: React.FC<{
     sider: <ChatSlider conversation={conversation} />,
     headerExtra: (
       <div className='flex items-center gap-8px'>
+        <SystemPermissionReminder
+          conversationId={conversation.id}
+          snapshot={conversation.agent_snapshot}
+        />
         {/* An SSH-bound session is indistinguishable from a local one everywhere
             else in the chrome, so the host it drives — and whether the link is
-            actually up — leads the header. It is also the one control kept on
-            mobile (ChatLayout portals headerExtra into the mobile actions slot):
-            knowing which machine you are typing at matters more on a phone, not
-            less. */}
-        {sshHostId ? <SshHostStatusPill conversationId={conversation.id} sshHostId={sshHostId} /> : null}
+            actually up — leads the header. */}
+        <SshHostStatusPill conversation={conversation} />
         {/* The collaboration canvas lives beside the mounted conversation; the
             header keeps the existing capability controls. */}
-        <CronJobManager
+        {!hideAdvancedControls && <CronJobManager
           conversation_id={conversation.id}
           cron_job_id={conversation.cron_job_id}
-          hasCronSkill={hasLoadedSkill(conversation, 'cron')}
-        />
+          hasCronSkill={conversation.agent_snapshot?.enabled_capabilities.includes('automation.schedule') === true}
+        />}
       </div>
     ),
     workspaceEnabled,
     workspacePath: conversation.extra?.workspace,
     isTemporaryWorkspace: (conversation.extra as { is_temporary_workspace?: boolean } | undefined)
       ?.is_temporary_workspace,
-    backend: 'nomi' as const,
-    preset: presetPresetInfo ?? undefined,
+    knowledgeEnabled,
+    knowledgeWritebackAvailable,
+    hideAdvancedControls,
   };
 
   return (
-    <NomiConversationLayout
-      conversation={conversation}
-      chatLayoutProps={chatLayoutProps}
-      modelSelection={modelSelection}
-      collaborationControlNode={collaborationControlNode}
-      presetPresetName={presetPresetInfo?.name}
-    />
+    <CreationComposerContext.Provider value={{ ...creation, presetId: frozenPresetId, resolvePreset, selectMode: selectCreationMode, exit: exitCreation }}>
+      <>
+        <AgentSwitchDialog
+          visible={agentSwitch !== null}
+          preview={agentSwitch?.preview}
+          currentAgentLabel={agentSwitch?.preview?.current.preset_id === conversation.preset_id
+            ? currentAgentLabel : undefined}
+          targetAgentLabel={agentSwitch?.selection.kind === 'template'
+            ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[agentSwitch.selection.templateKey]}.name`)
+            : undefined}
+          loading={agentSwitch?.loading ?? false}
+          applying={agentSwitch?.applying ?? false}
+          mode={agentSwitch?.mode ?? 'context_only'}
+          error={agentSwitch?.error}
+          errorCode={agentSwitch?.errorCode}
+          onModeChange={(mode) => setAgentSwitch((current) => current && ({ ...current, mode }))}
+          onConfirm={confirmCurrentConversationAgentSwitch}
+          onCancel={() => setAgentSwitch(null)}
+          onRecovery={(code) => {
+            setAgentSwitch(null);
+            void navigate(code === 'AGENT_SESSION_MODEL_INCOMPATIBLE'
+              ? '/models?section=chat'
+              : '/agent');
+          }}
+        />
+        <NomiConversationLayout
+          conversation={conversation}
+          chatLayoutProps={chatLayoutProps}
+          modelSelection={modelSelection}
+          agentSelectorNode={agentSelectorNode}
+          currentAgentLabel={currentAgentLabel}
+          modelSelectionDisabled={modelSwitching || agentSwitch?.applying === true}
+          reasoningEffort={reasoningEffort}
+          reasoningEffortUpdating={reasoningEffortUpdating}
+          onReasoningEffortChange={onReasoningEffortChange}
+        />
+      </>
+    </CreationComposerContext.Provider>
   );
 };
 
@@ -458,20 +541,15 @@ const ChatConversation: React.FC<{
   }
 
   if (conversation && conversation.type === 'nomi') {
-    // 桌面伙伴的专属会话（单会话契约）走受限面板：保留锁定模型/隐藏高级控制/强制 yolo/
-    // Companion sessions use a fixed workspace and restricted controls.
-    // Configuration controls remain limited for companion sessions, while
-    // linked execution progress and lifecycle state stay visible.
-    if (conversation.extra?.companion_session) {
-      return (
-        <ExecutionProvider conversation={conversation}>
-          <CompanionChatPanel
-            key={conversation.id}
-            conversation={conversation}
-            extraTabs={workspaceExtraTabs}
-          />
-        </ExecutionProvider>
-      );
+    // Use the shared shell and composer with companion-owned configuration
+    // callbacks; model/Agent edits must update the companion across all inputs.
+    const isCompanionConversation =
+      conversation.extra?.companion_session ||
+      Boolean(conversation.extra?.companion_id) ||
+      conversation.agent_snapshot?.preset_name === 'companion.default' ||
+      conversation.agent_snapshot?.enabled_capabilities.includes('companion') === true;
+    if (isCompanionConversation) {
+      return <CompanionConversationRedirect conversationId={conversation.id} />;
     }
     return (
       <ExecutionProvider conversation={conversation}>

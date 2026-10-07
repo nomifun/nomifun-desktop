@@ -10,7 +10,7 @@ use std::{
 
 use tokio::sync::watch;
 
-use crate::{ProcessOutcome, ProcessOwner, SessionId, supervisor::Session};
+use crate::{ProcessOutcome, ProcessOwner, SessionId, supervisor::{Session, StartupCleanupReport}};
 
 pub(crate) struct Registry {
     state: Mutex<RegistryState>,
@@ -23,6 +23,7 @@ struct RegistryState {
     active: HashMap<SessionId, SessionEntry>,
     retiring: HashMap<SessionId, Arc<Retirement>>,
     reservations: usize,
+    failed_starts: HashMap<SessionId, StartupCleanupReport>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,7 @@ struct SessionEntry {
     lease_expires_at: Instant,
     last_used: Instant,
     in_flight_actions: usize,
+    shutdown_blocking_actions: usize,
 }
 
 pub(crate) struct StartReservation {
@@ -51,6 +53,7 @@ pub(crate) struct SessionAction {
     registry: Weak<Registry>,
     session_id: SessionId,
     session: Arc<Session>,
+    blocks_shutdown: bool,
 }
 
 pub(crate) struct Retirement {
@@ -97,6 +100,7 @@ impl Registry {
                 active: HashMap::new(),
                 retiring: HashMap::new(),
                 reservations: 0,
+                failed_starts: HashMap::new(),
             }),
             changes,
             max_sessions,
@@ -163,6 +167,7 @@ impl Registry {
                         lease_expires_at: lease_deadline(now, lease),
                         last_used: now,
                         in_flight_actions: 0,
+                        shutdown_blocking_actions: 0,
                     },
                 );
                 assert!(replaced.is_none(), "UUIDv7 process session id collision");
@@ -178,11 +183,64 @@ impl Registry {
         result
     }
 
+    pub(crate) fn record_failed_start(&self, reservation: &mut StartReservation, report: StartupCleanupReport) {
+        {
+            let mut state = self.state.lock().expect("process registry lock is poisoned");
+            assert!(!reservation.completed, "startup reservation was already consumed");
+            state.reservations = state.reservations.checked_sub(1).expect("startup owns one reservation");
+            reservation.completed = true;
+            assert!(state.failed_starts.insert(report.session_id, report).is_none(), "startup identity must be unique");
+        }
+        self.bump_changes();
+    }
+
+    pub(crate) fn startup_reports(&self) -> Vec<StartupCleanupReport> {
+        let state = self.state.lock().expect("process registry lock is poisoned");
+        let mut reports = state.failed_starts.values().cloned().collect::<Vec<_>>();
+        reports.sort_by_key(|report| report.session_id);
+        reports
+    }
+
+    pub(crate) fn take_startup_reports(&self) -> Vec<StartupCleanupReport> {
+        let reports = {
+            let mut state = self.state.lock().expect("process registry lock is poisoned");
+            let mut reports = state.failed_starts.values().cloned().collect::<Vec<_>>();
+            reports.sort_by_key(|report| report.session_id);
+            // Unproven auxiliary ownership stays quarantined and occupies
+            // capacity. Only exact failed-start reports can be consumed.
+            state.failed_starts.retain(|_, report| !report.cleanup.reaped);
+            reports
+        };
+        self.bump_changes();
+        reports
+    }
+
     pub(crate) fn begin_action(
         self: &Arc<Self>,
         session_id: &SessionId,
         owner: &ProcessOwner,
         now: Instant,
+    ) -> Result<SessionAction, LookupError> {
+        self.begin_action_inner(session_id, owner, now, true)
+    }
+
+    /// Poll keeps the lease and Session authority alive, but shutdown must
+    /// still stop that authority to wake a poll waiting for a process exit.
+    pub(crate) fn begin_poll(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        owner: &ProcessOwner,
+        now: Instant,
+    ) -> Result<SessionAction, LookupError> {
+        self.begin_action_inner(session_id, owner, now, false)
+    }
+
+    fn begin_action_inner(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        owner: &ProcessOwner,
+        now: Instant,
+        blocks_shutdown: bool,
     ) -> Result<SessionAction, LookupError> {
         let session = {
             let mut state = self
@@ -200,6 +258,12 @@ impl Registry {
                 .in_flight_actions
                 .checked_add(1)
                 .expect("process action count overflowed");
+            if blocks_shutdown {
+                entry.shutdown_blocking_actions = entry
+                    .shutdown_blocking_actions
+                    .checked_add(1)
+                    .expect("process shutdown action count overflowed");
+            }
             renew_entry(entry, now);
             Arc::clone(&entry.session)
         };
@@ -208,6 +272,7 @@ impl Registry {
             registry: Arc::downgrade(self),
             session_id: *session_id,
             session,
+            blocks_shutdown,
         })
     }
 
@@ -354,7 +419,13 @@ impl Registry {
                 })
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(id, _)| *id);
-            victim.and_then(|id| state.active.remove(&id)).is_some()
+            if victim.and_then(|id| state.active.remove(&id)).is_some() {
+                true
+            } else {
+                let startup = state.failed_starts.iter().filter(|(_, report)| report.cleanup.reaped)
+                    .min_by_key(|(id, _)| **id).map(|(id, _)| *id);
+                startup.and_then(|id| state.failed_starts.remove(&id)).is_some()
+            }
         };
         if removed {
             self.bump_changes();
@@ -377,7 +448,7 @@ impl Registry {
                 .active
                 .iter()
                 .filter_map(|(id, entry)| {
-                    (entry.in_flight_actions == 0
+                    (entry.shutdown_blocking_actions == 0
                         && entry.session.is_reclaimable_terminal())
                     .then_some(*id)
                 })
@@ -390,7 +461,7 @@ impl Registry {
             let ids = state
                 .active
                 .iter()
-                .filter_map(|(id, entry)| (entry.in_flight_actions == 0).then_some(*id))
+                .filter_map(|(id, entry)| (entry.shutdown_blocking_actions == 0).then_some(*id))
                 .collect::<Vec<_>>();
             for id in ids {
                 let _ = move_to_retiring(&mut state, id);
@@ -413,7 +484,7 @@ impl Registry {
                     .active
                     .iter()
                     .filter_map(|(id, entry)| {
-                        (entry.in_flight_actions == 0
+                        (entry.shutdown_blocking_actions == 0
                             && entry.session.is_reclaimable_terminal())
                             .then_some(*id)
                     })
@@ -426,7 +497,7 @@ impl Registry {
                 let claimable = state
                     .active
                     .iter()
-                    .filter_map(|(id, entry)| (entry.in_flight_actions == 0).then_some(*id))
+                    .filter_map(|(id, entry)| (entry.shutdown_blocking_actions == 0).then_some(*id))
                     .collect::<Vec<_>>();
                 for id in claimable {
                     let _ = move_to_retiring(&mut state, id);
@@ -526,26 +597,36 @@ impl Registry {
             .map(|entry| Arc::clone(&entry.session))
     }
 
-    fn finish_action(&self, session_id: SessionId, now: Instant) -> Arc<Session> {
-        let (session, changed) = {
+    fn finish_action(&self, session_id: SessionId, now: Instant, blocks_shutdown: bool) {
+        let changed = {
             let mut state = self
                 .state
                 .lock()
                 .expect("process registry lock is poisoned");
             let shutting_down = state.phase != RegistryPhase::Open;
-            let (session, should_retire, should_remove) = {
-                let entry = state
-                    .active
-                    .get_mut(&session_id)
-                    .expect("process action outlived its active session");
+            let (should_retire, should_remove) = {
+                let Some(entry) = state.active.get_mut(&session_id) else {
+                    assert!(
+                        !blocks_shutdown && shutting_down,
+                        "process shutdown action outlived its active session"
+                    );
+                    // A shutdown retirement now holds the same Session that
+                    // this poll guard owns. No open-registry lease can renew.
+                    return;
+                };
                 entry.in_flight_actions = entry
                     .in_flight_actions
                     .checked_sub(1)
                     .expect("process action guard dropped more than once");
+                if blocks_shutdown {
+                    entry.shutdown_blocking_actions = entry
+                        .shutdown_blocking_actions
+                        .checked_sub(1)
+                        .expect("process shutdown action guard dropped more than once");
+                }
                 renew_entry(entry, now);
                 (
-                    Arc::clone(&entry.session),
-                    shutting_down && entry.in_flight_actions == 0,
+                    shutting_down && entry.shutdown_blocking_actions == 0,
                     entry.session.is_reclaimable_terminal(),
                 )
             };
@@ -555,15 +636,14 @@ impl Registry {
                 } else {
                     let _ = move_to_retiring(&mut state, session_id);
                 }
-                (session, true)
+                true
             } else {
-                (session, false)
+                false
             }
         };
         if changed {
             self.bump_changes();
         }
-        session
     }
 
     fn bump_changes(&self) {
@@ -601,7 +681,8 @@ impl Drop for SessionAction {
             return;
         };
         let now = Instant::now();
-        registry.finish_action(self.session_id, now).touch_at(now);
+        registry.finish_action(self.session_id, now, self.blocks_shutdown);
+        self.session.touch_at(now);
     }
 }
 
@@ -685,6 +766,7 @@ fn occupancy(state: &RegistryState) -> usize {
         .len()
         .saturating_add(state.retiring.len())
         .saturating_add(state.reservations)
+        .saturating_add(state.failed_starts.len())
 }
 
 fn renew_entry(entry: &mut SessionEntry, now: Instant) {

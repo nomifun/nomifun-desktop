@@ -50,6 +50,11 @@ impl FileStateCache {
         self.entries.get(&normalized)
     }
 
+    /// Inspect a cached state without promoting it or changing eviction order.
+    pub fn peek(&self, path: &Path) -> Option<&FileState> {
+        self.entries.peek(&normalize_path(path))
+    }
+
     /// Insert or update a file state entry.
     ///
     /// Evicts least-recently-used entries when the byte-size limit or
@@ -66,8 +71,15 @@ impl FileStateCache {
             self.current_size_bytes = self.current_size_bytes.saturating_sub(old.content_bytes());
         }
 
+        // An oversized revision must not evict unrelated entries or leave the
+        // previous revision available for stale-write checks. A smaller Read
+        // slice can still populate the cache for this path.
+        if new_size > self.max_size_bytes {
+            return;
+        }
+
         // Evict LRU entries until byte-size budget is available.
-        while self.current_size_bytes + new_size > self.max_size_bytes && !self.entries.is_empty() {
+        while self.current_size_bytes > self.max_size_bytes - new_size && !self.entries.is_empty() {
             if let Some((key, v)) = self.entries.pop_lru() {
                 self.unseen_after_write.remove(&key);
                 self.current_size_bytes = self.current_size_bytes.saturating_sub(v.content_bytes());
@@ -89,7 +101,9 @@ impl FileStateCache {
     pub fn insert_after_write(&mut self, path: PathBuf, state: FileState) {
         let normalized = normalize_path(&path);
         self.insert(path, state);
-        self.unseen_after_write.insert(normalized);
+        if self.entries.contains(&normalized) {
+            self.unseen_after_write.insert(normalized);
+        }
     }
 
     /// Whether the cached revision has not yet crossed the Read tool boundary.
@@ -128,6 +142,29 @@ impl FileStateCache {
     /// Current total byte size of all cached content.
     pub fn current_size_bytes(&self) -> usize {
         self.current_size_bytes
+    }
+}
+
+/// Metadata lookup for the shared mutation guards. Execution retains the
+/// existing LRU promotion; a hook preflight must only inspect the same entry.
+#[derive(Clone, Copy)]
+pub(crate) enum GuardCacheAccess {
+    Inspect,
+    Execute,
+}
+
+pub(crate) fn cached_mtime_for_guard(
+    cache: &std::sync::RwLock<FileStateCache>,
+    path: &Path,
+    access: GuardCacheAccess,
+) -> Result<Option<u64>, ()> {
+    match access {
+        GuardCacheAccess::Inspect => cache.read()
+            .map(|cache| cache.peek(path).map(|state| state.mtime_ms))
+            .map_err(|_| ()),
+        GuardCacheAccess::Execute => cache.write()
+            .map(|mut cache| cache.get(path).map(|state| state.mtime_ms))
+            .map_err(|_| ()),
     }
 }
 
@@ -255,7 +292,7 @@ mod tests {
     #[test]
     fn normalize_above_root_is_clamped() {
         let result = normalize_path(Path::new("/../b"));
-        assert_eq!(result, PathBuf::from("/b"));
+        assert_eq!(result, normalize_path(Path::new("/b")));
     }
 
     #[test]
@@ -297,6 +334,20 @@ mod tests {
         let config = make_config(10, 1_000_000);
         let mut cache = FileStateCache::new(&config);
         assert!(cache.get(Path::new("/does/not/exist")).is_none());
+    }
+
+    #[test]
+    fn hook_preflight_peek_preserves_lru_eviction_order() {
+        let mut cache = FileStateCache::new(&make_config(2, 1_000_000));
+        cache.insert(PathBuf::from("/a"), make_state("a", 1));
+        cache.insert(PathBuf::from("/b"), make_state("b", 2));
+        assert!(cache.peek(Path::new("/a")).is_some());
+        assert!(cache.peek(Path::new("/missing")).is_none());
+        cache.insert(PathBuf::from("/c"), make_state("c", 3));
+        assert!(cache.peek(Path::new("/a")).is_none());
+        assert!(cache.peek(Path::new("/b")).is_some());
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.current_size_bytes(), 2);
     }
 
     #[test]
@@ -435,9 +486,12 @@ mod tests {
 
     #[test]
     fn empty_content_cached() {
-        let config = make_config(10, 1_000_000);
+        let config = make_config(10, 0);
         let mut cache = FileStateCache::new(&config);
 
+        cache.insert_after_write(PathBuf::from("/full"), make_state("x", 1));
+        assert!(cache.is_empty());
+        assert!(!cache.needs_model_refresh(Path::new("/full")));
         cache.insert(PathBuf::from("/empty"), make_state("", 1));
         assert!(cache.get(Path::new("/empty")).is_some());
         assert_eq!(cache.current_size_bytes(), 0);

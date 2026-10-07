@@ -1,18 +1,38 @@
 //! Shared test helpers for nomifun-app E2E tests.
 #![allow(dead_code)]
 
+pub mod native_reliability_capture;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 use wiremock::MockServer;
 
-use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime, InMemoryAgentRuntimeRegistry};
-use nomifun_app::{AppConfig, AppServices, build_module_states, create_router, create_router_with_states};
+use nomifun_ai_agent::{
+    AgentRuntimeControl, AgentRuntimeHandle, InMemoryAgentRuntimeSessions, MockAgentRuntime,
+};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::{
+    AppServices, build_module_states, create_router, create_router_with_states,
+};
 use nomifun_auth::AuthPolicy;
-use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_file::FileService;
+use nomifun_skill_library::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_system::VersionCheckService;
+
+fn isolated_config(prefix: &str) -> AppConfig {
+    let root = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .unwrap()
+        .keep();
+    AppConfig {
+        data_dir: root.join("data"),
+        work_dir: root.join("work"),
+        ..AppConfig::default()
+    }
+}
 
 pub async fn build_app() -> (axum::Router, AppServices) {
     let root = tempfile::Builder::new()
@@ -68,11 +88,7 @@ pub fn encrypted_bearer_credentials() -> String {
 ///
 /// The protocol is explicit so App E2E fixtures exercise the same normalized,
 /// task-scoped authority as production.
-pub async fn seed_openai_chat_model(
-    pool: &nomifun_db::SqlitePool,
-    provider_id: &str,
-    model: &str,
-) {
+pub async fn seed_openai_chat_model(pool: &nomifun_db::SqlitePool, provider_id: &str, model: &str) {
     nomifun_db::sqlx::query(
         "INSERT OR IGNORE INTO provider_models \
          (provider_id, model, enabled, sort_order, description, created_at, updated_at) \
@@ -116,9 +132,20 @@ pub fn nomi_extra_with_workspace(workspace: impl Into<String>) -> serde_json::Va
 /// E5 `/api/skills/info`). Returns the router, services, and the
 /// `SkillPaths` so the test can seed fixtures at known locations.
 #[allow(dead_code)]
-pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router, AppServices, SkillPaths) {
+pub async fn build_app_with_skill_paths(
+    root: &std::path::Path,
+) -> (axum::Router, AppServices, SkillPaths) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     let (mut states, _) = build_module_states(&services).await;
 
     let builtin_dir = root.join("builtin-skills");
@@ -128,24 +155,20 @@ pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router
         cron_skills_dir: root.join("cron").join("skills"),
         builtin_skills_dir: builtin_dir.clone(),
         builtin_rules_dir: root.join("builtin-rules"),
-        preset_rules_dir: root.join("preset-rules"),
-        preset_skills_dir: root.join("preset-skills"),
     };
     for dir in [
         &paths.user_skills_dir,
         &builtin_dir,
         &paths.builtin_rules_dir,
-        &paths.preset_rules_dir,
-        &paths.preset_skills_dir,
     ] {
         std::fs::create_dir_all(dir).unwrap();
     }
 
-    let ext_paths_mgr = std::sync::Arc::new(ExternalPathsManager::with_file(root.join("paths.json")).await);
+    let ext_paths_mgr =
+        std::sync::Arc::new(ExternalPathsManager::with_file(root.join("paths.json")).await);
     states.skill = SkillRouterState {
         skill_paths: paths.clone(),
         external_paths_manager: ext_paths_mgr,
-        preset_dispatcher: states.skill.preset_dispatcher.clone(),
         skill_tag_repo: std::sync::Arc::new(nomifun_db::SqliteSkillTagRepository::new(
             services.database.pool().clone(),
         )),
@@ -158,20 +181,27 @@ pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router
 
 pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_config("nomifun-noop-opener-e2e-"))
+        .await
+        .unwrap();
     let (mut states, _) = build_module_states(&services).await;
-    states.shell.shell_service = std::sync::Arc::new(nomifun_shell::ShellService::new(std::sync::Arc::new(
-        nomifun_shell::NoopSystemOpener,
-    )));
+    states.shell.shell_service = std::sync::Arc::new(nomifun_shell::ShellService::new(
+        std::sync::Arc::new(nomifun_shell::NoopSystemOpener),
+    ));
     let router = create_router_with_states(&services, states);
     (router, services)
 }
 
-pub async fn build_app_with_file_roots(allowed_roots: Vec<std::path::PathBuf>) -> (axum::Router, AppServices) {
+pub async fn build_app_with_file_roots(
+    allowed_roots: Vec<std::path::PathBuf>,
+) -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_config("nomifun-file-roots-e2e-"))
+        .await
+        .unwrap();
     let (mut states, _) = build_module_states(&services).await;
-    states.file.file_service = std::sync::Arc::new(FileService::new(services.event_bus.clone(), allowed_roots));
+    states.file.file_service =
+        std::sync::Arc::new(FileService::with_inventory_cache(services.event_bus.clone(), allowed_roots, services.file_inventory.clone()));
     let router = create_router_with_states(&services, states);
     (router, services)
 }
@@ -181,11 +211,16 @@ pub async fn build_app_with_mock_version(
     mock_server: &MockServer,
 ) -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(db, &isolated_config("nomifun-version-e2e-"))
+        .await
+        .unwrap();
     let (mut states, _) = build_module_states(&services).await;
     let http_client = reqwest::Client::builder().no_proxy().build().unwrap();
-    states.system.version_check_service =
-        VersionCheckService::with_api_base(http_client, current_version.to_owned(), mock_server.uri());
+    states.system.version_check_service = VersionCheckService::with_api_base(
+        http_client,
+        current_version.to_owned(),
+        mock_server.uri(),
+    );
     let router = create_router_with_states(&services, states);
     (router, services)
 }
@@ -195,7 +230,7 @@ pub async fn build_app_with_mock_version(
 /// Use for tests that exercise session warmup and send-message paths where
 /// spawning a real CLI process is not feasible.
 pub async fn build_app_with_mock_agents() -> (axum::Router, AppServices) {
-    build_app_with_mock_agents_config(AppConfig::default()).await
+    build_app_with_mock_agents_config(isolated_config("nomifun-mock-agent-e2e-")).await
 }
 
 pub async fn build_isolated_app_with_mock_agents(
@@ -214,22 +249,26 @@ async fn build_app_with_mock_agents_config(config: AppConfig) -> (axum::Router, 
     let factory: std::sync::Arc<
         dyn Fn(
                 nomifun_ai_agent::types::AgentRuntimeBuildOptions,
-            ) -> futures_util::future::BoxFuture<'static, Result<AgentRuntimeHandle, nomifun_common::AppError>>
-            + Send
+            ) -> futures_util::future::BoxFuture<
+                'static,
+                Result<AgentRuntimeHandle, nomifun_common::AppError>,
+            > + Send
             + Sync,
     > = std::sync::Arc::new(|opts| {
         Box::pin(async move {
-            Ok(AgentRuntimeHandle::Mock(std::sync::Arc::new(NoopMockAgent {
-                conversation_id: opts.conversation_id,
-            })))
+            Ok(AgentRuntimeHandle::Mock(std::sync::Arc::new(
+                NoopMockAgent {
+                    conversation_id: opts.conversation_id,
+                },
+            )))
         })
     });
-    let runtime_registry: std::sync::Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry> =
-        std::sync::Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
+    let runtime_sessions: std::sync::Arc<dyn nomifun_ai_agent::AgentRuntimeSessions> =
+        std::sync::Arc::new(InMemoryAgentRuntimeSessions::new(factory));
     let services = AppServices::from_config(db, &config)
         .await
         .unwrap()
-        .with_agent_runtime_registry(runtime_registry);
+        .with_agent_runtime_sessions(runtime_sessions);
     let router = create_router(&services).await;
     (router, services)
 }
@@ -271,7 +310,10 @@ impl AgentRuntimeControl for NoopMockAgent {
     async fn cancel(&self) -> Result<(), nomifun_common::AppError> {
         Ok(())
     }
-    fn kill(&self, _reason: Option<nomifun_common::AgentKillReason>) -> Result<(), nomifun_common::AppError> {
+    fn kill(
+        &self,
+        _reason: Option<nomifun_common::AgentKillReason>,
+    ) -> Result<(), nomifun_common::AppError> {
         Ok(())
     }
 }
@@ -301,7 +343,11 @@ pub fn extract_csrf_token(resp: &axum::response::Response) -> Option<String> {
 }
 
 pub fn get_request(uri: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }
 
 pub fn get_with_token(uri: &str, token: &str) -> Request<Body> {
@@ -334,7 +380,13 @@ fn is_public_conversation_send(method: &str, uri: &str) -> bool {
     !conversation_id.is_empty() && !conversation_id.contains('/')
 }
 
-pub fn json_with_token(method_str: &str, uri: &str, body: serde_json::Value, token: &str, csrf: &str) -> Request<Body> {
+pub fn json_with_token(
+    method_str: &str,
+    uri: &str,
+    body: serde_json::Value,
+    token: &str,
+    csrf: &str,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method_str)
         .uri(uri)
@@ -380,10 +432,18 @@ pub async fn setup_and_login(
             .await
             .unwrap();
     } else {
-        services.user_repo.create_user(username, &hash).await.unwrap();
+        services
+            .user_repo
+            .create_user(username, &hash)
+            .await
+            .unwrap();
     }
 
-    let resp = app.clone().oneshot(get_request("/api/auth/status")).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(get_request("/api/auth/status"))
+        .await
+        .unwrap();
     let csrf = extract_csrf_token(&resp).expect("CSRF cookie should be set");
 
     let body = format!(r#"{{"username":"{username}","password":"{password}"}}"#);

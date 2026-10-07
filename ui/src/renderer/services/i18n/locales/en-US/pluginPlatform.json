@@ -1,0 +1,377 @@
+{
+  "authoring": {
+    "createPrompt": "Help me create a plugin",
+    "templatePrompt": "Create a before-tool guard using the agent.before_tool template. Ask for my guard rules first, then implement, verify and install it.",
+    "resumePrompt": "The actual permissions for draft {{id}} have been approved. Continue this existing draft through preview, business verification, installation and delivery checks; do not create another draft.",
+    "title": "Create a plugin or small app (Beta)",
+    "conversationHint": "Describe the requirement here using your default Agent. It will implement, verify, repair and install a usable plugin.",
+    "moduleNeeded": "Enable plugins and small apps in the Agent workbench first.",
+    "editPrompt": "Continue editing plugin {{id}} from revision {{revision}}. Read the implementation first and wait for my requested changes.",
+    "draftPrompt": "Continue draft {{id}}. Read its files first and wait for my requirement.",
+    "saved": "Saved",
+    "historicalDeleted": "Delivered; plugin deleted",
+    "inProgress": "In progress",
+    "deliveryPending": "Generation, required verification or installation is incomplete. Continue the paused task in this conversation.",
+    "resumeTask": "Continue task",
+    "currentConversationPending": "The plugin is installed; actual tool use in this conversation still needs verification. Continue the original task at its safe pause. This requirement remains incomplete until the tool is available and used.",
+    "replyLabel": "Add requirements or configuration",
+    "replyPlaceholder": "Add the missing information. Use a configured credential reference rather than entering a secret in chat.",
+    "replyContinue": "Send and continue this task",
+    "continueTaskPrompt": "Continue the original plugin task, complete its unmet required behavior, verification, installation and delivery checks, and retain the existing work.",
+    "approvalHint": "This plugin needs additional execution privileges. Review the actual code capabilities and permissions, then continue in this conversation.",
+    "accept": "Allow this plugin to use the capabilities above",
+    "approve": "Approve and continue",
+    "details": "Files and verification",
+    "importedHistoryHint": "Read-only history imported from the old creator. It does not prove current execution, authorization or successful verification.",
+    "saveContinue": "Save as default and continue authoring",
+    "workbenchHint": "Enable the whole plugin-development feature and its creation actions for the default Agent. Your requirement is retained.",
+    "continue": "Continue authoring",
+    "operations": {
+      "list": "List plugins and drafts",
+      "open": "Create or open draft",
+      "read": "Read files and verification",
+      "plan": "Record requirements and acceptance plan",
+      "apply": "Edit draft files",
+      "check": "Check package structure",
+      "preview": "Run plugin preview",
+      "test_action": "Verify business actions",
+      "test_ui": "Verify UI interactions",
+      "install": "Install or update plugin",
+      "inspect": "Inspect installed plugin",
+      "configure": "Configure plugin",
+      "enable": "Enable or disable plugin",
+      "export": "Export plugin",
+      "trash": "Move to trash",
+      "restore": "Restore plugin",
+      "delete": "Permanently delete plugin",
+      "discard": "Discard draft",
+      "close_preview": "Close preview"
+    }
+  },
+  "actions": {
+    "back": "Back to plugins",
+    "cancel": "Cancel",
+    "close": "Close",
+    "configure": "Configuration and access",
+    "create": "Create plugin",
+    "delete": "Delete permanently",
+    "disabled": "Disabled",
+    "edit": "Continue editing",
+    "enable": "Enable",
+    "enabled": "Enabled",
+    "exportBackup": "Export backup",
+    "exportPackage": "Export package",
+    "import": "Import",
+    "open": "Open",
+    "refresh": "Refresh",
+    "restore": "Restore previous version",
+    "restoreTrash": "Restore from trash",
+    "save": "Save",
+    "trash": "Move to trash"
+  },
+  "workspace": {
+    "title": "Plugins & Apps (Beta)",
+    "betaTitle": "Beta version",
+    "betaNotice": "Use is not recommended at this time.",
+    "subtitle": "Local capability center",
+    "navigation": "Plugin workspace navigation",
+    "collapse": "Collapse plugin navigation",
+    "expand": "Expand plugin navigation",
+    "smartViews": "Smart views",
+    "capabilityTypes": "Capability types",
+    "localOnly": "Plugins run on this device by default",
+    "views": {
+      "all": "All",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "drafts": "In progress",
+      "attention": "Needs attention",
+      "trash": "Trash",
+      "ui_only": "Interface apps",
+      "headless": "Background capabilities",
+      "mixed": "App + service"
+    }
+  },
+  "shape": {
+    "ui_only": "UI app",
+    "headless": "Background capability",
+    "mixed": "App + service",
+    "ui": "UI",
+    "service": "Service"
+  },
+  "service": {
+    "stopped": "Stopped",
+    "starting": "Starting",
+    "running": "Running",
+    "failed": "Failed"
+  },
+  "readOnly": {
+    "title": "Plugin access is read-only in WebUI",
+    "body": "Remote WebUI can inspect Plugins, Actions, Bindings, configuration, and access status. Creating, importing, running UI surfaces or Desktop commands, and changing local code, data, configuration, or lifecycle are available only in the desktop app.",
+    "draft": "Open this draft in the desktop app to continue editing."
+  },
+  "library": {
+    "title": "Plugins & Apps (Beta)",
+    "subtitle": "Apps and system capabilities share one package, identity, data root, and lifecycle.",
+    "search": "Search plugins and drafts",
+    "loading": "Loading plugins…",
+    "loadFailed": "Plugins could not be loaded.",
+    "mutationFailed": "The plugin changed elsewhere or the operation failed. Refresh and try again.",
+    "draft": "Draft",
+    "untitled": "Untitled plugin",
+    "unsaved": "Not installed",
+    "continue": "Continue creating",
+    "trashed": "In trash",
+    "openApp": "Ready to open",
+    "toggle": "Enable or disable {{name}}",
+    "emptyTitle": "Create your first plugin",
+    "emptyBody": "Describe what you need to create one, or import an existing plugin package.",
+    "noResultsTitle": "No matching plugins",
+    "noResultsBody": "Try another keyword, or clear the search to see everything.",
+    "clearSearch": "Clear search",
+    "draftDescription": "Keep describing what you need to finish this plugin.",
+    "sortLabel": "Plugin sort order",
+    "sortRecent": "Recently updated",
+    "sortName": "Name",
+    "pin": "Pin to sidebar",
+    "unpin": "Unpin",
+    "moreActions": "More actions for {{name}}",
+    "issueTitle": "This plugin needs your attention",
+    "reviewIssue": "Review and fix",
+    "columns": {
+      "plugin": "Plugin",
+      "type": "Capability type",
+      "updated": "Last updated",
+      "status": "Status",
+      "actions": "Actions"
+    },
+    "views": {
+      "all": {
+        "title": "All plugins",
+        "subtitle": "See {{count}} plugins and drafts in one place."
+      },
+      "enabled": {
+        "title": "Enabled",
+        "subtitle": "{{count}} plugins are working for you."
+      },
+      "disabled": {
+        "title": "Disabled",
+        "subtitle": "{{count}} plugins keep their data but do not run."
+      },
+      "drafts": {
+        "title": "In progress",
+        "subtitle": "{{count}} drafts are waiting to be finished."
+      },
+      "attention": {
+        "title": "Needs attention",
+        "subtitle": "{{count}} items need confirmation or a fix."
+      },
+      "trash": {
+        "title": "Trash",
+        "subtitle": "{{count}} plugins are disabled and waiting to be restored or removed."
+      },
+      "ui_only": {
+        "title": "Interface apps",
+        "subtitle": "{{count}} plugins can be opened and used directly."
+      },
+      "headless": {
+        "title": "Background capabilities",
+        "subtitle": "{{count}} plugins provide capabilities in the background."
+      },
+      "mixed": {
+        "title": "App + service",
+        "subtitle": "{{count}} plugins provide both an interface and a background service."
+      }
+    }
+  },
+  "creator": {
+    "launchFailed": "Unable to start plugin authoring. Check the default Agent or connection and retry.",
+    "title": "Create plugin",
+    "subtitle": "Chat edits the standard package files directly. Preview and save use the same SDK and storage adapters.",
+    "modelRequired": "Connect a Chat model before generating or changing a plugin.",
+    "placeholder": "Describe the app or capability you want, or ask for a change…",
+    "send": "Send",
+    "stop": "Stop",
+    "generating": "Updating package files…",
+    "files": "Package files",
+    "binaryFile": "This binary asset is shown by name and is not edited as text.",
+    "saveFile": "Save file",
+    "fileSaveFailed": "The file could not be saved. Refresh the draft and try again.",
+    "save": "Save and open",
+    "discard": "Discard draft",
+    "loadFailed": "The draft could not be loaded.",
+    "generateFailed": "The package could not be generated. Your draft was kept.",
+    "saveFailed": "Validation or activation failed. The installed plugin and its data are unchanged.",
+    "operationFailed": "The draft operation failed. Refresh and try again.",
+    "assistantTitle": "Creation assistant",
+    "assistantHelp": "Describe what you need in plain language, then refine the generated plugin together.",
+    "modelConnected": "Model connected",
+    "modelDisconnected": "Model not connected",
+    "welcomeTitle": "Start with one sentence",
+    "welcomeBody": "For example: build a meeting-notes assistant that organizes recordings and extracts action items.",
+    "you": "You",
+    "assistant": "General Agent",
+    "composerHint": "Enter to send · Shift + Enter for a new line",
+    "buildStatus": "Build progress",
+    "buildStatusHelp": "Generation and preview checks complete before saving.",
+    "capabilityCount": "{{count}} capabilities",
+    "permissionCount": "{{count}} permissions",
+    "headlessPreview": "This is a background capability and can be saved without an interface preview.",
+    "previewWaiting": "A preview and capability summary will appear here after generation.",
+    "livePreview": "Live preview",
+    "steps": {
+      "requirement": "Understand request",
+      "implementation": "Generate implementation",
+      "preview": "Verify preview"
+    },
+    "status": {
+      "new": "New draft",
+      "ready": "Ready to verify",
+      "generating": "Generating",
+      "failed": "Generation failed"
+    }
+  },
+  "preview": {
+    "title": "Preview",
+    "temporary": "Preview uses a temporary DataRoot. Its database, KV, files, and cache never merge into installed data.",
+    "permissions": "Preview access is off by default. Enable only the permissions needed for this session.",
+    "credentialUnavailable": "Credential slot {{slot}} refers to an unavailable Host Credential.",
+    "open": "Open preview",
+    "reload": "Reload preview",
+    "empty": "Open a preview to test the UI with temporary storage.",
+    "failed": "Preview validation or startup failed. Installed data was not changed.",
+    "temporaryShort": "Uses isolated temporary data and does not affect the installed plugin.",
+    "temporaryData": "Temporary preview data",
+    "surfaceFailed": "The plugin interface could not be opened",
+    "retry": "Retry",
+    "loading": "Loading plugin…"
+  },
+  "permissions": {
+    "title": "Review new access",
+    "added": "New permissions: {{permissions}}",
+    "secrets": "New Credential slots: {{slots}}",
+    "localCode": "This package contains a local Service. Enabling it runs trusted local JavaScript in its own process with the displayed access.",
+    "confirm": "Confirm and continue"
+  },
+  "import": {
+    "title": "Import plugin",
+    "body": "Choose a standard Plugin Package directory, ZIP, or Plugin Backup. The Host stages and validates every source through the same installation path.",
+    "directory": "Package directory",
+    "zip": "Package ZIP",
+    "backup": "Plugin Backup",
+    "package": "Plugin Package",
+    "checking": "Staging and validating…",
+    "invalid": "This source is not a valid Plugin Package or Backup.",
+    "failed": "Installation failed. Existing code and data remain unchanged.",
+    "shape": "{{ui}} · {{service}}",
+    "permissions": "Requested permissions",
+    "trustedService": "This package contains trusted local Service code. Review its permissions before installing.",
+    "backupDisclosure": "This Backup contains the active database and files ({{files}} files, {{bytes}} database bytes) plus non-secret configuration. Cache and preview data are excluded.",
+    "rebindCredentials": "Credential values are not included. Rebind these slots after import: {{slots}}",
+    "createCopy": "Create a separate local copy with new identity and data",
+    "install": "Install and enable"
+  },
+  "config": {
+    "title": "Configuration and access",
+    "values": "Non-secret configuration (JSON)",
+    "schema": "Configuration schema",
+    "invalidJson": "Configuration must be valid JSON.",
+    "objectRequired": "Configuration must be a JSON object.",
+    "secretBoundary": "Secret values never enter configuration. Enter only Host Credential Store references below.",
+    "credentialReference": "Select a Host Credential",
+    "credentialSlot": "Credential reference for {{slot}}",
+    "credentialRequired": "Credential slot {{slot}} is required.",
+    "credentialUnavailable": "unavailable",
+    "credentialUnavailableSelected": "Credential slot {{slot}} must use an available Host Credential.",
+    "grantPermission": "Allow {{permission}}"
+  },
+  "detail": {
+    "loadFailed": "The plugin could not be loaded.",
+    "notFound": "Plugin not found.",
+    "operationFailed": "The operation failed or the plugin changed elsewhere. Refresh and try again.",
+    "saved": "The plugin was validated, activated, and saved.",
+    "disabledTitle": "This app is disabled",
+    "disabledBody": "Enable it to open its UI. Its persistent data remains available.",
+    "headlessTitle": "Background capability plugin",
+    "headlessBody": "This plugin has no UI. Its enabled Actions and Bindings enhance registered Agent, Desktop, or automation extension points.",
+    "actions": "Actions",
+    "bindings": "Bindings",
+    "noActions": "This plugin declares no Actions.",
+    "noBindings": "This plugin declares no Bindings.",
+    "available": "Available",
+    "storage": "Storage and version",
+    "configuration": "Configuration status",
+    "configurationValid": "Valid",
+    "configurationInvalid": "Invalid",
+    "artifact": "Active artifact",
+    "dataGeneration": "Data generation",
+    "dataVersion": "Data version",
+    "credentials": "Credential slots",
+    "permissions": "Permissions",
+    "granted": "Granted",
+    "denied": "Denied",
+    "noPermissions": "No Host permissions requested.",
+    "actionsHelp": "The concrete operations this plugin can perform.",
+    "bindingsHelp": "Where these capabilities appear across the product.",
+    "runtimeStatus": "Runtime status",
+    "recentCheck": "Recent check",
+    "needsReview": "Needs attention",
+    "passed": "Passed",
+    "currentVersion": "Current version",
+    "runtime": "Runtime process",
+    "summary": "Capability summary",
+    "updatedAt": "Last updated {{date}}",
+    "configurationHelp": "Review non-secret settings and manage credential references.",
+    "showConfiguration": "Show current configuration",
+    "permissionsHelp": "See exactly which host capabilities this plugin can access.",
+    "storageHelp": "Versions and local data stay under the same plugin identity.",
+    "versionAndData": "Version and data",
+    "versionAndDataHelp": "Review the current version, then restore or export when needed.",
+    "packageId": "Package ID",
+    "revision": "Revision",
+    "maintenanceActions": "Maintenance actions",
+    "maintenanceHelp": "Export, restore, or remove this plugin. Risky actions ask again.",
+    "activeData": "Active plugin data",
+    "tabs": {
+      "label": "Plugin details",
+      "overview": "Overview",
+      "access": "Access & data",
+      "maintenance": "Versions & maintenance"
+    }
+  },
+  "command": {
+    "run": "Run on Desktop",
+    "input": "Desktop command JSON input",
+    "result": "Desktop command result",
+    "invalidJson": "Desktop command input must be valid JSON.",
+    "failed": "The Desktop command failed or is no longer available."
+  },
+  "dialog": {
+    "destination": "Destination path",
+    "restore": {
+      "title": "Restore previous version",
+      "withData": "Also restore the previous data generation",
+      "dataLoss": "Restoring previous data discards data written after the update.",
+      "acknowledge": "I understand that newer plugin data will be lost"
+    },
+    "export_package": {
+      "title": "Export Plugin Package",
+      "disclosure": "Package export contains code, resources, and optional source. It never contains user data, configuration, cache, or Credential values."
+    },
+    "export_backup": {
+      "title": "Export Plugin Backup",
+      "disclosure": "Backup contains the active package, active DataRoot, non-secret configuration, grants, and Credential slot names. It excludes Credential values, cache, preview data, and older generations."
+    },
+    "trash": {
+      "title": "Move plugin to trash",
+      "body": "UI access, Actions, Bindings, Service, grants, and Credential access are revoked immediately. Data is retained until permanent deletion."
+    },
+    "delete": {
+      "title": "Delete plugin permanently",
+      "body": "This permanently removes the local plugin instance, data generations, files, configuration, grants, and Credential bindings. It cannot be undone. The content-addressed shared Artifact cache contains no user data and may be retained or reclaimed by the Host."
+    },
+    "command": {
+      "title": "Run Desktop command"
+    }
+  }
+}

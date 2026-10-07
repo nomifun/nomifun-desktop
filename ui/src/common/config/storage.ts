@@ -5,7 +5,10 @@
  */
 
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
-import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type {
+  AgentPresetId,
+  AgentResolvedSnapshot,
+} from '@/common/types/agentPlatform';
 import type {
   TDecisionPolicy,
   TDelegationPolicy,
@@ -23,23 +26,23 @@ import type {
   McpServerId,
   ProviderId,
 } from '@/common/types/ids';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 
 /**
  * Conversation source type - identifies where the conversation was created
  * 会话来源类型 - 标识会话创建的来源
  */
-export type ConversationSource = 'nomifun' | 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | (string & {});
+type ConversationSource = 'nomifun' | 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | (string & {});
 
-export type TChatConversationStatus = 'pending' | 'running' | 'finished';
-export type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running' | 'waiting_confirmation';
+type TChatConversationStatus = 'pending' | 'running' | 'finished';
+type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running';
 
-export type TConversationRuntimeSummary = {
+type TConversationRuntimeSummary = {
   state: TConversationRuntimeStateKind;
   can_send_message: boolean;
   has_runtime: boolean;
   runtime_status?: TChatConversationStatus;
   is_processing: boolean;
-  pending_confirmations: number;
   /** Exact backend turn currently owning this runtime. This is lifecycle
    * authority; processing_started_at is display-only and may collide. */
   active_turn_id?: MessageId;
@@ -59,6 +62,8 @@ interface IChatConversation<T, Extra> {
   type: T;
   extra: Extra;
   model: TProviderWithModel;
+  /** Per-session override. Undefined inherits the selected model default. */
+  reasoning_effort?: SessionReasoningEffort;
   status?: TChatConversationStatus | undefined;
   runtime?: TConversationRuntimeSummary;
   /** 会话来源，默认为 nomifun / Conversation source, defaults to nomifun */
@@ -70,10 +75,10 @@ interface IChatConversation<T, Extra> {
   channel_chat_id?: string;
   /** Cron job that spawned this conversation. */
   cron_job_id?: CronJobId;
-  /** Immutable preset lineage resolved and persisted by the backend. */
-  preset_id?: PresetReference;
+  /** Immutable AgentPreset lineage resolved and persisted by the backend. */
+  preset_id?: AgentPresetId;
   preset_revision?: number;
-  preset_snapshot?: ResolvedPresetSnapshot;
+  agent_snapshot?: AgentResolvedSnapshot;
   /** Nomi-only collaboration policy persisted as first-class conversation fields. */
   delegation_policy?: TDelegationPolicy;
   execution_model_pool?: TExecutionModelPool;
@@ -107,26 +112,14 @@ export type TChatConversation = IChatConversation<
   'nomi',
   {
     workspace: string;
+    /** Canonical native execution state; a pause retains ownership of its turn. */
+    execution_phase?: string;
+    execution_pause?: { reason: string; cleanup_proven: boolean; paused_at_ms: number };
     custom_workspace?: boolean;
     proxy?: string;
-    /** Skills snapshot for this conversation — authoritative list, written
-     * once at creation. Join with `GET /api/skills` for descriptions. */
-    skills?: string[];
-    /** MCP server id snapshot chosen when the conversation was created. */
-    mcp_server_ids?: McpServerId[];
-    /** MCP server name snapshot chosen when the conversation was created. */
-    mcp_servers?: string[];
-    /** Conversation-scoped MCP status snapshot shown in the sendbox menu. */
-    mcp_statuses?: IConversationMcpStatus[];
-    /** Session-only MCP server snapshot persisted at creation time. */
-    session_mcp_servers?: ISessionMcpServer[];
     /** Max tokens per response */
     /** Max agentic turns */
     maxTurns?: number;
-    /** Persisted session mode for resume support */
-    session_mode?: string;
-    /** Legacy marker for pre-provider-probe health-check conversations */
-    is_health_check?: boolean;
     /** Last token usage stats */
     last_token_usage?: TokenUsageData;
     /** Marks this nomi conversation as a desktop-companion's single per-companion
@@ -141,32 +134,19 @@ export type TChatConversation = IChatConversation<
     /** IM-channel platform when a companion turn originated from an external
      * channel (telegram/lark/…). Present on channel-sourced companion turns. */
     channel_platform?: string;
-    /** In-session companion summon marker（设计 B）: the summoned companion's
-     * id + hand-picked memory ids + excluded skills, `summoned_at`
-     * server-stamped. Written only through PUT
-     * /api/conversations/{id}/summon or trusted backend creators; drives
-     * the sendbox summon control and the header/sidebar badges. */
-    summon?: {
-      companion_id: CompanionId;
-      memory_ids: string[];
-      skill_exclusions: string[];
-      summoned_at: number;
-    };
   }
 >;
-
-export type IChatConversationRefer = {
-  'chat.history': TChatConversation[];
-};
 
 /**
  * 统一多模态能力词表 —— ts-rs 生成契约的 re-export（生成源
  * crates/backend/nomifun-api-types/src/model_task.rs，由
  * `cargo test -p nomifun-api-types` 重新生成到 @/common/protocolBindings/）。
- * ModelTask 决定端点/请求体；ModelTrait 是同一任务内的细化（主要修饰 chat）。
+ * ModelTask 决定端点/请求体；ModelTrait 仅是目录提示，不限制 Chat 的原生能力。
+ * 工具调用、推理和流式传输由运行时的 ModelTechnicalCapability 观察管理。
  */
 export type { ModelTask } from '@/common/protocolBindings/ModelTask';
 export type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
+export type { ModelTechnicalCapability } from '@/common/protocolBindings/ModelTechnicalCapability';
 
 /** 权威 per-model 能力档案（键 (provider_id, model)）。 */
 export interface IProvider {
@@ -207,26 +187,26 @@ export type TProviderWithModel = Omit<IProvider, 'models'> & {
 };
 
 // MCP Server Configuration Types
-export interface IMcpServerTransportStdio {
+interface IMcpServerTransportStdio {
   type: 'stdio';
   command: string;
   args?: string[];
   env?: Record<string, string>;
 }
 
-export interface IMcpServerTransportSSE {
+interface IMcpServerTransportSSE {
   type: 'sse';
   url: string;
   headers?: Record<string, string>;
 }
 
-export interface IMcpServerTransportHTTP {
+interface IMcpServerTransportHTTP {
   type: 'http';
   url: string;
   headers?: Record<string, string>;
 }
 
-export interface IMcpServerTransportStreamableHTTP {
+interface IMcpServerTransportStreamableHTTP {
   type: 'streamable_http';
   url: string;
   headers?: Record<string, string>;
@@ -254,23 +234,7 @@ export interface IMcpServer {
   builtin?: boolean;
 }
 
-/** Conversation-scoped MCP snapshot keyed by the stable MCP business ID. */
-export interface ISessionMcpServer {
-  mcp_server_id: McpServerId;
-  name: string;
-  transport: IMcpServerTransport;
-}
-
-export type IConversationMcpStatusKind = 'loaded' | 'failed' | 'unsupported';
-
-export interface IConversationMcpStatus {
-  mcp_server_id: McpServerId;
-  name: string;
-  status: IConversationMcpStatusKind;
-  reason?: string;
-}
-
-export interface IMcpTool {
+interface IMcpTool {
   name: string;
   description?: string;
   input_schema?: unknown;

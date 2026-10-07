@@ -109,7 +109,6 @@ describe('CreativeAssetClient', () => {
       model: undefined,
       providerId: '0190f5fe-7c00-7a00-8000-000000000002',
       params: undefined,
-      workbenchKind: undefined,
       canvasId: '0190f5fe-7c00-7a00-8000-000000000003',
       nodeId: '0190f5fe-7c00-7a00-8000-000000000004',
       generationTaskId: '0190f5fe-7c00-7a00-8000-000000000005',
@@ -122,18 +121,19 @@ describe('CreativeAssetClient', () => {
     });
   });
 
-  test('keeps legacy standalone project provenance inert', () => {
+  test('maps the exact conversation and turn that produced a saved material', () => {
     const asset = mapWorkshopAsset(
       assetDto({
         origin: {
-          workbench_kind: 'image',
-          project_id: '0190f5fe-7c00-7a00-8000-000000000003',
+          conversation_id: '0190f5fe-7c00-7a00-8000-000000000003',
+          message_id: '0190f5fe-7c00-7a00-8000-000000000004',
           creation_task_id: '0190f5fe-7c00-7a00-8000-000000000005',
         },
       })
     );
 
-    expect(asset.origin?.workbenchKind).toBe('image');
+    expect(asset.origin?.conversationId).toBe('0190f5fe-7c00-7a00-8000-000000000003');
+    expect(asset.origin?.messageId).toBe('0190f5fe-7c00-7a00-8000-000000000004');
     expect(asset.origin?.canvasId).toBeUndefined();
   });
 
@@ -306,7 +306,7 @@ describe('CreativeAssetClient', () => {
     );
   });
 
-  test('serializes preset provenance without catalog-only attribution fields', async () => {
+  test('serializes catalog provenance with auditable attribution fields', async () => {
     let request: unknown;
     const client = new CreativeAssetClient(
       apiStub({
@@ -324,20 +324,24 @@ describe('CreativeAssetClient', () => {
     );
 
     await client.createText({
-      title: 'Preset prompt',
+      title: 'Catalog prompt',
       textContent: 'Prompt body',
       origin: {
-        promptLibrarySource: 'preset',
-        promptLibraryId: 'preset-1',
+        promptLibrarySource: 'catalog',
+        promptLibraryId: 'catalog-1',
+        promptCatalogId: 'catalog-1',
+        sourceUrl: 'https://example.test/source',
       },
     });
     expect(request).toMatchObject({
       origin: {
-        prompt_library_source: 'preset',
-        prompt_library_id: 'preset-1',
+        prompt_library_source: 'catalog',
+        prompt_library_id: 'catalog-1',
+        prompt_catalog_id: 'catalog-1',
+        source_url: 'https://example.test/source',
       },
     });
-    expect(JSON.stringify(request).includes('prompt_catalog_id')).toBe(false);
+    expect(JSON.stringify(request).includes('prompt_catalog_id')).toBe(true);
   });
 
   test('rejects an invalid prompt-removal match count', async () => {
@@ -346,7 +350,7 @@ describe('CreativeAssetClient', () => {
     );
     let error: unknown;
     try {
-      await client.removePromptAsset('preset', 'preset-1');
+      await client.removePromptAsset('catalog', 'catalog-1');
     } catch (reason) {
       error = reason;
     }

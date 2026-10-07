@@ -159,6 +159,17 @@ fn tc_5_2_07_byte_size_eviction() {
     assert!(cache.get(Path::new("/b")).is_some());
     assert!(cache.get(Path::new("/c")).is_some());
     assert!(cache.current_size_bytes() <= 15);
+
+    // Oversized inserts must preserve other entries, but not a stale revision
+    // of the same path or a refresh marker without a corresponding entry.
+    cache.insert(PathBuf::from("/huge"), make_state(&"x".repeat(16), 4));
+    assert!(cache.get(Path::new("/huge")).is_none());
+    assert_eq!(cache.len(), 2);
+    cache.insert_after_write(PathBuf::from("/b"), make_state(&"x".repeat(16), 5));
+    assert!(cache.get(Path::new("/b")).is_none());
+    assert!(!cache.needs_model_refresh(Path::new("/b")));
+    assert!(cache.get(Path::new("/c")).is_some());
+    assert_eq!(cache.current_size_bytes(), 6);
 }
 
 /// TC-5.2-08: Inserting the same path twice updates (overwrites) the entry.

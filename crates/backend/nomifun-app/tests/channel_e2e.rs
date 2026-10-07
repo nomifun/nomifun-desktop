@@ -167,7 +167,12 @@ async fn enable_plugin_invalid_type() {
     let json = body_json(resp).await;
     let data = &json["data"];
     assert!(!data["success"].as_bool().unwrap());
-    assert!(data["error"].as_str().unwrap().contains("Invalid plugin type"));
+    let error = data["error"].as_str().unwrap();
+    assert!(error.contains("unsupported channel plugin type"), "{error}");
+    assert!(
+        error.contains("extension channel plugins are not supported"),
+        "{error}"
+    );
 }
 
 // DP-3: Disable missing pluginId fails

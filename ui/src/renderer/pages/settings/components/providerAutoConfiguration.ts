@@ -15,8 +15,6 @@ import {
   type ModelProtocolManifestMap,
 } from './providerModelAdvanced';
 
-export const DEFAULT_REQUIRED_OUTPUT_LIMIT = 4_096;
-
 export type ProviderCompatibilityMode = 'auto' | 'openai' | 'anthropic';
 
 const OPENAI_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {
@@ -36,12 +34,12 @@ const ANTHROPIC_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> =
 
 const EMPTY_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {};
 
-export type ProviderAutoConfigurationConfidence =
+type ProviderAutoConfigurationConfidence =
   | 'verified'
   | 'endpoint_confirmed'
   | 'fallback';
 
-export interface ProviderAutoConfigurationCandidate {
+interface ProviderAutoConfigurationCandidate {
   descriptor: ProtocolDescriptor;
   authScheme: string;
 }
@@ -302,9 +300,9 @@ export const selectProviderAutoConfiguration = (
     ...(best?.suggestedBaseUrl
       ? { suggestedBaseUrl: best.suggestedBaseUrl }
       : {}),
-    ...(selected.descriptor.requires_output_ceiling
-      ? { outputLimit: DEFAULT_REQUIRED_OUTPUT_LIMIT }
-      : {}),
+    // Protocol discovery is not a model output-limit recommendation. Required
+    // protocols must obtain an explicit value from verified model facts or
+    // the user's configuration; optional protocols keep the provider default.
   };
 };
 
@@ -349,8 +347,8 @@ export const applyProviderCompatibilityMode = (
           contentEndpoint: '',
           realtimeEndpoint: '',
           allowCrossOriginCredentials: false,
-          providerParamsJson: '',
-          outputLimit: undefined,
+          providerParamsJson: capability.providerParamsJson,
+          outputLimit: capability.outputLimit,
         };
       }),
     };
@@ -377,8 +375,8 @@ export const applyProviderCompatibilityMode = (
             contentEndpoint: '',
             realtimeEndpoint: '',
             allowCrossOriginCredentials: false,
-            providerParamsJson: '',
-            outputLimit: undefined,
+            providerParamsJson: capability.providerParamsJson,
+            outputLimit: capability.outputLimit,
           };
         }
         return capability;
@@ -407,17 +405,12 @@ export const applyProviderCompatibilityMode = (
               contentEndpoint: '',
               realtimeEndpoint: '',
               allowCrossOriginCredentials: false,
-              providerParamsJson: '',
+              providerParamsJson: capability.providerParamsJson,
             }
           : {}),
-        outputLimit:
-          protocol === 'anthropic.messages'
-            ? resetTransport
-              ? DEFAULT_REQUIRED_OUTPUT_LIMIT
-              : capability.outputLimit ?? DEFAULT_REQUIRED_OUTPUT_LIMIT
-            : resetTransport
-              ? undefined
-              : capability.outputLimit,
+        // A transport switch must not replace a configured model limit with
+        // a guessed universal value, or erase an explicit customization.
+        outputLimit: capability.outputLimit,
       };
     }),
   };
@@ -458,10 +451,10 @@ export const applyProviderAutoConfiguration = (
               contentEndpoint: '',
               realtimeEndpoint: '',
               allowCrossOriginCredentials: false,
-              providerParamsJson: '',
+              providerParamsJson: capability.providerParamsJson,
             }
           : {}),
-        ...(capability.outputLimit === undefined && detection.outputLimit !== undefined
+        ...(capability.outputLimit === undefined && capability.outputLimitSource !== 'user' && detection.outputLimit !== undefined
           ? { outputLimit: detection.outputLimit }
           : {}),
       };

@@ -81,7 +81,6 @@ const renderLibrary = (overrides: Partial<React.ComponentProps<typeof CreativeAs
         onEditAsset={() => undefined}
         onDownloadAsset={() => undefined}
         onRemoveAsset={() => undefined}
-        onSetSelectedLibrary={() => undefined}
         onInsertSelected={() => undefined}
         onDownloadSelected={() => undefined}
         onRemoveSelected={() => undefined}
@@ -91,6 +90,21 @@ const renderLibrary = (overrides: Partial<React.ComponentProps<typeof CreativeAs
   );
 
 describe('CreativeAssetLibrary', () => {
+  test('hides absent metadata and uses the same short default name for the card and actions', () => {
+    const prompt = '纯白色纸张破洞视角，洞边缘有撕纸纤维质感，蓝色头发的小女孩从洞中探出。';
+    for (const view of ['grid', 'list'] as const) {
+      const html = renderLibrary({
+        view,
+        selectedIds: new Set(),
+        state: state({ assets: [{ ...asset('unnamed', 'image'), title: prompt, origin: { prompt }, collection: '  ', tags: ['', '  '] }] }),
+      });
+      expect(html.includes('>纯白色纸张破洞视角，洞边缘有撕</strong>')).toBe(true);
+      expect(html.includes('aria-label="更多：纯白色纸张破洞视角，洞边缘有撕"')).toBe(true);
+      expect(html.includes(testLabels.noCollection)).toBe(false);
+      expect(html.includes(testLabels.noTags)).toBe(false);
+    }
+  });
+
   test('renders the controlled source-aligned library surface and every media kind', () => {
     const html = renderLibrary();
 
@@ -106,15 +120,39 @@ describe('CreativeAssetLibrary', () => {
     expect(html.includes('A reusable creative prompt')).toBe(true);
   });
 
+  test('shows the collection on the cover and omits asset tags from cards', () => {
+    const html = renderLibrary({ selectedIds: new Set() });
+    const imageCard = html.match(/<article\b[^>]*data-asset-id="asset-0"[\s\S]*?<\/article>/)?.[0] ?? '';
+    const cover = imageCard.match(/<div\b[^>]*data-asset-cover="true"[^>]*>[\s\S]*?<\/div>/)?.[0] ?? '';
+
+    expect(cover.includes('data-asset-collection="true"')).toBe(true);
+    expect(cover.includes('title="Campaign">Campaign</span>')).toBe(true);
+    expect(imageCard.includes('aria-label="hero, image"')).toBe(false);
+    expect(imageCard.includes('title="hero">hero</span>')).toBe(false);
+  });
+
   test('exposes selection and multi-action intent without owning selected state', () => {
     const html = renderLibrary();
 
     expect(html.includes('data-asset-selection-bar="true"')).toBe(true);
     expect(html.includes('已选择 2 项')).toBe(true);
-    for (const label of ['移出素材库', '插入画布', '下载', '删除']) {
+    for (const label of ['插入画布', '批量另存为', '删除']) {
       expect(html.includes(label)).toBe(true);
     }
     expect(html.match(/type="checkbox"/g)?.length).toBe(4);
+  });
+
+  test('keeps source-page batch actions before upload and uses shared checkbox controls', () => {
+    const html = renderLibrary({ appearance: 'source-page' });
+    const toolbar = html.slice(html.indexOf('data-asset-selection-toolbar'), html.indexOf(`>${testLabels.upload}</button>`));
+
+    expect(html.includes('data-asset-selection-bar')).toBe(false);
+    expect(toolbar.includes('已选择 2 项')).toBe(true);
+    expect(toolbar.includes('arco-checkbox-indeterminate')).toBe(true);
+    expect(toolbar.includes('arco-btn-status-danger')).toBe(true);
+    expect(html.indexOf('data-asset-selection-toolbar')).toBeLessThan(html.indexOf(`>${testLabels.upload}</button>`));
+    expect(html.match(/type="checkbox"/g)?.length).toBe(5);
+    expect(html.includes('aria-label="选择素材: image asset"')).toBe(true);
   });
 
   test('switches to the controlled list presentation without changing asset identity', () => {
@@ -186,7 +224,7 @@ describe('CreativeAssetLibrary', () => {
       selectable: false,
       selectedIds: new Set(),
       labels: {
-        title: '我的素材',
+        title: '资产库',
         description: '收藏常用素材，按类型和标题快速查找。',
         kindFilter: '类型',
       },
@@ -197,11 +235,10 @@ describe('CreativeAssetLibrary', () => {
         total: 14,
         onPageChange: () => undefined,
       },
-      onRenameCollection: () => undefined,
     });
 
     expect(html.includes('data-asset-appearance="source-page"')).toBe(true);
-    expect(html.includes('<h1>我的素材</h1>')).toBe(true);
+    expect(html.includes('<h1>资产库</h1>')).toBe(true);
     expect(html.includes('role="search"')).toBe(true);
     expect(html.includes('type="search" aria-label="搜索"')).toBe(true);
     expect(html.includes('aria-label="素材范围"')).toBe(false);
@@ -219,7 +256,7 @@ describe('CreativeAssetLibrary', () => {
     expect(footer.includes('2.0 KB')).toBe(true);
     expect(footer.includes('image/example')).toBe(true);
     expect(footer.includes('aria-haspopup="menu"')).toBe(true);
-    expect(html.includes('重命名合集')).toBe(true);
+    expect(html.includes('重命名合集')).toBe(false);
     expect(html.includes('图片和视频，单文件最大 64 MB')).toBe(true);
     expect(html.includes('aria-label="素材分页"')).toBe(true);
     expect(html.includes('10 条/页')).toBe(true);
@@ -252,12 +289,12 @@ describe('CreativeAssetLibrary', () => {
     expect(submitted).toBe('hero title');
   });
 
-  test('keeps compact and reduced-motion layouts explicit', () => {
+  test('keeps reduced-motion behavior explicit', () => {
     const css = readFileSync(new URL('./CreativeAssetLibrary.module.css', import.meta.url), 'utf8');
-    expect(css.includes('@media (max-width: 820px)')).toBe(true);
-    expect(css.includes('@media (max-width: 560px)')).toBe(true);
-    expect(css.includes('@media (hover: none)')).toBe(true);
     expect(css.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
     expect(css.includes("[data-asset-appearance='source-page']")).toBe(true);
+    expect(css.includes('.collectionBadge {')).toBe(true);
+    expect(css.includes('right: 8px;')).toBe(true);
+    expect(css.includes('.assetTags')).toBe(false);
   });
 });

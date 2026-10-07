@@ -14,7 +14,9 @@
     "pausedBadge": "已暂停：{{reason}}",
     "pausedReasons": {
       "requirementFailed": "需求执行失败",
-      "userInterrupted": "手动停止"
+      "userInterrupted": "手动停止",
+      "executionFailed": "执行失败",
+      "userActionRequired": "等待人工处理"
     },
     "resume": "恢复",
     "resumeSuccess": "标签已恢复"
@@ -22,6 +24,7 @@
   "runState": {
     "off": "已关闭",
     "idle": "空闲",
-    "active": "执行中"
+    "active": "执行中",
+    "paused": "已暂停"
   }
 }

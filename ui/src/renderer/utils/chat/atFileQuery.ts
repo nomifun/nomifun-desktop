@@ -28,7 +28,7 @@ function unescapeAtFileQuery(value: string): string {
   return value.replace(/\\(.)/g, '$1');
 }
 
-export function escapeAtFilePath(path: string): string {
+function escapeAtFilePath(path: string): string {
   return path.replace(/([\\\s,;!?()[\]{}])/g, '\\$1');
 }
 

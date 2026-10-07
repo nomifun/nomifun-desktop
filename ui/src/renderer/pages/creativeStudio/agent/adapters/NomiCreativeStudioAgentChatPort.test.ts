@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import i18n from 'i18next';
 
 import type {
   IConversationTurnCompletedEvent,
@@ -107,7 +108,6 @@ const turnStarted = (): IConversationTurnStartedEvent => ({
     has_runtime: true,
     runtime_status: 'running',
     is_processing: true,
-    pending_confirmations: 0,
     active_turn_id: turnId,
   },
 });
@@ -127,7 +127,6 @@ const turnCompleted = (
     has_runtime: false,
     runtime_status: 'finished',
     is_processing: false,
-    pending_confirmations: 0,
   },
   workspace: '',
   model: { platform: 'test', name: 'Test', use_model: model.model },
@@ -272,6 +271,84 @@ const collect = async <T>(
 };
 
 describe('NomiCreativeStudioAgentChatPort', () => {
+  test('keeps a canonical pause without resubmission or implicit cancellation until user Stop', async () => {
+    const transport = new FakeTransport();
+    const pause = { turnId, reason: 'EXECUTION_MODEL_INVALID_REQUEST', cleanupProven: true, pausedAt: undefined };
+    transport.snapshots = [idleSnapshot({ authority: 'unknown', activeTurnId: turnId, pause })];
+    const controller = new AbortController();
+    const iterable = await createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(), transport, recoveryPollMs: 25,
+    }).runTurn(request(controller.signal));
+    const iterator = iterable[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.value).toEqual({ type: 'paused', pause });
+    expect(transport.sendCalls).toEqual([]);
+    expect(transport.stopCalls).toEqual([]);
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(transport.stopCalls).toEqual([conversationId]);
+  });
+
+  test('an admitted turn exposes its matching pause and is not implicitly stopped', async () => {
+    const transport = new FakeTransport();
+    const pause = { turnId, reason: 'EXECUTION_MODEL_INVALID_REQUEST', cleanupProven: false, pausedAt: undefined };
+    transport.snapshots = [idleSnapshot(), idleSnapshot({ authority: 'unknown', activeTurnId: turnId, pause })];
+    const controller = new AbortController();
+    const iterable = await createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(), transport, recoveryPollMs: 25,
+    }).runTurn(request(controller.signal));
+    const iterator = iterable[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({ type: 'paused', pause });
+    expect(transport.sendCalls).toHaveLength(1);
+    expect(transport.stopCalls).toEqual([]);
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(transport.stopCalls).toEqual([conversationId]);
+  });
+
+  test('late stream content cannot replace a canonical pause with running text', async () => {
+    const transport = new FakeTransport();
+    const pause = { turnId, reason: 'EXECUTION_MODEL_INVALID_REQUEST', cleanupProven: true, pausedAt: undefined };
+    const snapshot = idleSnapshot({ authority: 'unknown', activeTurnId: turnId, pause });
+    transport.snapshots = [snapshot, snapshot];
+    const controller = new AbortController();
+    const iterable = await createNomiCreativeStudioAgentChatPort({
+      resolveSession: matchingResolver(), transport, recoveryPollMs: 25,
+    }).runTurn(request(controller.signal));
+    const iterator = iterable[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({ type: 'paused', pause });
+    transport.emitResponse({ type: 'content', data: 'LATE_BEFORE_PAUSE', msg_id: assistantMessageId, turn_id: turnId, conversation_id: conversationId });
+    const next = iterator.next();
+    const timer = setTimeout(() => controller.abort(), 1);
+    await expect(next).rejects.toMatchObject({ name: 'AbortError' });
+    clearTimeout(timer);
+    expect(transport.sendCalls).toEqual([]);
+    expect(transport.inspectCalls).toHaveLength(2);
+    expect(transport.stopCalls).toEqual([conversationId]);
+  });
+
+  test('recovers failed and stopped turns without resubmission or false completion', async () => {
+    for (const status of ['failed', 'stopped'] as const) {
+      const restored: CreativeStudioAgentMessage[] = [...recoveredHistory.slice(0, -1), {
+        id: assistantMessageId, role: 'assistant', status, text: '',
+        ...(status === 'failed' ? { errorMessage: 'Skill is not selected' } : {}),
+      } as CreativeStudioAgentMessage];
+      const transport = new FakeTransport();
+      const port = createNomiCreativeStudioAgentChatPort({
+        resolveSession: matchingResolver({ history: restored }), transport,
+      });
+      const events = await collect(port.runTurn(request(new AbortController().signal)));
+      expect(events).toEqual([
+        { type: 'history-reconciled', history: restored },
+        status === 'failed'
+          ? { type: 'failed', message: 'Skill is not selected', retryable: false }
+          : { type: 'stopped' },
+      ]);
+      expect(transport.sendCalls).toEqual([]);
+      expect(transport.inspectCalls).toEqual([]);
+    }
+  });
+
   test('maps real REST admission plus exact WS turn lifecycle into port events', async () => {
     const transport = new FakeTransport();
     const mutableSkillIds = [...planningSkillIds];
@@ -353,7 +430,12 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     );
 
     expect(events).toEqual([
-      { type: 'activity', label: 'Synchronizing connection; Agent has started' },
+      {
+        type: 'activity',
+        label: i18n.t('creativeStudio.agent.activity.connectionSyncing', {
+          defaultValue: 'Synchronizing connection; Agent has started',
+        }) || 'Synchronizing connection; Agent has started',
+      },
       { type: 'history-reconciled', history: recoveredHistory },
       { type: 'completed', assistantMessageId },
     ]);
@@ -634,6 +716,9 @@ describe('NomiCreativeStudioAgentChatPort', () => {
             code: 'USER_LLM_PROVIDER_RATE_LIMITED',
             ownership: 'user_llm_provider',
             detail: 'raw provider payload must stay out of the Canvas panel',
+            agentLabel: 'Original Agent',
+            modelName: 'original-model',
+            workspacePath: '/original-workspace',
             retryable: true,
           },
           msg_id: assistantMessageId,
@@ -657,6 +742,12 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     expect(events[1].message.includes('{')).toBe(false);
     expect(events[1].message.includes('USER_LLM_PROVIDER_RATE_LIMITED')).toBe(false);
     expect(events[1].message.includes('raw provider payload')).toBe(false);
+    expect(events[1].turnId).toBe(turnId);
+    expect(events[1].error).toEqual({
+      message: 'rate limited', code: 'USER_LLM_PROVIDER_RATE_LIMITED', ownership: 'user_llm_provider',
+      detail: 'raw provider payload must stay out of the Canvas panel', agentLabel: 'Original Agent',
+      modelName: 'original-model', workspacePath: '/original-workspace', retryable: true,
+    });
     expect(transport.stopCalls).toEqual([conversationId]);
     expect(transport.responseListeners.size).toBe(0);
   });

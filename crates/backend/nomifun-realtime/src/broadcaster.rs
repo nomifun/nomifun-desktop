@@ -39,8 +39,8 @@ pub struct UserEventEnvelope {
 /// `tokio::sync::broadcast` channel.
 ///
 /// The broadcast channel is used for module-to-WebSocket event fan-out.
-/// Each `WebSocketManager` connection subscribes to this channel and
-/// forwards received events to its per-connection `mpsc` sender.
+/// Application bridge tasks subscribe once per audience channel and forward
+/// events to `WebSocketManager`, which owns per-connection `mpsc` senders.
 pub struct BroadcastEventBus {
     tx: broadcast::Sender<WebSocketMessage<serde_json::Value>>,
     user_tx: broadcast::Sender<UserEventEnvelope>,
@@ -56,7 +56,7 @@ impl BroadcastEventBus {
 
     /// Subscribe to receive broadcast events.
     ///
-    /// Each WebSocket connection calls this once to get its own receiver.
+    /// Bridge tasks and internal observers each obtain their own receiver.
     pub fn subscribe(&self) -> broadcast::Receiver<WebSocketMessage<serde_json::Value>> {
         self.tx.subscribe()
     }

@@ -32,6 +32,9 @@ pub enum CronError {
     #[error("Scheduler error: {0}")]
     Scheduler(String),
 
+    #[error("Schedule mutation outcome is unknown: {0}")]
+    OutcomeUnknown(String),
+
     #[error(transparent)]
     App(#[from] AppError),
 
@@ -55,6 +58,7 @@ impl From<CronError> for AppError {
             CronError::InvalidSkillContent(msg) => AppError::BadRequest(msg),
             CronError::InvalidAgentConfig(msg) => AppError::BadRequest(msg),
             CronError::Scheduler(msg) => AppError::Internal(msg),
+            CronError::OutcomeUnknown(msg) => AppError::Conflict(msg),
             CronError::App(app_err) => app_err,
             CronError::Database(db_err) => AppError::from(db_err),
             CronError::Json(e) => AppError::Internal(format!("JSON error: {e}")),
@@ -67,6 +71,8 @@ impl CronError {
         match error {
             AppError::WorkspacePathEdgeWhitespace(_) => Self::App(error),
             AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_) => Self::App(error),
+            AppError::WorkspaceDirectoryUnavailable(_) => Self::App(error),
+            AppError::WorkspaceDirectoryRuntimeUnavailable(_) => Self::App(error),
             other => Self::Scheduler(format!("create conversation: {other}")),
         }
     }
@@ -153,6 +159,21 @@ mod tests {
             err,
             AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(msg) if msg == "/tmp/a b"
         ));
+    }
+
+    #[test]
+    fn missing_workspace_app_errors_preserve_create_and_runtime_codes() {
+        let create: AppError = CronError::App(AppError::WorkspaceDirectoryUnavailable(
+            "/missing".into(),
+        ))
+        .into();
+        assert_eq!(create.error_code(), "WORKSPACE_DIRECTORY_UNAVAILABLE");
+
+        let runtime: AppError = CronError::App(
+            AppError::WorkspaceDirectoryRuntimeUnavailable("/missing".into()),
+        )
+        .into();
+        assert_eq!(runtime.error_code(), "WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE");
     }
 
     #[test]

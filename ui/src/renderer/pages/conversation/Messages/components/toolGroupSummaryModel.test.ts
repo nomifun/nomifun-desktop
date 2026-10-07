@@ -10,6 +10,8 @@ import {
   buildToolReceiptDetailRows,
   buildToolReceiptSummaryParts,
   buildToolSummaryDescriptor,
+  countBoundedSearchResults,
+  countNonFatalToolFailures,
   getToolReceiptIconFromSummaryParts,
 } from './toolGroupSummaryModel';
 
@@ -19,6 +21,80 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 });
 
 describe('buildToolReceiptSummaryParts', () => {
+  test('keeps clean timeouts separate from unknown errors and preserves a timed-out retry attempt', () => {
+    const timeout = tool({ key: 'timeout', name: 'poll_process', status: 'error', commandTimedOut: true,
+      output: 'exact timeout and cleanup receipt' });
+    const unknown = tool({ key: 'unknown', name: 'poll_process', status: 'error', output: 'cleanup unknown' });
+    const parts = buildToolReceiptSummaryParts([timeout, unknown], 'failed');
+    expect(parts.map(({ state, commandTimedOut }) => ({ state, commandTimedOut }))).toEqual([
+      { state: 'failed', commandTimedOut: true }, { state: 'failed', commandTimedOut: undefined },
+    ]);
+    expect(buildToolReceiptDetailRows([timeout])[0]).toMatchObject({
+      state: 'failed', commandTimedOut: true, output: timeout.output,
+    });
+    const retried = buildToolReceiptDetailRows([
+      { ...timeout, retry: { retryGroupId: timeout.key, attemptNo: 1 } },
+      tool({ key: 'later', name: 'poll_process', commandExitCode: 0,
+        retry: { retryGroupId: timeout.key, attemptNo: 2, retryOfCallId: timeout.key } }),
+    ])[0];
+    expect(retried.commandTimedOut).toBeUndefined();
+    expect(retried.attempts?.[0]).toMatchObject({ state: 'failed', commandTimedOut: true, output: timeout.output });
+  });
+  test('separates a proven launch refusal from other failures and keeps it in retry history', () => {
+    const first = tool({ key: 'not-started', name: 'exec_command', status: 'error',
+      commandNotStarted: true, output: 'original launch diagnostic' });
+    const other = tool({ key: 'system', name: 'exec_command', status: 'error', output: 'unknown failure' });
+    const parts = buildToolReceiptSummaryParts([first, other], 'failed');
+    expect(parts.map(({ state, commandNotStarted }) => ({ state, commandNotStarted }))).toEqual([
+      { state: 'failed', commandNotStarted: true },
+      { state: 'failed', commandNotStarted: undefined },
+    ]);
+    const rows = buildToolReceiptDetailRows([first, other]);
+    expect(rows[0]?.commandNotStarted).toBe(true);
+    expect(rows[0]?.output).toBe('original launch diagnostic');
+    const retried = buildToolReceiptDetailRows([
+      { ...first, retry: { retryGroupId: first.key, attemptNo: 1 } },
+      tool({ key: 'started', name: 'exec_command', commandExitCode: 0,
+        retry: { retryGroupId: first.key, attemptNo: 2, retryOfCallId: first.key } }),
+    ]);
+    expect(retried[0]?.state).toBe('completed');
+    expect(retried[0]?.commandNotStarted).toBeUndefined();
+    expect(retried[0]?.attempts?.[0]).toMatchObject({
+      state: 'failed', commandNotStarted: true, output: 'original launch diagnostic',
+    });
+  });
+
+  test('separates command exit codes from system failures and retains raw detail', () => {
+    const tools = [
+      tool({ key: 'pass', name: 'exec_command', commandExitCode: 0 }),
+      tool({ key: 'diagnostic', name: 'exec_command', status: 'error', nonFatalFailure: true,
+        commandExitCode: 1, output: 'intentional test failure' }),
+      tool({ key: 'system', name: 'exec_command', status: 'error', output: 'launch failed' }),
+    ];
+    const parts = buildToolReceiptSummaryParts(tools, 'failed');
+    expect(parts.map(({ state, commandExitCode }) => ({ state, commandExitCode }))).toEqual([
+      { state: 'completed', commandExitCode: 0 },
+      { state: 'completed', commandExitCode: 1 },
+      { state: 'failed', commandExitCode: undefined },
+    ]);
+    expect(countNonFatalToolFailures(tools)).toBe(0);
+    const rows = buildToolReceiptDetailRows(tools);
+    expect(rows[1]?.commandExitCode).toBe(1);
+    expect(rows[1]?.output).toBe('intentional test failure');
+    expect(rows[2]?.state).toBe('failed');
+  });
+
+  test('counts only exact bounded search results for the dedicated warning summary', () => {
+    const tools = [
+      tool({ key: 'limited', name: 'search_files', status: 'error', nonFatalFailure: true,
+        boundedResult: 'search_context_withheld' }),
+      tool({ key: 'ordinary', name: 'Bash', status: 'error', nonFatalFailure: true }),
+      tool({ key: 'failed', name: 'search_files', status: 'error' }),
+    ];
+    expect(countBoundedSearchResults(tools)).toBe(1);
+    expect(countNonFatalToolFailures(tools)).toBe(1);
+  });
+
   test('collapses a complete explicit retry chain and preserves attempt history', () => {
     const firstAttempt = tool({
       key: 'call-1',
@@ -90,7 +166,7 @@ describe('buildToolReceiptSummaryParts', () => {
         action: 'generic',
         count: 1,
         state: 'completed',
-        target: 'update_plan',
+        target: 'Update plan',
       },
     ]);
   });
@@ -109,7 +185,7 @@ describe('buildToolReceiptSummaryParts', () => {
         action: 'generic',
         count: 2,
         state: 'failed',
-        target: 'nomi_knowledge_update_base, knowledge_search',
+        target: 'Nomi knowledge update base, Search knowledge',
       },
     ]);
   });
@@ -129,14 +205,14 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
 
     expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
-      { title: 'read_file', action: 'read_files' },
-      { title: 'write_file', action: 'edit_files' },
-      { title: 'list_directory', action: 'list_files' },
-      { title: 'server/read_file', action: 'read_files' },
-      { title: 'server/write_file', action: 'edit_files' },
-      { title: 'server/list_directory', action: 'list_files' },
+      { title: 'Read file', action: 'read_files' },
+      { title: 'Write file', action: 'edit_files' },
+      { title: 'List directory', action: 'list_files' },
+      { title: 'Read file', action: 'read_files' },
+      { title: 'Write file', action: 'edit_files' },
+      { title: 'List directory', action: 'list_files' },
       {
-        title: 'server/read_file',
+        title: 'Read file',
         action: 'read_files',
       },
     ]);
@@ -152,7 +228,7 @@ describe('buildToolReceiptSummaryParts', () => {
 
     expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
       {
-        title: 'gateway/nomi_knowledge_update_base',
+        title: 'Nomi knowledge update base',
         action: 'generic',
       },
     ]);
@@ -167,10 +243,10 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
 
     expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
-      { title: 'web/search', action: 'generic' },
-      { title: 'knowledge/read', action: 'generic' },
-      { title: 'workflow/run', action: 'generic' },
-      { title: 'domain/list', action: 'generic' },
+      { title: 'Search', action: 'generic' },
+      { title: 'Read', action: 'generic' },
+      { title: 'Run', action: 'generic' },
+      { title: 'List', action: 'generic' },
     ]);
   });
 
@@ -358,14 +434,14 @@ describe('buildToolReceiptSummaryParts', () => {
         action: 'generic',
         count: 1,
         state: 'completed',
-        target: 'nomifun-desktop/nomi_delegate',
+        target: 'Nomi delegate',
         notExecutedReason: 'invalid_arguments',
       },
       {
         action: 'generic',
         count: 1,
         state: 'completed',
-        target: 'nomifun-desktop/nomi_delegate',
+        target: 'Nomi delegate',
       },
     ]);
   });
@@ -408,7 +484,7 @@ describe('buildToolReceiptSummaryParts', () => {
       'completed'
     );
 
-    expect(parts[0]?.target).toBe('nomifun-desktop/nomi_delegate');
+    expect(parts[0]?.target).toBe('Nomi delegate');
     expect(parts[0]?.target?.includes('anxmvqfkcuzfi4mq')).toBe(false);
   });
 });
@@ -469,7 +545,7 @@ describe('buildToolSummaryDescriptor', () => {
       'completed'
     );
 
-    expect(descriptor?.target).toBe('Edit MessageList.tsx');
+    expect(descriptor?.target).toBe('Edit · MessageList.tsx');
   });
 });
 
@@ -615,8 +691,9 @@ describe('buildToolReceiptDetailRows', () => {
         key: 'delegate-invalid',
         action: 'generic',
         state: 'completed',
-        title: 'nomifun-desktop/nomi_delegate',
-        target: 'nomifun-desktop/nomi_delegate',
+        title: 'Nomi delegate',
+        diagnostics: 'MCP · nomifun-desktop\nmcp__nomifun-desktop__nomi_delegate__anxmvqfkcuzfi4mq',
+        target: 'Nomi delegate',
         output,
         notExecutedReason: 'invalid_arguments',
       },

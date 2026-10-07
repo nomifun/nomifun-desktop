@@ -3,30 +3,123 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use nomi_config::config::{CliArgs, Config};
+use nomi_config::compat::ProviderCompat;
+use nomi_config::config::{CliArgs, Config, ProviderType};
 use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason};
-use nomifun_api_types::{ModelTask, ModelTrait};
-use nomifun_common::{AppError, ProviderId};
+use nomifun_api_types::ModelTask;
+use nomifun_common::{AppError, ProviderId, ProviderWithModel};
 use nomifun_model_invoke::{
     AuthMaterial, AuthScheme, ModelInvokeService, ModelRef, ProtocolExecutorKind,
-    protocol_task_descriptor,
+    protocol_supports_reasoning_effort_value, protocol_task_descriptor,
 };
 
 use crate::types::NomiCompatOverrides;
 
-use super::nomi::resolve_bedrock_config;
+fn resolve_bedrock_config(
+    json: Option<&str>,
+    credentials: &serde_json::Value,
+) -> Option<nomi_config::config::BedrockConfig> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BedrockMetadata {
+        auth_method: nomifun_api_types::BedrockAuthMethod,
+        region: String,
+        profile: Option<String>,
+    }
 
-/// Image input is opt-in on the exact Chat capability. Runtime observations
-/// may downgrade a declared vision model after an explicit upstream rejection,
-/// but can never promote a capability that omitted `vision_input`.
+    let metadata: BedrockMetadata = serde_json::from_str(json?).ok()?;
+    let region = metadata.region.trim();
+    if region.is_empty() {
+        return None;
+    }
+    let credentials = credentials.as_object()?;
+    match metadata.auth_method {
+        nomifun_api_types::BedrockAuthMethod::AccessKey => {
+            if metadata.profile.is_some() {
+                return None;
+            }
+            let access_key_id = credentials
+                .get("access_key_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let secret_access_key = credentials
+                .get("secret_access_key")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let session_token = match credentials.get("session_token") {
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            if credentials.keys().any(|field| {
+                !matches!(
+                    field.as_str(),
+                    "access_key_id" | "secret_access_key" | "session_token"
+                )
+            }) {
+                return None;
+            }
+            Some(nomi_config::config::BedrockConfig {
+                region: Some(region.to_owned()),
+                access_key_id: Some(access_key_id.to_owned()),
+                secret_access_key: Some(secret_access_key.to_owned()),
+                session_token,
+                profile: None,
+            })
+        }
+        nomifun_api_types::BedrockAuthMethod::Profile => {
+            if !credentials.is_empty() {
+                return None;
+            }
+            let profile = metadata
+                .profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            Some(nomi_config::config::BedrockConfig {
+                region: Some(region.to_owned()),
+                access_key_id: None,
+                secret_access_key: None,
+                session_token: None,
+                profile: Some(profile.to_owned()),
+            })
+        }
+        nomifun_api_types::BedrockAuthMethod::DefaultChain => {
+            if !credentials.is_empty() || metadata.profile.is_some() {
+                return None;
+            }
+            Some(nomi_config::config::BedrockConfig {
+                region: Some(region.to_owned()),
+                access_key_id: None,
+                secret_access_key: None,
+                session_token: None,
+                profile: None,
+            })
+        }
+    }
+}
+
+/// Image input follows the selected protocol serializer. Catalog traits are
+/// advisory; only an explicit upstream rejection can narrow runtime support.
 pub(crate) fn capability_supports_image(
     provider_id: &str,
     model: &str,
-    traits: &[ModelTrait],
+    protocol_id: &str,
 ) -> bool {
-    traits.contains(&ModelTrait::VisionInput)
+    nomifun_chat_model_broker::chat_protocol_for_id(protocol_id)
+        .is_some_and(|protocol| {
+            nomifun_chat_model_broker::protocol_features(protocol)
+                .contains(&nomifun_chat_model_broker::ChatModelFeature::ImageInput)
+        })
         && !nomifun_common::VisionUnsupportedRegistry::global()
             .is_unsupported(provider_id, model)
 }
@@ -38,11 +131,63 @@ pub(crate) struct ResolvedProviderFields {
     pub provider: String,
     pub api_key: String,
     pub model: String,
+    pub output_limit: Option<u32>,
     pub base_url: Option<String>,
     pub compat_overrides: NomiCompatOverrides,
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
-    pub context_limit: Option<i64>,
-    pub output_limit: Option<i64>,
+    pub supports_web_search: bool,
+}
+
+/// The exact provider/model pair selected for one runtime admission.
+///
+/// `use_model` is an explicit override, not a catalog fallback. Normalizing it
+/// once keeps the factory and lifecycle registry on the same route identity and
+/// prevents malformed override values from reaching different layers with
+/// different interpretations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeModelSelection {
+    pub provider_id: String,
+    pub model: String,
+}
+
+impl RuntimeModelSelection {
+    /// Rebuild the boundary value after the override has been normalized.
+    ///
+    /// Keeping `use_model` absent here prevents downstream resolvers from
+    /// interpreting the same selection a second time or accidentally falling
+    /// back to the catalog model.
+    pub(crate) fn into_provider_with_model(self) -> ProviderWithModel {
+        ProviderWithModel {
+            provider_id: self.provider_id,
+            model: self.model,
+            use_model: None,
+        }
+    }
+}
+
+pub(crate) fn resolve_runtime_model_selection(
+    selection: &ProviderWithModel,
+) -> Result<RuntimeModelSelection, AppError> {
+    ProviderId::try_from(selection.provider_id.as_str()).map_err(|_| {
+        AppError::BadRequest("Agent runtime requires a canonical provider_id".to_owned())
+    })?;
+    if selection.model.is_empty() || selection.model.trim() != selection.model {
+        return Err(AppError::BadRequest(
+            "Agent runtime requires a trimmed, non-empty model".to_owned(),
+        ));
+    }
+
+    let model = selection.use_model.as_deref().unwrap_or(&selection.model);
+    if model.is_empty() || model.trim() != model {
+        return Err(AppError::BadRequest(
+            "Agent runtime model override must be trimmed and non-empty".to_owned(),
+        ));
+    }
+
+    Ok(RuntimeModelSelection {
+        provider_id: selection.provider_id.clone(),
+        model: model.to_owned(),
+    })
 }
 
 fn invoke_error_to_app_error(error: nomifun_model_invoke::InvokeError) -> AppError {
@@ -71,6 +216,15 @@ pub(crate) async fn resolve_provider_fields(
     provider_id: &str,
     model: &str,
 ) -> Result<ResolvedProviderFields, AppError> {
+    resolve_provider_fields_at_revision(invoke, provider_id, model, None).await
+}
+
+async fn resolve_provider_fields_at_revision(
+    invoke: &ModelInvokeService,
+    provider_id: &str,
+    model: &str,
+    expected_config_revision: Option<i64>,
+) -> Result<ResolvedProviderFields, AppError> {
     ProviderId::try_from(provider_id).map_err(|_| {
         AppError::BadRequest("provider_id must be a canonical ProviderId".to_owned())
     })?;
@@ -90,6 +244,13 @@ pub(crate) async fn resolve_provider_fields(
         )
         .await
         .map_err(invoke_error_to_app_error)?;
+    if expected_config_revision.is_some_and(|expected| task.config_revision != expected) {
+        return Err(AppError::Conflict(format!(
+            "provider config revision changed: expected {}, found {}",
+            expected_config_revision.expect("checked"),
+            task.config_revision
+        )));
+    }
     let descriptor = protocol_task_descriptor(&task.protocol, ModelTask::Chat).ok_or_else(|| {
         AppError::BadRequest(format!("Unsupported Chat protocol {:?}", task.protocol))
     })?;
@@ -188,6 +349,10 @@ pub(crate) async fn resolve_provider_fields(
         .as_object()
         .cloned()
         .ok_or_else(|| AppError::BadRequest("Chat capability provider_params must be a JSON object".into()))?;
+    // Host-owned context accounting metadata stays in the saved capability,
+    // but is never a provider request field.
+    provider_body.remove("_nomifun_context_limit_kind");
+    provider_body.remove(nomifun_api_types::MODEL_GATEWAY_CATALOG_BASELINE_PARAM);
     let max_tokens_field = match provider_body.remove("max_tokens_field") {
         Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
             Some(value.trim().to_owned())
@@ -222,6 +387,31 @@ pub(crate) async fn resolve_provider_fields(
         }
         None => None,
     };
+    let reasoning_effort = match provider_body.remove("reasoning_effort") {
+        Some(serde_json::Value::String(value))
+            if protocol_supports_reasoning_effort_value(&task.protocol, &value) => Some(value),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Chat provider_params.reasoning_effort is unsupported by the selected protocol"
+                    .into(),
+            ));
+        }
+        None => None,
+    };
+
+    let output_limit = task
+        .output_limit
+        .map(|limit| {
+            u32::try_from(limit)
+                .ok()
+                .filter(|limit| *limit > 0)
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "Chat capability output_limit must be positive and fit in u32".into(),
+                    )
+                })
+        })
+        .transpose()?;
 
     let compat_overrides = NomiCompatOverrides {
         // The resolver passes Nomi a complete task endpoint.
@@ -229,11 +419,12 @@ pub(crate) async fn resolve_provider_fields(
         supports_image: Some(capability_supports_image(
             provider_id,
             model,
-            &task.traits,
+            &task.protocol,
         )),
         max_tokens_field,
         require_reasoning_content,
         chain_rounds,
+        reasoning_effort,
         extra_body: (!provider_body.is_empty()).then_some(provider_body),
     };
 
@@ -241,11 +432,11 @@ pub(crate) async fn resolve_provider_fields(
         provider,
         api_key,
         model: task.model,
+        output_limit,
         base_url,
         compat_overrides,
         bedrock_config,
-        context_limit: task.context_limit,
-        output_limit: task.output_limit,
+        supports_web_search: task.protocol == "openai.responses",
     })
 }
 
@@ -267,25 +458,63 @@ pub async fn resolve_provider_config(
         model,
     )
     .await?;
+    provider_config_from_fields(fields, workspace)
+}
+
+pub async fn resolve_provider_config_at_revision(
+    invoke: &ModelInvokeService,
+    provider_id: &str,
+    model: &str,
+    expected_config_revision: i64,
+    workspace: &Path,
+) -> Result<Config, AppError> {
+    let fields = resolve_provider_fields_at_revision(
+        invoke,
+        provider_id,
+        model,
+        Some(expected_config_revision),
+    )
+    .await?;
+    provider_config_from_fields(fields, workspace)
+}
+
+fn provider_config_from_fields(
+    fields: ResolvedProviderFields,
+    workspace: &Path,
+) -> Result<Config, AppError> {
 
     let cli_args = CliArgs {
         provider: Some(fields.provider),
         api_key: Some(fields.api_key),
         base_url: fields.base_url,
         model: Some(fields.model),
-        max_tokens: None,
+        max_tokens: fields.output_limit,
         max_turns: None,
         system_prompt: None,
         profile: None,
-        auto_approve: false,
         project_dir: Some(workspace.to_path_buf()),
     };
 
     let mut config =
         Config::resolve(&cli_args).map_err(|e| AppError::Internal(format!("Config resolve failed: {e}")))?;
 
+    // Managed model configuration is authoritative, including absence. A
+    // local CLI/project default must not supply an unconfigured model ceiling.
+    config.output_max_tokens = fields.output_limit;
+
     // Apply bedrock and compat post-assignments
     config.bedrock = fields.bedrock_config;
+
+    // Local CLI/project compatibility tuning must not change a managed
+    // model's request. Start from protocol presets, then overlay only the
+    // controls resolved from the exact saved capability.
+    config.compat = match config.provider {
+        ProviderType::Anthropic | ProviderType::Vertex => ProviderCompat::anthropic_defaults(),
+        ProviderType::OpenAI => ProviderCompat::openai_defaults(),
+        ProviderType::OpenAIResponses => ProviderCompat::openai_responses_defaults(),
+        ProviderType::Gemini => ProviderCompat::gemini_defaults(),
+        ProviderType::Bedrock => ProviderCompat::bedrock_defaults(),
+    };
 
     if let Some(field) = fields.compat_overrides.max_tokens_field {
         config.compat.max_tokens_field = Some(field);
@@ -298,6 +527,9 @@ pub async fn resolve_provider_config(
     }
     if let Some(chain_rounds) = fields.compat_overrides.chain_rounds {
         config.compat.chain_rounds = Some(chain_rounds);
+    }
+    if let Some(reasoning_effort) = fields.compat_overrides.reasoning_effort {
+        config.compat.reasoning_effort = Some(reasoning_effort);
     }
     config.compat.extra_body = fields.compat_overrides.extra_body;
     // One-shot consumers include robot vision, so the same persisted Chat
@@ -326,12 +558,14 @@ pub enum DeltaKind {
 ///
 /// Builds an `LlmRequest` from the given config, streams events from the
 /// provider, and concatenates `TextDelta` events until `Done` is received.
+/// An absent `max_tokens` preserves the model's configured limit or the
+/// provider default; an explicit request can only lower a configured limit.
 /// Errors from the provider or the stream are mapped to `AppError::BadGateway`.
 pub async fn one_shot_completion(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
 ) -> Result<String, AppError> {
     streaming_completion(cfg, system, messages, max_tokens, |_| {}).await
 }
@@ -347,22 +581,11 @@ pub async fn one_shot_completion_bounded(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     max_output_utf8_bytes: usize,
 ) -> Result<String, AppError> {
+    let request = completion_request(cfg, system, messages, max_tokens)?;
     let provider: Arc<dyn LlmProvider> = create_provider(cfg);
-    let request = LlmRequest {
-        model: cfg.model.clone(),
-        system: system.to_owned(),
-        messages,
-        tools: vec![],
-        max_tokens: Some(max_tokens),
-        thinking: None,
-        reasoning_effort: None,
-        // A bounded one-shot draft is never a durable agent round: it keeps no
-        // provider-side state and must not consume a round cursor.
-        retain_provider_round: false,
-    };
     let rx = provider
         .stream(&request)
         .await
@@ -377,21 +600,11 @@ pub async fn streaming_completion(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     on_delta: impl FnMut(&str) + Send,
 ) -> Result<String, AppError> {
+    let request = completion_request(cfg, system, messages, max_tokens)?;
     let provider: Arc<dyn LlmProvider> = create_provider(cfg);
-
-    let request = LlmRequest {
-        model: cfg.model.clone(),
-        system: system.to_owned(),
-        messages,
-        tools: vec![],
-        max_tokens: Some(max_tokens),
-        thinking: None,
-        reasoning_effort: None,
-        retain_provider_round: false,
-    };
 
     let rx = provider.stream(&request).await.map_err(provider_error_to_app_error)?;
 
@@ -411,25 +624,50 @@ pub async fn streaming_completion_text_or_reasoning(
     cfg: &Config,
     system: &str,
     messages: Vec<Message>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     on_delta: impl FnMut(DeltaKind, &str) + Send,
 ) -> Result<String, AppError> {
+    let request = completion_request(cfg, system, messages, max_tokens)?;
     let provider: Arc<dyn LlmProvider> = create_provider(cfg);
-
-    let request = LlmRequest {
-        model: cfg.model.clone(),
-        system: system.to_owned(),
-        messages,
-        tools: vec![],
-        max_tokens: Some(max_tokens),
-        thinking: None,
-        reasoning_effort: None,
-        retain_provider_round: false,
-    };
 
     let rx = provider.stream(&request).await.map_err(provider_error_to_app_error)?;
 
     drain_text_or_reasoning(rx, on_delta).await
+}
+
+fn completion_request(
+    cfg: &Config,
+    system: &str,
+    messages: Vec<Message>,
+    requested_output_limit: Option<u32>,
+) -> Result<LlmRequest, AppError> {
+    if requested_output_limit == Some(0) || cfg.output_max_tokens == Some(0) {
+        return Err(AppError::BadRequest(
+            "Chat completion output limit must be positive".into(),
+        ));
+    }
+    let max_tokens = match (requested_output_limit, cfg.output_max_tokens) {
+        (Some(requested), Some(configured)) => Some(requested.min(configured)),
+        (Some(requested), None) => Some(requested),
+        (None, configured) => configured,
+    };
+    if max_tokens.is_none() && cfg.provider.requires_output_ceiling() {
+        return Err(AppError::BadRequest(format!(
+            "{:?} Chat protocol requires an explicit output limit; set Max output tokens on the selected model capability or supply a completion output limit",
+            cfg.provider,
+        )));
+    }
+    Ok(LlmRequest {
+        model: cfg.model.clone(),
+        system: system.to_owned(),
+        messages,
+        tools: vec![],
+        max_tokens,
+        thinking: None,
+        reasoning_effort: None,
+        // One-shot completions keep no provider-side round state.
+        retain_provider_round: false,
+    })
 }
 
 /// Convenience constructor for a user-role `Message` with a single text block.
@@ -639,17 +877,17 @@ mod image_override_tests {
     use super::*;
 
     #[test]
-    fn absent_vision_trait_never_defaults_to_supported() {
-        assert!(!capability_supports_image(
-            "unlikely-prov-xyz",
-            "unlikely-model",
-            &[]
-        ));
-        assert!(capability_supports_image(
-            "unlikely-prov-xyz",
-            "unlikely-model",
-            &[ModelTrait::VisionInput]
-        ));
+    fn image_input_uses_protocol_support_and_explicit_upstream_rejection() {
+        for protocol in ["openai.chat_text", "openai.responses", "anthropic.messages",
+            "gemini.generate_text", "bedrock.anthropic_messages", "vertex.anthropic_messages"] {
+            assert!(capability_supports_image("image-default-test", protocol, protocol));
+        }
+        assert!(!capability_supports_image("image-default-test", "image-only", "openai.images"));
+
+        nomifun_common::VisionUnsupportedRegistry::global()
+            .mark_unsupported("image-rejection-test", "rejected-model");
+        assert!(!capability_supports_image("image-rejection-test", "rejected-model", "openai.chat_text"));
+        assert!(capability_supports_image("other-image-provider", "rejected-model", "openai.chat_text"));
     }
 }
 
@@ -682,6 +920,13 @@ mod provider_resolution_tests {
     }
 
     async fn resolve_case(case: ChatCase) -> ResolvedProviderFields {
+        resolve_case_with_output_limit(case, None).await
+    }
+
+    async fn resolve_case_with_output_limit(
+        case: ChatCase,
+        output_limit: Option<i64>,
+    ) -> ResolvedProviderFields {
         let db = init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_repo: Arc<dyn IProviderRepository> =
@@ -702,6 +947,7 @@ mod provider_resolution_tests {
             endpoint: case.endpoint,
             provider_params: case.provider_params,
             context_limit: Some(131_072),
+            output_limit,
             ..Default::default()
         }];
         provider_repo
@@ -750,27 +996,59 @@ mod provider_resolution_tests {
 
     #[tokio::test]
     async fn exact_openai_chat_capability_resolves_nomi_config() {
-        let fields = resolve_case(ChatCase {
-            provider_id: "0190f5fe-7c00-7a00-8000-000000000101",
-            protocol: "openai.chat_text",
-            auth_scheme: "bearer",
-            base_url: "https://transport.example/root",
-            base_url_override: Some("https://transport.example/openai-root"),
-            endpoint: Some("/custom/chat"),
-            traits: "[]",
-            credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
-            provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true}"#,
-            bedrock_config: None,
-        })
+        let fields = resolve_case_with_output_limit(
+            ChatCase {
+                provider_id: "0190f5fe-7c00-7a00-8000-000000000101",
+                protocol: "openai.chat_text",
+                auth_scheme: "bearer",
+                base_url: "https://transport.example/root",
+                base_url_override: Some("https://transport.example/openai-root"),
+                endpoint: Some("/custom/chat"),
+                traits: "[]",
+                credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
+                provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"ultra","temperature":0.2,"_nomifun_context_limit_kind":"input_only","_nomifun_gateway_catalog_baseline":{"protocol":"openai.chat_text"},"custom":{"values":[1,true,{"mode":"precise"}]}}"#,
+                bedrock_config: None,
+            },
+            Some(100_000),
+        )
         .await;
         assert_eq!(fields.provider, "openai");
+        assert_eq!(fields.output_limit, Some(100_000));
         assert_eq!(fields.api_key, "test-secret\ntest-secret-2");
         assert_eq!(fields.base_url.as_deref(), Some("https://transport.example/openai-root/custom/chat"));
         assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
         assert_eq!(fields.compat_overrides.max_tokens_field.as_deref(), Some("max_completion_tokens"));
         assert_eq!(fields.compat_overrides.require_reasoning_content, Some(true));
-        assert_eq!(fields.context_limit, Some(131_072));
-        assert_eq!(fields.compat_overrides.supports_image, Some(false));
+        assert_eq!(fields.compat_overrides.reasoning_effort.as_deref(), Some("ultra"));
+        assert_eq!(
+            fields.compat_overrides.extra_body.as_ref().unwrap()["temperature"],
+            serde_json::json!(0.2)
+        );
+        assert_eq!(
+            fields.compat_overrides.extra_body.as_ref().unwrap()["custom"],
+            serde_json::json!({"values": [1, true, {"mode": "precise"}]})
+        );
+        assert!(
+            !fields.compat_overrides.extra_body.as_ref().unwrap()
+                .contains_key("_nomifun_context_limit_kind"),
+            "host context metadata must never reach the provider request body"
+        );
+        assert!(
+            !fields.compat_overrides.extra_body.as_ref().unwrap()
+                .contains_key("_nomifun_gateway_catalog_baseline"),
+            "gateway catalog metadata must never reach the provider request body"
+        );
+        assert!(
+            !fields
+                .compat_overrides
+                .extra_body
+                .as_ref()
+                .unwrap()
+                .contains_key("reasoning_effort"),
+            "the normalized model default must be carried as a typed request field"
+        );
+        assert_eq!(fields.compat_overrides.supports_image, Some(true));
+        assert!(!fields.supports_web_search);
     }
 
     #[tokio::test]
@@ -782,7 +1060,7 @@ mod provider_resolution_tests {
             base_url: "https://api.openai.com/v1",
             base_url_override: None,
             endpoint: Some("/responses"),
-            traits: r#"["vision_input"]"#,
+            traits: "[]",
             credentials: r#"{"api_keys":["test-secret"]}"#,
             provider_params: r#"{"chain_rounds":true,"temperature":0.2}"#,
             bedrock_config: None,
@@ -792,6 +1070,7 @@ mod provider_resolution_tests {
         assert_eq!(fields.base_url.as_deref(), Some("https://api.openai.com/v1/responses"));
         assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
         assert_eq!(fields.compat_overrides.chain_rounds, Some(true));
+        assert!(fields.supports_web_search);
         assert_eq!(
             fields.compat_overrides.extra_body.as_ref().unwrap()["temperature"],
             serde_json::json!(0.2)
@@ -808,7 +1087,7 @@ mod provider_resolution_tests {
     }
 
     #[tokio::test]
-    async fn vision_input_is_strictly_controlled_by_the_exact_chat_trait() {
+    async fn vision_input_does_not_require_a_saved_trait() {
         let fields = resolve_case(ChatCase {
             provider_id: "0190f5fe-7c00-7a00-8000-000000000105",
             protocol: "openai.chat_text",
@@ -816,7 +1095,7 @@ mod provider_resolution_tests {
             base_url: "https://transport.example/root",
             base_url_override: None,
             endpoint: Some("/chat/completions"),
-            traits: r#"["vision_input"]"#,
+            traits: "[]",
             credentials: r#"{"api_keys":["test-secret"]}"#,
             provider_params: "{}",
             bedrock_config: None,
@@ -902,8 +1181,262 @@ mod provider_resolution_tests {
 }
 
 #[cfg(test)]
+mod completion_output_limit_tests {
+    use super::*;
+    use nomi_config::config::ProviderType;
+
+    fn fields(output_limit: Option<u32>) -> ResolvedProviderFields {
+        ResolvedProviderFields {
+            provider: "openai".into(),
+            api_key: "fixture-key".into(),
+            model: "fixture-model".into(),
+            output_limit,
+            base_url: Some("https://provider.example/chat".into()),
+            compat_overrides: NomiCompatOverrides::default(),
+            bedrock_config: None,
+            supports_web_search: false,
+        }
+    }
+
+    #[test]
+    fn managed_output_limit_including_absence_overrides_project_defaults() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".nomi.toml"),
+            "[default]\nprovider = \"openai\"\nmax_tokens = 64\n",
+        )
+        .unwrap();
+
+        for saved in [None, Some(100_000)] {
+            let config = provider_config_from_fields(fields(saved), workspace.path()).unwrap();
+            assert_eq!(config.output_max_tokens, saved);
+            let request = completion_request(&config, "system", vec![user_message("user")], None)
+                .unwrap();
+            assert_eq!(request.max_tokens, saved);
+            assert!(request.tools.is_empty());
+            assert!(!request.retain_provider_round);
+        }
+    }
+
+    #[test]
+    fn managed_compat_controls_including_absence_override_project_tuning() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".nomi.toml"),
+            r#"[default]
+provider = "openai"
+[providers.openai.compat]
+max_tokens_field = "local_token_limit"
+reasoning_effort = "high"
+require_reasoning_content = true
+chain_rounds = true
+supports_effort = false
+clean_orphan_tool_calls = false
+strip_patterns = ["remove_from_local"]
+api_path = "/unexpected"
+[providers.openai.compat.extra_body]
+temperature = 0.99
+[providers.openai.compat.extra_body.custom]
+mode = "local"
+"#,
+        )
+        .unwrap();
+
+        let mut saved = fields(None);
+        saved.compat_overrides.api_path = Some(String::new());
+        let config = provider_config_from_fields(saved, workspace.path()).unwrap();
+        assert_eq!(config.api_key, "fixture-key");
+        assert_eq!(config.base_url, "https://provider.example/chat");
+        assert_eq!(config.compat.api_path.as_deref(), Some(""));
+        assert_eq!(config.compat.max_tokens_field.as_deref(), Some("max_tokens"));
+        assert!(config.compat.reasoning_effort.is_none());
+        assert!(config.compat.extra_body.is_none());
+        assert!(config.compat.require_reasoning_content.is_none());
+        assert!(config.compat.chain_rounds.is_none());
+        assert!(config.compat.strip_patterns.is_none());
+        assert!(config.compat.supports_effort());
+        assert!(config.compat.clean_orphan_tool_calls());
+
+        let mut saved = fields(None);
+        saved.provider = "openai-responses".into();
+        let response_config = provider_config_from_fields(saved, workspace.path()).unwrap();
+        assert_eq!(
+            response_config.compat.api_path.as_deref(),
+            Some("/v1/responses")
+        );
+        assert_eq!(
+            response_config.compat.max_tokens_field.as_deref(),
+            Some("max_output_tokens")
+        );
+
+        let mut saved = fields(Some(100_000));
+        saved.compat_overrides = NomiCompatOverrides {
+            api_path: Some(String::new()),
+            max_tokens_field: Some("max_completion_tokens".into()),
+            reasoning_effort: Some("low".into()),
+            require_reasoning_content: Some(false),
+            chain_rounds: Some(false),
+            extra_body: Some(
+                serde_json::json!({"temperature": 0.2, "custom": {"values": [1, true]}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+            ..Default::default()
+        };
+        let config = provider_config_from_fields(saved, workspace.path()).unwrap();
+        assert_eq!(config.output_max_tokens, Some(100_000));
+        assert_eq!(config.compat.api_path.as_deref(), Some(""));
+        assert_eq!(
+            config.compat.max_tokens_field.as_deref(),
+            Some("max_completion_tokens")
+        );
+        assert_eq!(config.compat.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(config.compat.require_reasoning_content, Some(false));
+        assert_eq!(config.compat.chain_rounds, Some(false));
+        assert_eq!(
+            config.compat.extra_body.unwrap(),
+            serde_json::json!({"temperature": 0.2, "custom": {"values": [1, true]}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+    }
+
+    #[test]
+    fn completion_limit_preserves_omission_and_intersects_explicit_limits() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = provider_config_from_fields(fields(None), workspace.path()).unwrap();
+        let cases = [
+            (None, None, None),
+            (None, Some(100_000), Some(100_000)),
+            (Some(100_000), None, Some(100_000)),
+            (Some(100_000), Some(50_000), Some(50_000)),
+            (Some(32_000), Some(100_000), Some(32_000)),
+        ];
+        for (configured, requested, expected) in cases {
+            config.output_max_tokens = configured;
+            let request =
+                completion_request(&config, "system", vec![user_message("user")], requested)
+                    .unwrap();
+            assert_eq!(request.max_tokens, expected);
+        }
+    }
+
+    #[test]
+    fn required_protocols_use_explicit_limits_or_report_missing_configuration() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = provider_config_from_fields(fields(None), workspace.path()).unwrap();
+        for provider in [
+            ProviderType::Anthropic,
+            ProviderType::Bedrock,
+            ProviderType::Vertex,
+        ] {
+            config.provider = provider;
+            config.output_max_tokens = None;
+            let error = completion_request(&config, "system", vec![user_message("user")], None)
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message.contains("Max output tokens"))
+            );
+
+            let explicit =
+                completion_request(&config, "system", vec![user_message("user")], Some(512))
+                    .unwrap();
+            assert_eq!(explicit.max_tokens, Some(512));
+
+            config.output_max_tokens = Some(100_000);
+            let saved = completion_request(&config, "system", vec![user_message("user")], None)
+                .unwrap();
+            assert_eq!(saved.max_tokens, Some(100_000));
+        }
+    }
+
+    #[test]
+    fn zero_output_limits_are_rejected_before_provider_construction() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = provider_config_from_fields(fields(None), workspace.path()).unwrap();
+        assert!(completion_request(&config, "system", vec![user_message("user")], Some(0)).is_err());
+        config.output_max_tokens = Some(0);
+        assert!(completion_request(&config, "system", vec![user_message("user")], None).is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    fn runtime_selection(model: &str, use_model: Option<&str>) -> ProviderWithModel {
+        ProviderWithModel {
+            provider_id: TEST_PROVIDER_ID.to_owned(),
+            model: model.to_owned(),
+            use_model: use_model.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn runtime_model_selection_normalizes_the_explicit_override_once() {
+        let selected =
+            resolve_runtime_model_selection(&runtime_selection("catalog-model", Some("route-model")))
+                .unwrap();
+
+        assert_eq!(
+            selected,
+            RuntimeModelSelection {
+                provider_id: TEST_PROVIDER_ID.to_owned(),
+                model: "route-model".to_owned(),
+            }
+        );
+        assert_eq!(
+            selected.clone().into_provider_with_model(),
+            ProviderWithModel {
+                provider_id: TEST_PROVIDER_ID.to_owned(),
+                model: "route-model".to_owned(),
+                use_model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_model_selection_uses_the_declared_model_without_an_override() {
+        let selected = resolve_runtime_model_selection(&runtime_selection("declared-model", None))
+            .unwrap();
+
+        assert_eq!(selected.model, "declared-model");
+        assert_eq!(selected.provider_id, TEST_PROVIDER_ID);
+    }
+
+    #[test]
+    fn runtime_model_selection_rejects_invalid_base_or_override_values() {
+        let invalid = [
+            ProviderWithModel {
+                provider_id: "not-a-provider".to_owned(),
+                model: "model".to_owned(),
+                use_model: None,
+            },
+            runtime_selection(" model", None),
+            runtime_selection("", None),
+            runtime_selection("model", Some(" override")),
+            runtime_selection("model", Some("")),
+            runtime_selection("model", Some(" ")),
+        ];
+
+        for selection in invalid {
+            assert!(
+                resolve_runtime_model_selection(&selection).is_err(),
+                "invalid selection unexpectedly accepted: {selection:?}"
+            );
+        }
+
+        // An explicit override does not make an invalid catalog model valid:
+        // the persisted pair must still be structurally complete.
+        assert!(
+            resolve_runtime_model_selection(&runtime_selection(" model", Some("route-model")))
+                .is_err()
+        );
+    }
 
     #[test]
     fn user_message_creates_correct_structure() {

@@ -16,13 +16,13 @@ type WorkspaceHeaderProps = {
   /**
    * Authoritative temp-workspace flag from
    * `conversation.extra.is_temporary_workspace`. Drives which right-side action
-   * renders: temp sessions get {@link WorkspaceBindButton}, bound workspaces get
-   * {@link WorkspaceOpenButton}.
+   * renders: temp sessions get a new-conversation workspace entry, while bound
+   * workspaces get {@link WorkspaceOpenButton}.
    */
   isTemporaryWorkspace?: boolean;
   /**
-   * Conversation this panel belongs to. Required by {@link WorkspaceBindButton}
-   * to redirect a temporary session's workspace via a PATCH.
+   * Conversation this panel belongs to. Used only to decide whether the
+   * new-conversation workspace entry is available.
    */
   conversation_id?: ConversationId;
   activeTab?: WorkspaceTab;
@@ -56,8 +56,8 @@ const WorkspacePanelHeader: React.FC<WorkspaceHeaderProps> = ({
     )}
     <div className='workspace-panel-header__title flex-1 truncate'>{children}</div>
 
-    {/* Right-side workspace action. Temporary sessions offer a "bind a real
-        directory" entry so the agent can work inside a project on disk; bound
+    {/* Right-side workspace action. Temporary sessions offer a "new conversation
+        in a real directory" entry; bound
         workspaces offer the "open in external tool" button. Each guards for the
         desktop shell internally, so nothing renders in WebUI/browser mode. */}
     {!collapsed &&

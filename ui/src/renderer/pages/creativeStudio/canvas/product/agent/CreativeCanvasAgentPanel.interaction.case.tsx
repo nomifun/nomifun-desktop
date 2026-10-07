@@ -5,6 +5,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { spyOn } from 'bun:test';
 import i18next from 'i18next';
 import React, { useCallback, useState } from 'react';
 import { initReactI18next } from 'react-i18next';
@@ -23,6 +24,7 @@ import {
   parseProviderId,
 } from '@/common/types/ids';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { serializeCreativeStudioAgentHistory } from '../../../agent/adapters';
 import type {
   CreativeStudioAgentChatPort,
@@ -76,6 +78,7 @@ const TERMINAL_FAILURE_MESSAGE = '模型请求过于频繁，请稍后重试';
 const BACKEND_FAILURE_MESSAGE = '模型服务暂时不可用';
 
 const planningContext: CreativeCanvasAgentContextSnapshot = {
+  canvasTitle: 'Test canvas',
   kind: 'nomifun.creative-studio.canvas-context',
   version: 1,
   canvasId: CANVAS_ID,
@@ -464,7 +467,9 @@ const verifyBackendHttpErrorUsesBackendMessage = async (): Promise<void> => {
   cleanup();
 };
 
-const verifyCompletedPendingTurnRecovery = async (): Promise<void> => {
+const verifySettledPendingTurnRecovery = async (
+  status: 'complete' | 'failed' | 'stopped'
+): Promise<void> => {
   const recoveredHistory: readonly CreativeStudioAgentMessage[] = [
     {
       id: RECOVERED_USER_ID,
@@ -475,9 +480,10 @@ const verifyCompletedPendingTurnRecovery = async (): Promise<void> => {
     {
       id: RECOVERED_ASSISTANT_ID,
       role: 'assistant',
-      status: 'complete',
-      text: '上一轮已由后台完成。',
-    },
+      status,
+      text: '上一轮的已保存内容。',
+      ...(status === 'failed' ? { errorMessage: TERMINAL_FAILURE_MESSAGE } : {}),
+    } as CreativeStudioAgentMessage,
   ];
   const pendingSession: CreativeChatSessionReference = {
     id: SESSION_ID,
@@ -554,7 +560,7 @@ const verifyCompletedPendingTurnRecovery = async (): Promise<void> => {
         resolveSession={resolveSession}
         chatPort={{
           async *runTurn() {
-            throw new Error('A completed pending turn must not be submitted again');
+            throw new Error('A settled pending turn must not be submitted again');
           },
         }}
         onPersist={persistDocument}
@@ -564,7 +570,7 @@ const verifyCompletedPendingTurnRecovery = async (): Promise<void> => {
 
   render(<ControlledRecoveryPanel />);
   await waitFor(() => {
-    assert.ok(screen.getByText('上一轮已由后台完成。'));
+    assert.ok(screen.getByText('上一轮的已保存内容。'));
   });
   assert.equal(resolverCalls, 1);
   assert.deepEqual(persistedSession?.messageIds, [
@@ -572,6 +578,8 @@ const verifyCompletedPendingTurnRecovery = async (): Promise<void> => {
     RECOVERED_ASSISTANT_ID,
   ]);
   assert.equal(persistedSession?.pendingTurn, null);
+  assert.equal(document.querySelector(`[data-agent-message-status="${status}"][data-agent-message-role="assistant"]`) !== null, true);
+  assert.equal(screen.queryByRole('button', { name: 'Retry this message' }), null);
   cleanup();
 };
 
@@ -675,7 +683,38 @@ const verifyCompletedTurnRecoveryAfterLegacyFenceLoss = async (): Promise<void> 
   cleanup();
 };
 
+const verifyHistoricalFailureHasNoDeadRetry = async (): Promise<void> => {
+  const history: readonly CreativeStudioAgentMessage[] = [
+    { id: DURABLE_USER_ID, role: 'user', status: 'complete', text: PROMPT },
+    { id: DURABLE_ASSISTANT_ID, role: 'assistant', status: 'failed', text: '',
+      errorMessage: TERMINAL_FAILURE_MESSAGE },
+  ];
+  const session: CreativeChatSessionReference = {
+    id: SESSION_ID, title: '失败的旧会话', messageIds: history.map(message => message.id),
+    model: MODEL, pendingTurn: null, createdAt: 1, updatedAt: 2,
+  };
+  render(<CreativeCanvasAgentPanel
+    {...baseProps} hydrated sessions={[session]} activeSessionId={SESSION_ID}
+    resolveSession={async input => ({
+      binding: { ownership: 'creative-studio-exclusive', canvasId: input.canvasId,
+        sessionId: input.sessionId, conversationId: CONVERSATION_ID, model: input.model,
+        historyKey: serializeCreativeStudioAgentHistory(history) },
+      history, appliedProposalMessageIds: [], created: false,
+    })}
+    chatPort={{ async *runTurn() { throw new Error('Historical failure must not be resubmitted'); } }}
+    onPersist={async () => { throw new Error('Restoring an already referenced failure must not mutate the Canvas'); }}
+  />);
+  await waitFor(() => assert.equal(screen.getAllByText(TERMINAL_FAILURE_MESSAGE).length, 1));
+  assert.equal(screen.queryByRole('button', { name: 'Retry this message' }), null);
+  assert.equal(document.querySelector('[data-agent-running="true"]'), null);
+  cleanup();
+};
+
 const run = async (): Promise<void> => {
+  // The panel includes the product Agent binding selector. Keep its options
+  // query local while this fixture exercises transcript/turn reconciliation.
+  const bindingOptions = spyOn(agentPlatform.productBindingOptions, 'invoke')
+    .mockRejectedValue(new Error('Agent options are unavailable in this transcript fixture'));
   const originalConsoleError = console.error;
   console.error = (...args: unknown[]) => {
     if (
@@ -689,13 +728,17 @@ const run = async (): Promise<void> => {
   };
   try {
     await verifyHydrationTransition();
+    await verifyHistoricalFailureHasNoDeadRetry();
     await verifyLocalPendingTurnKeepsTranscript();
     await verifyTerminalFailureRendersOnce();
     await verifyBackendHttpErrorUsesBackendMessage();
-    await verifyCompletedPendingTurnRecovery();
+    for (const status of ['complete', 'failed', 'stopped'] as const) {
+      await verifySettledPendingTurnRecovery(status);
+    }
     await verifyCompletedTurnRecoveryAfterLegacyFenceLoss();
     await flushReact();
   } finally {
+    bindingOptions.mockRestore();
     console.error = originalConsoleError;
   }
 };

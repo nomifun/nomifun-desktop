@@ -57,13 +57,17 @@ pub struct ProviderCompat {
     /// Default: true for anthropic/bedrock/vertex, false for openai.
     pub supports_thinking: Option<bool>,
 
-    /// Whether this provider supports reasoning_effort (OpenAI-style).
-    /// Default: false for anthropic/bedrock/vertex, true for openai.
+    /// Whether this provider supports a normalized low/medium/high reasoning
+    /// effort. Default: true for OpenAI, Responses and native Gemini.
     pub supports_effort: Option<bool>,
 
     /// Available effort levels for this provider (e.g., ["low", "medium", "high"]).
     /// Only meaningful when supports_effort is true.
     pub effort_levels: Option<Vec<String>>,
+
+    /// Model-level default selected in Model Management. None keeps the
+    /// provider/system default; request-specific overrides may supersede it.
+    pub reasoning_effort: Option<String>,
 
     /// 该模型是否支持图片输入(多模态)。None = 默认支持(true)。
     /// 为 Some(false) 时 OpenAI provider 的 build_messages 会剔除图片、改文字占位。
@@ -159,7 +163,8 @@ impl ProviderCompat {
             sanitize_schema: Some(true),
             auto_tool_id: Some(true),
             supports_thinking: Some(false),
-            supports_effort: Some(false),
+            supports_effort: Some(true),
+            effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
             supports_image: Some(true),
             ..Default::default()
         }
@@ -185,6 +190,7 @@ impl ProviderCompat {
             supports_thinking: user.supports_thinking.or(defaults.supports_thinking),
             supports_effort: user.supports_effort.or(defaults.supports_effort),
             effort_levels: user.effort_levels.or(defaults.effort_levels),
+            reasoning_effort: user.reasoning_effort.or(defaults.reasoning_effort),
             supports_image: user.supports_image.or(defaults.supports_image),
             require_reasoning_content: user
                 .require_reasoning_content
@@ -283,8 +289,7 @@ pub fn sanitize_json_schema(schema: &Value) -> Value {
         });
     }
 
-    strip_additional_properties(&mut schema);
-    normalize_array_types(&mut schema);
+    normalize_schema(&mut schema);
     schema
 }
 
@@ -872,37 +877,37 @@ fn resolve_local_schema_ref<'a>(root: &'a Value, schema: &Value) -> Option<&'a V
     root.pointer(reference.strip_prefix('#')?)
 }
 
-fn strip_additional_properties(val: &mut Value) {
-    if let Some(obj) = val.as_object_mut() {
-        obj.remove("additionalProperties");
-        for v in obj.values_mut() {
-            strip_additional_properties(v);
+// Visit schema positions only. Property names and literal instance data in
+// const/enum/examples are not schema keywords and must survive unchanged.
+fn normalize_schema(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else { return; };
+    object.remove("additionalProperties");
+    if let Some(types) = object.get("type").and_then(Value::as_array) {
+        let mut non_null = types.iter().filter(|value| value.as_str() != Some("null"));
+        if let Some(single) = non_null.next()
+            && non_null.next().is_none()
+        {
+            object.insert("type".to_owned(), single.clone());
         }
-    } else if let Some(arr) = val.as_array_mut() {
-        for v in arr.iter_mut() {
-            strip_additional_properties(v);
+    }
+    for (key, child) in object {
+        if is_named_schema_map_keyword(key) || matches!(key.as_str(), "$defs" | "definitions") {
+            if let Some(schemas) = child.as_object_mut() {
+                for schema in schemas.values_mut() { normalize_schema(schema); }
+            }
+        } else if is_schema_array_keyword(key) || (key == "items" && child.is_array()) {
+            if let Some(schemas) = child.as_array_mut() {
+                for schema in schemas { normalize_schema(schema); }
+            }
+        } else if is_schema_value_keyword(key) {
+            normalize_schema(child);
         }
     }
 }
 
-fn normalize_array_types(val: &mut Value) {
-    if let Some(obj) = val.as_object_mut() {
-        // Normalize ["string", "null"] → "string"
-        if let Some(arr) = obj.get("type").and_then(Value::as_array) {
-            let non_null: Vec<&Value> = arr.iter().filter(|v| v.as_str() != Some("null")).collect();
-            if non_null.len() == 1 {
-                obj.insert("type".to_string(), non_null[0].clone());
-            }
-        }
-        for v in obj.values_mut() {
-            normalize_array_types(v);
-        }
-    } else if let Some(arr) = val.as_array_mut() {
-        for v in arr.iter_mut() {
-            normalize_array_types(v);
-        }
-    }
-}
+#[cfg(test)]
+#[path = "compat_audit_tests.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1016,7 +1021,8 @@ mod tests {
         assert!(compat.auto_tool_id());
         assert!(compat.supports_image());
         assert!(!compat.supports_thinking());
-        assert!(!compat.supports_effort());
+        assert!(compat.supports_effort());
+        assert_eq!(compat.effort_levels(), &["low", "medium", "high"]);
     }
 
     #[test]
@@ -1529,11 +1535,13 @@ mod tests {
         let defaults = ProviderCompat::openai_defaults();
         let user = ProviderCompat {
             supports_thinking: Some(true),
+            reasoning_effort: Some("high".to_owned()),
             ..Default::default()
         };
         let merged = ProviderCompat::merge(defaults, user);
         assert_eq!(merged.supports_thinking, Some(true));
         assert_eq!(merged.supports_effort, Some(true));
+        assert_eq!(merged.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

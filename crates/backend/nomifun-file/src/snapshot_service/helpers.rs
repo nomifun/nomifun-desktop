@@ -39,6 +39,7 @@ Thumbs.db
 .next/
 .nuxt/
 .output/
+.nomifun/
 ";
 
 /// Signature name used for snapshot commits.
@@ -533,6 +534,7 @@ pub(super) fn stage_all_with_deletions(repo: &Repository) -> Result<(), AppError
 /// For existing files, adds to the index. For deleted files, removes from
 /// the index (equivalent to `git add <deleted-file>`).
 pub(super) fn stage_single_file(repo: &Repository, rel_path: &str) -> Result<(), AppError> {
+    validate_snapshot_relative_path(rel_path)?;
     let workdir = repo
         .workdir()
         .ok_or_else(|| AppError::Internal("Repository has no workdir".into()))?;
@@ -542,7 +544,12 @@ pub(super) fn stage_single_file(repo: &Repository, rel_path: &str) -> Result<(),
         .index()
         .map_err(|e| AppError::Internal(format!("Failed to get index: {}", e)))?;
 
-    if abs_path.exists() {
+    let exists = match std::fs::symlink_metadata(&abs_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(AppError::Internal(format!("Failed to inspect file {}: {}", rel_path, error))),
+    };
+    if exists {
         index
             .add_path(Path::new(rel_path))
             .map_err(|e| AppError::Internal(format!("Failed to stage file {}: {}", rel_path, e)))?;
@@ -561,15 +568,48 @@ pub(super) fn stage_single_file(repo: &Repository, rel_path: &str) -> Result<(),
 
 /// Unstage a single file (reset it in the index to match HEAD).
 pub(super) fn unstage_single_file(repo: &Repository, rel_path: &str) -> Result<(), AppError> {
+    validate_snapshot_relative_path(rel_path)?;
     let head = repo
         .head()
         .map_err(|e| AppError::Internal(format!("Failed to get HEAD: {}", e)))?;
     let commit = head
         .peel_to_commit()
         .map_err(|e| AppError::Internal(format!("Failed to peel HEAD: {}", e)))?;
-    // reset_default expects a commit-ish object, not a tree
-    repo.reset_default(Some(commit.as_object()), [rel_path])
+    let tree = commit
+        .tree()
+        .map_err(|e| AppError::Internal(format!("Failed to get HEAD tree: {}", e)))?;
+    // reset_default interprets pathspecs. Read HEAD in memory to copy only the
+    // literal entry, retaining this index's case rules and the HEAD file mode.
+    let mut index = repo.index()
+        .map_err(|e| AppError::Internal(format!("Failed to get index: {}", e)))?;
+    index.read_tree(&tree)
+        .map_err(|e| AppError::Internal(format!("Failed to read HEAD tree: {}", e)))?;
+    // Normalize validated components: Index::get_path panics on a leading '.'.
+    let path: PathBuf = Path::new(rel_path).components()
+        .filter(|part| matches!(part, std::path::Component::Normal(_))).collect();
+    // get_path and find_prefix both use case-sensitive lookups. Honor the
+    // repository's case-folding rule without reintroducing glob matching.
+    let ignore_case = match repo.config().and_then(|config| config.get_bool("core.ignorecase")) {
+        Ok(value) => value,
+        Err(error) if error.code() == git2::ErrorCode::NotFound => false,
+        Err(error) => return Err(AppError::Internal(format!("Failed to read index case rules: {}", error))),
+    };
+    let literal = path.components().map(|part| part.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>().join("/");
+    let baseline = index.get_path(&path, 0).or_else(|| {
+        ignore_case.then(|| index.iter().find(|entry| entry.path.eq_ignore_ascii_case(literal.as_bytes()))).flatten()
+    });
+    // Reload all staged entries before editing; the HEAD index is never written.
+    index.read(true)
+        .map_err(|e| AppError::Internal(format!("Failed to reload index: {}", e)))?;
+    index.remove_path(&path)
         .map_err(|e| AppError::Internal(format!("Failed to unstage file {}: {}", rel_path, e)))?;
+    if let Some(entry) = baseline {
+        index.add(&entry)
+            .map_err(|e| AppError::Internal(format!("Failed to restore index entry {}: {}", rel_path, e)))?;
+    }
+    index.write()
+        .map_err(|e| AppError::Internal(format!("Failed to write index: {}", e)))?;
     Ok(())
 }
 
@@ -597,14 +637,25 @@ pub(super) fn discard_single_file(
     rel_path: &str,
     operation: FileChangeOperation,
 ) -> Result<(), AppError> {
+    validate_snapshot_relative_path(rel_path)?;
     match operation {
         FileChangeOperation::Create => {
             // New/untracked file: just delete it
             let abs_path = workspace.join(rel_path);
-            if abs_path.exists() {
-                std::fs::remove_file(&abs_path)
-                    .map_err(|e| AppError::Internal(format!("Failed to delete file {}: {}", abs_path.display(), e)))?;
+            match std::fs::symlink_metadata(&abs_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(AppError::Internal(format!("Failed to inspect file: {error}"))),
+                Ok(_) => {}
             }
+            // Check parents, but do not resolve the last symlink: discarding a
+            // new symlink must remove the link itself, never its target.
+            let parent = crate::path_safety::validate_path(
+                &abs_path.parent().expect("validated relative file path").to_string_lossy(),
+                &[workspace],
+            )?;
+            let target = parent.join(abs_path.file_name().expect("validated relative file path"));
+            std::fs::remove_file(&target)
+                .map_err(|e| AppError::Internal(format!("Failed to delete file {}: {}", target.display(), e)))?;
             Ok(())
         }
         FileChangeOperation::Modify | FileChangeOperation::Delete => {
@@ -625,21 +676,127 @@ pub(super) fn reset_single_file(
     rel_path: &str,
     operation: FileChangeOperation,
 ) -> Result<(), AppError> {
-    // Step 1: unstage (ignore errors for files not in index)
-    let _ = unstage_single_file(repo, rel_path);
+    // Validate before changing the index, not only before the working tree.
+    validate_snapshot_relative_path(rel_path)?;
+    // Do not delete or overwrite the working file if resetting the index fails.
+    unstage_single_file(repo, rel_path)?;
 
     // Step 2: restore working tree
     discard_single_file(repo, workspace, rel_path, operation)
 }
 
+fn validate_snapshot_relative_path(rel_path: &str) -> Result<(), AppError> {
+    use std::path::Component;
+    let path = Path::new(rel_path);
+    if rel_path.contains('\0')
+        || !path.components().any(|part| matches!(part, Component::Normal(_)))
+        || path.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(AppError::BadRequest("snapshot file path must be workspace-relative without traversal".into()));
+    }
+    Ok(())
+}
+
 /// Checkout a single file from HEAD, restoring it in the working tree.
 fn checkout_path_from_head(repo: &Repository, rel_path: &str) -> Result<(), AppError> {
+    let tree = repo.head().and_then(|head| head.peel_to_tree())
+        .map_err(|e| AppError::Internal(format!("Failed to get HEAD tree: {}", e)))?;
+    let entry = tree.get_path(Path::new(rel_path))
+        .map_err(|e| AppError::Internal(format!("Failed to find {} in HEAD: {}", rel_path, e)))?;
+    // A missing literal path must not succeed as a no-op, and a directory
+    // must not turn a single-file request into a recursive checkout.
+    if entry.kind() == Some(git2::ObjectType::Tree) {
+        return Err(AppError::BadRequest("snapshot checkout path must be a file".into()));
+    }
+    #[cfg(unix)]
+    if rel_path.contains('\\') {
+        return restore_unix_literal_entry(repo, &entry, rel_path);
+    }
     let mut cb = git2::build::CheckoutBuilder::new();
-    cb.force().path(rel_path);
+    cb.force().disable_pathspec_match(true).path(rel_path);
 
-    repo.checkout_head(Some(&mut cb))
+    repo.checkout_tree(tree.as_object(), Some(&mut cb))
         .map_err(|e| AppError::Internal(format!("Failed to checkout {} from HEAD: {}", rel_path, e)))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn restore_unix_literal_entry(
+    repo: &Repository,
+    entry: &git2::TreeEntry<'_>,
+    rel_path: &str,
+) -> Result<(), AppError> {
+    use std::io::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if entry.kind() != Some(git2::ObjectType::Blob) {
+        return Err(AppError::BadRequest(
+            "snapshot checkout path must be a regular file or symlink".into(),
+        ));
+    }
+    let workspace = repo
+        .workdir()
+        .ok_or_else(|| AppError::Internal("Repository has no workdir".into()))?;
+    let requested = workspace.join(rel_path);
+    let parent = crate::path_safety::validate_path(
+        &requested
+            .parent()
+            .expect("validated relative snapshot path")
+            .to_string_lossy(),
+        &[workspace],
+    )?;
+    let target = parent.join(
+        requested
+            .file_name()
+            .expect("validated relative snapshot path"),
+    );
+    let temporary = parent.join(format!(
+        ".nomifun-snapshot-{}.tmp",
+        nomifun_common::generate_id()
+    ));
+    let blob = repo
+        .find_blob(entry.id())
+        .map_err(|error| AppError::Internal(format!("Failed to read HEAD blob: {error}")))?;
+    let result = (|| -> Result<(), AppError> {
+        if entry.filemode() == 0o120000 {
+            std::os::unix::fs::symlink(
+                std::ffi::OsStr::from_bytes(blob.content()),
+                &temporary,
+            )
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to stage literal snapshot symlink: {error}"))
+            })?;
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|error| {
+                    AppError::Internal(format!("Failed to stage literal snapshot file: {error}"))
+                })?;
+            file.write_all(blob.content()).map_err(|error| {
+                AppError::Internal(format!("Failed to write literal snapshot file: {error}"))
+            })?;
+            file.set_permissions(std::fs::Permissions::from_mode(
+                (entry.filemode() as u32) & 0o777,
+            ))
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to restore literal snapshot mode: {error}"))
+            })?;
+            file.sync_all().map_err(|error| {
+                AppError::Internal(format!("Failed to sync literal snapshot file: {error}"))
+            })?;
+        }
+        std::fs::rename(&temporary, &target).map_err(|error| {
+            AppError::Internal(format!("Failed to publish literal snapshot file: {error}"))
+        })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,12 +1213,50 @@ mod tests {
         let sig = Signature::now("test", "test@test.com").unwrap();
         repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
 
+        let outside = tempfile::tempdir().unwrap();
+        let protected = outside.path().join("protected.txt");
+        std::fs::write(&protected, "keep").unwrap();
+        let relative_escape = format!("../{}/protected.txt", outside.path().file_name().unwrap().to_str().unwrap());
+        for bad in [protected.to_str().unwrap(), relative_escape.as_str(), "", ".", "a/../../protected.txt"] {
+            assert!(matches!(
+                discard_single_file(&repo, tmp.path(), bad, FileChangeOperation::Create),
+                Err(AppError::BadRequest(_))
+            ));
+            assert!(matches!(
+                reset_single_file(&repo, tmp.path(), bad, FileChangeOperation::Create),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        assert_eq!(std::fs::read(&protected).unwrap(), b"keep");
+
         std::fs::write(tmp.path().join("new.txt"), "new").unwrap();
         assert!(tmp.path().join("new.txt").exists());
 
         discard_single_file(&repo, tmp.path(), "new.txt", FileChangeOperation::Create).unwrap();
 
         assert!(!tmp.path().join("new.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_new_link_removes_only_the_link_and_rejects_linked_parent() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let repo = Repository::init(workspace.path()).unwrap();
+        let target = outside.path().join("protected.txt");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("parent")).unwrap();
+        assert!(matches!(
+            discard_single_file(&repo, workspace.path(), "parent/protected.txt", FileChangeOperation::Create),
+            Err(AppError::Forbidden(_))
+        ));
+        for target in [&target, &outside.path().join("missing.txt")] {
+            let link = workspace.path().join("link");
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            discard_single_file(&repo, workspace.path(), "link", FileChangeOperation::Create).unwrap();
+            assert!(std::fs::symlink_metadata(link).is_err());
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
 
     #[test]
@@ -1173,6 +1368,22 @@ mod tests {
         assert!(
             reason.is_none(),
             "node_modules must be excluded from the pre-walk count: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn guard_excludes_workspace_owner_artifacts_from_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), "1").unwrap();
+        let artifacts = tmp.path().join(".nomifun/artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        for index in 0..20 {
+            std::fs::write(artifacts.join(format!("artifact-{index}")), "owned").unwrap();
+        }
+        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+        assert!(
+            snapshot_guard_with_limits(&canonical, 2, u64::MAX, test_deadline()).is_none(),
+            "owner artifacts must not inflate or enter workspace snapshots"
         );
     }
 

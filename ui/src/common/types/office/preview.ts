@@ -6,8 +6,6 @@
 
 import type { ConversationId, PreviewSnapshotId } from '@/common/types/ids';
 
-export type { PreviewSnapshotId };
-
 export type PreviewContentType =
   | 'markdown'
   | 'diff'
@@ -17,13 +15,7 @@ export type PreviewContentType =
   | 'ppt'
   | 'word'
   | 'excel'
-  | 'image'
-  | 'url'
-  // 小程序：会话工作区里的单文件自包含 HTML，沙箱 iframe 实时渲染。
-  // Mini-app: the conversation's single self-contained HTML artifact.
-  // Renderer-only — deliberately absent from the Rust `PreviewContentType`
-  // enum because this type never crosses the wire.
-  | 'miniapp';
+  | 'image';
 
 export interface PreviewHistoryTarget {
   contentType: PreviewContentType;
@@ -49,8 +41,4 @@ export interface PreviewUrlResponse {
   url: string;
   capability?: string;
   error?: string;
-}
-
-export interface RemoteImageFetchRequest {
-  url: string;
 }

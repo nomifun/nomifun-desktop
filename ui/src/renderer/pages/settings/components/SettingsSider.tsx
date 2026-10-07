@@ -1,14 +1,9 @@
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
-import { type IExtensionSettingsTab } from '@/common/adapter/ipcBridge';
-import { useExtI18n } from '@/renderer/hooks/system/useExtI18n';
-import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSettingsTabs';
 import {
-  Computer,
   Cpu,
   Info,
-  Puzzle,
   Server,
+  Shield,
   System,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -17,24 +12,24 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Tooltip } from '@arco-design/web-react';
 import { getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
-import { buildSettingsNavItems } from './settingsNavigation';
 
 /** Builtin settings tab IDs in display order (must match router paths). */
 export const BUILTIN_TAB_IDS = [
   'system',
+  'permissions',
   'execution-engines',
   'ssh-hosts',
-  'computer-use',
   'about',
 ] as const;
 
 /**
- * Group headers displayed above specific builtin tabs.
- * The header is rendered once, immediately before the first item whose id matches.
- * Extension tabs anchored between these builtins inherit the enclosing group visually.
+ * Group headers displayed above specific built-in tabs.
+ * Each header is rendered immediately before its matching item.
  */
 const GROUP_HEADER_BEFORE: Record<string, string> = {
   system: 'settings.groupApp',
+  permissions: 'settings.groupCapabilities',
+  'execution-engines': 'settings.groupRuntimes',
   about: 'settings.groupAbout',
 };
 
@@ -42,8 +37,7 @@ type SiderItem = {
   id: string;
   label: string;
   icon: React.ReactElement;
-  isImageIcon?: boolean;
-  /** Route path segment — for builtins: `/settings/{path}`, for extensions: `/settings/ext/{id}` */
+  /** Route path segment for the built-in settings page. */
   path: string;
 };
 
@@ -55,15 +49,11 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
   const { t } = useTranslation();
   const { pathname } = useLocation();
 
-  const extensionTabs = useExtensionSettingsTabs();
-  const { resolveExtTabName } = useExtI18n();
-
   const { menus, groupHeaderAt } = useMemo(() => {
-    // Build builtin items
     const builtinMap: Record<string, SiderItem> = {
       'execution-engines': {
         id: 'execution-engines',
-        label: t('settings.executionEngineHub.railTitle'),
+        label: t('settings.executionEngines.title'),
         icon: <Cpu />,
         path: 'execution-engines',
       },
@@ -74,48 +64,24 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         path: 'ssh-hosts',
       },
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
-      'computer-use': {
-        id: 'computer-use',
-        label: t('settings.computerUseNav'),
-        icon: <Computer />,
-        path: 'computer-use',
+      permissions: {
+        id: 'permissions',
+        label: t('settings.capabilityPermissions.nav'),
+        icon: <Shield />,
+        path: 'permissions',
       },
       about: { id: 'about', label: t('settings.about'), icon: <Info />, path: 'about' },
     };
 
-    // Start with ordered builtin IDs
     const builtins: SiderItem[] = BUILTIN_TAB_IDS.map((id) => builtinMap[id]);
-
-    // Helper to create SiderItem from extension tab
-    const toSiderItem = (tab: IExtensionSettingsTab): SiderItem => {
-      const resolvedIcon = resolveExtensionAssetUrl(tab.icon) || tab.icon;
-      return {
-        id: tab.id,
-        label: resolveExtTabName(tab),
-        icon: resolvedIcon ? <img src={resolvedIcon} alt='' className='w-full h-full object-contain' /> : <Puzzle />,
-        isImageIcon: Boolean(resolvedIcon),
-        path: `ext/${tab.id}`,
-      };
-    };
-
-    const { items: result, beforeCounts } = buildSettingsNavItems(builtins, extensionTabs, toSiderItem);
-
-    // Compute group header render positions.
-    //
-    // A header must appear before the first *visible* item of its group, which may
-    // be an extension tab anchored with placement='before' to the group's first
-    // builtin — not the builtin itself. Otherwise such an extension would render
-    // above the header and visually belong to the previous group.
     const headerAt = new Map<number, string>();
     for (const [builtinId, headerKey] of Object.entries(GROUP_HEADER_BEFORE)) {
-      const builtinIdx = result.findIndex((item) => item.id === builtinId);
-      if (builtinIdx < 0) continue;
-      const beforeCount = beforeCounts.get(builtinId) ?? 0;
-      headerAt.set(builtinIdx - beforeCount, headerKey);
+      const builtinIdx = builtins.findIndex((item) => item.id === builtinId);
+      if (builtinIdx >= 0) headerAt.set(builtinIdx, headerKey);
     }
 
-    return { menus: result, groupHeaderAt: headerAt };
-  }, [t, extensionTabs, resolveExtTabName]);
+    return { menus: builtins, groupHeaderAt: headerAt };
+  }, [t]);
 
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
   return (
@@ -156,23 +122,19 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
               >
                 {/* Leading icon — 22px slot to align with main sider rows */}
                 <span className='size-22px flex items-center justify-center shrink-0 line-height-0'>
-                  {item.isImageIcon ? (
-                    <span className='w-16px h-16px flex items-center justify-center'>{item.icon}</span>
-                  ) : (
-                    React.cloneElement(
-                      item.icon as React.ReactElement<{
-                        theme?: string;
-                        size?: string | number;
-                        className?: string;
-                        strokeWidth?: number;
-                      }>,
-                      {
-                        theme: 'outline',
-                        size: '16',
-                        strokeWidth: 3,
-                        className: isSelected ? 'block leading-none text-primary-6' : 'block leading-none text-t-secondary',
-                      }
-                    )
+                  {React.cloneElement(
+                    item.icon as React.ReactElement<{
+                      theme?: string;
+                      size?: string | number;
+                      className?: string;
+                      strokeWidth?: number;
+                    }>,
+                    {
+                      theme: 'outline',
+                      size: '16',
+                      strokeWidth: 3,
+                      className: isSelected ? 'block leading-none text-primary-6' : 'block leading-none text-t-secondary',
+                    }
                   )}
                 </span>
                 <FlexFullContainer className='h-24px collapsed-hidden'>

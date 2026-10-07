@@ -1,16 +1,42 @@
 {
-  "agentFallbackNotice": "{{original}} 不可用，已自动切换到 {{fallback}}。",
+  "agentEntries": {
+    "needsSetup": "待配置",
+    "choose": "选择 Agent",
+    "search": "搜索 Agent",
+    "fromTemplate": "官方 Agent",
+    "showMorePersonal": "显示更多（{{count}}）",
+    "showFewerPersonal": "收起自定义 Agent",
+    "manage": "管理 Agent",
+    "empty": "没有找到匹配的 Agent 或模板",
+    "loading": "正在加载 Agent…",
+    "loadFailed": "Agent 列表加载失败",
+    "modelNeeded": "当前没有可用于聊天的默认模型，请在模型管理中配置或启用聊天模型后重试。当前输入和 Agent 选择已保留。",
+    "modelCompatibility": {
+      "title": "所选模型已确认不支持 Agent 所需能力",
+      "summary": "服务返回已确认“{{model}}”不支持下面的技术能力，系统已经自动记录；无需手动勾选。",
+      "currentModel": "当前模型",
+      "missingCapabilities": "缺少能力",
+      "preserved": "你的输入、附件、项目与 Agent 选择都已保留，完成调整后可以继续发送。",
+      "chooseCompatible": "选择兼容模型（{{count}}）",
+      "configureCurrent": "检查模型与协议配置",
+      "viewChatModels": "查看聊天模型",
+      "noCompatibleOption": "没有已配置的兼容模型",
+      "noCompatibleModel": "暂无其他兼容模型，请检查模型与协议配置或新增模型。",
+      "targetNotFound": "没有找到要配置的模型，已为你打开供应商与模型列表。"
+    },
+    "capabilitiesNeeded": "这个官方 Agent 所需的部分能力尚未接入当前版本。当前输入和选择已保留，你可以选择其他 Agent，或在管理中调整能力。",
+    "launchFailed": "暂时无法启动这个官方 Agent，请检查服务状态后重试。当前输入和选择已保留。"
+  },
   "noAgentAvailable": "没有可用的 Main Agent。请登录 Google 或安装 Claude/Codex CLI。是否前往设置？",
   "noAgentAvailableShort": "没有可用的 Main Agent。点击配置。",
   "agentTabAutoSwitch": "模型不兼容 Gemini，已自动切换到 {{fallback}}",
   "autoSwitchToAgent": "Gemini 未配置，正在自动切换到 {{agent}}",
   "autoSwitchedAgent": "{{from}} 不可用，已自动切换到 {{to}}",
-  "promptExamplesHint": "试试这些可点击的案例提示词：",
-  "selectPresetHint": "选择一位设定开始任务",
-  "agentSwitcherLabel": "Agent",
-  "switchedToAgent": "已切换到 {{agent}}",
   "modelRequired": "请先选择模型",
+  "agentPresetRequired": "请先从 Agent 工作台选择一个已保存的 Agent。",
   "collaboration": {
+    "attachmentsUnsupported": "Agent 集群暂不支持在启动时携带附件。请移除文件后重试；当前消息与协作配置会保留。",
+    "autoworkExclusive": "AutoWork 与立即启动 Agent 集群是两种独立模式。请先关闭 AutoWork，或清除协作配置。",
     "models": {
       "title": "协作模型",
       "label": "协作模型",
@@ -27,7 +53,8 @@
     "clearWorkspace": "清除",
     "specifyWorkspace": "选择项目文件夹",
     "searchPlaceholder": "搜索项目…",
-    "defaultWorkspace": "默认工作路径（Nomi 管理）"
+    "defaultWorkspace": "默认工作路径（Nomi 管理）",
+    "unavailable": "所选项目目录“{{workspacePath}}”不存在或无法访问。请恢复该目录，或重新选择一个现有目录后再试。"
   },
   "scanning": {
     "initialMessage": "当前Agent不可用, 正在检测其他可用agent...",
@@ -46,40 +73,38 @@
     "draftOff": "未预设",
     "willMount": "将挂载 {{count}} 个知识库"
   },
-  "entry": {
-    "free": "自由发挥",
-    "usePreset": "使用设定",
-    "skills": "使用 Skills",
-    "skillsActive": "使用 Skills · 已启用",
-    "skillsAdjustAria": "调整本次会话已启用的 {{count}} 个 Skills",
-    "skillsActiveAria": "查看本次会话已启用的 {{count}} 个 Skills",
-    "backToFree": "自由发挥"
+  "showcase": {
+    "title": "我的伙伴",
+    "all": "全部伙伴 · {{count}}",
+    "manage": "管理伙伴",
+    "create": "创建伙伴",
+    "expand": "展开",
+    "collapse": "收起",
+    "search": "搜索伙伴名称",
+    "noMatches": "没有找到匹配的伙伴",
+    "openChat": "打开聊天",
+    "opening": "正在打开…",
+    "chatFailed": "暂时无法打开伙伴会话，请重试。",
+    "floating": "桌面悬浮",
+    "floatingFor": "{{name}}的桌面悬浮",
+    "floatingFailed": "切换桌面悬浮失败，请重试",
+    "emptyTitle": "让第一位伙伴加入展台",
+    "emptyDescription": "选择内置形象，或用自己的图片创建伙伴。",
+    "loading": "正在加载伙伴…",
+    "loadFailed": "伙伴列表暂时无法加载",
+    "retry": "重试",
+    "closeList": "关闭伙伴列表",
+    "moreFor": "{{name}} 的更多操作"
   },
-  "skillsPopover": {
-    "title": "本次会话使用的 Skills",
-    "description": "这些 Skills 会随本次会话注入，可在发送前由「使用 Skills」调整。",
-    "enabledCount": "已启用 {{count}} 个",
-    "overflowCount": "还有 {{count}} 个 Skills",
-    "adjustHint": "点击「使用 Skills」调整本次会话。"
-  },
-  "drawer": {
-    "presetTab": "设定",
-    "skillsTab": "Skills",
-    "searchPreset": "搜索设定名称或描述…",
-    "searchSkill": "搜索 Skill 名称或描述…",
-    "usePreset": "使用",
-    "keepFree": "保持自由发挥",
-    "applySkills": "应用到本次会话",
-    "selectedCount": "已选 {{count}} 个 Skill",
-    "sourceCustom": "自定义",
-    "sourceBuiltin": "内置",
-    "sourceExtension": "扩展",
-    "autoInject": "自动注入",
-    "presetCount": "个设定",
-    "skillCount": "个 Skill",
-    "presetHint": "选择一个设定，本次会话将由后端解析并固化配置快照。",
-    "presetEmpty": "还没有设定。可前往设定页创建，或保持自由发挥。",
-    "presetNoMatch": "没有匹配当前搜索与筛选条件的设定。",
-    "skillNoMatch": "没有匹配当前搜索与筛选条件的 Skill。"
+  "utilities": {
+    "title": "帮助与工具",
+    "help": "帮助与反馈",
+    "docs": "使用文档",
+    "video": "观看视频",
+    "community": "社区交流",
+    "running": "运行中",
+    "checking": "检查中",
+    "unavailable": "不可用",
+    "stopped": "未启用"
   }
 }

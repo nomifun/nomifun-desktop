@@ -1,0 +1,1076 @@
+//! Shared construction and validation helpers for the C7 bundled domain waves.
+//!
+//! Domain crates use this module to build the same vendor-neutral
+//! `PackageManifest`/`PluginRegistration` shape.  The helper deliberately
+//! exposes no application service bag, database pool, legacy router, runtime
+//! selector, or approval state.  A domain implementation can therefore add
+//! real typed ports later without changing the registration boundary.
+
+#![forbid(unsafe_code)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use nomifun_agent_contracts::{
+    ActionId, ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions,
+    CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityManifest,
+    CancellationDescriptor,
+    CanonicalSchemaRef, DigestHex, EffectClass, HostPortId, HostPortRef,
+    InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
+    PackageContributions, PackageId, PackageManifest, PackageRef, PlatformConstraint,
+    PluginBootCriticality, PluginBootState, PluginContextDescriptor, PluginDesiredState,
+    PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId, PluginRegistrarDescriptor,
+    PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
+    PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod, ResourceKind, ScopeKey,
+    RuntimeTarget, SkillDefinition, StrictJsonValue, ToolPresentationKind,
+    ValidatedPluginConfig, VersionString,
+    capability_surface_declarations, digest_payload,
+};
+use nomifun_agent_kernel::{
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext,
+    CapabilityResourceProviderFactory, CapabilityResourceProviderRequest,
+    ContextContributionResult, KernelError, PluginRegistration,
+    ResourceProviderResult,
+};
+use serde_json::json;
+use thiserror::Error;
+
+pub const CONTRACT_VERSION: &str = "1.0.0";
+
+#[derive(Debug, Error)]
+pub enum DomainRegistrationError {
+    #[error("domain package {package_id:?} declares duplicate capability {capability_id:?}")]
+    DuplicateCapability {
+        package_id: PackageId,
+        capability_id: CapabilityId,
+    },
+    #[error("domain package {package_id:?} declares no capabilities")]
+    EmptyPackage { package_id: PackageId },
+    #[error("invalid domain registration for {package_id:?}: {reason}")]
+    Invalid { package_id: PackageId, reason: String },
+    #[error("canonical digest failed: {0}")]
+    Digest(String),
+    #[error("kernel registration failed: {0}")]
+    Kernel(#[from] KernelError),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CapabilitySpec {
+    pub id: &'static str,
+    pub kind: CapabilityKind,
+    pub effect_class: Option<EffectClass>,
+    pub resource_kinds: &'static [&'static str],
+    pub presentation: ToolPresentationKind,
+    pub host_targets: &'static [&'static str],
+    pub host_surfaces: &'static [&'static str],
+}
+
+impl CapabilitySpec {
+    const fn new(id: &'static str, kind: CapabilityKind) -> Self {
+        Self {
+            id,
+            kind,
+            effect_class: None,
+            resource_kinds: &[],
+            presentation: ToolPresentationKind::Hidden,
+            host_targets: &[],
+            host_surfaces: &[],
+        }
+    }
+
+    pub const fn context(id: &'static str) -> Self {
+        Self::new(id, CapabilityKind::ContextContributor)
+    }
+
+    pub const fn tool(
+        id: &'static str,
+        effect_class: EffectClass,
+        resource_kinds: &'static [&'static str],
+    ) -> Self {
+        Self {
+            effect_class: Some(effect_class),
+            resource_kinds,
+            presentation: ToolPresentationKind::FunctionTool,
+            ..Self::new(id, CapabilityKind::Tool)
+        }
+    }
+
+    pub const fn resource_provider(
+        id: &'static str,
+        resource_kinds: &'static [&'static str],
+    ) -> Self {
+        Self { resource_kinds, ..Self::new(id, CapabilityKind::ResourceProvider) }
+    }
+
+    pub const fn scheduler(id: &'static str) -> Self {
+        Self::new(id, CapabilityKind::Scheduler)
+    }
+
+    pub const fn middleware(id: &'static str) -> Self {
+        Self::new(id, CapabilityKind::TurnMiddleware)
+    }
+
+    pub const fn transport(id: &'static str) -> Self {
+        Self::new(id, CapabilityKind::Transport)
+    }
+
+    pub const fn background(id: &'static str) -> Self {
+        Self::new(id, CapabilityKind::BackgroundService)
+    }
+
+    pub const fn event_source(id: &'static str) -> Self {
+        Self::event_source_with_resources(id, &[])
+    }
+
+    pub const fn event_source_with_resources(
+        id: &'static str,
+        resource_kinds: &'static [&'static str],
+    ) -> Self {
+        Self { resource_kinds, ..Self::new(id, CapabilityKind::EventSource) }
+    }
+
+    pub const fn event_consumer(id: &'static str) -> Self {
+        Self::new(id, CapabilityKind::EventConsumer)
+    }
+
+    /// Mark a capability as available only on an explicit host target/surface
+    /// set.  An empty set means the capability is platform-neutral.
+    pub const fn on_hosts(
+        mut self,
+        host_targets: &'static [&'static str],
+        host_surfaces: &'static [&'static str],
+    ) -> Self {
+        self.host_targets = host_targets;
+        self.host_surfaces = host_surfaces;
+        self
+    }
+
+    fn has_action(&self) -> bool {
+        self.kind == CapabilityKind::Tool
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PackageSpec {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub description: &'static str,
+    pub mount_id: &'static str,
+    pub capabilities: &'static [CapabilitySpec],
+    pub supported_surfaces: &'static [&'static str],
+}
+
+struct UnavailableCapability {
+    capability_id: CapabilityId,
+}
+
+#[async_trait]
+impl CapabilityContextContributionFactory for UnavailableCapability {
+    async fn contribute(
+        &self,
+        _request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "bundled Context capability {} has no configured owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
+#[async_trait]
+impl CapabilityResourceProviderFactory for UnavailableCapability {
+    async fn acquire(
+        &self,
+        _request: CapabilityResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "bundled Resource capability {} has no configured owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
+#[async_trait]
+impl CapabilityHandler for UnavailableCapability {
+    async fn invoke(
+        &self,
+        _context: CapabilityInvocationContext,
+        _input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "bundled Tool capability {} has no configured owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
+pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegistrationError> {
+    let package_id = PackageId::from(spec.id);
+    if spec.capabilities.is_empty() {
+        return Err(DomainRegistrationError::EmptyPackage { package_id });
+    }
+
+    let package_ref = PackageRef {
+        id: package_id.clone(),
+        version: VersionString::from(CONTRACT_VERSION),
+    };
+    let source = PluginSourceMetadata {
+        source_kind: PluginSourceKind::Bundled,
+        source_identity: spec.id.to_owned(),
+        source_digest: None,
+    };
+    let identity = PluginIdentityDescriptor {
+        package: package_ref.clone(),
+        mount_id: AgentModuleId::from(spec.mount_id),
+    };
+    let config_schema = StrictJsonValue(json!({
+        "type": "object",
+        "additionalProperties": false,
+    }));
+
+    let mut seen = BTreeSet::new();
+    let mut capability_manifests = Vec::with_capacity(spec.capabilities.len());
+    let mut handler_specs = Vec::new();
+    let mut context_factory_specs = Vec::new();
+    let mut resource_factory_specs = Vec::new();
+
+    for capability in spec.capabilities {
+        let capability_id = CapabilityId::from(capability.id);
+        if !seen.insert(capability_id.clone()) {
+            return Err(DomainRegistrationError::DuplicateCapability {
+                package_id: package_id.clone(),
+                capability_id,
+            });
+        }
+
+        let input_schema = json!({
+            "type": "object",
+            "additionalProperties": true,
+        });
+        let output_schema = json!({
+            "type": "object",
+            "additionalProperties": true,
+        });
+        let input_digest = digest_payload(&input_schema).map_err(digest_error)?;
+        let output_digest = digest_payload(&output_schema).map_err(digest_error)?;
+        let actions = match (capability.has_action(), capability.effect_class) {
+            (true, Some(effect_class)) => {
+                let action_id = ActionId::from(format!("{}.invoke", capability.id));
+                handler_specs.push(capability_id.clone());
+                vec![CapabilityActionDescriptor {
+                    action_id,
+                    input_schema: schema_ref(capability.id, "input", &input_digest),
+                    output_schema: schema_ref(capability.id, "output", &output_digest),
+                    effect_class,
+                    presentation: capability.presentation,
+                }]
+            }
+            (false, None) => Vec::new(),
+            _ => {
+                return Err(DomainRegistrationError::Invalid {
+                    package_id: package_id.clone(),
+                    reason: format!(
+                        "capability {} must have an effect class iff it is a Tool",
+                        capability.id
+                    ),
+                });
+            }
+        };
+        let context_schema_refs = if capability.kind == CapabilityKind::ContextContributor {
+            context_factory_specs.push(capability_id.clone());
+            vec![schema_ref(
+                capability.id,
+                "context",
+                &output_digest,
+            )]
+        } else {
+            Vec::new()
+        };
+        if capability.kind == CapabilityKind::ResourceProvider {
+            resource_factory_specs.push(capability_id.clone());
+        }
+        let event_schema_refs = if matches!(
+            capability.kind,
+            CapabilityKind::EventSource | CapabilityKind::EventConsumer
+        ) {
+            vec![schema_ref(capability.id, "event", &output_digest)]
+        } else {
+            Vec::new()
+        };
+
+        let supported_surfaces: Vec<String> = if capability.host_surfaces.is_empty() {
+            spec.supported_surfaces
+                .iter()
+                .map(|surface| (*surface).to_owned())
+                .collect()
+        } else {
+            capability
+                .host_surfaces
+                .iter()
+                .map(|surface| (*surface).to_owned())
+                .collect()
+        };
+        let supported_platforms = if capability.host_targets.is_empty() {
+            vec![PlatformConstraint::Any]
+        } else {
+            vec![PlatformConstraint::Targets {
+                host_targets: capability
+                    .host_targets
+                    .iter()
+                    .map(|target| (*target).to_owned().into())
+                    .collect(),
+                host_surfaces: capability
+                    .host_surfaces
+                    .iter()
+                    .map(|surface| (*surface).to_owned())
+                    .collect(),
+            }]
+        };
+        let resource_kinds = capability
+            .resource_kinds
+            .iter()
+            .map(|kind| ResourceKind::from(*kind))
+            .collect::<BTreeSet<_>>();
+        let contribution_id = nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            capability_id.as_ref()
+        ));
+        capability_manifests.push(CapabilityManifest {
+            id: capability_id,
+            contribution_id,
+            kind: capability.kind,
+            package: package_ref.clone(),
+            display: localized(capability.id, capability.id),
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(
+                supported_surfaces,
+                supported_consumers(capability.id),
+            ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms,
+            config_schema: StrictJsonValue(json!({
+                "type": "object",
+                "additionalProperties": false,
+            })),
+            contributions: CapabilityContributions {
+                actions,
+                context_schema_refs,
+                context_phase: Default::default(),
+                ui_slot: None,
+                event_schema_refs,
+                resource_kinds,
+                host_ports: Vec::new(),
+            },
+        });
+    }
+
+    let manifest = PackageManifest {
+        schema_version: VersionString::from(CONTRACT_VERSION),
+        host_contract_version: VersionString::from(CONTRACT_VERSION),
+        package_id: package_id.clone(),
+        package_version: VersionString::from(CONTRACT_VERSION),
+        display: localized(spec.display_name, spec.description),
+        package_dependencies: Vec::new(),
+        requires_runtime_features: Vec::new(),
+        config_schema: config_schema.clone(),
+        provides_services: Vec::new(),
+        requires_services: Vec::new(),
+        entrypoint: InProcessEntrypointMetadata {
+            entrypoint_profile: "trusted-in-process".to_owned(),
+            entrypoint_id: format!("{}.entrypoint", spec.id),
+            contract_version: VersionString::from(CONTRACT_VERSION),
+        }
+        .into(),
+        contributions: PackageContributions {
+            capabilities: capability_manifests,
+            skills: Vec::<SkillDefinition>::new(),
+            mcp_tools: Vec::new(),
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
+        },
+    };
+    let manifest_artifact = ArtifactEnvelope::new(manifest).map_err(digest_error)?;
+    let cancellation_port = host_port(&format!("{}.cancel", spec.id));
+    let task_port = host_port(&format!("{}.tasks", spec.id));
+    let state = PluginStateHandleDescriptor {
+        package_id: package_id.clone(),
+        mount_id: identity.mount_id.clone(),
+        methods: PluginStateMethod::REQUIRED.into_iter().collect(),
+    };
+    let metadata = PluginRegistrationMetadata {
+        manifest: manifest_artifact,
+        mount_id: identity.mount_id.clone(),
+        source: source.clone(),
+        boot_state: PluginBootState {
+            criticality: PluginBootCriticality::Required,
+            desired_state: PluginDesiredState::Enabled,
+            effective_state: PluginEffectiveState::Active,
+            diagnostic_code: None,
+        },
+        registrar: PluginRegistrarDescriptor {
+            identity: identity.clone(),
+            allowed_operations: BTreeSet::from([
+                PluginRegistrarOperation::BindHostPort,
+                PluginRegistrarOperation::ContributeCapability,
+            ]),
+            declared_capability_ids: seen,
+            declared_skill_ids: BTreeSet::new(),
+            declared_mcp_tool_keys: BTreeSet::new(),
+            declared_role_ids: BTreeSet::new(),
+            declared_service_keys: BTreeSet::new(),
+            declared_host_ports: BTreeSet::from([
+                cancellation_port.id.clone(),
+                task_port.id.clone(),
+            ]),
+        },
+        context: PluginContextDescriptor {
+            identity,
+            source,
+            validated_config: ValidatedPluginConfig {
+                schema_digest: digest_payload(&config_schema).map_err(digest_error)?,
+                config_revision: 1,
+                value: StrictJsonValue(json!({})),
+            },
+            state,
+            declared_services: Default::default(),
+            host_ports: Vec::new(),
+            typed_command_ports: Vec::new(),
+            domain_outbox_ports: Vec::new(),
+            cancellation: CancellationDescriptor {
+                cancellation_port,
+                scope_key: ScopeKey::from(format!("mount:{}", spec.mount_id)),
+            },
+            managed_task_registration: ManagedTaskRegistrationDescriptor {
+                registrar_port: task_port,
+                scope_key: ScopeKey::from(format!("mount:{}", spec.mount_id)),
+            },
+        },
+    };
+
+    let mut registration = PluginRegistration::new(metadata);
+    for capability_id in handler_specs {
+        registration.add_capability_handler(
+            capability_id.clone(),
+            Arc::new(UnavailableCapability { capability_id }),
+        )?;
+    }
+    for capability_id in context_factory_specs {
+        registration.add_capability_context_factory(
+            capability_id.clone(),
+            Arc::new(UnavailableCapability { capability_id }),
+        )?;
+    }
+    for capability_id in resource_factory_specs {
+        registration.add_capability_resource_factory(
+            capability_id.clone(),
+            Arc::new(UnavailableCapability { capability_id }),
+        )?;
+    }
+    Ok(registration)
+}
+
+fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
+    let _ = capability_id;
+    BTreeSet::from([CapabilityConsumer::Agent])
+}
+
+pub fn registrations(
+    specs: impl IntoIterator<Item = PackageSpec>,
+) -> Result<Vec<PluginRegistration>, DomainRegistrationError> {
+    let mut result = Vec::new();
+    let mut packages = BTreeSet::new();
+    let mut capabilities = BTreeMap::<CapabilityId, PackageId>::new();
+    for spec in specs {
+        if !packages.insert(spec.id) {
+            return Err(DomainRegistrationError::Invalid {
+                package_id: PackageId::from(spec.id),
+                reason: "duplicate package id".to_owned(),
+            });
+        }
+        let registration = registration(spec)?;
+        for capability in &registration.metadata.manifest.payload.contributions.capabilities {
+            if let Some(previous) =
+                capabilities.insert(capability.id.clone(), PackageId::from(spec.id))
+            {
+                return Err(DomainRegistrationError::Invalid {
+                    package_id: PackageId::from(spec.id),
+                    reason: format!(
+                        "capability {} is already owned by {}",
+                        capability.id.as_ref(),
+                        previous.as_ref()
+                    ),
+                });
+            }
+        }
+        result.push(registration);
+    }
+    Ok(result)
+}
+
+pub fn validate_inventory(
+    registrations: &[PluginRegistration],
+) -> Result<(), DomainRegistrationError> {
+    let mut packages = BTreeSet::new();
+    let mut mounts = BTreeSet::new();
+    let mut capabilities = BTreeSet::new();
+    for registration in registrations {
+        let metadata = &registration.metadata;
+        let manifest = &metadata.manifest.payload;
+        if !metadata.manifest.verify().map_err(digest_error)? {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "package manifest digest verification failed",
+            ));
+        }
+        let package_ref = PackageRef {
+            id: manifest.package_id.clone(),
+            version: manifest.package_version.clone(),
+        };
+        if metadata.source.source_identity.trim().is_empty()
+            || metadata.source.source_identity != manifest.package_id.as_ref()
+            || metadata.context.source != metadata.source
+        {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "source metadata does not match the manifest package identity and context",
+            ));
+        }
+        if metadata.mount_id != metadata.registrar.identity.mount_id
+            || metadata.mount_id != metadata.context.identity.mount_id
+            || metadata.registrar.identity.package != package_ref
+            || metadata.context.identity.package != package_ref
+            || metadata.context.state.package_id != manifest.package_id
+            || metadata.context.state.mount_id != metadata.mount_id
+            || metadata.context.state.methods
+                != PluginStateMethod::REQUIRED.into_iter().collect()
+        {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "package identity, mount, or mandatory state metadata drifted",
+            ));
+        }
+        let expected_config_digest =
+            digest_payload(&manifest.config_schema).map_err(digest_error)?;
+        if metadata.context.validated_config.schema_digest != expected_config_digest {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "validated config schema digest does not match the manifest",
+            ));
+        }
+        if !packages.insert(manifest.package_id.clone()) {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "duplicate package in registration inventory",
+            ));
+        }
+        if !mounts.insert(metadata.mount_id.clone()) {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "duplicate agent module in registration inventory",
+            ));
+        }
+        let mut expected_handlers = BTreeSet::new();
+        let mut manifest_capability_ids = BTreeSet::new();
+        let mut manifest_skill_ids = BTreeSet::new();
+        let mut manifest_mcp_tool_keys = BTreeSet::new();
+        let mut manifest_role_ids = BTreeSet::new();
+        let mut manifest_service_ids = BTreeSet::new();
+        let role_member_ids = manifest
+            .contributions
+            .role_contracts
+            .iter()
+            .flat_map(|contract| {
+                contract
+                    .members
+                    .iter()
+                    .map(|member| member.capability.id.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        for capability in &manifest.contributions.capabilities {
+            if !capabilities.insert(capability.id.clone()) {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "duplicate capability {} in registration inventory",
+                        capability.id.as_ref()
+                    ),
+                ));
+            }
+            if !manifest_capability_ids.insert(capability.id.clone())
+                || capability.package != package_ref
+            {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "capability {} does not belong to the package manifest",
+                        capability.id.as_ref()
+                    ),
+                ));
+            }
+            let action_ids = capability
+                .contributions
+                .actions
+                .iter()
+                .map(|action| action.action_id.clone())
+                .collect::<BTreeSet<_>>();
+            if action_ids.len() != capability.contributions.actions.len() {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "capability {} declares duplicate action IDs",
+                        capability.id.as_ref()
+                    ),
+                ));
+            }
+            match capability.kind {
+                CapabilityKind::Tool if capability.contributions.actions.len() == 1 => {
+                    if !role_member_ids.contains(&capability.id) {
+                        expected_handlers.insert(capability.id.clone());
+                    }
+                }
+                CapabilityKind::Tool => {
+                    return Err(invalid_registration(
+                        &manifest.package_id,
+                        format!(
+                            "tool capability {} must declare exactly one action",
+                            capability.id.as_ref()
+                        ),
+                    ));
+                }
+                _ if capability.contributions.actions.is_empty() => {}
+                _ => {
+                    return Err(invalid_registration(
+                        &manifest.package_id,
+                        format!(
+                            "non-tool capability {} declares an action",
+                            capability.id.as_ref()
+                        ),
+                    ));
+                }
+            }
+        }
+        for contract in &manifest.contributions.role_contracts {
+            if !manifest_role_ids.insert(contract.key.role_id.clone()) {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "execution-role contract declarations are duplicated",
+                ));
+            }
+            if contract.members.is_empty() {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "execution-role contract must contain members",
+                ));
+            }
+            for member in &contract.members {
+                if !manifest
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id == member.capability.id)
+                {
+                    return Err(invalid_registration(
+                        &manifest.package_id,
+                        format!(
+                            "role member {} is not declared by the package",
+                            member.capability.id.as_ref()
+                        ),
+                    ));
+                }
+            }
+        }
+        for provider in &manifest.contributions.role_providers {
+            if !manifest_role_ids.contains(&provider.role.key.role_id) {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "role provider references an undeclared role contract",
+                ));
+            }
+        }
+        let provider_role_ids = manifest
+            .contributions
+            .role_providers
+            .iter()
+            .map(|provider| provider.role.key.role_id.clone())
+            .collect::<BTreeSet<_>>();
+        if provider_role_ids != manifest_role_ids {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "role contracts and role providers must have the same role identity set",
+            ));
+        }
+        for skill in &manifest.contributions.skills {
+            if !manifest_skill_ids.insert(skill.id.clone()) || skill.package != package_ref {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "skill {} does not belong to the package manifest",
+                        skill.id.as_ref()
+                    ),
+                ));
+            }
+        }
+        for mapping in &manifest.contributions.mcp_tools {
+            if !manifest_mcp_tool_keys.insert(mapping.canonical_tool_key.clone())
+                || mapping.package != package_ref
+                || !manifest
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id == mapping.capability.id)
+            {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "MCP mapping {} does not belong to the package manifest",
+                        mapping.canonical_tool_key.as_ref()
+                    ),
+                ));
+            }
+        }
+        for provision in &manifest.provides_services {
+            if !manifest_service_ids.insert(provision.service.id.clone()) {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "provided service declarations are duplicated",
+                ));
+            }
+        }
+        let declared_host_ports = declared_host_ports(metadata);
+        let expected_registrar_operations = required_registrar_operations(
+            !manifest_capability_ids.is_empty(),
+            !manifest_skill_ids.is_empty(),
+            !manifest_mcp_tool_keys.is_empty(),
+            !manifest_role_ids.is_empty(),
+            !manifest_service_ids.is_empty(),
+            !declared_host_ports.is_empty(),
+        );
+        if metadata.registrar.declared_capability_ids != manifest_capability_ids
+            || metadata.registrar.declared_skill_ids != manifest_skill_ids
+            || metadata.registrar.declared_mcp_tool_keys != manifest_mcp_tool_keys
+            || metadata.registrar.declared_role_ids != manifest_role_ids
+            || metadata.registrar.declared_service_keys != manifest_service_ids
+            || metadata.registrar.declared_host_ports != declared_host_ports
+            || metadata.registrar.allowed_operations != expected_registrar_operations
+        {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "registrar declarations do not match manifest and context",
+            ));
+        }
+        let actual_role_handlers = registration
+            .role_action_handler_ids()
+            .into_iter()
+            .map(|(_, capability_id)| capability_id)
+            .collect::<BTreeSet<_>>();
+        let expected_role_handlers = role_member_ids
+            .iter()
+            .filter(|capability_id| {
+                manifest
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| {
+                        &capability.id == *capability_id
+                            && !capability.contributions.actions.is_empty()
+                    })
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if registration.handler_ids() != expected_handlers
+            || actual_role_handlers != expected_role_handlers
+        {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "capability handler exports differ from Tool actions",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn declared_host_ports(metadata: &PluginRegistrationMetadata) -> BTreeSet<HostPortId> {
+    metadata
+        .context
+        .host_ports
+        .iter()
+        .map(|binding| binding.port.id.clone())
+        .chain(
+            metadata
+                .context
+                .typed_command_ports
+                .iter()
+                .map(|binding| binding.port.id.clone()),
+        )
+        .chain(
+            metadata
+                .context
+                .domain_outbox_ports
+                .iter()
+                .map(|binding| binding.port.id.clone()),
+        )
+        .chain([metadata.context.cancellation.cancellation_port.id.clone()])
+        .chain([metadata.context.managed_task_registration.registrar_port.id.clone()])
+        .collect()
+}
+
+fn required_registrar_operations(
+    capabilities: bool,
+    skills: bool,
+    mcp: bool,
+    role_providers: bool,
+    services: bool,
+    host_ports: bool,
+) -> BTreeSet<PluginRegistrarOperation> {
+    let mut operations = BTreeSet::new();
+    if capabilities {
+        operations.insert(PluginRegistrarOperation::ContributeCapability);
+    }
+    if skills {
+        operations.insert(PluginRegistrarOperation::ContributeSkill);
+    }
+    if mcp {
+        operations.insert(PluginRegistrarOperation::ContributeMcpToolMapping);
+    }
+    if role_providers {
+        operations.insert(PluginRegistrarOperation::ContributeRoleProvider);
+    }
+    if services {
+        operations.insert(PluginRegistrarOperation::ProvideService);
+    }
+    if host_ports {
+        operations.insert(PluginRegistrarOperation::BindHostPort);
+    }
+    operations
+}
+
+fn localized(name: &str, description: &str) -> LocalizedMetadata {
+    LocalizedMetadata {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        localized_names: BTreeMap::new(),
+        localized_descriptions: BTreeMap::new(),
+    }
+}
+
+fn host_port(id: &str) -> HostPortRef {
+    HostPortRef {
+        id: HostPortId::from(id.to_owned()),
+        version: VersionString::from(CONTRACT_VERSION),
+    }
+}
+
+fn schema_ref(capability: &str, direction: &str, digest: &DigestHex) -> CanonicalSchemaRef {
+    CanonicalSchemaRef::from(format!(
+        "schema://{capability}/{direction}@1#{}",
+        digest.as_ref()
+    ))
+}
+
+fn digest_error(error: impl std::fmt::Display) -> DomainRegistrationError {
+    DomainRegistrationError::Digest(error.to_string())
+}
+
+fn invalid_registration(
+    package_id: &PackageId,
+    reason: impl Into<String>,
+) -> DomainRegistrationError {
+    DomainRegistrationError::Invalid {
+        package_id: package_id.clone(),
+        reason: reason.into(),
+    }
+}
+
+/// A small helper for callers that need to make an explicit, typed
+/// availability decision before resolving a capability.
+pub fn capability_available_on_host(
+    host_target: &str,
+    host_surface: &str,
+    capability: &CapabilitySpec,
+) -> bool {
+    check_platform_availability(
+        capability,
+        &RuntimeTarget::from(host_target),
+        host_surface,
+    )
+    .is_ok()
+}
+
+/// Check a capability against its typed host target and surface contract.
+///
+/// Empty host identities fail closed with the canonical Kernel error.
+/// Surface-only restrictions remain represented by the capability's
+/// `supported_surfaces`; `PlatformConstraint::Any` is only used for the
+/// absence of a target restriction.
+pub fn check_platform_availability(
+    capability: &CapabilitySpec,
+    host_target: &RuntimeTarget,
+    host_surface: &str,
+) -> Result<(), KernelError> {
+    if host_target.as_ref().trim().is_empty() {
+        return Err(KernelError::CapabilityUnavailableOnPlatform {
+            capability_id: CapabilityId::from(capability.id),
+            target: host_target.as_ref().to_owned(),
+            surface: host_surface.to_owned(),
+        });
+    }
+    if host_surface.trim().is_empty() {
+        return Err(KernelError::CapabilityUnavailableOnSurface {
+            capability_id: CapabilityId::from(capability.id),
+            surface: host_surface.to_owned(),
+        });
+    }
+    if !capability.host_targets.is_empty()
+        && !capability
+            .host_targets
+            .iter()
+            .any(|target| *target == host_target.as_ref())
+    {
+        return Err(KernelError::CapabilityUnavailableOnPlatform {
+            capability_id: CapabilityId::from(capability.id),
+            target: host_target.as_ref().to_owned(),
+            surface: host_surface.to_owned(),
+        });
+    }
+    if !capability.host_surfaces.is_empty()
+        && !capability
+            .host_surfaces
+            .iter()
+            .any(|surface| *surface == host_surface)
+    {
+        return Err(KernelError::CapabilityUnavailableOnSurface {
+            capability_id: CapabilityId::from(capability.id),
+            surface: host_surface.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CAPS: &[CapabilitySpec] = &[
+        CapabilitySpec::tool("support.read", EffectClass::ReadLocal, &["workspace"]),
+        CapabilitySpec::context("support.context"),
+    ];
+
+    #[test]
+    fn declarative_registration_has_exact_handler_and_metadata_sets() {
+        let registrations = registrations([PackageSpec {
+            id: "domain.support",
+            display_name: "Support",
+            description: "Test support package",
+            mount_id: "domain-support",
+            capabilities: CAPS,
+            supported_surfaces: &["desktop"],
+        }])
+        .unwrap();
+        validate_inventory(&registrations).unwrap();
+        let registration = &registrations[0];
+        assert_eq!(registration.handler_ids().len(), 1);
+        assert_eq!(
+            registration
+                .metadata
+                .manifest
+                .payload
+                .contributions
+                .capabilities
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn host_constraints_are_typed_and_fail_closed() {
+        let capability = CapabilitySpec::tool(
+            "support.windows",
+            EffectClass::ExecuteLocal,
+            &[],
+        )
+        .on_hosts(&["x86_64-pc-windows-msvc"], &["desktop"]);
+        assert!(capability_available_on_host(
+            "x86_64-pc-windows-msvc",
+            "desktop",
+            &capability
+        ));
+        assert!(!capability_available_on_host(
+            "x86_64-unknown-linux-gnu",
+            "headless",
+            &capability
+        ));
+        assert!(matches!(
+            check_platform_availability(
+                &capability,
+                &RuntimeTarget::from("x86_64-unknown-linux-gnu"),
+                "headless",
+            ),
+            Err(KernelError::CapabilityUnavailableOnPlatform { .. })
+        ));
+
+        let surface_only =
+            CapabilitySpec::context("support.desktop-only").on_hosts(&[], &["desktop"]);
+        assert!(check_platform_availability(
+            &surface_only,
+            &RuntimeTarget::from("x86_64-unknown-linux-gnu"),
+            "desktop",
+        )
+        .is_ok());
+        assert!(matches!(
+            check_platform_availability(
+                &surface_only,
+                &RuntimeTarget::from("x86_64-unknown-linux-gnu"),
+                "headless",
+            ),
+            Err(KernelError::CapabilityUnavailableOnSurface { .. })
+        ));
+        assert!(!capability_available_on_host("", "desktop", &surface_only));
+    }
+
+    #[test]
+    fn inventory_rejects_tampered_manifest_and_identity_metadata() {
+        let mut manifest_tampered = registrations([PackageSpec {
+            id: "domain.support",
+            display_name: "Support",
+            description: "Test support package",
+            mount_id: "domain-support",
+            capabilities: CAPS,
+            supported_surfaces: &["desktop"],
+        }])
+        .unwrap();
+        manifest_tampered[0]
+            .metadata
+            .manifest
+            .payload
+            .display
+            .name = "Tampered".to_owned();
+        assert!(validate_inventory(&manifest_tampered)
+            .unwrap_err()
+            .to_string()
+            .contains("digest"));
+
+        let mut identity_tampered = registrations([PackageSpec {
+            id: "domain.support",
+            display_name: "Support",
+            description: "Test support package",
+            mount_id: "domain-support",
+            capabilities: CAPS,
+            supported_surfaces: &["desktop"],
+        }])
+        .unwrap();
+        identity_tampered[0].metadata.source.source_identity = "other".to_owned();
+        assert!(validate_inventory(&identity_tampered)
+            .unwrap_err()
+            .to_string()
+            .contains("source metadata"));
+    }
+}

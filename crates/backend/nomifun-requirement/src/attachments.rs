@@ -41,8 +41,9 @@ const WORKSPACE_STAGE_REL_DIR: &str = ".nomi/requirement-attachments";
 pub struct PromptAttachment {
     /// Original display name ("设计稿.png").
     pub file_name: String,
-    /// Path the model should read: workspace-relative (forward slashes) when
-    /// staged into the session workspace, absolute otherwise. Empty when missing.
+    /// Workspace-relative path (forward slashes) under the private AutoWork
+    /// staging root. Durable attachment-store source paths are never exposed
+    /// to the model. Empty when missing.
     pub path: String,
     /// The original file vanished from the attachment store —listed so the
     /// model knows an image existed but cannot be read.
@@ -190,6 +191,54 @@ fn workspace_stage_lock_key(workspace: &Path) -> PathBuf {
         }
     }
     workspace_lock_comparison_path(absolute)
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct BlockingActivationTestPause {
+    workspace_key: PathBuf,
+    entered: StdMutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    released: StdMutex<bool>,
+    release_signal: std::sync::Condvar,
+}
+
+#[cfg(test)]
+fn blocking_activation_test_pause_slot(
+) -> &'static StdMutex<Option<Arc<BlockingActivationTestPause>>> {
+    static PAUSE: OnceLock<StdMutex<Option<Arc<BlockingActivationTestPause>>>> =
+        OnceLock::new();
+    PAUSE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn pause_blocking_activation_for_test(workspace: &Path) {
+    let pause = blocking_activation_test_pause_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|pause| pause.workspace_key == workspace_stage_lock_key(workspace))
+        .cloned();
+    let Some(pause) = pause else {
+        return;
+    };
+    if let Some(entered) = pause
+        .entered
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        let _ = entered.send(());
+    }
+    let mut released = pause
+        .released
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while !*released {
+        released = pause
+            .release_signal
+            .wait(released)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
 }
 
 #[cfg(windows)]
@@ -374,7 +423,7 @@ impl AttachmentStore {
             let source = resolve_attachment_source(&self.data_dir, &row).map_err(|error| {
                 attachment_stage_error("validate persisted attachment source", error)
             })?;
-            let Some(source) = source else {
+            let Some(_source) = source else {
                 attachments.push(PromptAttachment {
                     file_name: row.file_name,
                     path: String::new(),
@@ -395,17 +444,10 @@ impl AttachmentStore {
                     missing: false,
                 });
             } else {
-                let source = source.to_str().ok_or_else(|| {
-                    AppError::Forbidden(
-                        "persisted attachment path is not valid UTF-8 and cannot be represented in a prompt"
-                            .to_owned(),
-                    )
-                })?;
-                attachments.push(PromptAttachment {
-                    file_name: row.file_name,
-                    path: source.to_owned(),
-                    missing: false,
-                });
+                return Err(AppError::Conflict(
+                    "AutoWork cannot expose an available attachment without a frozen AgentSession workspace"
+                        .to_owned(),
+                ));
             }
         }
 
@@ -421,9 +463,23 @@ impl AttachmentStore {
     /// No fallback is allowed here: changing a prompt path after receipt
     /// preflight would change the request payload under the same idempotency
     /// key. A copy error is returned before the keyed send can claim execution.
+    #[cfg(test)]
     pub(crate) async fn activate_prompt_plan(
         &self,
         plan: &PromptAttachmentPlan,
+    ) -> Result<(), AppError> {
+        self.activate_prompt_plan_with_operation_lease(plan, Arc::new(()))
+            .await
+    }
+
+    /// Activate a prompt plan while retaining the Session operation lease in
+    /// the process-owned blocking task. Tokio cannot cancel a running
+    /// `spawn_blocking` closure, so the lease must move into that closure rather
+    /// than remain owned only by its abortable async waiter.
+    pub(crate) async fn activate_prompt_plan_with_operation_lease(
+        &self,
+        plan: &PromptAttachmentPlan,
+        operation_lease: Arc<dyn Send + Sync>,
     ) -> Result<(), AppError> {
         if plan.copies.is_empty() {
             return Ok(());
@@ -473,8 +529,11 @@ impl AttachmentStore {
         tokio::task::spawn_blocking(move || {
             // Cancellation of the async caller must not release the workspace
             // or source transaction while blocking copy/publish work runs.
+            let _operation_lease = operation_lease;
             let _stage_guard = stage_guard;
             let _mutation_guard = mutation_guard;
+            #[cfg(test)]
+            pause_blocking_activation_for_test(&workspace);
             activate_prompt_plan_blocking(&data_dir, &workspace, &copies)
         })
         .await
@@ -1870,6 +1929,18 @@ fn validate_delete_journal(
     Ok(persisted_entries)
 }
 
+fn serialize_delete_journal(journal: &AttachmentDeleteJournal) -> io::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(journal).map_err(|error| {
+        invalid_attachment_data(format!("serialize attachment delete journal: {error}"))
+    })?;
+    if bytes.len() as u64 > MAX_DELETE_JOURNAL_BYTES {
+        return Err(invalid_attachment_data(
+            "attachment delete journal exceeds its maximum size",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn read_delete_journal(
     requirement_root: &Path,
     requirement_id: &str,
@@ -1884,15 +1955,14 @@ fn read_delete_journal(
     else {
         return Ok(None);
     };
-    let mut file =
-        open_stable_regular_file(&journal_path, "attachment delete journal")?;
-    if file.metadata()?.len() > MAX_DELETE_JOURNAL_BYTES {
+    let file = open_stable_regular_file(&journal_path, "attachment delete journal")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_DELETE_JOURNAL_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_DELETE_JOURNAL_BYTES {
         return Err(invalid_attachment_data(
             "attachment delete journal exceeds its maximum size",
         ));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
     let journal = serde_json::from_slice::<AttachmentDeleteJournal>(&bytes)
         .map_err(|error| {
             invalid_attachment_data(format!(
@@ -2359,11 +2429,7 @@ fn prepare_delete_journal_blocking(
         entries,
     };
     validate_delete_journal(&journal, requirement_id, rows)?;
-    let bytes = serde_json::to_vec(&journal).map_err(|error| {
-        invalid_attachment_data(format!(
-            "serialize attachment delete journal: {error}"
-        ))
-    })?;
+    let bytes = serialize_delete_journal(&journal)?;
     publish_static_file(
         &requirement_root,
         DELETE_JOURNAL_FILE,
@@ -2513,6 +2579,49 @@ fn validate_requirement_id(requirement_id: &str) -> Result<(), AppError> {
         .map_err(|error| AppError::BadRequest(format!("invalid requirement id: {error}")))
 }
 
+/// Validate the only attachment path shape permitted in an Agent-visible
+/// AutoWork goal. This deliberately accepts no absolute/data-dir fallback.
+pub(crate) fn validate_prompt_attachment_path(
+    requirement_id: &str,
+    path: &str,
+) -> Result<(), AppError> {
+    RequirementId::parse(requirement_id.to_owned()).map_err(|_| {
+        AppError::Conflict(
+            "AutoWork attachment prompt has a non-canonical Requirement identity".to_owned(),
+        )
+    })?;
+    let prefix = format!("./{WORKSPACE_STAGE_REL_DIR}/{requirement_id}/");
+    let Some(disk_name) = path.strip_prefix(&prefix) else {
+        return Err(AppError::Conflict(
+            "AutoWork attachment prompt path is outside the frozen workspace staging root"
+                .to_owned(),
+        ));
+    };
+    if disk_name.is_empty()
+        || disk_name.contains('/')
+        || disk_name.contains('\\')
+        || disk_name.chars().any(char::is_control)
+    {
+        return Err(AppError::Conflict(
+            "AutoWork attachment prompt path is not a canonical staged file".to_owned(),
+        ));
+    }
+    let Some((attachment_id, extension)) = disk_name.rsplit_once('.') else {
+        return Err(AppError::Conflict(
+            "AutoWork attachment prompt path has no canonical image extension".to_owned(),
+        ));
+    };
+    if AttachmentId::parse(attachment_id.to_owned()).is_err()
+        || extension != extension.to_ascii_lowercase()
+        || !IMAGE_EXTENSIONS.contains(&extension)
+    {
+        return Err(AppError::Conflict(
+            "AutoWork attachment prompt path has an invalid attachment identity".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Lowercased extension when it is in the image whitelist.
 fn image_ext(name: &str) -> Option<String> {
     let ext = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
@@ -2578,9 +2687,11 @@ mod tests {
     ) {
         let db = init_database_memory().await.unwrap();
         sqlx::query(
-            "INSERT INTO conversations \
-             (conversation_id, user_id, name, type, status, created_at, updated_at) \
-             VALUES (?, ?, 'test', 'nomi', 'pending', 0, 0)",
+            "INSERT INTO agent_sessions (\
+                 agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                 agent_binding_json, next_seq, created_at\
+             ) VALUES (?, json_object('principal_kind','user','principal_id',?), \
+                       'live', 'Requirement attachment test', 0, 0, '{}', 1, 0)",
         )
         .bind(CONVERSATION_1)
         .bind(USER_1)
@@ -2604,7 +2715,6 @@ mod tests {
         let pool = db.pool().clone();
         let repo: Arc<dyn nomifun_db::IAttachmentRepository> =
             Arc::new(SqliteAttachmentRepository::new(pool.clone()));
-        Box::leak(Box::new(db));
         let data_dir = tempfile::tempdir().unwrap();
         let upload_root = tempfile::tempdir().unwrap();
         let store = AttachmentStore::new(data_dir.path().to_path_buf(), repo)
@@ -2652,6 +2762,44 @@ mod tests {
             status.success(),
             "create Windows directory junction with command: {command}"
         );
+    }
+
+    #[test]
+    fn delete_journal_size_limit_matches_serialization_and_recovery() {
+        let operation_id = AttachmentId::new().into_string();
+        let entry_for = |index| {
+            let attachment_id = format!("0190f5fe-7c00-7a00-8000-{index:012x}");
+            let disk_name = format!("{attachment_id}.png");
+            AttachmentDeleteJournalEntry {
+                attachment_id,
+                staged_name: expected_delete_staged_name(&disk_name, &operation_id),
+                disk_name,
+                identity_volume: 1,
+                identity_index: 1,
+            }
+        };
+        let mut journal = AttachmentDeleteJournal {
+            version: DELETE_JOURNAL_VERSION,
+            requirement_id: REQ_1.to_owned(),
+            operation_id: operation_id.clone(),
+            entries: Vec::new(),
+        };
+        let entry_bytes = serde_json::to_vec(&entry_for(0)).unwrap().len();
+        let base_bytes = serde_json::to_vec(&journal).unwrap().len();
+        let count = (MAX_DELETE_JOURNAL_BYTES as usize - base_bytes + 1) / (entry_bytes + 1);
+        journal.entries = (0..count).map(entry_for).collect();
+        validate_delete_journal(&journal, REQ_1, &[]).unwrap();
+        assert!(serialize_delete_journal(&journal).unwrap().len() as u64 <= MAX_DELETE_JOURNAL_BYTES);
+        journal.entries.push(entry_for(count));
+        let result = serialize_delete_journal(&journal);
+        assert!(result.is_err(), "oversized journal must be rejected before publication");
+        let error = result.err().unwrap();
+        assert!(error.to_string().contains("exceeds its maximum size"));
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join(DELETE_JOURNAL_FILE), serde_json::to_vec(&journal).unwrap()).unwrap();
+        let error = read_delete_journal(directory.path(), REQ_1, &[]).unwrap_err();
+        assert!(error.to_string().contains("exceeds its maximum size"));
     }
 
     #[tokio::test]
@@ -3243,6 +3391,105 @@ mod tests {
                 .exists()
         );
         assert!(stage_root.join(".gitignore").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_prompt_activation_holds_session_lease_until_blocking_stage_exits() {
+        let (store, _data_dir, upload_root) = store().await;
+        let source = put_upload(upload_root.path(), "leased.png", b"leased-stage");
+        store
+            .ingest(
+                REQ_1,
+                &[NewAttachmentRef {
+                    source_path: source,
+                    file_name: "leased.png".into(),
+                }],
+                None,
+            )
+            .await
+            .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let plan = store
+            .plan_for_prompt(REQ_1, Some(workspace.path()))
+            .await
+            .unwrap();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let pause = Arc::new(BlockingActivationTestPause {
+            workspace_key: workspace_stage_lock_key(workspace.path()),
+            entered: StdMutex::new(Some(entered_tx)),
+            released: StdMutex::new(false),
+            release_signal: std::sync::Condvar::new(),
+        });
+        *blocking_activation_test_pause_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+
+        let operation_gate = Arc::new(tokio::sync::RwLock::new(()));
+        let read_guard = Arc::clone(&operation_gate).read_owned().await;
+        let operation_lease: Arc<dyn Send + Sync> =
+            Arc::new(StdMutex::new(Some(read_guard)));
+        let store = Arc::new(store);
+        let task = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .activate_prompt_plan_with_operation_lease(&plan, operation_lease)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .expect("blocking staging must start")
+            .expect("blocking staging must signal");
+        *blocking_activation_test_pause_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            Arc::clone(&operation_gate).try_write_owned().is_err(),
+            "aborting the async waiter must not release the Session operation lease"
+        );
+
+        *pause
+            .released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        pause.release_signal.notify_all();
+        let write_guard = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(guard) = Arc::clone(&operation_gate).try_write_owned() {
+                    break guard;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Session lease must release after blocking staging exits");
+        drop(write_guard);
+    }
+
+    #[tokio::test]
+    async fn available_attachment_without_frozen_workspace_fails_without_source_disclosure() {
+        let (store, data_dir, upload_root) = store().await;
+        let source = put_upload(upload_root.path(), "private.png", b"private");
+        store
+            .ingest(
+                REQ_1,
+                &[NewAttachmentRef {
+                    source_path: source,
+                    file_name: "private.png".into(),
+                }],
+                None,
+            )
+            .await
+            .unwrap();
+
+        let error = store.plan_for_prompt(REQ_1, None).await.unwrap_err();
+        assert!(error.to_string().contains("frozen AgentSession workspace"));
+        assert!(!error.to_string().contains(&data_dir.path().to_string_lossy().to_string()));
     }
 
     #[tokio::test]

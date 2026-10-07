@@ -1,0 +1,18 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "manifest_version": "1.0.0",
+    "database_schema_digest": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8",
+    "rust_contract_schema_digest": "892310a97b12c3fb220189d4c9b068c0c042f95869742e2104329c62cfba11e0",
+    "package_schema_digest": "cb03f0e6ae6e74d1736879253ae9c7145d67116ed5464f346ef5435ea62ea687",
+    "official_preset_seed_manifest_digest": "7c8cc22d62bb60483dbbe7f3d05348244cdfcb7b06717f1666441daab3730afb",
+    "canonical_api_inventory_digest": "0dff87b295c7e967afb84ad461cbf6da41cec0960749137fd525990622d589d8",
+    "session_event_registry_digest": "db152ee7b650513c4ff7654f279495ce0f5d0628a9e5b388ce206841772eadba",
+    "error_registry_digest": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c",
+    "runtime_protocol_digest": "9032de7b801199422b5193b854f26b4db2eb793c1bd2e490f045c62cbaa88489",
+    "runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
+    "platform_validation_contract_digest": "2ad5072bfff0fb80034265b1e6a93f7eb036fceeec4a4515c13075bbb828c97a",
+    "confirmed_decision_contract_digest": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4"
+  },
+  "payload_digest": "d80495381e86ed1e41d7f27de41d58b25a4f10cb2a98c4e7b9dfac96f159aec9"
+}

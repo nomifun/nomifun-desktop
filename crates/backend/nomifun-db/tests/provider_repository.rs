@@ -1,13 +1,12 @@
-use nomifun_db::models::ConversationRow;
 use nomifun_db::{
-    CoordinatedProviderModelDelete, CreateProviderParams, CreateTerminalParams,
-    CreativeStudioTemplateRow, DbError, IConversationRepository,
+    CoordinatedProviderModelDelete, CreateProviderParams,
+    CreativeStudioTemplateRow, DbError,
     IProviderConnectionRepository, IProviderModelCapabilityRepository,
-    IProviderModelRepository, IProviderRepository, ITerminalRepository, NewProviderModel,
+    IProviderModelRepository, IProviderRepository, NewProviderModel,
     NewProviderModelCapability, ProviderModelCleanupPlan, ProviderModelProjectCleanup,
-    ProviderModelTemplateCleanup, SqliteConversationRepository,
+    ProviderModelTemplateCleanup,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
-    SqliteProviderModelRepository, SqliteProviderRepository, SqliteTerminalRepository,
+    SqliteProviderModelRepository, SqliteProviderRepository,
     UpdateProviderParams, UpsertProviderConnectionParams, init_database_memory,
 };
 
@@ -28,6 +27,7 @@ static CHAT_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProvide
     provider_params: "{}",
     context_limit: Some(128_000),
     output_limit: None,
+    compaction_threshold_pct: None,
 }];
 
 static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -45,6 +45,7 @@ static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         provider_params: "{\"seed\":7}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
 
 static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -62,6 +63,7 @@ static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         provider_params: "{}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
 
 static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -79,6 +81,7 @@ static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         provider_params: "{}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
 
 fn provider_params(provider_id: Option<&str>) -> CreateProviderParams<'_> {
@@ -167,6 +170,38 @@ async fn aggregate_create_persists_provider_model_capability_and_named_connectio
     .await
     .unwrap();
     assert_eq!(connection_count, 1);
+}
+
+#[tokio::test]
+async fn chat_compaction_threshold_survives_model_save() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let capability = [NewProviderModelCapability {
+        compaction_threshold_pct: Some(60),
+        ..CHAT_CAPABILITIES[0]
+    }];
+    providers
+        .create(provider_params(Some(PROVIDER_ID)), &model("chat", &capability), &[])
+        .await
+        .unwrap();
+    let repository = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    assert_eq!(
+        repository.get(PROVIDER_ID, "chat", "chat").await.unwrap().unwrap().compaction_threshold_pct,
+        Some(60)
+    );
+
+    let changed = [NewProviderModelCapability {
+        compaction_threshold_pct: Some(90),
+        ..CHAT_CAPABILITIES[0]
+    }];
+    SqliteProviderModelRepository::new(db.pool().clone())
+        .save(PROVIDER_ID, 0, &model("chat", &changed))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.get(PROVIDER_ID, "chat", "chat").await.unwrap().unwrap().compaction_threshold_pct,
+        Some(90)
+    );
 }
 
 #[tokio::test]
@@ -319,6 +354,7 @@ async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() 
             provider_params: "{}",
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
         },
         NewProviderModelCapability {
             task: "image_generation",
@@ -570,6 +606,121 @@ async fn stale_health_probe_cannot_overwrite_a_newer_invocation_graph() {
 }
 
 #[tokio::test]
+async fn technical_capability_downgrade_is_durable_preserved_by_probes_and_revision_fenced() {
+    let db = init_database_memory().await.unwrap();
+    SqliteProviderRepository::new(db.pool().clone())
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("chat", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+
+    assert!(
+        capabilities
+            .mark_technical_capability_unsupported(
+                PROVIDER_ID,
+                0,
+                "chat",
+                "chat",
+                "function_calling",
+            )
+            .await
+            .unwrap()
+    );
+    let stored = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    let health: serde_json::Value =
+        serde_json::from_str(stored.health.as_deref().unwrap()).unwrap();
+    assert_eq!(health["status"], "unknown");
+    assert_eq!(
+        health["unsupported_technical_capabilities"],
+        serde_json::json!(["function_calling"])
+    );
+
+    assert!(
+        capabilities
+            .set_health(
+                PROVIDER_ID,
+                0,
+                "chat",
+                "chat",
+                Some(r#"{"status":"healthy","latency":25}"#),
+            )
+            .await
+            .unwrap()
+    );
+    let probed = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    let health: serde_json::Value =
+        serde_json::from_str(probed.health.as_deref().unwrap()).unwrap();
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(
+        health["unsupported_technical_capabilities"],
+        serde_json::json!(["function_calling"])
+    );
+
+    assert!(
+        capabilities
+            .set_health(PROVIDER_ID, 0, "chat", "chat", None)
+            .await
+            .unwrap()
+    );
+    let cleared_probe = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    let health: serde_json::Value =
+        serde_json::from_str(cleared_probe.health.as_deref().unwrap()).unwrap();
+    assert_eq!(health["status"], "unknown");
+    assert_eq!(
+        health["unsupported_technical_capabilities"],
+        serde_json::json!(["function_calling"])
+    );
+    assert!(cleared_probe.health_checked_at.is_none());
+
+    let changed_capabilities = [NewProviderModelCapability {
+        endpoint: Some("/v2/chat/completions"),
+        ..CHAT_CAPABILITIES[0]
+    }];
+    SqliteProviderModelRepository::new(db.pool().clone())
+        .save(PROVIDER_ID, 0, &model("chat", &changed_capabilities))
+        .await
+        .unwrap();
+    assert!(
+        !capabilities
+            .mark_technical_capability_unsupported(
+                PROVIDER_ID,
+                0,
+                "chat",
+                "chat",
+                "streaming",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "chat", "chat")
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            .is_none(),
+        "model configuration changes reset negative observations"
+    );
+}
+
+#[tokio::test]
 async fn model_save_persists_distinct_async_route_endpoints() {
     let db = init_database_memory().await.unwrap();
     SqliteProviderRepository::new(db.pool().clone())
@@ -633,109 +784,6 @@ async fn clone_graph_copies_configuration_but_not_health() {
     assert_eq!(copied.protocol, "openai.chat_text");
     assert!(copied.health.is_none());
     assert!(copied.health_checked_at.is_none());
-}
-
-#[tokio::test]
-async fn managed_graph_replaces_membership_and_keeps_matching_capability_health() {
-    let db = init_database_memory().await.unwrap();
-    let repository = SqliteProviderRepository::new(db.pool().clone());
-    repository
-        .save_managed_graph(
-            provider_params(Some(PROVIDER_ID)),
-            &[
-                model("old", &CHAT_CAPABILITIES),
-                model("kept", &CHAT_CAPABILITIES),
-            ],
-        )
-        .await
-        .unwrap();
-    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
-    capabilities
-        .set_health(
-            PROVIDER_ID,
-            0,
-            "kept",
-            "chat",
-            Some(r#"{"status":"healthy"}"#),
-        )
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE provider_model_capabilities SET updated_at = 321 \
-         WHERE provider_id = ? AND model = 'kept' AND task = 'chat'",
-    )
-    .bind(PROVIDER_ID)
-    .execute(db.pool())
-    .await
-    .unwrap();
-
-    repository
-        .save_managed_graph(
-            provider_params(Some(PROVIDER_ID)),
-            &[
-                model("kept", &CHAT_CAPABILITIES),
-                model("new", &CHAT_CAPABILITIES),
-            ],
-        )
-        .await
-        .unwrap();
-    let models = SqliteProviderModelRepository::new(db.pool().clone())
-        .list_for_provider(PROVIDER_ID)
-        .await
-        .unwrap();
-    assert_eq!(
-        models
-            .iter()
-            .map(|row| row.model.as_str())
-            .collect::<Vec<_>>(),
-        ["kept", "new"]
-    );
-    assert!(
-        capabilities
-            .get(PROVIDER_ID, "kept", "chat")
-            .await
-            .unwrap()
-            .unwrap()
-            .health
-            .is_some()
-    );
-    assert!(
-        capabilities
-            .get(PROVIDER_ID, "old", "chat")
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    let mut changed_provider = provider_params(Some(PROVIDER_ID));
-    changed_provider.base_url = "https://managed.example.test/v2";
-    repository
-        .save_managed_graph(
-            changed_provider,
-            &[
-                model("kept", &CHAT_CAPABILITIES),
-                model("new", &CHAT_CAPABILITIES),
-            ],
-        )
-        .await
-        .unwrap();
-    let invalidated = capabilities
-        .get(PROVIDER_ID, "kept", "chat")
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(invalidated.health.is_none());
-    assert!(invalidated.health_checked_at.is_none());
-    assert_eq!(invalidated.updated_at, 321);
-    assert_eq!(
-        repository
-            .find_by_id(PROVIDER_ID)
-            .await
-            .unwrap()
-            .unwrap()
-            .config_revision,
-        2
-    );
 }
 
 #[tokio::test]
@@ -983,6 +1031,7 @@ async fn bedrock_provider_allows_the_manifest_defined_empty_base_url() {
         provider_params: "{}",
         context_limit: None,
         output_limit: Some(8192),
+        compaction_threshold_pct: None,
     }];
     let db = init_database_memory().await.unwrap();
     let repository = SqliteProviderRepository::new(db.pool().clone());
@@ -1012,149 +1061,6 @@ async fn bedrock_provider_allows_the_manifest_defined_empty_base_url() {
         .unwrap()
         .unwrap();
     assert_eq!(capability.output_limit, Some(8192));
-}
-
-#[tokio::test]
-async fn delete_clears_all_idmm_session_bypass_references_but_preserves_watch_config() {
-    const DELETED_PROVIDER: &str = "0190f5fe-7c00-7a00-8000-000000000020";
-    const RETAINED_PROVIDER: &str = "0190f5fe-7c00-7a00-8000-000000000021";
-
-    let db = init_database_memory().await.unwrap();
-    let provider_repo = SqliteProviderRepository::new(db.pool().clone());
-    insert_provider(&provider_repo, DELETED_PROVIDER, "deleted").await;
-    insert_provider(&provider_repo, RETAINED_PROVIDER, "retained").await;
-
-    let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-    let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
-    let conversation_id = nomifun_common::ConversationId::new().into_string();
-    conversation_repo
-        .create(&ConversationRow {
-            id: 0,
-            conversation_id: conversation_id.clone(),
-            user_id: owner.clone(),
-            name: "IDMM cleanup".to_owned(),
-            r#type: "nomi".to_owned(),
-            extra: r#"{"workspace":"/tmp/idmm"}"#.to_owned(),
-            delegation_policy: "automatic".to_owned(),
-            execution_model_pool: None,
-            decision_policy: "automatic".to_owned(),
-            execution_template_id: None,
-            model: None,
-            status: Some("pending".to_owned()),
-            source: Some("nomifun".to_owned()),
-            channel_chat_id: None,
-            pinned: false,
-            pinned_at: None,
-            cron_job_id: None,
-            preset_id: None,
-            preset_revision: None,
-            preset_snapshot: None,
-            created_at: 1,
-            updated_at: 1,
-        })
-        .await
-        .unwrap();
-    let conversation_idmm = serde_json::json!({
-        "fault_watch": {
-            "enabled": true,
-            "scan_interval_secs": 23,
-            "bypass_model": {
-                "provider_id": DELETED_PROVIDER,
-                "model": "fault-deleted"
-            }
-        },
-        "decision_watch": {
-            "enabled": true,
-            "scan_interval_secs": 41,
-            "bypass_model": {
-                "provider_id": RETAINED_PROVIDER,
-                "model": "decision-retained"
-            }
-        }
-    })
-    .to_string();
-    conversation_repo
-        .update_idmm(&conversation_id, Some(&conversation_idmm))
-        .await
-        .unwrap();
-
-    let terminal_repo = SqliteTerminalRepository::new(db.pool().clone());
-    let terminal = terminal_repo
-        .create(&CreateTerminalParams {
-            id: nomifun_common::TerminalId::new(),
-            name: "IDMM cleanup".to_owned(),
-            cwd: "/tmp".to_owned(),
-            command: "$SHELL".to_owned(),
-            args: "[]".to_owned(),
-            env: None,
-            backend: None,
-            mode: None,
-            cols: 80,
-            rows: 24,
-            user_id: nomifun_common::UserId::parse(owner).unwrap(),
-        })
-        .await
-        .unwrap();
-    let terminal_idmm = serde_json::json!({
-        "fault_watch": {
-            "enabled": true,
-            "max_retries": 8,
-            "bypass_model": {
-                "provider_id": RETAINED_PROVIDER,
-                "model": "fault-retained"
-            }
-        },
-        "decision_watch": {
-            "enabled": true,
-            "max_retries": 5,
-            "bypass_model": {
-                "provider_id": DELETED_PROVIDER,
-                "model": "decision-deleted"
-            }
-        }
-    })
-    .to_string();
-    terminal_repo
-        .update_idmm(terminal.terminal_id.as_str(), Some(&terminal_idmm))
-        .await
-        .unwrap();
-
-    provider_repo.delete(DELETED_PROVIDER).await.unwrap();
-
-    let conversation = conversation_repo
-        .get(&conversation_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let extra: serde_json::Value = serde_json::from_str(&conversation.extra).unwrap();
-    assert!(extra["idmm"]["fault_watch"].get("bypass_model").is_none());
-    assert_eq!(extra["idmm"]["fault_watch"]["enabled"], true);
-    assert_eq!(extra["idmm"]["fault_watch"]["scan_interval_secs"], 23);
-    assert_eq!(
-        extra["idmm"]["decision_watch"]["bypass_model"]["provider_id"],
-        RETAINED_PROVIDER
-    );
-    assert_eq!(extra["workspace"], "/tmp/idmm");
-
-    let terminal_idmm: serde_json::Value = serde_json::from_str(
-        &terminal_repo
-            .get_idmm(terminal.terminal_id.as_str())
-            .await
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        terminal_idmm["fault_watch"]["bypass_model"]["provider_id"],
-        RETAINED_PROVIDER
-    );
-    assert!(
-        terminal_idmm["decision_watch"]
-            .get("bypass_model")
-            .is_none()
-    );
-    assert_eq!(terminal_idmm["decision_watch"]["enabled"], true);
-    assert_eq!(terminal_idmm["decision_watch"]["max_retries"], 5);
 }
 
 #[tokio::test]
@@ -1235,87 +1141,6 @@ async fn model_delete_provider_revision(db: &nomifun_db::Database) -> i64 {
         .fetch_one(db.pool())
         .await
         .unwrap()
-}
-
-async fn add_chat_capability_to_model(db: &nomifun_db::Database, model: &str) {
-    let exists: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM provider_model_capabilities \
-         WHERE provider_id = ? AND model = ? AND task = 'chat'",
-    )
-    .bind(PROVIDER_ID)
-    .bind(model)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    if exists == 0 {
-        sqlx::query(
-            "INSERT INTO provider_model_capabilities \
-                (provider_id, model, task, traits, protocol, connection_role, endpoint, \
-                 allow_cross_origin_credentials, provider_params, context_limit, created_at, updated_at) \
-             VALUES (?, ?, 'chat', '[\"vision_input\"]', 'openai.chat_text', 'default', \
-                     '/chat/completions', 0, '{}', 128000, 1, 1)",
-        )
-        .bind(PROVIDER_ID)
-        .bind(model)
-        .execute(db.pool())
-        .await
-        .unwrap();
-    }
-}
-
-fn conversation_with_model(
-    user_id: &str,
-    model: Option<serde_json::Value>,
-    execution_model_pool: Option<serde_json::Value>,
-    status: &str,
-) -> ConversationRow {
-    let now = nomifun_common::now_ms();
-    ConversationRow {
-        id: 0,
-        conversation_id: nomifun_common::ConversationId::new().into_string(),
-        user_id: user_id.to_owned(),
-        name: "model deletion fixture".to_owned(),
-        r#type: "nomi".to_owned(),
-        extra: "{}".to_owned(),
-        delegation_policy: "automatic".to_owned(),
-        execution_model_pool: execution_model_pool.map(|value| value.to_string()),
-        decision_policy: "automatic".to_owned(),
-        execution_template_id: None,
-        model: model.map(|value| value.to_string()),
-        status: Some(if status == "running" {
-            "finished".to_owned()
-        } else {
-            status.to_owned()
-        }),
-        source: Some("nomifun".to_owned()),
-        channel_chat_id: None,
-        pinned: false,
-        pinned_at: None,
-        cron_job_id: None,
-        preset_id: None,
-        preset_revision: None,
-        preset_snapshot: None,
-        created_at: now,
-        updated_at: now,
-    }
-}
-
-fn model_json(model: &str) -> serde_json::Value {
-    serde_json::json!({
-        "provider_id": PROVIDER_ID,
-        "model": model,
-        "use_model": model,
-    })
-}
-
-fn model_pool(models: &[&str]) -> serde_json::Value {
-    serde_json::json!({
-        "mode": "range",
-        "models": models.iter().map(|model| serde_json::json!({
-            "provider_id": PROVIDER_ID,
-            "model": model,
-        })).collect::<Vec<_>>(),
-    })
 }
 
 async fn seed_model_cleanup_project(
@@ -1768,133 +1593,233 @@ async fn missing_model_returns_false_without_applying_cleanup() {
 }
 
 #[tokio::test]
-async fn coordinated_model_delete_retargets_idle_conversation_model_and_pool() {
+async fn graph_create_persists_all_models_labels_and_connections_atomically() {
     let db = init_database_memory().await.unwrap();
-    seed_model_delete_provider(&db, true).await;
-    let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-    let repo = SqliteConversationRepository::new(db.pool().clone());
-    let conversation = conversation_with_model(
-        &owner,
-        Some(model_json("delete-me")),
-        Some(model_pool(&["delete-me", "keep-me"])),
-        "finished",
-    );
-    let conversation_id = repo.create(&conversation).await.unwrap();
-    let models = SqliteProviderModelRepository::new(db.pool().clone());
-
-    assert!(
-        models
-            .delete_coordinated(&CoordinatedProviderModelDelete {
-                provider_id: PROVIDER_ID.to_owned(),
-                model: "delete-me".to_owned(),
-                expected_config_revision: model_delete_provider_revision(&db).await,
-                cleanup: ProviderModelCleanupPlan::default(),
-            })
-            .await
-            .unwrap()
-    );
-
-    let updated = repo.get(&conversation_id).await.unwrap().unwrap();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(updated.model.as_deref().unwrap()).unwrap(),
-        model_json("keep-me")
-    );
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(
-            updated.execution_model_pool.as_deref().unwrap()
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let (provider, models) = providers
+        .create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[
+                model("chat", &CHAT_CAPABILITIES),
+                model("voice", &VOICE_CAPABILITIES),
+            ],
+            &[Some("Chat label".into()), Some("Voice label".into())],
+            &[voice_connection(Some("Voice API"), "https://voice.example/v1")],
         )
-        .unwrap(),
-        model_pool(&["keep-me"])
-    );
-    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn coordinated_model_delete_rejects_running_conversation_without_writes() {
-    let db = init_database_memory().await.unwrap();
-    seed_model_delete_provider(&db, true).await;
-    add_chat_capability_to_model(&db, "keep-me").await;
-    let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-    let repo = SqliteConversationRepository::new(db.pool().clone());
-    let conversation = conversation_with_model(
-        &owner,
-        Some(model_json("delete-me")),
-        Some(model_pool(&["delete-me", "keep-me"])),
-        "running",
-    );
-    let conversation_id = repo.create(&conversation).await.unwrap();
-    let mut tx = db.pool().begin().await.unwrap();
-    let receipt_id = format!("test-running-{conversation_id}");
-    sqlx::query(
-        "INSERT INTO conversation_delivery_receipts \
-            (operation_id, message_id, conversation_id, projected_conversation_id, \
-             projected_message_id, user_id, kind, request_payload, status, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, NULL, ?, 'turn', '{}', 'accepted', 1, 1)",
-    )
-    .bind(&receipt_id)
-    .bind(nomifun_common::MessageId::new().into_string())
-    .bind(&conversation_id)
-    .bind(&conversation_id)
-    .bind(&owner)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE conversations SET status = 'running', active_turn_operation_id = ?, \
-             admission_epoch = admission_epoch + 1 WHERE conversation_id = ?",
-    )
-    .bind(&receipt_id)
-    .bind(&conversation_id)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    let models = SqliteProviderModelRepository::new(db.pool().clone());
-    let error = models
-        .delete_coordinated(&CoordinatedProviderModelDelete {
-            provider_id: PROVIDER_ID.to_owned(),
-            model: "delete-me".to_owned(),
-            expected_config_revision: 1,
-            cleanup: ProviderModelCleanupPlan::default(),
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::Conflict(message) if message.contains("running Conversation")));
-    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
-    let unchanged = repo.get(&conversation_id).await.unwrap().unwrap();
-    let expected_model = model_json("delete-me").to_string();
-    assert_eq!(unchanged.model.as_deref(), Some(expected_model.as_str()));
-}
-
-#[tokio::test]
-async fn coordinated_model_delete_clears_idle_conversation_when_no_chat_fallback_exists() {
-    let db = init_database_memory().await.unwrap();
-    seed_model_delete_provider(&db, false).await;
-    let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-    let repo = SqliteConversationRepository::new(db.pool().clone());
-    let conversation = conversation_with_model(
-        &owner,
-        Some(model_json("delete-me")),
-        Some(serde_json::json!({
-            "mode": "single",
-            "model": model_json("delete-me"),
-        })),
-        "finished",
-    );
-    let conversation_id = repo.create(&conversation).await.unwrap();
-    let models = SqliteProviderModelRepository::new(db.pool().clone());
-
-    models
-        .delete_coordinated(&CoordinatedProviderModelDelete {
-            provider_id: PROVIDER_ID.to_owned(),
-            model: "delete-me".to_owned(),
-            expected_config_revision: 0,
-            cleanup: ProviderModelCleanupPlan::default(),
-        })
         .await
         .unwrap();
 
-    let updated = repo.get(&conversation_id).await.unwrap().unwrap();
-    assert!(updated.model.is_none());
-    assert!(updated.execution_model_pool.is_none());
+    assert_eq!(provider.config_revision, 0);
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].model, "chat");
+    assert_eq!(models[0].display_name.as_deref(), Some("Chat label"));
+    assert_eq!(models[1].display_name.as_deref(), Some("Voice label"));
+    assert_eq!(
+        SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+            .list_for_provider(PROVIDER_ID)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        SqliteProviderConnectionRepository::new(db.pool().clone())
+            .get(PROVIDER_ID, "voice")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn graph_create_rolls_back_earlier_models_connections_and_provider() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let error = providers
+        .create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[model("valid", &CHAT_CAPABILITIES), model("invalid", &[])],
+            &[Some("First".into()), None],
+            &[voice_connection(None, "https://voice.example/v1")],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    for table in ["providers", "provider_models", "provider_model_capabilities", "provider_connections"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE provider_id = ?"))
+            .bind(PROVIDER_ID)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "{table} must roll back");
+    }
+}
+
+#[tokio::test]
+async fn graph_create_rejects_empty_duplicate_and_mismatched_model_sets() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    assert!(matches!(
+        providers.create_graph(provider_params(Some(PROVIDER_ID)), &[], &[], &[]).await,
+        Err(DbError::Conflict(_))
+    ));
+    assert!(matches!(
+        providers.create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[model("duplicate", &CHAT_CAPABILITIES), model("duplicate", &CHAT_CAPABILITIES)],
+            &[None, None], &[],
+        ).await,
+        Err(DbError::Conflict(_))
+    ));
+    assert!(matches!(
+        providers.create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[model("chat", &CHAT_CAPABILITIES)], &[], &[],
+        ).await,
+        Err(DbError::Conflict(_))
+    ));
+    assert!(providers.find_by_id(PROVIDER_ID).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn graph_connection_update_bumps_once_and_invalidates_only_changed_roles() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let spare_capabilities = [NewProviderModelCapability {
+        connection_role: "spare",
+        ..VOICE_CAPABILITIES[0]
+    }];
+    let spare_connection = UpsertProviderConnectionParams {
+        role: "spare",
+        ..voice_connection(None, "https://spare.example/v1")
+    };
+    providers
+        .create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[
+                model("chat", &CHAT_CAPABILITIES),
+                model("voice", &VOICE_CAPABILITIES),
+                model("spare", &spare_capabilities),
+            ],
+            &[None, None, None],
+            &[voice_connection(None, "https://voice.example/v1"), spare_connection],
+        )
+        .await
+        .unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    for (model, task) in [("chat", "chat"), ("voice", "speech_synthesis"), ("spare", "speech_synthesis")] {
+        capabilities.set_health(PROVIDER_ID, 0, model, task, Some(r#"{"status":"healthy"}"#))
+            .await.unwrap();
+    }
+    let connection_repository = SqliteProviderConnectionRepository::new(db.pool().clone());
+    let original = connection_repository.get(PROVIDER_ID, "voice").await.unwrap().unwrap();
+    let changed = providers.update_with_connections(
+        PROVIDER_ID,
+        0,
+        UpdateProviderParams { credentials_encrypted: Some("rotated-default"), ..Default::default() },
+        &[UpsertProviderConnectionParams {
+            credentials_encrypted: "rotated-voice",
+            ..voice_connection(Some("New label"), "https://new-voice.example/v1")
+        }],
+    ).await.unwrap();
+    assert_eq!(changed.config_revision, 1);
+    assert_eq!(changed.credentials_encrypted, "rotated-default");
+    let voice = connection_repository.get(PROVIDER_ID, "voice").await.unwrap().unwrap();
+    assert_eq!(voice.connection_id, original.connection_id);
+    assert_eq!(voice.created_at, original.created_at);
+    assert_eq!(voice.credentials_encrypted, "rotated-voice");
+    assert!(capabilities.get(PROVIDER_ID, "chat", "chat").await.unwrap().unwrap().health.is_none());
+    assert!(capabilities.get(PROVIDER_ID, "voice", "speech_synthesis").await.unwrap().unwrap().health.is_none());
+    assert!(capabilities.get(PROVIDER_ID, "spare", "speech_synthesis").await.unwrap().unwrap().health.is_some());
+
+    let label_only = providers.update_with_connections(
+        PROVIDER_ID, 1, UpdateProviderParams { name: Some("Gateway"), ..Default::default() },
+        &[UpsertProviderConnectionParams {
+            label: Some("Label only"), credentials_encrypted: "rotated-voice",
+            ..voice_connection(None, "https://new-voice.example/v1")
+        }],
+    ).await.unwrap();
+    assert_eq!(label_only.config_revision, 1);
+}
+
+#[tokio::test]
+async fn graph_connection_update_rolls_back_parent_and_earlier_role_on_failure() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers.create(
+        provider_params(Some(PROVIDER_ID)), &model("voice", &VOICE_CAPABILITIES),
+        &[voice_connection(None, "https://voice.example/v1")],
+    ).await.unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    capabilities.set_health(PROVIDER_ID, 0, "voice", "speech_synthesis", Some(r#"{"status":"healthy"}"#))
+        .await.unwrap();
+    let error = providers.update_with_connections(
+        PROVIDER_ID, 0,
+        UpdateProviderParams { credentials_encrypted: Some("must-roll-back"), ..Default::default() },
+        &[
+            voice_connection(None, "https://must-roll-back.example/v1"),
+            UpsertProviderConnectionParams { role: "default", ..voice_connection(None, "https://invalid.example/v1") },
+        ],
+    ).await.unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    let parent = providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap();
+    assert_eq!(parent.credentials_encrypted, "cipher");
+    assert_eq!(parent.config_revision, 0);
+    assert_eq!(SqliteProviderConnectionRepository::new(db.pool().clone())
+        .get(PROVIDER_ID, "voice").await.unwrap().unwrap().base_url, "https://voice.example/v1");
+    assert!(capabilities.get(PROVIDER_ID, "voice", "speech_synthesis").await.unwrap().unwrap().health.is_some());
+}
+
+#[tokio::test]
+async fn graph_model_sync_preserves_unselected_models_and_fences_stale_updates() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers.create(
+        provider_params(Some(PROVIDER_ID)), &model("unselected", &CHAT_CAPABILITIES), &[],
+    ).await.unwrap();
+    let saved = providers.save_graph_models(
+        PROVIDER_ID, 0,
+        &[model("first", &CHAT_CAPABILITIES), model("second", &IMAGE_CAPABILITIES)],
+        &[Some("First label".into()), None],
+    ).await.unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0].display_name.as_deref(), Some("First label"));
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 1);
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    assert!(models.get(PROVIDER_ID, "unselected").await.unwrap().is_some());
+    let stale = providers.save_graph_models(
+        PROVIDER_ID, 0, &[model("stale", &CHAT_CAPABILITIES)], &[None],
+    ).await.unwrap_err();
+    assert!(matches!(stale, DbError::Conflict(_)));
+    assert!(models.get(PROVIDER_ID, "stale").await.unwrap().is_none());
+    providers.save_graph_models(
+        PROVIDER_ID, 1,
+        &[model("first", &CHAT_CAPABILITIES), model("second", &IMAGE_CAPABILITIES)],
+        &[Some("Display only".into()), None],
+    ).await.unwrap();
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 1);
+}
+
+#[tokio::test]
+async fn graph_model_sync_rolls_back_earlier_model_and_rejects_deleted_parent() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers.create(
+        provider_params(Some(PROVIDER_ID)), &model("existing", &CHAT_CAPABILITIES), &[],
+    ).await.unwrap();
+    let error = providers.save_graph_models(
+        PROVIDER_ID, 0, &[model("first", &CHAT_CAPABILITIES), model("invalid", &[])],
+        &[Some("Must roll back".into()), None],
+    ).await.unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    assert!(models.get(PROVIDER_ID, "first").await.unwrap().is_none());
+    assert!(models.get(PROVIDER_ID, "existing").await.unwrap().is_some());
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 0);
+    providers.delete(PROVIDER_ID).await.unwrap();
+    let error = providers.save_graph_models(
+        PROVIDER_ID, 0, &[model("resurrection", &CHAT_CAPABILITIES)], &[None],
+    ).await.unwrap_err();
+    assert!(matches!(error, DbError::NotFound(_)));
+    assert!(models.get(PROVIDER_ID, "resurrection").await.unwrap().is_none());
 }

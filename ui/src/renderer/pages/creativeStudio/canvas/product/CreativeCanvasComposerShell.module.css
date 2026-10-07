@@ -480,40 +480,7 @@ select.settingsControl {
   }
 }
 
-@media (max-width: 760px) {
-  .positioner {
-    width: min(540px, calc(100vw - 32px));
-  }
 
-  .modelSelect {
-    width: auto;
-    flex: 1 1 120px;
-  }
-
-  .settingsSummary {
-    display: none;
-  }
-
-  .settingsButton {
-    width: 40px;
-    min-width: 40px;
-    max-width: 40px;
-    flex: 0 0 40px;
-    padding: 0;
-  }
-}
-
-@media (max-width: 420px) {
-  .retrySubmitButton {
-    width: 48px;
-    min-width: 48px;
-    padding: 0;
-  }
-
-  .retryLabel {
-    display: none;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .spin {

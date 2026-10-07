@@ -7,6 +7,8 @@
 import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from './turnDisclosureModel';
+import { projectAssistantText } from './processTraceDisplayModel';
+import { toDisplayText } from '@/common/chat/displayText';
 
 type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 
@@ -17,7 +19,6 @@ type ProcessStateItem =
   | { type: 'artifact' };
 
 export const mergeProcessStates = (states: TurnDisclosureProcessState[]): TurnDisclosureProcessState => {
-  if (states.includes('waiting')) return 'waiting';
   if (states.includes('running')) return 'running';
   if (states.includes('failed')) return 'failed';
   if (states.includes('canceled')) return 'canceled';
@@ -29,9 +30,8 @@ export const getToolMessagesProcessState = (messages: ToolProcessMessage[]): Tur
     if (message.type !== 'tool_group') return [];
     if (!Array.isArray(message.content)) return [];
     return message.content.map((tool) => {
-      if (tool.status === 'Confirming') return 'waiting';
       if (tool.status === 'Executing' || tool.status === 'Pending') return 'running';
-      if (tool.status === 'Error') return tool.confirmationDetails?.type === 'exec' ? 'completed' : 'failed';
+      if (tool.status === 'Error') return 'failed';
       if (tool.status === 'Canceled') return 'canceled';
       return 'completed';
     });
@@ -61,15 +61,17 @@ export const getProcessItemState = (item: ProcessStateItem): TurnDisclosureProce
   }
 
   switch (item.type) {
+    case 'text':
+      return item.position === 'left' && projectAssistantText(toDisplayText(item.content.content)).hasToolPayload
+        ? 'failed' : 'completed';
     case 'thinking':
       return item.content.status === 'done' ? 'completed' : 'running';
     case 'tool_call':
       return getToolMessagesProcessState([item]);
     case 'tool_group':
       return getToolMessagesProcessState([item]);
-    case 'permission':
-      return 'waiting';
     case 'agent_status':
+      if (item.content.turn_summary && item.content.turn_state === 'cancelled') return 'canceled';
       if (item.content.status === 'error') return 'failed';
       if (item.content.status === 'connecting' || item.content.status === 'preparing') return 'running';
       return 'completed';

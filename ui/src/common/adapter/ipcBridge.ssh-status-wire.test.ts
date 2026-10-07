@@ -106,9 +106,10 @@ describe('ssh live-status wire contract', () => {
     // written once on connect and never walked back). Live link state comes
     // only from ssh.status / the statuses snapshot.
     expect(source.includes('IApiSshStatus')).toBe(true);
+    const mapperStart = source.indexOf('const fromApiSshStatus');
     const statusesBlock = source.slice(
-      source.indexOf('const fromApiSshStatus'),
-      source.indexOf('// -----', source.indexOf('onStatus'))
+      mapperStart,
+      source.indexOf('// -----', source.indexOf('onStatus:', mapperStart))
     );
     expect(statusesBlock.length).toBeGreaterThan(0);
     expect(statusesBlock.includes('value.status')).toBe(false);

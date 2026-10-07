@@ -6,19 +6,28 @@
 
 import type { MessageId } from '@/common/types/ids';
 
-export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'other';
-export type TurnDisclosureProcessState = 'completed' | 'running' | 'waiting' | 'failed' | 'canceled';
+export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'metadata' | 'other';
+export type TurnDisclosureProcessState = 'completed' | 'running' | 'failed' | 'canceled';
 
 export interface TurnDisclosureInputItem {
   id: string;
   turnId?: MessageId;
   role: TurnDisclosureRole;
   createdAt: number;
+  /** Wall-clock content time; createdAt may instead be a stable history cursor. */
+  displayAt?: number;
   processStartedAt?: number;
   processEndedAt?: number;
   processState?: TurnDisclosureProcessState;
+  /** Canonical wall-clock interval supplied by the owning Turn projection. */
+  turnStartedAt?: number;
+  turnEndedAt?: number;
+  /** Terminal assistant rows (notably errors) own the settled outcome. */
+  terminal?: boolean;
   running?: boolean;
   sourceMessageIds?: MessageId[];
+  continuationOfMessageId?: MessageId;
+  publicText?: boolean;
 }
 
 export type TurnDisclosureOutputItem =
@@ -56,6 +65,24 @@ export interface AssignTurnIdOptions {
 }
 
 const unique = <T extends string>(values: T[]): T[] => Array.from(new Set(values.filter(Boolean)));
+
+export function collectPublicContinuationIds(
+  items: TurnDisclosureInputItem[], final: TurnDisclosureInputItem | undefined
+): ReadonlySet<string> {
+  const visible = new Set<string>();
+  if (!final?.turnId || final.role !== 'assistant' || final.terminal || final.publicText !== true) return visible;
+  const bySource = new Map<MessageId, TurnDisclosureInputItem>();
+  for (const entry of items) {
+    if (entry.turnId !== final.turnId || entry.role !== 'assistant' || entry.terminal || entry.publicText !== true) continue;
+    for (const source of entry.sourceMessageIds ?? []) bySource.set(source, entry);
+  }
+  let current: TurnDisclosureInputItem | undefined = final;
+  while (current && !visible.has(current.id)) {
+    visible.add(current.id);
+    current = current.continuationOfMessageId ? bySource.get(current.continuationOfMessageId) : undefined;
+  }
+  return visible;
+}
 
 const toProcessReceipt = (entry: TurnDisclosureInputItem): TurnDisclosureOutputItem => ({
   type: 'process_receipt',
@@ -142,7 +169,7 @@ const getEffectiveProcessState = (
   options: { isClosed: boolean }
 ): TurnDisclosureProcessState => {
   const state = getProcessState(entry);
-  if (options.isClosed && (state === 'running' || state === 'waiting')) {
+  if (options.isClosed && state === 'running') {
     return 'completed';
   }
   return state;
@@ -151,18 +178,6 @@ const getEffectiveProcessState = (
 const getProcessStartAt = (entry: TurnDisclosureInputItem): number => entry.processStartedAt ?? entry.createdAt;
 
 const getProcessEndAt = (entry: TurnDisclosureInputItem): number => entry.processEndedAt ?? entry.createdAt;
-
-const resolveDisclosureState = (
-  processItems: TurnDisclosureInputItem[],
-  options: { isClosed: boolean }
-): TurnDisclosureProcessState => {
-  const states = processItems.map((entry) => getEffectiveProcessState(entry, options));
-  if (states.includes('waiting')) return 'waiting';
-  if (states.includes('running')) return 'running';
-  if (states.includes('failed')) return 'failed';
-  if (states.includes('canceled')) return 'canceled';
-  return 'completed';
-};
 
 const buildEmptyRunningDisclosure = (
   turnId: MessageId,
@@ -196,6 +211,7 @@ const buildEmptyRunningSegmentOutput = (
   let insertedDisclosure = false;
 
   segment.forEach((entry) => {
+    if (entry.role === 'metadata') return;
     if (!insertedDisclosure && entry.role !== 'user' && entry.role !== 'other') {
       output.push(disclosure);
       insertedDisclosure = true;
@@ -210,11 +226,53 @@ const buildEmptyRunningSegmentOutput = (
   return output;
 };
 
+const buildEmptyClosedSegmentOutput = (
+  turnId: MessageId,
+  segment: TurnDisclosureInputItem[],
+  finalAssistantForTurn: TurnDisclosureInputItem | undefined,
+  turnStartedAt: number,
+  turnEndedAt: number
+): TurnDisclosureOutputItem[] => {
+  const state = finalAssistantForTurn?.processState === 'failed'
+    ? 'failed'
+    : finalAssistantForTurn?.processState === 'canceled'
+      ? 'canceled'
+      : 'completed';
+  const disclosure: TurnDisclosureOutputItem = {
+    type: 'turn_disclosure',
+    id: `turn-disclosure-${turnId}`,
+    turnId,
+    processItemIds: [],
+    sourceMessageIds: [],
+    startAt: turnStartedAt,
+    endAt: turnEndedAt,
+    state,
+    processItemStates: {},
+    running: false,
+    defaultCollapsed: true,
+  };
+  const output: TurnDisclosureOutputItem[] = [];
+  let inserted = false;
+  for (const entry of segment) {
+    if (entry.role === 'metadata') continue;
+    if (entry === finalAssistantForTurn && !inserted) {
+      output.push(disclosure);
+      inserted = true;
+    }
+    output.push({ type: 'item', id: entry.id });
+  }
+  if (!inserted) output.push(disclosure);
+  return output;
+};
+
 function buildSegmentOutput(
   segment: TurnDisclosureInputItem[],
   isClosed: boolean,
   finalAssistantForTurn?: TurnDisclosureInputItem,
-  turnStartedAt?: number
+  turnStartedAt?: number,
+  turnEndedAt?: number,
+  resultBeforeFailure?: TurnDisclosureInputItem,
+  publicContinuationIds: ReadonlySet<string> = new Set()
 ): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
@@ -222,37 +280,60 @@ function buildSegmentOutput(
   // A delayed event from another turn can split one logical turn into several
   // segments. Only the last assistant row across the whole turn is final
   // answer content; earlier assistant rows remain part of the process trace.
-  const finalAssistantIndex = finalAssistantForTurn
+  // A streaming assistant row is still provisional. A later tool call or
+  // model step can replace it, so keep it in the work journal
+  // until the turn actually closes.
+  const finalAssistantIndex = isClosed && finalAssistantForTurn
     ? segment.findIndex((entry) => entry === finalAssistantForTurn)
     : -1;
+  const resultBeforeFailureIndex = isClosed && resultBeforeFailure
+    ? segment.findIndex((entry) => entry === resultBeforeFailure)
+    : -1;
+  const isVisibleAssistant = (index: number) => index === finalAssistantIndex || index === resultBeforeFailureIndex
+    || (isClosed && publicContinuationIds.has(segment[index].id));
   const stateOptions = { isClosed };
 
   const processItems = segment.filter((entry, index) => {
-    if (entry.role === 'user' || entry.role === 'other') return false;
-    return index !== finalAssistantIndex;
+    if (entry.role === 'user' || entry.role === 'metadata' || entry.role === 'other') return false;
+    return !isVisibleAssistant(index);
   });
 
   if (!processItems.length) {
     if (!isClosed) {
       return buildEmptyRunningSegmentOutput(segment, buildEmptyRunningDisclosure(turnId, segment, turnStartedAt));
     }
-    return segment.map((entry) => ({ type: 'item', id: entry.id }));
+    const visibleEntries = segment.filter((entry) => entry.role !== 'metadata');
+    const fallbackStart = visibleEntries.length
+      ? Math.min(...visibleEntries.map(getProcessStartAt))
+      : 0;
+    const fallbackEnd = finalAssistantForTurn
+      ? getProcessEndAt(finalAssistantForTurn)
+      : visibleEntries.length
+        ? Math.max(...visibleEntries.map(getProcessEndAt))
+        : fallbackStart;
+    if (finalAssistantForTurn || turnEndedAt !== undefined) {
+      return buildEmptyClosedSegmentOutput(
+        turnId,
+        segment,
+        finalAssistantForTurn,
+        turnStartedAt ?? fallbackStart,
+        turnEndedAt ?? fallbackEnd
+      );
+    }
+    return visibleEntries.map((entry) => ({ type: 'item', id: entry.id }));
   }
 
-  const resolvedState = resolveDisclosureState(processItems, stateOptions);
   const terminalProcessState = getEffectiveProcessState(processItems.at(-1)!, stateOptions);
-  // The header describes lifecycle, not whether every individual operation
-  // succeeded. Once processing settles, every non-canceled turn is "processed";
-  // intermediate failures remain available in `processItemStates` for the
-  // expanded trace. While the turn is live, a failed step must not prematurely
-  // close the header because the agent may recover and continue.
+  const terminalState = finalAssistantForTurn
+    ? getEffectiveProcessState(finalAssistantForTurn, stateOptions)
+    : terminalProcessState;
+  // Intermediate failures remain visible in the expanded trace, while the
+  // terminal answer/error owns the settled Turn outcome.
   const state: TurnDisclosureProcessState = isClosed
-    ? terminalProcessState === 'canceled'
-      ? 'canceled'
+    ? terminalState === 'failed' || terminalState === 'canceled'
+      ? terminalState
       : 'completed'
-    : resolvedState === 'waiting'
-      ? 'waiting'
-      : 'running';
+    : 'running';
 
   const disclosure: TurnDisclosureOutputItem = {
     type: 'turn_disclosure',
@@ -266,26 +347,27 @@ function buildSegmentOutput(
     startAt: turnStartedAt ?? Math.min(...processItems.map(getProcessStartAt)),
     // A final answer is the authoritative task boundary. Process intervals are
     // only a fallback for background/process-only turns with no final answer.
-    endAt: finalAssistantForTurn
+    endAt: turnEndedAt ?? (finalAssistantForTurn
       ? getProcessEndAt(finalAssistantForTurn)
-      : Math.max(...processItems.map(getProcessEndAt)),
+      : Math.max(...processItems.map(getProcessEndAt))),
     state,
     processItemStates: Object.fromEntries(
       processItems.map((entry) => [entry.id, getEffectiveProcessState(entry, stateOptions)])
     ),
-    running: state === 'running' || state === 'waiting',
-    defaultCollapsed: state !== 'running' && state !== 'waiting',
+    running: state === 'running',
+    defaultCollapsed: state !== 'running',
   };
 
   const output: TurnDisclosureOutputItem[] = [];
   let insertedDisclosure = false;
 
   segment.forEach((entry, index) => {
-    if (entry.role !== 'user' && entry.role !== 'other' && index !== finalAssistantIndex) {
+    if (entry.role === 'metadata') return;
+    if (entry.role !== 'user' && entry.role !== 'other' && !isVisibleAssistant(index)) {
       return;
     }
 
-    if (index === finalAssistantIndex && !insertedDisclosure) {
+    if (isVisibleAssistant(index) && !insertedDisclosure) {
       output.push(disclosure);
       insertedDisclosure = true;
     }
@@ -348,11 +430,56 @@ const coalesceTurnDisclosures = (
       endAt: Math.max(existing.endAt, item.endAt),
       state,
       processItemStates: { ...existing.processItemStates, ...item.processItemStates },
-      running: state === 'running' || state === 'waiting',
-      defaultCollapsed: state !== 'running' && state !== 'waiting',
+      running: state === 'running',
+      defaultCollapsed: state !== 'running',
     };
   }
 
+  return output;
+};
+
+const placeTurnDisclosuresAtTurnBoundary = (
+  items: TurnDisclosureOutputItem[],
+  requestByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>,
+  finalAssistantByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>
+): TurnDisclosureOutputItem[] => {
+  const disclosureByTurn = new Map<MessageId, Extract<TurnDisclosureOutputItem, { type: 'turn_disclosure' }>>();
+  for (const item of items) {
+    if (item.type === 'turn_disclosure') disclosureByTurn.set(item.turnId, item);
+  }
+
+  const visibleItemIds = new Set(items.flatMap((item) => (item.type === 'item' ? [item.id] : [])));
+  const requestTurnByItemId = new Map<string, MessageId>();
+  for (const [turnId, request] of requestByTurn) {
+    if (visibleItemIds.has(request.id)) requestTurnByItemId.set(request.id, turnId);
+  }
+  const requestAnchoredTurns = new Set(requestTurnByItemId.values());
+
+  const finalAssistantTurnByItemId = new Map<string, MessageId>();
+  for (const [turnId, finalAssistant] of finalAssistantByTurn) {
+    if (!requestAnchoredTurns.has(turnId) && visibleItemIds.has(finalAssistant.id)) {
+      finalAssistantTurnByItemId.set(finalAssistant.id, turnId);
+    }
+  }
+  const anchoredTurns = new Set([...requestAnchoredTurns, ...finalAssistantTurnByItemId.values()]);
+
+  const output: TurnDisclosureOutputItem[] = [];
+  for (const item of items) {
+    if (item.type === 'turn_disclosure' && anchoredTurns.has(item.turnId)) {
+      continue;
+    }
+    if (item.type === 'item') {
+      const turnId = finalAssistantTurnByItemId.get(item.id);
+      const disclosure = turnId ? disclosureByTurn.get(turnId) : undefined;
+      if (disclosure) output.push(disclosure);
+    }
+    output.push(item);
+    if (item.type === 'item') {
+      const turnId = requestTurnByItemId.get(item.id);
+      const disclosure = turnId ? disclosureByTurn.get(turnId) : undefined;
+      if (disclosure) output.push(disclosure);
+    }
+  }
   return output;
 };
 
@@ -389,14 +516,32 @@ export function buildTurnDisclosureItems(
   const output: TurnDisclosureOutputItem[] = [];
   let segment: TurnDisclosureInputItem[] = [];
   const activeTurnId = options.tailClosed === true ? undefined : options.activeTurnId;
+  const requestByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const finalAssistantByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const turnStartedAtByTurn = new Map<MessageId, number>();
+  const turnEndedAtByTurn = new Map<MessageId, number>();
+  const terminalStateByTurn = new Map<MessageId, TurnDisclosureProcessState>();
+  const authoritativeStartedTurns = new Set<MessageId>();
   const processObservedAtByItemId = new Map<string, number>();
 
   for (const item of items) {
+    if (item.turnId && item.turnStartedAt !== undefined) {
+      turnStartedAtByTurn.set(item.turnId, item.turnStartedAt);
+      authoritativeStartedTurns.add(item.turnId);
+    }
+    if (item.turnId && item.turnEndedAt !== undefined) {
+      turnEndedAtByTurn.set(item.turnId, item.turnEndedAt);
+      if (item.role === 'metadata' && item.processState && item.processState !== 'running') {
+        terminalStateByTurn.set(item.turnId, item.processState);
+      }
+    }
     if (item.turnId && item.role === 'user') {
+      if (!requestByTurn.has(item.turnId)) requestByTurn.set(item.turnId, item);
       const currentStart = turnStartedAtByTurn.get(item.turnId);
-      if (currentStart === undefined || item.createdAt < currentStart) {
+      if (
+        !authoritativeStartedTurns.has(item.turnId) &&
+        (currentStart === undefined || item.createdAt < currentStart)
+      ) {
         turnStartedAtByTurn.set(item.turnId, item.createdAt);
       }
     }
@@ -405,25 +550,56 @@ export function buildTurnDisclosureItems(
       // Live rows are arrival-ordered and a delayed older text can be appended
       // after the real final answer. Choose by authoritative message time;
       // `>=` intentionally lets the later observation break timestamp ties.
-      if (!currentFinal || item.createdAt >= currentFinal.createdAt) {
+      if (
+        !currentFinal ||
+        (item.terminal === true && currentFinal.terminal !== true) ||
+        (item.terminal === currentFinal.terminal && item.createdAt >= currentFinal.createdAt)
+      ) {
         finalAssistantByTurn.set(item.turnId, item);
       }
     }
-    if (item.role !== 'user' && item.role !== 'other') {
+    if (item.role !== 'user' && item.role !== 'metadata' && item.role !== 'other') {
       processObservedAtByItemId.set(item.id, getProcessEndAt(item));
     }
   }
 
+  // Keep the last result produced before an error next to that error. It can
+  // describe partial effects the user needs; older progress stays in the trace.
+  // Text arriving after the terminal timestamp cannot replace this result.
+  const resultBeforeFailureByTurn = new Map<MessageId, TurnDisclosureInputItem>();
+  for (const item of items) {
+    if (!item.turnId || item.role !== 'assistant' || item.terminal) continue;
+    const terminal = finalAssistantByTurn.get(item.turnId);
+    if (!terminal?.terminal || terminal.processState !== 'failed') continue;
+    const usesWallTime = item.displayAt !== undefined && terminal.turnEndedAt !== undefined;
+    const contentTime = usesWallTime ? item.displayAt! : item.createdAt;
+    const terminalTime = usesWallTime ? terminal.turnEndedAt! : terminal.createdAt;
+    if (contentTime > terminalTime) continue;
+    const previous = resultBeforeFailureByTurn.get(item.turnId);
+    const latest = !previous || (item.displayAt !== undefined && previous.displayAt !== undefined
+      ? item.displayAt >= previous.displayAt
+      : item.createdAt >= previous.createdAt);
+    if (latest) resultBeforeFailureByTurn.set(item.turnId, item);
+  }
+
+  const publicContinuationIds = new Map<MessageId, ReadonlySet<string>>();
+  for (const [turn, final] of finalAssistantByTurn) {
+    publicContinuationIds.set(turn, collectPublicContinuationIds(items, final));
+  }
   const flush = (fallbackClosed: boolean) => {
     if (!segment.length) return;
     const segmentTurnId = segment[0]?.turnId;
-    const isClosed = options.tailClosed === true || (activeTurnId ? segmentTurnId !== activeTurnId : fallbackClosed);
+    const isClosed = (segmentTurnId !== undefined && turnEndedAtByTurn.has(segmentTurnId))
+      || options.tailClosed === true || (activeTurnId ? segmentTurnId !== activeTurnId : fallbackClosed);
     output.push(
       ...buildSegmentOutput(
         segment,
         isClosed,
         segmentTurnId ? finalAssistantByTurn.get(segmentTurnId) : undefined,
-        segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined
+        segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined,
+        segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined,
+        segmentTurnId ? resultBeforeFailureByTurn.get(segmentTurnId) : undefined,
+        segmentTurnId ? publicContinuationIds.get(segmentTurnId) : undefined
       )
     );
     segment = [];
@@ -432,7 +608,9 @@ export function buildTurnDisclosureItems(
   for (const item of items) {
     if (!item.turnId) {
       flush(true);
-      output.push(item.role === 'process' ? toProcessReceipt(item) : { type: 'item', id: item.id });
+      if (item.role !== 'metadata') {
+        output.push(item.role === 'process' ? toProcessReceipt(item) : { type: 'item', id: item.id });
+      }
       continue;
     }
 
@@ -446,8 +624,20 @@ export function buildTurnDisclosureItems(
 
   flush(options.tailClosed === true);
   // Delayed events can make one logical turn appear in multiple non-contiguous
-  // segments. Keep ordinary transcript items in arrival order, but fold their
-  // synthetic process metadata into the first disclosure so IDs/DOM controls
-  // remain unique and one turn can never render two "processed" headers.
-  return applyStopNotice(coalesceTurnDisclosures(output, processObservedAtByItemId), options.stopNotice);
+  // segments. Keep ordinary transcript items in arrival order, fold their
+  // synthetic process metadata into one disclosure, then place that disclosure
+  // after the visible request (or before the final answer for a background
+  // turn). Persisted process rows may arrive after several later messages;
+  // leaving the synthetic header there stacks old "processed" rows below the
+  // newest text.
+  const coalesced = coalesceTurnDisclosures(output, processObservedAtByItemId);
+  const placed = placeTurnDisclosuresAtTurnBoundary(coalesced, requestByTurn, finalAssistantByTurn);
+  // Durable terminal metadata wins over partial text and stale live tool rows,
+  // including after reload when the in-memory stop notice no longer exists.
+  const authoritative = placed.map((item): TurnDisclosureOutputItem => {
+    if (item.type !== 'turn_disclosure') return item;
+    const state = terminalStateByTurn.get(item.turnId);
+    return state ? { ...item, state, running: false, defaultCollapsed: true } : item;
+  });
+  return applyStopNotice(authoritative, options.stopNotice);
 }

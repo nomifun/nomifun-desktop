@@ -5,289 +5,364 @@
  */
 
 import { ipcBridge } from '@/common';
-import { configService } from '@/common/config/configService';
-import type { IMcpServer } from '@/common/config/storage';
-import { parseAgentId, type AgentId, type McpServerId } from '@/common/types/ids';
-import {
-  MAX_AGENT_EXECUTION_MODELS,
-  type TDecisionPolicy,
-  type TDelegationPolicy,
-  type TExecutionModelPool,
-  type TExecutionModelRef,
-} from '@/common/types/agentExecution/agentExecutionTypes';
-import { resolveLocaleKey } from '@/common/utils';
-
-import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
+import Composer, { ComposerSendButton } from '@/renderer/components/chat/Composer';
+import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
+import FileAttachButton from '@/renderer/components/media/FileAttachButton';
+import { ComposerSceneHeader } from '@/renderer/creation/ComposerSceneSelector';
+import GuidWorkspaceFootnote from './components/GuidWorkspaceFootnote';
+import { Robot } from '@icon-park/react';
+import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
-import { useConfig } from '@/renderer/hooks/config/useConfig';
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
-import { isEmoji, resolvePresetAvatarImageSrc } from '@/renderer/utils/model/presetPresentation';
-import { CUSTOM_AVATAR_IMAGE_MAP } from './constants';
-import AgentPillBar from './components/AgentPillBar';
-import ComposerEntryStrip, { type GuidActiveSkill } from './components/ComposerEntryStrip';
-import GuidPresetEditorHost from './components/GuidPresetEditorHost';
-import { AgentPillBarSkeleton } from './components/GuidSkeleton';
-import GuidActionRow from './components/GuidActionRow';
-import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
-import GuidInputCard from './components/GuidInputCard';
-import GuidCollaboratorSelector from './components/GuidCollaboratorSelector';
-import type { AppliedCollaborationTemplate } from '@/renderer/components/collaboration/collaborationTemplateModel';
-import GuidModelSelector from './components/GuidModelSelector';
-import GuidResourceCards from './components/GuidResourceCards';
-import MentionDropdown, { MentionSelectorBadge } from './components/MentionDropdown';
-import QuickActionButtons from './components/QuickActionButtons';
-import PresetPickerDrawer from './components/PresetPickerDrawer';
-import type { LocalizableSkill } from '@/renderer/pages/settings/skill/skillDisplay';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
+import SessionCapabilityPicker, { useSessionCapabilityCatalog, type SessionCapabilityDraft } from '@/renderer/components/chat/SessionCapabilityPicker';
+import { defaultSessionCapabilityDraft, toSessionCapabilitySelection } from '@/renderer/components/chat/SessionCapabilityPicker/model';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
-import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
-import { SummonDrawer, useCompanionRoster } from '@/renderer/pages/conversation/components/SummonPanel';
+import KnowledgeControl, { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
+import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
+import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
+import {
+  agentResourceKindMayRemainUnbound,
+  requiredAgentResourcePickerKinds,
+  resolveAgentResourceSelections,
+  type AgentResourceSelectionValue,
+} from '@/renderer/hooks/agent/agentResourceSelection';
+import { Alert, ConfigProvider } from '@arco-design/web-react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import { useTranslation } from 'react-i18next';
+import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
+import { PLUGIN_DEVELOPMENT_MODULE } from '@/common/types/pluginDevelopment';
+import { PLUGIN_FEATURE_VISIBLE } from '@/renderer/utils/plugins/pluginFeatureAvailability';
+import { launchPluginConversation, readPluginLaunchIntent, consumePluginLaunchIntent } from '../plugins/pluginConversationLaunch';
+import type { PluginLaunchIntent } from '../plugins/pluginConversationLaunch';
+import { initialPluginDelivery } from '../plugins/pluginConversationRequest';
+import { useLocation, useNavigate } from 'react-router-dom';
+import GuidAgentSelector from './components/GuidAgentSelector';
+import GuidCompanionShowcase from './components/GuidCompanionShowcase';
+import ChatModelSelector from '@/renderer/components/chat/ChatModelSelector';
+import MentionDropdown, {
+  MentionSelectorBadge,
+} from './components/MentionDropdown';
+import QuickActionButtons from './components/QuickActionButtons';
+import {
+  autoWorkStartDisabled,
+  isAutoWorkEntry,
+} from './hooks/autoWorkEntry';
+import { useGuidSessionOptions } from './hooks/useGuidSessionOptions';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
-import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
-import { useMiniAppQuickStart } from '@/renderer/hooks/agent/useMiniAppQuickStart';
-import { autoWorkStartDisabled, isAutoWorkEntry } from './hooks/autoWorkEntry';
+import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
+import { useGuidCollaboration } from './hooks/useGuidCollaboration';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
-import { useGuidSend } from './hooks/useGuidSend';
-import { useExecutionModelPool } from '@/renderer/pages/conversation/execution/useExecutionModelPool';
-import { reconcileModelRefs, sameModelRefs } from '@/renderer/pages/conversation/execution/executionModelRefs';
-import CollaborationPolicyControl from '@/renderer/components/collaboration/CollaborationPolicyControl';
-import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
+import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
+import { shouldStartGuidCollaboration, useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
-import { ensureBackendMcpCatalog } from '@/renderer/hooks/mcp/catalog';
-import { resolveAgentLogo } from '@/renderer/utils/model/agentLogo';
-import { ConfigProvider, Message } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { mutate as swrMutate } from 'swr';
-import type { Preset } from '@/common/types/agent/presetTypes';
-import { PRESET_CATALOG_SWR_KEY } from '@/renderer/hooks/preset/presetCatalog';
+import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
+import CreationControls, { CreationModelSelector } from '@/renderer/creation/CreationControls';
+import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
+import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
+import type { OfficialPresetKey } from '@/common/types/agentPlatform';
+import { createDefaultIdmmConfig } from '@/common/types/idmm';
+import type { ModelTechnicalCapability } from '@/common/config/storage';
+import {
+  capabilityOf,
+  capabilitySupportsTechnicalCapability,
+} from '@/common/utils/providerModels';
+import { modelDisplayLabel } from '@/common/utils/modelPresentation';
+import GuidModelCompatibilityNotice from './components/GuidModelCompatibilityNotice';
+import { modelCapabilityConfigurationRoute } from '@/renderer/pages/modelHub/modelConfigurationRoute';
+import {
+  reasoningEffortsForProtocol,
+  type SessionReasoningEffort,
+} from '@/common/types/reasoningEffort';
+
+type GuidNavigationState = {
+  resetAgentSelection?: boolean;
+  resetSessionOptions?: boolean;
+  selectedAgentPresetId?: string;
+  selectedAgentTemplateKey?: OfficialPresetKey;
+  workspace?: string;
+};
 
 const GuidPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
+  const pluginIntentToken = PLUGIN_FEATURE_VISIBLE
+    ? new URLSearchParams(location.search).get('pluginIntent')
+    : null;
+  const [pluginLaunchError, setPluginLaunchError] = useState('');
+  const [pluginLaunch, setPluginLaunch] = useState<{ intent: PluginLaunchIntent; bootstrap: string } | null>(null);
+  const appliedPluginIntent = useRef<string | null>(null);
   const pendingConversation = usePendingConversation();
+  const guidContainerRef = useRef<HTMLDivElement>(null);
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
+  const [resourcePickerReady, setResourcePickerReady] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<SessionReasoningEffort>();
+  const capabilityCatalog = useSessionCapabilityCatalog();
+  const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({ skillNames: [], mcpServerIds: [] });
+  const initializedCapabilities = useRef(false);
+  useEffect(() => {
+    if (capabilityCatalog.loading || capabilityCatalog.error || initializedCapabilities.current) return;
+    initializedCapabilities.current = true;
+    setCapabilityDraft(defaultSessionCapabilityDraft(capabilityCatalog.catalog));
+  }, [capabilityCatalog.catalog, capabilityCatalog.loading, capabilityCatalog.error]);
 
-  // Warm the conversation page's lazy chunk while the user is composing, so the
-  // first navigation into a conversation doesn't stall on a cold code-split
-  // load (Suspense AppLoader). Idempotent — React.lazy caches the import.
   useEffect(() => {
     void import('@renderer/pages/conversation');
   }, []);
-  const location = useLocation();
-  const guidContainerRef = useRef<HTMLDivElement>(null);
-  const openPresetDetailsRef = useRef<(() => void) | null>(null);
-  const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
 
-  const localeKey = resolveLocaleKey(i18n.language);
-  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const navigationState = location.state as GuidNavigationState | null;
+  const resetAgentRequested =
+    navigationState?.resetAgentSelection === true;
+  const resetSessionOptionsRequested =
+    navigationState?.resetSessionOptions === true;
+  const preselectedPresetId = navigationState?.selectedAgentPresetId;
+  const preselectedTemplateKey = navigationState?.selectedAgentTemplateKey;
 
-  // --- Mini-app mode ---
-  // When active the composer sends through `useMiniAppQuickStart` instead of the
-  // regular launch branches: engine pinned to Nomi, builder prompt injected, and
-  // the landing is `/conversation/:id` like every other launch.
-  const [miniAppMode, setMiniAppMode] = useState(false);
-  const miniAppQuickStart = useMiniAppQuickStart();
-  // Synchronous double-submit guard (mirrors `useGuidSend`'s `sendingRef`):
-  // `loading` is React state, so two gestures inside one tick would both pass
-  // the check and create two conversations.
-  const miniAppSendingRef = useRef(false);
-
-  // --- Drawer state ---
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerMode, setDrawerMode] = useState<'preset' | 'skills'>('preset');
-  const [delegationPolicy, setDelegationPolicy] = useState<TDelegationPolicy>('automatic');
-  const [decisionPolicy, setDecisionPolicy] = useState<TDecisionPolicy>('automatic');
-  const [collaborationModels, setCollaborationModels] = useState<TExecutionModelRef[]>(
-    () => configService.get('nomi.collaborationModels') ?? [],
-  );
-  const [selectedCollaborationTemplate, setSelectedCollaborationTemplate] =
-    useState<AppliedCollaborationTemplate | null>(null);
-
-  // --- Skills state ---
-  // All available skills (builtin auto-injected + user-imported custom) merged
-  // into one catalog for the action-row menu. Auto-injected skills default to
-  // checked; the rest are opt-in per conversation (or pre-checked when the
-  // active preset declares them in `included_skills`).
-  const [allSkills, setAllSkills] = useState<Array<LocalizableSkill & { isAuto: boolean }>>([]);
-  const [guidDisabledBuiltinSkills, setGuidDisabledBuiltinSkills] = useState<string[] | undefined>(undefined);
-  const [guidEnabledSkills, setGuidEnabledSkills] = useState<string[] | undefined>(undefined);
-  const [availableMcpServers, setAvailableMcpServers] = useState<IMcpServer[]>([]);
-  const [guidSelectedMcpServerIds, setGuidSelectedMcpServerIds] = useState<McpServerId[] | undefined>(undefined);
-
-  useEffect(() => {
-    Promise.all([ipcBridge.fs.listBuiltinAutoSkills.invoke(), ipcBridge.fs.listAvailableSkills.invoke()])
-      .then(([autoSkills, availableSkills]) => {
-        const autoNames = new Set(autoSkills.map((s) => s.name));
-        const merged: Array<LocalizableSkill & { isAuto: boolean }> = [
-          ...autoSkills.map((s) => ({
-            name: s.name,
-            description: s.description,
-            name_i18n: s.name_i18n,
-            description_i18n: s.description_i18n,
-            isAuto: true,
-          })),
-          ...availableSkills
-            .filter((s) => !autoNames.has(s.name))
-            .map((s) => ({
-              name: s.name,
-              description: s.description,
-              name_i18n: s.name_i18n,
-              description_i18n: s.description_i18n,
-              isAuto: false,
-            })),
-        ];
-        setAllSkills(merged);
-      })
-      .catch(() => setAllSkills([]));
-  }, []);
-
-  useEffect(() => {
-    void ensureBackendMcpCatalog()
-      .then(({ allServers }) => {
-        setAvailableMcpServers(allServers);
-        setGuidSelectedMcpServerIds((prev) => prev ?? []);
-      })
-      .catch((error) => {
-        console.error('[GuidPage] Failed to load MCP catalog:', error);
-        setAvailableMcpServers([]);
-        setGuidSelectedMcpServerIds((prev) => prev ?? []);
-      });
-  }, []);
-
-  const handleToggleSkill = useCallback((skillName: string, isAuto: boolean) => {
-    if (isAuto) {
-      setGuidDisabledBuiltinSkills((prev) => {
-        const list = prev ?? [];
-        return list.includes(skillName) ? list.filter((s) => s !== skillName) : [...list, skillName];
-      });
-    } else {
-      setGuidEnabledSkills((prev) => {
-        const list = prev ?? [];
-        return list.includes(skillName) ? list.filter((s) => s !== skillName) : [...list, skillName];
-      });
-    }
-  }, []);
-
-  const handleToggleMcpServer = useCallback((serverId: McpServerId) => {
-    setGuidSelectedMcpServerIds((prev) => {
-      const current = prev ?? [];
-      return current.includes(serverId) ? current.filter((id) => id !== serverId) : [...current, serverId];
-    });
-  }, []);
-
-  // --- Hooks ---
-  // Nomi is the only engine, and it picks models from configured providers.
-  const modelSelection = useGuidModelSelection('nomi');
-  const { configuredPairs, allPairs, isLoading: isModelCatalogLoading } = useExecutionModelPool();
-  const collaboratorReconciliation = useMemo(
-    () => (isModelCatalogLoading ? null : reconcileModelRefs(collaborationModels, configuredPairs, allPairs)),
-    [allPairs, collaborationModels, configuredPairs, isModelCatalogLoading],
-  );
-  const activeCollaborators = collaboratorReconciliation?.active ?? [];
-  const mainModelRef = useMemo<TExecutionModelRef | null>(
-    () =>
-      modelSelection.current_model
-        ? {
-            provider_id: modelSelection.current_model.id,
-            model: modelSelection.current_model.use_model,
-          }
-        : null,
-    [modelSelection.current_model?.id, modelSelection.current_model?.use_model],
-  );
-  useEffect(() => {
-    if (!selectedCollaborationTemplate || !mainModelRef) return;
-    const containsLead = selectedCollaborationTemplate.models.some(
-      (model) => model.provider_id === mainModelRef.provider_id && model.model === mainModelRef.model,
-    );
-    if (!containsLead) setSelectedCollaborationTemplate(null);
-  }, [mainModelRef, selectedCollaborationTemplate]);
-  const persistCollaborationModels = useCallback((next: TExecutionModelRef[]) => {
-    setCollaborationModels(next);
-    void configService.set('nomi.collaborationModels', next).catch((error) => {
-      console.error('[GuidPage] Failed to save collaboration models:', error);
-    });
-  }, []);
-  useEffect(() => {
-    if (!collaboratorReconciliation || collaboratorReconciliation.removed.length === 0) return;
-    if (sameModelRefs(collaborationModels, collaboratorReconciliation.retained)) return;
-    setSelectedCollaborationTemplate(null);
-    persistCollaborationModels(collaboratorReconciliation.retained);
-  }, [collaborationModels, collaboratorReconciliation, persistCollaborationModels]);
-  const executionModelPool = useMemo<TExecutionModelPool | undefined>(() => {
-    if (!mainModelRef) return undefined;
-    const models = [
-      mainModelRef,
-      ...activeCollaborators.filter(
-        (item) => item.provider_id !== mainModelRef.provider_id || item.model !== mainModelRef.model,
-      ),
-    ].slice(0, MAX_AGENT_EXECUTION_MODELS);
-    return models.length === 1 ? { mode: 'single', model: models[0] } : { mode: 'range', models };
-  }, [activeCollaborators, mainModelRef]);
-
-  const navState = location.state as {
-    resetPreset?: boolean;
-    selectedAgentKey?: string;
-  } | null;
-  const resetPresetRequested = navState?.resetPreset === true;
-  const preselectAgentKey = navState?.selectedAgentKey;
   const agentSelection = useGuidAgentSelection({
-    modelList: modelSelection.modelList,
-    localeKey,
-    resetPreset: resetPresetRequested,
-    preselectAgentKey,
+    resetAgentSelection: resetAgentRequested,
+    selectedAgentPresetId: preselectedPresetId,
+    selectedAgentTemplateKey: preselectedTemplateKey,
     locationKey: location.key,
   });
-
+  const modelSelection = useGuidModelSelection('nomi');
+  const collaboration = useGuidCollaboration(modelSelection.current_model);
   const guidInput = useGuidInput({
-    locationState: location.state as { workspace?: string } | null,
+    locationState: navigationState,
   });
-
-  // Advanced per-conversation drafts (knowledge mounts / AutoWork / IDMM /
-  // summon) — collected up front and applied right after the conversation is
-  // created.
-  const advancedConfig = useGuidAdvancedConfig();
-
-  // When AutoWork is armed (switch on + requirement tag) the primary button
-  // becomes a "Start AutoWork" action: clickable without typed input, and it
-  // creates the session + starts AutoWork without sending a first message (see
-  // planGuidEntry). Declared here because the mini-app branch below has to stay
-  // mutually exclusive with it.
-  const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
-
-  // Mini-app mode and an armed AutoWork entry are mutually exclusive: both claim
-  // the primary button, and silently launching a mini-app from the "Start
-  // AutoWork" affordance would be a lie. AutoWork wins — the mini-app entry is
-  // hidden while it is armed, and an already-armed mini-app mode is dropped.
   useEffect(() => {
-    if (isAutoWorkMode) setMiniAppMode(false);
-  }, [isAutoWorkMode]);
+    if (!pluginIntentToken || !agentSelection.isLoaded || agentSelection.isLoading
+      || appliedPluginIntent.current === pluginIntentToken) return;
+    let active = true;
+    void pluginPlatform.authoring.preflight.invoke({ selection: agentSelection.selection }).then(response => {
+      if (!active) return;
+      const intent = readPluginLaunchIntent(pluginIntentToken, response.owner_user_id);
+      if (!intent) { setPluginLaunchError(t('pluginPlatform.creator.launchFailed')); return; }
+      if (response.status !== 'ready') {
+        return launchPluginConversation(navigate, {}, pluginIntentToken);
+      }
+      appliedPluginIntent.current = pluginIntentToken;
+      const bootstrap = intent.requirement
+        ?? (intent.plugin_id ? t('pluginPlatform.authoring.editPrompt', { id: intent.plugin_id, revision: intent.expected_plugin_revision })
+          : intent.draft_id ? t('pluginPlatform.authoring.draftPrompt', { id: intent.draft_id })
+          : intent.template ? t('pluginPlatform.authoring.templatePrompt') : t('pluginPlatform.authoring.createPrompt'));
+      setPluginLaunch({ intent, bootstrap });
+      if (bootstrap) guidInput.setInput(bootstrap);
+      if (intent.files) guidInput.setFiles(intent.files);
+    }).catch(error => {
+      if (active) setPluginLaunchError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { active = false; };
+  }, [pluginIntentToken, agentSelection.selection, agentSelection.isLoaded, agentSelection.isLoading, navigate, t]);
+  const advancedConfig = useGuidSessionOptions();
+  const clearSentInput = useCallback(() => {
+    guidInput.setInput('');
+    guidInput.setFiles([]);
+    guidInput.setDir('');
+  }, [guidInput.setInput, guidInput.setFiles, guidInput.setDir]);
+  const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput, {
+    config: collaboration.config, model: modelSelection.current_model, ready: collaboration.ready,
+  });
+  useEffect(() => {
+    if (creation.draft.pendingPrompt === undefined) return;
+    guidInput.setInput(creation.draft.pendingPrompt);
+    creation.update(draft => ({ ...draft, pendingPrompt: undefined }));
+  }, [creation.draft.pendingPrompt, creation.update, guidInput.setInput]);
+  const presetCapabilities = useGuidPresetCapabilities(
+    agentSelection.selection.kind === 'preset'
+      ? agentSelection.selection.presetId
+      : undefined
+  );
 
-  // 召唤伙伴 draft entry (nomi launches only): pick in the shared drawer here,
-  // apply onto the conversation right after create.
-  const [summonDrawerOpen, setSummonDrawerOpen] = useState(false);
-  const companionRoster = useCompanionRoster();
-  const summonedCompanionName = advancedConfig.summon
-    ? (companionRoster.find((c) => c.companion_id === advancedConfig.summon?.companion_id)?.name ?? null)
-    : null;
+  const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
+    ? Boolean(agentSelection.selectedTemplate)
+    : !presetCapabilities.isLoading && !presetCapabilities.error;
+  const presetResourceKinds = agentSelection.selectedTemplate
+    ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
+    : presetCapabilities.requiredResourceKinds;
+  const presetCapabilityIds = agentSelection.selectedTemplate
+      ? new Set(agentSelection.selectedTemplate.seed.enabled_capabilities.map((selection) => selection.capability.id))
+    : presetCapabilities.capabilityIds;
+  const presetActionIds = agentSelection.selectedTemplate
+    ? new Set(
+        agentSelection.selectedTemplate.seed.enabled_capabilities.flatMap(
+          (selection) => selection.action_allowlist ?? []
+        )
+      )
+    : presetCapabilities.actionIds;
+  const selectedAgentRequiresToolCalls = presetActionIds.size > 0 || capabilityDraft.mcpServerIds.length > 0;
+  const requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = selectedAgentRequiresToolCalls
+    ? ['function_calling']
+    : [];
+  const currentModelProvider = modelSelection.modelList.find(
+    (provider) => provider.id === modelSelection.current_model?.id
+  );
+  const currentModelDefinition = currentModelProvider?.models.find(
+    (model) => model.model === modelSelection.current_model?.use_model
+  );
+  const currentModelCapability = currentModelDefinition?.capabilities.find(
+    (capability) => capability.task === 'chat'
+  );
+  const reasoningEffortOptions = capabilitySupportsTechnicalCapability(
+    currentModelCapability,
+    'reasoning'
+  )
+    ? reasoningEffortsForProtocol(currentModelCapability?.protocol)
+    : [];
+  useEffect(() => {
+    if (
+      currentModelCapability
+      && reasoningEffort !== undefined
+      && !reasoningEffortOptions.includes(reasoningEffort)
+    ) {
+      setReasoningEffort(undefined);
+    }
+  }, [currentModelCapability, reasoningEffort, reasoningEffortOptions]);
+  const missingTechnicalCapabilities = requiredTechnicalCapabilities.filter(
+    (technical) =>
+      !capabilitySupportsTechnicalCapability(currentModelCapability, technical)
+  );
+  const selectedAgentModelCompatible = missingTechnicalCapabilities.length === 0;
+  const selectedAgentModelIncompatible =
+    Boolean(modelSelection.current_model) && !selectedAgentModelCompatible;
+  const currentModelLabel = modelDisplayLabel(
+    modelSelection.current_model?.use_model ?? '',
+    currentModelDefinition?.display_name
+  );
+  const currentProviderLabel =
+    currentModelProvider?.name ?? modelSelection.current_model?.name ?? '';
+  const compatibleModelCount = modelSelection.modelList.reduce(
+    (count, provider) => count + modelSelection.getAvailableModels(provider).filter((model) => {
+      const capability = capabilityOf(provider, model, 'chat');
+      return requiredTechnicalCapabilities.every((technical) =>
+        capabilitySupportsTechnicalCapability(capability, technical)
+      );
+    }).length,
+    0
+  );
+  const canConfigureCurrentModel = Boolean(modelSelection.current_model);
+  const collaborationEnabled = presetResourceResolutionReady
+    && presetCapabilityIds.has('agent.collaboration');
+  const knowledgeEnabled = presetResourceResolutionReady
+    && presetResourceKinds.has('knowledge_base');
+  const knowledgeRequiresWrite = [...presetActionIds].some((action) =>
+    action === 'knowledge/write' || action === 'knowledge/autogen'
+  );
+  // Every concrete resource chosen for this launch crosses the same canonical
+  // AgentSession admission boundary. Knowledge keeps its compact header control
+  // but contributes to this same frozen resource request at Session creation.
+  const resourcePickerKinds = new Set(
+    [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base' && kind !== 'mcp_server')
+  );
+  const optionalResourcePickerKinds = requiredAgentResourcePickerKinds(
+    [...resourcePickerKinds].filter(agentResourceKindMayRemainUnbound)
+  );
+  const resourceSelectionResolution = resolveAgentResourceSelections(
+    resourcePickerKinds,
+    resourceSelectionValue
+  );
+  const knowledgeResourceSelections = knowledgeEnabled && advancedConfig.knowledge.enabled
+    ? advancedConfig.knowledge.kb_ids.map((resourceId) => ({
+        resource_kind: 'knowledge_base',
+        resource_id: resourceId,
+      }))
+    : [];
+  const sessionResourceSelections = [
+    ...resourceSelectionResolution.selections,
+    ...knowledgeResourceSelections,
+  ];
+  const knowledgePolicy = knowledgeResourceSelections.length > 0
+    ? {
+        writeback: advancedConfig.knowledge.writeback,
+        writeback_eagerness: advancedConfig.knowledge.writeback_eagerness,
+      }
+    : undefined;
+  const advancedControlsEnabled = presetResourceResolutionReady && presetCapabilityIds.size > 0;
+  const idmmControlEnabled = presetResourceResolutionReady;
+  const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
+  const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
+  const collaborationLaunchConfigured = collaborationEnabled
+    && shouldStartGuidCollaboration(collaboration.config);
+  const resourceSelectionsReady = presetResourceResolutionReady
+    && resourcePickerReady
+    && resourceSelectionResolution.missingKinds.length === 0;
+  // A workspace chosen before the Agent target (for example from a project
+  // drawer's "new conversation" action) is explicit user intent. Keep that
+  // project context visible and bind it on send even when the selected target
+  // does not otherwise expose an optional workspace picker.
+  const workspaceEnabled = (
+    Boolean(guidInput.dir.trim()) ||
+    (presetResourceResolutionReady && presetResourceKinds.has('workspace')));
+  const hasAgentLaunchTarget = agentSelection.selection.kind === 'template'
+    ? Boolean(agentSelection.selectedTemplate)
+    : Boolean(
+        agentSelection.selectedPreset?.current_stable_revision &&
+          presetResourceResolutionReady
+      );
+  const hasLaunchTarget = hasAgentLaunchTarget
+    && Boolean(modelSelection.current_model)
+    && selectedAgentModelCompatible;
+  const selectedAgentResourceKey = agentSelection.selection.kind === 'template'
+    ? `template:${agentSelection.selection.templateKey}`
+    : `preset:${agentSelection.selection.presetId}`;
+  const appliedIdmmDefaultRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    setResourceSelectionValue({});
+    advancedConfig.setKnowledge(defaultKnowledgeBinding());
+  }, [advancedConfig.setKnowledge, selectedAgentResourceKey]);
+  useEffect(() => {
+    if (!presetResourceResolutionReady) return;
+    const sourceKey = `${location.key}:${selectedAgentResourceKey}`;
+    if (appliedIdmmDefaultRef.current === sourceKey) return;
+    advancedConfig.setIdmmDefault(
+      agentSelection.selection.kind === 'preset'
+        ? presetCapabilities.idmm
+        : createDefaultIdmmConfig()
+    );
+    appliedIdmmDefaultRef.current = sourceKey;
+  }, [
+    advancedConfig.setIdmmDefault,
+    agentSelection.selection.kind,
+    location.key,
+    presetCapabilities.idmm,
+    presetResourceResolutionReady,
+    selectedAgentResourceKey,
+  ]);
 
   const mention = useGuidMention({
-    availableAgents: agentSelection.availableAgents,
-    customAgentAvatarMap: agentSelection.customAgentAvatarMap,
-    selectedAgentKey: agentSelection.selectedAgentKey,
-    setSelectedAgentKey: agentSelection.setSelectedAgentKey,
+    presets: agentSelection.presets,
+    officialTemplates: agentSelection.officialTemplates,
+    selection: agentSelection.selection,
+    setSelection: agentSelection.setSelection,
+    selectedPreset: agentSelection.selectedPreset,
     setInput: guidInput.setInput,
-    selectedAgentInfo: agentSelection.selectedAgentInfo,
   });
 
   const send = useGuidSend({
-    // Input state
+    requiredModules: pluginIntentToken ? [PLUGIN_DEVELOPMENT_MODULE] : undefined,
+    pluginDelivery: pluginIntentToken
+      ? initialPluginDelivery(pluginLaunch?.intent ?? null, guidInput.input, pluginLaunch?.bootstrap ?? '') : undefined,
+    beforeSend: pluginIntentToken ? async () => {
+      const result = await pluginPlatform.authoring.preflight.invoke({ selection: agentSelection.selection });
+      if (result.status !== 'ready') {
+        await launchPluginConversation(navigate, { requirement: guidInput.input, files: guidInput.files }, pluginIntentToken);
+        throw new Error(t('pluginPlatform.authoring.moduleNeeded'));
+      }
+    } : undefined,
+    afterSend: pluginIntentToken ? () => consumePluginLaunchIntent(pluginIntentToken) : undefined,
     input: guidInput.input,
     setInput: guidInput.setInput,
     files: guidInput.files,
@@ -296,120 +371,39 @@ const GuidPage: React.FC = () => {
     setDir: guidInput.setDir,
     setLoading: guidInput.setLoading,
     loading: guidInput.loading,
-
-    // Agent state
-    selectedAgent: agentSelection.selectedAgent,
-    selectedAgentKey: agentSelection.selectedAgentKey,
-    selectedAgentInfo: agentSelection.selectedAgentInfo,
-    selectedMode: agentSelection.selectedMode,
+    selection: agentSelection.selection,
+    selectedPreset: agentSelection.selectedPreset,
+    selectedTemplate: agentSelection.selectedTemplate,
     current_model: modelSelection.current_model,
-
-    // Agent helpers
-    findAgentByKey: agentSelection.findAgentByKey,
-    getEffectiveAgentType: agentSelection.getEffectiveAgentType,
-    guidDisabledBuiltinSkills,
-    guidEnabledSkills,
-    availableMcpServers,
-    selectedMcpServerIds: guidSelectedMcpServerIds,
-    applyAdvancedConfig: advancedConfig.applyToConversation,
-    autoWork: advancedConfig.autoWork,
-    delegationPolicy,
-    executionModelPool,
-    decisionPolicy,
-    executionTemplateId: selectedCollaborationTemplate?.execution_template_id,
-
-    // Mention state reset
+    reasoningEffort,
+    applyAdvancedConfig: (conversationId) =>
+      advancedConfig.applyToConversation(conversationId, {
+        allowAutomation: advancedControlsEnabled || idmmControlEnabled,
+      }),
+    autoWork: effectiveAutoWork,
+    workspaceEnabled,
+    resourceResolutionReady: selectedAgentModelCompatible
+      && resourceSelectionsReady
+      && initializedCapabilities.current && !capabilityCatalog.loading && !capabilityCatalog.error
+      && (!collaborationEnabled || collaboration.ready),
+    collaboration: collaborationEnabled ? collaboration.config : undefined,
+    resourceSelections: sessionResourceSelections,
+    sessionCapabilities: toSessionCapabilitySelection(capabilityDraft),
+    knowledgePolicy,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
     setMentionSelectorOpen: mention.setMentionSelectorOpen,
     setMentionActiveIndex: mention.setMentionActiveIndex,
-
-    // Navigation
     navigate,
     t,
-
-    // Instant "creating conversation" loading overlay (ConversationShell-level)
     beginPending: pendingConversation.begin,
     endPending: pendingConversation.end,
   });
-
-  // --- Coordinated handlers (depend on multiple hooks) ---
-  /**
-   * Composer submit. Mini-app mode owns the send path end to end and skips
-   * every `useGuidSend` branch: the launch is always one Nomi conversation
-   * carrying the builder prompt, so none of the engine/preset/AutoWork
-   * negotiation applies. The staged composer inputs (model, workspace dir,
-   * attachments) still travel with it — dropping them silently would lose the
-   * user's files. The pending overlay is reused so the transition looks
-   * identical to a normal launch.
-   */
-  const handleComposerSend = useCallback(() => {
-    // An armed AutoWork entry always wins: the effect above already dropped
-    // mini-app mode, and this second read makes the exclusion synchronous.
-    if (!miniAppMode || isAutoWorkMode) {
-      send.sendMessageHandler();
-      return;
-    }
-    const prompt = guidInput.input.trim();
-    if (!prompt || guidInput.loading || miniAppSendingRef.current) return;
-    miniAppSendingRef.current = true;
-    guidInput.setLoading(true);
-    pendingConversation.begin({
-      input: guidInput.input,
-      files: guidInput.files.length > 0 ? guidInput.files : undefined,
-      sendsInitialMessage: true,
-    });
-    void miniAppQuickStart
-      .start({
-        prompt,
-        model: modelSelection.current_model,
-        dir: guidInput.dir,
-        files: guidInput.files,
-      })
-      .then((started) => {
-        if (!started) return;
-        // Same teardown as the normal path, so a same-route return to the start
-        // page does not resurrect the launched draft.
-        guidInput.setInput('');
-        guidInput.setFiles([]);
-        guidInput.setDir('');
-        mention.setMentionOpen(false);
-        mention.setMentionQuery(null);
-        mention.setMentionSelectorOpen(false);
-        mention.setMentionActiveIndex(0);
-        setMiniAppMode(false);
-      })
-      .finally(() => {
-        miniAppSendingRef.current = false;
-        guidInput.setLoading(false);
-        pendingConversation.end();
-      });
-  }, [
-    miniAppMode,
-    isAutoWorkMode,
-    send.sendMessageHandler,
-    guidInput.input,
-    guidInput.loading,
-    guidInput.files,
-    guidInput.dir,
-    guidInput.setInput,
-    guidInput.setFiles,
-    guidInput.setDir,
-    guidInput.setLoading,
-    mention.setMentionOpen,
-    mention.setMentionQuery,
-    mention.setMentionSelectorOpen,
-    mention.setMentionActiveIndex,
-    modelSelection.current_model,
-    miniAppQuickStart.start,
-    pendingConversation,
-  ]);
 
   const handleInputChange = useCallback(
     (value: string) => {
       guidInput.setInput(value);
       const match = value.match(mention.mentionMatchRegex);
-      // 首页不根据输入 @ 呼起 mention 列表，占位符里的 @agent 仅为提示，选 agent 用顶部栏或下拉手动选
       if (match) {
         mention.setMentionQuery(match[1]);
         mention.setMentionOpen(false);
@@ -418,11 +412,17 @@ const GuidPage: React.FC = () => {
         mention.setMentionOpen(false);
       }
     },
-    [mention.mentionMatchRegex, guidInput.setInput, mention.setMentionQuery, mention.setMentionOpen],
+    [
+      guidInput.setInput,
+      mention.mentionMatchRegex,
+      mention.setMentionOpen,
+      mention.setMentionQuery,
+    ]
   );
 
   const [sendKeyPref] = useConfig('chat.sendKey');
   const sendKey = sendKeyPref ?? 'enter';
+  const submitInput = creation.draft.mode ? creation.send : send.sendMessageHandler;
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -432,21 +432,33 @@ const GuidPage: React.FC = () => {
       ) {
         event.preventDefault();
         if (mention.filteredMentionOptions.length === 0) return;
-        mention.setMentionActiveIndex((prev) => {
+        mention.setMentionActiveIndex((previous) => {
           if (event.key === 'ArrowDown') {
-            return (prev + 1) % mention.filteredMentionOptions.length;
+            return (
+              (previous + 1) % mention.filteredMentionOptions.length
+            );
           }
-          return (prev - 1 + mention.filteredMentionOptions.length) % mention.filteredMentionOptions.length;
+          return (
+            (previous - 1 + mention.filteredMentionOptions.length) %
+            mention.filteredMentionOptions.length
+          );
         });
         return;
       }
-      if ((mention.mentionOpen || mention.mentionSelectorOpen) && event.key === 'Enter' && !event.shiftKey) {
+
+      if (
+        (mention.mentionOpen || mention.mentionSelectorOpen) &&
+        event.key === 'Enter' &&
+        !event.shiftKey
+      ) {
         event.preventDefault();
         if (mention.filteredMentionOptions.length > 0) {
           const query = mention.mentionQuery?.toLowerCase();
           const exactMatch = query
             ? mention.filteredMentionOptions.find(
-                (option) => option.label.toLowerCase() === query || option.tokens.has(query),
+                (option) =>
+                  option.label.toLowerCase() === query ||
+                  option.tokens.has(query)
               )
             : undefined;
           const selected =
@@ -464,12 +476,18 @@ const GuidPage: React.FC = () => {
         mention.setMentionActiveIndex(0);
         return;
       }
-      if (mention.mentionOpen && (event.key === 'Backspace' || event.key === 'Delete') && !mention.mentionQuery) {
+
+      if (
+        mention.mentionOpen &&
+        (event.key === 'Backspace' || event.key === 'Delete') &&
+        !mention.mentionQuery
+      ) {
         mention.setMentionOpen(false);
         mention.setMentionQuery(null);
         mention.setMentionActiveIndex(0);
         return;
       }
+
       if (
         !mention.mentionOpen &&
         mention.mentionSelectorVisible &&
@@ -482,7 +500,11 @@ const GuidPage: React.FC = () => {
         mention.setMentionActiveIndex(0);
         return;
       }
-      if ((mention.mentionOpen || mention.mentionSelectorOpen) && event.key === 'Escape') {
+
+      if (
+        (mention.mentionOpen || mention.mentionSelectorOpen) &&
+        event.key === 'Escape'
+      ) {
         event.preventDefault();
         mention.setMentionOpen(false);
         mention.setMentionQuery(null);
@@ -490,246 +512,123 @@ const GuidPage: React.FC = () => {
         mention.setMentionActiveIndex(0);
         return;
       }
+
       if (isSubmitGesture(event, sendKey)) {
         event.preventDefault();
-        if (!guidInput.input.trim()) return;
-        handleComposerSend();
+        if (!guidInput.input.trim() && !isAutoWorkMode) return;
+        void submitInput();
       }
     },
-    [mention, guidInput.input, handleComposerSend, sendKey],
+    [
+      guidInput.input,
+      isAutoWorkMode,
+      mention,
+      sendKey,
+      submitInput,
+    ]
   );
 
-  const handleSelectAgentFromPillBar = useCallback(
-    (key: string) => {
-      agentSelection.setSelectedAgentKey(key);
+  const handleSelectAgent = useCallback(
+    (selection: GuidAgentSelection) => {
+      agentSelection.setSelection(selection);
+      advancedConfig.reset();
+      collaboration.reset();
       mention.setMentionOpen(false);
       mention.setMentionQuery(null);
       mention.setMentionSelectorOpen(false);
       mention.setMentionActiveIndex(0);
     },
     [
-      agentSelection.setSelectedAgentKey,
+      agentSelection.setSelection,
+      advancedConfig.reset,
+      collaboration.reset,
+      mention.setMentionActiveIndex,
       mention.setMentionOpen,
       mention.setMentionQuery,
       mention.setMentionSelectorOpen,
-      mention.setMentionActiveIndex,
-    ],
+    ]
   );
 
-  const handleSelectPresetKey = useCallback(
-    (selectedAgentKey: string) => {
-      agentSelection.setSelectedAgentKey(selectedAgentKey);
-      mention.setMentionOpen(false);
-      mention.setMentionQuery(null);
-      mention.setMentionSelectorOpen(false);
-      mention.setMentionActiveIndex(0);
-    },
-    [
-      agentSelection.setSelectedAgentKey,
-      mention.setMentionOpen,
-      mention.setMentionQuery,
-      mention.setMentionSelectorOpen,
-      mention.setMentionActiveIndex,
-    ],
+  const typewriterPlaceholder = useTypewriterPlaceholder(
+    t('conversation.welcome.placeholder')
   );
+  const normalPlaceholder = `${mention.selectedAgentLabel}, ${
+    typewriterPlaceholder || t('conversation.welcome.placeholder')
+  }`;
 
-  // Typewriter placeholder
-  const typewriterPlaceholder = useTypewriterPlaceholder(t('conversation.welcome.placeholder'));
-  const selectedPresetRecord = useMemo(() => {
-    if (!agentSelection.is_presetAgent || !agentSelection.selectedAgentInfo?.preset_id) return undefined;
-    return agentSelection.presets.find(
-      (item) => item.preset_id === agentSelection.selectedAgentInfo?.preset_id,
-    );
-  }, [agentSelection.presets, agentSelection.is_presetAgent, agentSelection.selectedAgentInfo?.preset_id]);
-
-  // Sync disabledBuiltinSkills + enabledSkills from preset preset config
-  useEffect(() => {
-    if (agentSelection.is_presetAgent && selectedPresetRecord) {
-      setGuidDisabledBuiltinSkills(selectedPresetRecord.excluded_auto_skills);
-      setGuidEnabledSkills(selectedPresetRecord.included_skills.map((item) => item.skill_name));
-    } else {
-      setGuidDisabledBuiltinSkills(undefined);
-      setGuidEnabledSkills(undefined);
-    }
-  }, [agentSelection.is_presetAgent, selectedPresetRecord]);
-
-  const heroTitle = useMemo(() => {
-    if (!agentSelection.is_presetAgent) return t('conversation.welcome.title');
-    const i18nName = selectedPresetRecord?.name_i18n?.[localeKey];
-    if (i18nName) return i18nName;
-    return mention.selectedAgentLabel || t('conversation.welcome.title');
-  }, [agentSelection.is_presetAgent, selectedPresetRecord, localeKey, mention.selectedAgentLabel, t]);
-  const selectedPresetAvatar = useMemo(() => {
-    if (!agentSelection.is_presetAgent) return null;
-    const selectedPreset = agentSelection.presets.find(
-      (item) => item.preset_id === agentSelection.selectedAgentInfo?.preset_id,
-    );
-    const avatarValue = selectedPreset?.avatar?.trim() || agentSelection.selectedAgentInfo?.avatar?.trim();
-    if (!avatarValue) return { kind: 'icon' as const };
-    const avatarImage = resolvePresetAvatarImageSrc(avatarValue, CUSTOM_AVATAR_IMAGE_MAP);
-    if (avatarImage) {
-      return { kind: 'image' as const, value: avatarImage };
-    }
-    return isEmoji(avatarValue)
-      ? { kind: 'emoji' as const, value: avatarValue }
-      : { kind: 'icon' as const };
-  }, [
-    agentSelection.presets,
-    agentSelection.is_presetAgent,
-    agentSelection.selectedAgentInfo?.avatar,
-    agentSelection.selectedAgentInfo?.preset_id,
-  ]);
-  // Reset guid-local UI state before paint so same-route navigations do not
-  // briefly show the previous draft or preset preset layout.
   useLayoutEffect(() => {
+    // Returning from another page resumes the draft. Only an explicit new
+    // conversation action requests a reset.
+    if (!resetAgentRequested && !resetSessionOptionsRequested) return;
     guidInput.setInput('');
     guidInput.setFiles([]);
     guidInput.setLoading(false);
-    if (!(location.state as { workspace?: string } | null)?.workspace) {
+    if (!navigationState?.workspace) {
       guidInput.setDir('');
     }
     advancedConfig.reset();
+    collaboration.reset();
+    setReasoningEffort(undefined);
+    setResourceSelectionValue({});
+    creation.update(draft => ({ ...draft, references: [], pendingPrompt: undefined, pendingFiles: undefined }));
   }, [
+    creation.update,
+    setResourceSelectionValue,
+    advancedConfig.reset,
+    collaboration.reset,
     guidInput.setDir,
     guidInput.setFiles,
     guidInput.setInput,
     guidInput.setLoading,
-    advancedConfig.reset,
     location.key,
-    location.state,
+    navigationState?.workspace,
+    resetAgentRequested,
+    resetSessionOptionsRequested,
   ]);
 
-  // Clear resetPreset from location.state after the hook has consumed it,
-  // so that re-renders don't re-trigger the reset logic.
-  //
-  // Must go through React Router's navigate — raw window.history.replaceState
-  // with `location.pathname` would write the HashRouter virtual path (e.g.
-  // '/guid') into the browser's real URL and strip the leading '#'. On the
-  // next hard reload, the browser would then request '/guid' directly from
-  // the dev server (which has no SPA fallback) and 404.
   useEffect(() => {
-    if (!resetPresetRequested && !preselectAgentKey) return;
-    navigate(`${location.pathname}${location.search}${location.hash}`, {
-      replace: true,
-      state: null,
-    });
-  }, [resetPresetRequested, preselectAgentKey, location.pathname, location.search, location.hash, navigate]);
-
-  // `/guid?miniapp=1` (HashRouter query) activates mini-app mode — the library
-  // page's empty-state CTA lands here. The flag is stripped from the URL right
-  // after, which is what keeps this from re-arming after a manual dismiss: the
-  // effect's own navigate clears `location.search`, so the guard below is false
-  // on every later run. No "handled" ref: that would also block a *fresh*
-  // same-route activation from the library page.
-  const miniAppQueryRequested = useMemo(
-    () => new URLSearchParams(location.search).get('miniapp') === '1',
-    [location.search],
-  );
-  useEffect(() => {
-    if (!miniAppQueryRequested) return;
-    setMiniAppMode(true);
-    navigate(`${location.pathname}${location.hash}`, { replace: true, state: null });
-  }, [miniAppQueryRequested, location.pathname, location.hash, navigate]);
-
-  const currentPresetAgentId =
-    selectedPresetRecord?.preferred_agent_id || selectedPresetRecord?.agent_preferences[0]?.agent_id;
-  // Mirrors PresetEditDrawer's Main Agent options — detected execution
-  // engines from AgentPillBar's data source, so avatars resolve the same way.
-  const agentSwitcherItems = useMemo(() => {
-    if (!agentSelection.availableAgents || !selectedPresetRecord) return [];
-    return agentSelection.availableAgents
-      .filter((a) => !a.is_preset && a.agent_type !== 'remote')
-      .map((a) => {
-        const key = a.id || a.backend || a.agent_type;
-        const extensionAvatar = a.isExtension ? resolveExtensionAssetUrl(a.avatar) : undefined;
-        const logo =
-          extensionAvatar ||
-          resolveAgentLogo({
-            icon: a.icon,
-            backend: a.backend || a.agent_type,
-            agentId: a.id,
-            isExtension: a.isExtension,
-          });
-        return {
-          key,
-          label: a.name,
-          logo,
-          isCurrent: key === currentPresetAgentId,
-          isExtension: a.isExtension,
-        };
-      });
-  }, [agentSelection.availableAgents, currentPresetAgentId, selectedPresetRecord]);
-
-  const effectiveAgentRecord = useMemo(() => {
-    return agentSelection.availableAgents?.find(
-      (agent) =>
-        !agent.is_preset && (agent.backend || agent.agent_type) === agentSelection.currentEffectiveAgentInfo.agent_type,
-    );
-  }, [agentSelection.availableAgents, agentSelection.currentEffectiveAgentInfo.agent_type]);
-
-  const effectiveAgentLogo = useMemo(
-    () =>
-      resolveAgentLogo({
-        icon: effectiveAgentRecord?.icon,
-        backend: effectiveAgentRecord?.backend || agentSelection.currentEffectiveAgentInfo.agent_type,
-        agentId: effectiveAgentRecord?.id,
-        isExtension: effectiveAgentRecord?.isExtension,
-      }),
-    [effectiveAgentRecord, agentSelection.currentEffectiveAgentInfo.agent_type],
-  );
-  const handlePresetAgentSwitch = useCallback(
-    async (nextAgentId: AgentId) => {
-      const presetId = selectedPresetRecord?.preset_id;
-      if (!presetId || nextAgentId === currentPresetAgentId) return;
-      try {
-        await swrMutate(
-          PRESET_CATALOG_SWR_KEY,
-          (prev: Preset[] | undefined) =>
-            prev?.map((item) =>
-              item.preset_id === presetId ? { ...item, preferred_agent_id: nextAgentId } : item,
-            ),
-          { revalidate: false },
-        );
-        await ipcBridge.presets.setState.invoke({
-          preset_id: presetId,
-          preferred_agent_id: nextAgentId,
-        });
-        await Promise.all([
-          swrMutate(PRESET_CATALOG_SWR_KEY),
-          agentSelection.refreshCustomAgents(),
-        ]);
-        const agent_name = agentSelection.availableAgents?.find((a) => a.id === nextAgentId)?.name || nextAgentId;
-        Message.success(t('guid.switchedToAgent', { agent: agent_name }));
-      } catch (error) {
-        console.error('[GuidPage] Failed to switch preset agent preference:', error);
-        Message.error(t('common.failed', { defaultValue: 'Failed' }));
-      }
-    },
-    [agentSelection, currentPresetAgentId, selectedPresetRecord, t],
-  );
-
-  // Resolve the effective agent type once — covers both direct selection and preset presets
-  const effectiveAgentType = agentSelection.is_presetAgent
-    ? agentSelection.currentEffectiveAgentInfo.agent_type
-    : agentSelection.selectedAgent;
-
-  // Only the nomi factory reads `extra.summon` — drop a staged summon draft
-  // when the user switches away so it is never applied to a non-nomi launch.
-  useEffect(() => {
-    if (effectiveAgentType !== 'nomi' && advancedConfig.summon) {
-      advancedConfig.setSummon(null);
-      setSummonDrawerOpen(false);
+    if (!resetAgentRequested && !preselectedPresetId && !preselectedTemplateKey) return;
+    if (
+      (preselectedPresetId || preselectedTemplateKey) &&
+      (agentSelection.isLoading || !agentSelection.isLoaded)
+    ) {
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveAgentType, advancedConfig.summon]);
+    if ((preselectedPresetId || preselectedTemplateKey) && agentSelection.loadError) return;
+    const preselectionResolved =
+      (!preselectedPresetId && !preselectedTemplateKey) ||
+      (preselectedPresetId
+        ? (agentSelection.selection.kind === 'preset' &&
+            agentSelection.selection.presetId === preselectedPresetId) ||
+          !agentSelection.presets.some(
+            (preset) => preset.preset_id === preselectedPresetId
+          )
+        : (agentSelection.selection.kind === 'template' &&
+            agentSelection.selection.templateKey === preselectedTemplateKey) ||
+          !agentSelection.officialTemplates.some(
+            (template) => template.template_key === preselectedTemplateKey
+          ));
+    if (!preselectionResolved) return;
+    navigate(
+      `${location.pathname}${location.search}${location.hash}`,
+      { replace: true, state: null }
+    );
+  }, [
+    location.hash,
+    location.pathname,
+    location.search,
+    navigate,
+    agentSelection.isLoading,
+    agentSelection.isLoaded,
+    agentSelection.loadError,
+    agentSelection.officialTemplates,
+    agentSelection.presets,
+    agentSelection.selection,
+    preselectedPresetId,
+    preselectedTemplateKey,
+    resetAgentRequested,
+  ]);
 
-  // Agents that use configured model providers for their model selection.
-  const PROVIDER_BASED_AGENTS = new Set(['nomi']);
-  const isProviderModelMode =
-    PROVIDER_BASED_AGENTS.has(effectiveAgentType) &&
-    (!agentSelection.is_presetAgent || agentSelection.currentEffectiveAgentInfo.isAvailable);
-
-  // Build the mention dropdown node
   const mentionDropdownNode = (
     <MentionDropdown
       menuRef={mention.mentionMenuRef}
@@ -739,299 +638,235 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  // Build the model selector node — a plain single-select model picker.
-  const modelSelectorNode = (
-    <GuidModelSelector
-      isProviderModelMode={isProviderModelMode}
-      modelList={modelSelection.modelList}
-      current_model={modelSelection.current_model}
-      setCurrentModel={modelSelection.setCurrentModel}
-    />
-  );
-  const collaboratorSelectorNode = (
-    <GuidCollaboratorSelector
-      value={activeCollaborators}
-      onChange={(next) => {
-        setSelectedCollaborationTemplate(null);
-        persistCollaborationModels(next);
-      }}
-      mainModel={mainModelRef}
-      selectedTemplate={selectedCollaborationTemplate}
-      workDir={guidInput.dir}
-      onTemplateApply={(template) => {
-        setSelectedCollaborationTemplate({
-          execution_template_id: template.execution_template_id,
-          name: template.name,
-          participantCount: template.participantCount,
-          models: template.models,
-        });
-      }}
-      onTemplateClear={() => setSelectedCollaborationTemplate(null)}
-      className='nomi-sendbox-model-btn'
-    />
-  );
-  const collaborationPolicyNode = (
-    <CollaborationPolicyControl
-      runtimeType={effectiveAgentType}
-      delegationPolicy={delegationPolicy}
-      decisionPolicy={decisionPolicy}
-      className='guid-entry-policy-btn'
-      onChange={(next) => {
-        setDelegationPolicy(next.delegationPolicy);
-        setDecisionPolicy(next.decisionPolicy);
-      }}
-    />
-  );
-
-  // Advanced drafts — the same controls as the conversation header, in draft
-  // mode (collected locally, applied right after the conversation is created).
-  // Keyed by location.key so same-route navigations (which reset the drafts in
-  // the layout effect above) also remount the controls and re-run their
-  // mount-time seeding (e.g. IDMM's global default steering prompt).
-  const advancedControlsNode = (
+  const advancedControlsNode = knowledgeEnabled || advancedControlsEnabled || idmmControlEnabled ? (
     <>
-      <AutoWorkControl
-        key={`autowork-${location.key}`}
-        draft={{
-          value: advancedConfig.autoWork,
-          onChange: advancedConfig.setAutoWork,
-        }}
-        applyNote={t('guid.advanced.applyNote')}
-      />
-      <IdmmControl
-        key={`idmm-${location.key}`}
-        draft={{ value: advancedConfig.idmm, onChange: advancedConfig.setIdmm }}
-        applyNote={t('guid.advanced.applyNote')}
-      />
-      <KnowledgeControl
-        key={`knowledge-${location.key}`}
-        draft={{
-          value: advancedConfig.knowledge,
-          onChange: advancedConfig.setKnowledge,
-        }}
-        applyNote={t('guid.advanced.applyNote')}
-      />
-    </>
-  );
-
-  // Build the action row
-  // When AutoWork is enabled (with a tag) the primary button becomes a
-  // "Start AutoWork" action: clickable without typed input, and it creates the
-  // session + starts AutoWork without sending a first message (see planGuidEntry).
-  const actionRowNode = (
-    <GuidActionRow
-      files={guidInput.files}
-      onFilesUploaded={guidInput.handleFilesUploaded}
-      modelSelectorNode={modelSelectorNode}
-      collaboratorSelectorNode={
-        effectiveAgentType === 'nomi' && delegationPolicy !== 'disabled' ? collaboratorSelectorNode : undefined
-      }
-      selectedAgent={agentSelection.selectedAgent}
-      effectiveModeAgent={agentSelection.currentEffectiveAgentInfo.agent_type}
-      selectedMode={agentSelection.selectedMode}
-      onModeSelect={agentSelection.setSelectedMode}
-      is_presetAgent={agentSelection.is_presetAgent}
-      selectedAgentInfo={agentSelection.selectedAgentInfo}
-      presets={agentSelection.presets}
-      localeKey={localeKey}
-      onClosePresetTag={() => agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey)}
-      agentLogo={effectiveAgentLogo}
-      agentSwitcherItems={agentSwitcherItems}
-      onAgentSwitch={(key) => {
-        handlePresetAgentSwitch(parseAgentId(key)).catch((err) =>
-          console.error('Failed to switch preset agent:', err)
-        );
-      }}
-      mcpServers={availableMcpServers}
-      selectedMcpServerIds={guidSelectedMcpServerIds ?? []}
-      onToggleMcpServer={handleToggleMcpServer}
-      hidePresetTag
-      loading={guidInput.loading}
-      speechInputNode={
-        <SpeechInputButton
-          disabled={guidInput.loading}
-          locale={i18n.language}
-          onTranscript={(transcript) => {
-            guidInput.setInput((current) => appendSpeechTranscript(current, transcript));
+      {knowledgeEnabled && (
+        <KnowledgeControl
+          key={`knowledge-${location.key}-${selectedAgentResourceKey}`}
+          draft={{
+            value: advancedConfig.knowledge,
+            onChange: advancedConfig.setKnowledge,
           }}
+          writebackAvailable={knowledgeRequiresWrite}
+          applyNote={t('knowledge.control.guidApplyNote')}
         />
-      }
-      autoWorkMode={isAutoWorkMode}
-      isButtonDisabled={
-        isAutoWorkMode ? autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork) : send.isButtonDisabled
-      }
-      onSend={handleComposerSend}
-    />
+      )}
+      {advancedControlsEnabled && (
+        <AutoWorkControl
+          key={`autowork-${location.key}`}
+          draft={{
+            value: advancedConfig.autoWork,
+            onChange: advancedConfig.setAutoWork,
+          }}
+          applyNote={t('guid.advanced.applyNote')}
+          disabledReason={collaborationLaunchConfigured ? t('guid.collaboration.autoworkExclusive') : undefined}
+        />
+      )}
+      {idmmControlEnabled && (
+        <IdmmControl
+          key={`idmm-${location.key}-${selectedAgentResourceKey}`}
+          draft={{
+            value: advancedConfig.idmm,
+            onChange: advancedConfig.setIdmm,
+          }}
+          applyNote={t('guid.advanced.applyNote')}
+        />
+      )}
+    </>
+  ) : null;
+
+  const modelSelectorNode = (
+    creation.draft.mode ? <CreationModelSelector files={guidInput.files} /> : (
+      <ChatModelSelector
+        providers={modelSelection.modelList}
+        currentModel={modelSelection.current_model}
+        getAvailableModels={modelSelection.getAvailableModels}
+        requiredTechnicalCapabilities={requiredTechnicalCapabilities}
+        popupVisible={modelPickerOpen}
+        onPopupVisibleChange={setModelPickerOpen}
+        reasoningEffort={reasoningEffort}
+        reasoningEffortOptions={reasoningEffortOptions}
+        reasoningEffortDisabled={guidInput.loading}
+        onReasoningEffortChange={setReasoningEffort}
+        onSelectModel={async (provider, model) => {
+          const capability = capabilityOf(provider, model, 'chat');
+          const options = capabilitySupportsTechnicalCapability(capability, 'reasoning')
+            ? reasoningEffortsForProtocol(capability?.protocol)
+            : [];
+          if (reasoningEffort !== undefined && !options.includes(reasoningEffort)) {
+            setReasoningEffort(undefined);
+          }
+          await modelSelection.setCurrentModel({ ...provider, use_model: model });
+        }}
+      />
+    )
   );
 
-  // --- Active skills (for ComposerEntryStrip badge + summary popover) ---
-  const activeSkills = useMemo<GuidActiveSkill[]>(() => {
-    const disabled = guidDisabledBuiltinSkills ?? [];
-    const enabled = guidEnabledSkills ?? [];
-    return allSkills.filter((s) => (s.isAuto ? !disabled.includes(s.name) : enabled.includes(s.name)));
-  }, [allSkills, guidDisabledBuiltinSkills, guidEnabledSkills]);
-  const activeSkillCount = activeSkills.length;
-
-  const handleOpenSkillsDrawer = useCallback(() => {
-    setDrawerMode('skills');
-    setDrawerOpen(true);
-  }, []);
-
-  const handleRegisterOpenDetails = useCallback((openDetails: (() => void) | null) => {
-    openPresetDetailsRef.current = openDetails;
-  }, []);
+  const autoWorkButtonDisabled =
+    !hasLaunchTarget || !resourceSelectionsReady || !collaboration.ready ||
+    autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
+  const openFileSelector = () => {
+    void ipcBridge.dialog.showOpen.invoke({ properties: ['openFile', 'multiSelections'] })
+      .then(paths => { if (paths?.length) guidInput.handleFilesUploaded(paths); })
+      .catch(error => console.error('Failed to open file dialog:', error));
+  };
 
   return (
-    <ConfigProvider getPopupContainer={() => guidContainerRef.current || document.body}>
+    <CreationComposerContext.Provider value={creation}>
+    <ConfigProvider
+      getPopupContainer={() => guidContainerRef.current || document.body}
+    >
       <div ref={guidContainerRef} className={styles.guidContainer}>
-        {/* Advanced controls (AutoWork / IDMM / Knowledge / MultiAgent) hang in
-            the content area's top-right corner — mirroring the active-session
-            ChatLayout header placement, and freeing the input box's bottom row.
-            Desktop only (hidden on mobile via CSS), matching the session header. */}
-        <div className={styles.guidAdvancedControls}>{advancedControlsNode}</div>
+        {pluginIntentToken && pluginLaunchError && <Alert type='error' showIcon content={pluginLaunchError} />}
+        <div className={styles.guidAdvancedControls}>
+          {!creation.draft.mode && advancedControlsNode}
+        </div>
         <div className={styles.guidPrimaryStage}>
           <div className={styles.guidLayout}>
-            <div className={styles.heroHeader}>
-              <p className='text-2xl font-semibold mb-0 text-0 text-center'>{t('conversation.welcome.title')}</p>
-            </div>
+            <GuidCompanionShowcase />
 
-            {agentSelection.availableAgents === undefined ? (
-              <AgentPillBarSkeleton />
-            ) : agentSelection.availableAgents.length > 0 ? (
-              <AgentPillBar
-                availableAgents={agentSelection.availableAgents}
-                selectedAgentKey={agentSelection.selectedAgentKey}
-                getAgentKey={agentSelection.getAgentKey}
-                onSelectAgent={handleSelectAgentFromPillBar}
-                suppressSelectionAnimation={resetPresetRequested}
+            {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
+              <Alert
+                type='error'
+                showIcon
+                title={t('common.error')}
+                content={t('agentSettings.errors.presetCapabilitiesLoadFailed')}
+                className={styles.guidPresetCapabilityError}
               />
-            ) : null}
+            )}
 
-            <GuidInputCard
-              input={guidInput.input}
-              onInputChange={handleInputChange}
-              onKeyDown={handleInputKeyDown}
-              onPaste={guidInput.onPaste}
-              onFocus={guidInput.handleTextareaFocus}
-              onBlur={guidInput.handleTextareaBlur}
-              placeholder={
-                miniAppMode
-                  ? t('miniApps.composer.placeholder')
-                  : `${mention.selectedAgentLabel}, ${typewriterPlaceholder || t('conversation.welcome.placeholder')}`
-              }
-              isInputActive={guidInput.isInputFocused}
-              isFileDragging={guidInput.isFileDragging}
-              activeBorderColor={activeBorderColor}
-              inactiveBorderColor={inactiveBorderColor}
-              activeShadow={activeShadow}
-              dragHandlers={guidInput.dragHandlers}
-              mentionOpen={mention.mentionOpen}
-              mentionSelectorBadge={
-                <MentionSelectorBadge
+            {selectedAgentModelIncompatible && (
+              <GuidModelCompatibilityNotice
+                modelLabel={currentModelLabel}
+                providerLabel={currentProviderLabel}
+                missingCapabilities={missingTechnicalCapabilities}
+                compatibleModelCount={compatibleModelCount}
+                canConfigureCurrentModel={canConfigureCurrentModel}
+                onChooseCompatibleModel={() => setModelPickerOpen(true)}
+                onOpenModelConfiguration={() => {
+                  const currentModel = modelSelection.current_model;
+                  if (!currentModel) return;
+                  void navigate(
+                    canConfigureCurrentModel
+                      ? modelCapabilityConfigurationRoute(currentModel.id, currentModel.use_model)
+                      : '/models?section=chat'
+                  );
+                }}
+              />
+            )}
+
+            <div className={styles.guidComposerGroup}>
+              {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
+              <Composer
+                sideTools={
+                  <SessionCapabilityPicker
+                    catalog={capabilityCatalog.catalog}
+                    draft={capabilityDraft}
+                    onChange={setCapabilityDraft}
+                    loading={capabilityCatalog.loading}
+                    loadFailed={Boolean(capabilityCatalog.error)}
+                    errorMessage={capabilityCatalog.error?.message}
+                    onRetry={capabilityCatalog.retry}
+                    disabled={guidInput.loading}
+                    applyMode='create'
+                  >
+                    {collaborationEnabled &&
+                    <CollaborationComposerControl
+                      value={collaboration.activeCollaborators}
+                      onChange={collaboration.setCollaborators}
+                      mainModel={collaboration.mainModel}
+                      selectedTemplate={collaboration.selectedTemplate}
+                      workDir={guidInput.dir}
+                      onTemplateApply={collaboration.setTemplate}
+                      onTemplateClear={() => collaboration.setTemplate(null)}
+                      policy={collaboration.policy}
+                      onPolicyChange={collaboration.setPolicy}
+                      disabled={advancedConfig.autoWork.enabled}
+                      disabledReason={advancedConfig.autoWork.enabled ? t('guid.collaboration.autoworkExclusive') : undefined}
+                    />}
+                  </SessionCapabilityPicker>
+                }
+                isFileDragging={guidInput.isFileDragging}
+                dragHandlers={guidInput.dragHandlers}
+                overlayOpen={mention.mentionOpen}
+                header={<ComposerSceneHeader agent={
+                  <GuidAgentSelector
+                    presets={agentSelection.presets}
+                    draftPresets={agentSelection.draftPresets}
+                    officialTemplates={agentSelection.officialTemplates}
+                    selection={agentSelection.selection}
+                    isLoading={agentSelection.isLoading}
+                    loadError={agentSelection.loadError}
+                    onRetry={agentSelection.refreshPresets}
+                    onSelectPreset={(presetId) =>
+                      handleSelectAgent({ kind: 'preset', presetId })
+                    }
+                    onSelectTemplate={(templateKey) =>
+                      handleSelectAgent({ kind: 'template', templateKey })
+                    }
+                  />
+                } />}
+                beforeInput={<MentionSelectorBadge
                   visible={mention.mentionSelectorVisible}
                   open={mention.mentionSelectorOpen}
                   onOpenChange={mention.setMentionSelectorOpen}
                   agentLabel={mention.selectedAgentLabel}
                   mentionMenu={mentionDropdownNode}
                   onResetQuery={() => mention.setMentionQuery(null)}
-                />
-              }
-              mentionDropdown={mentionDropdownNode}
-              files={guidInput.files}
-              onRemoveFile={guidInput.handleRemoveFile}
-              actionRow={actionRowNode}
-              workspaceDir={guidInput.dir}
-              onSelectWorkspace={(dir) => guidInput.setDir(dir)}
-              onClearWorkspace={() => guidInput.setDir('')}
-              entryStrip={
-                <ComposerEntryStrip
-                  isPresetAgent={agentSelection.is_presetAgent}
-                  presetLabel={heroTitle !== t('conversation.welcome.title') ? heroTitle : undefined}
-                  presetAvatar={selectedPresetAvatar ?? undefined}
-                  onAdjustSkills={handleOpenSkillsDrawer}
-                  onFree={() => {
-                    agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey);
-                  }}
-                  localeKey={localeKey}
-                  activeSkillCount={activeSkillCount}
-                  activeSkills={activeSkills}
-                  collaborationPolicyNode={collaborationPolicyNode}
-                  onSummonCompanion={
-                    effectiveAgentType === 'nomi' ? () => setSummonDrawerOpen(true) : undefined
-                  }
-                  summonedCompanionName={summonedCompanionName}
-                  onCreateMiniApp={isAutoWorkMode ? undefined : () => setMiniAppMode(true)}
-                  miniAppActive={miniAppMode}
-                  onDismissMiniApp={() => setMiniAppMode(false)}
-                />
-              }
-            />
+                />}
+                overlays={mention.mentionOpen && <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>{mentionDropdownNode}</div>}
+                inputProps={{
+                  value: guidInput.input,
+                  onChange: handleInputChange,
+                  onKeyDown: handleInputKeyDown,
+                  onPaste: guidInput.onPaste,
+                  onFocus: guidInput.handleTextareaFocus,
+                  placeholder: creation.draft.mode ? '描述你想创作的内容，可添加参考素材…' : normalPlaceholder,
+                  'data-testid': 'guid-input',
+                }}
+                attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
+                tools={<div className='inline-flex items-center gap-6px'>
+                  <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} />
+                </div>}
+                creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
+                rightTools={<div className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0' data-composer-group>{modelSelectorNode}</div>}
+                actions={<>
+                  <SpeechInputButton disabled={guidInput.loading} locale={i18n.language}
+                    onTranscript={transcript => guidInput.setInput(current => appendSpeechTranscript(current, transcript))} />
+                  <ComposerSendButton
+                    loading={guidInput.loading || creation.loading}
+                    disabled={creation.draft.mode ? creation.loading || !creation.ready || !guidInput.input.trim() : isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled}
+                    icon={!creation.draft.mode && isAutoWorkMode ? <Robot theme='filled' size='14' fill='currentColor' strokeWidth={5} /> : undefined}
+                    title={!creation.draft.mode && isAutoWorkMode ? t('requirements.autowork.startSession') : undefined}
+                    onClick={() => void submitInput()}
+                    testId='guid-send-btn'
+                  />
+                </>}
+              />
+            </div>
 
-            <GuidResourceCards />
+            {!creation.draft.mode && <AgentResourcePicker
+              requiredKinds={resourcePickerKinds}
+              optionalKinds={optionalResourcePickerKinds}
+              capabilityIds={presetCapabilityIds}
+              actionIds={presetActionIds}
+              value={resourceSelectionValue}
+              onChange={setResourceSelectionValue}
+              onAdmissionReadinessChange={setResourcePickerReady}
+              disabled={guidInput.loading || !presetResourceResolutionReady}
+            />}
 
-        {/* 召唤伙伴 draft drawer — applied after the conversation is created. */}
-        <SummonDrawer
-          visible={summonDrawerOpen}
-          onCancel={() => setSummonDrawerOpen(false)}
-          initial={advancedConfig.summon}
-          onApply={(draft) => {
-            advancedConfig.setSummon(draft);
-            setSummonDrawerOpen(false);
-          }}
-          onRelease={() => {
-            advancedConfig.setSummon(null);
-            setSummonDrawerOpen(false);
-          }}
-        />
-
-            {/* Editor host (modals + example prompts + fallback notice) */}
-            <GuidPresetEditorHost
-              presets={agentSelection.presets}
-              localeKey={localeKey}
-              selectedAgentKey={agentSelection.selectedAgentKey}
-              selectedAgentInfo={agentSelection.selectedAgentInfo}
-              currentEffectiveAgentInfo={agentSelection.currentEffectiveAgentInfo}
-              onSetInput={guidInput.setInput}
-              onFocusInput={guidInput.handleTextareaFocus}
-              onRegisterOpenDetails={handleRegisterOpenDetails}
-            />
+            <QuickActionButtons onOpenBugReport={() => setShowFeedbackModal(true)} />
           </div>
         </div>
 
-        <div className={styles.guidDiscoveryArea}>
-          <GuidCompanionPosterPreview />
-        </div>
-
-        {/* PresetPickerDrawer (right-side) */}
-        <PresetPickerDrawer
-          visible={drawerOpen}
-          mode={drawerMode}
-          onModeChange={setDrawerMode}
-          onClose={() => setDrawerOpen(false)}
-          presets={agentSelection.presets}
-          localeKey={localeKey}
-          onSelectPreset={(id) => {
-            handleSelectPresetKey(`preset:${id}`);
-            setDrawerOpen(false);
-          }}
-          onFree={() => {
-            agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey);
-            setDrawerOpen(false);
-          }}
-          allSkills={allSkills}
-          enabledSkills={guidEnabledSkills ?? []}
-          disabledBuiltinSkills={guidDisabledBuiltinSkills ?? []}
-          onToggleSkill={handleToggleSkill}
+        <FeedbackReportModal
+          visible={showFeedbackModal}
+          onCancel={() => setShowFeedbackModal(false)}
         />
-
-        <QuickActionButtons
-          onOpenBugReport={() => setShowFeedbackModal(true)}
-          inactiveBorderColor={inactiveBorderColor}
-          activeShadow={activeShadow}
-        />
-        <FeedbackReportModal visible={showFeedbackModal} onCancel={() => setShowFeedbackModal(false)} />
       </div>
     </ConfigProvider>
+    </CreationComposerContext.Provider>
   );
 };
 

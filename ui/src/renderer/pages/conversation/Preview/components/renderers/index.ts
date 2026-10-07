@@ -12,5 +12,4 @@
  * Components with special rendering logic
  */
 
-export { default as HTMLRenderer } from './HTMLRenderer';
-export { default as SelectionToolbar } from './SelectionToolbar';
+export {};

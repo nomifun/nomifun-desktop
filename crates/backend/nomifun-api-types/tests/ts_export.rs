@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use ts_rs::{Config, TS};
+use nomifun_api_types::model_gateway::*;
 
 use nomifun_api_types::{
     AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
@@ -8,8 +9,9 @@ use nomifun_api_types::{
     KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryCapabilities, KnowledgeEntryKind,
     KnowledgeEntryOrigin, KnowledgeEntrySourceInfo, KnowledgeEntrySourceRelationship,
     KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSourceSyncStatus,
-    KnowledgeTreeAccess, ModelInfo,
-    ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
+    KnowledgeTreeAccess, ModelInfo, ModelCatalogSource, ModelContextLimitKind, ModelTaskSource, ModelTokenLimitSources,
+    ModelProtocolManifestResponse, ModelTask, ModelTechnicalCapability, ModelTrait,
+    PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
     ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
@@ -54,6 +56,23 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
 
 #[test]
 fn export_provider_domain_bindings() {
+    export_binding_if_changed::<ModelGatewayOperator>("ModelGatewayOperator.ts");
+    export_binding_if_changed::<ModelGatewayMetaResponse>("ModelGatewayMetaResponse.ts");
+    export_binding_if_changed::<ModelGatewayTaskEndpoints>("ModelGatewayTaskEndpoints.ts");
+    export_binding_if_changed::<ModelGatewayPrice>("ModelGatewayPrice.ts");
+    export_binding_if_changed::<ModelGatewayCatalogModel>("ModelGatewayCatalogModel.ts");
+    export_binding_if_changed::<ModelGatewayCatalogResponse>("ModelGatewayCatalogResponse.ts");
+    export_binding_if_changed::<ModelGatewayQuota>("ModelGatewayQuota.ts");
+    export_binding_if_changed::<ModelGatewayPlan>("ModelGatewayPlan.ts");
+    export_binding_if_changed::<ModelGatewayBalance>("ModelGatewayBalance.ts");
+    export_binding_if_changed::<ModelGatewayKey>("ModelGatewayKey.ts");
+    export_binding_if_changed::<ModelGatewayRateLimits>("ModelGatewayRateLimits.ts");
+    export_binding_if_changed::<ModelGatewayAccountResponse>("ModelGatewayAccountResponse.ts");
+    export_binding_if_changed::<ModelGatewayMetaRequest>("ModelGatewayMetaRequest.ts");
+    export_binding_if_changed::<ModelGatewayCatalogRequest>("ModelGatewayCatalogRequest.ts");
+    export_binding_if_changed::<CreateModelGatewayRequest>("CreateModelGatewayRequest.ts");
+    export_binding_if_changed::<UpdateModelGatewayConnectionRequest>("UpdateModelGatewayConnectionRequest.ts");
+    export_binding_if_changed::<SyncModelGatewayResponse>("SyncModelGatewayResponse.ts");
     export_binding_if_changed::<KnowledgeEntryKind>("KnowledgeEntryKind.ts");
     export_binding_if_changed::<KnowledgeEntryOrigin>("KnowledgeEntryOrigin.ts");
     export_binding_if_changed::<KnowledgeEntrySourceRelationship>(
@@ -81,6 +100,7 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<KnowledgeRetrievalConfig>("KnowledgeRetrievalConfig.ts");
     export_binding_if_changed::<ModelTask>("ModelTask.ts");
     export_binding_if_changed::<ModelTrait>("ModelTrait.ts");
+    export_binding_if_changed::<ModelTechnicalCapability>("ModelTechnicalCapability.ts");
     export_binding_if_changed::<HealthStatus>("HealthStatus.ts");
     export_binding_if_changed::<ProviderHealthCheckErrorKind>("ProviderHealthCheckErrorKind.ts");
     export_binding_if_changed::<ProviderHealthCheckRequest>("ProviderHealthCheckRequest.ts");
@@ -104,7 +124,11 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<SaveProviderModelRequest>("SaveProviderModelRequest.ts");
     export_binding_if_changed::<ProviderModelKeyRequest>("ProviderModelKeyRequest.ts");
     export_binding_if_changed::<ModelInfo>("ModelInfo.ts");
+    export_binding_if_changed::<ModelTaskSource>("ModelTaskSource.ts");
+    export_binding_if_changed::<ModelContextLimitKind>("ModelContextLimitKind.ts");
+    export_binding_if_changed::<ModelTokenLimitSources>("ModelTokenLimitSources.ts");
     export_binding_if_changed::<FetchModelsResponse>("FetchModelsResponse.ts");
+    export_binding_if_changed::<ModelCatalogSource>("ModelCatalogSource.ts");
     export_binding_if_changed::<ProviderConnectionInput>("ProviderConnectionInput.ts");
     export_binding_if_changed::<SaveProviderConnectionRequest>("SaveProviderConnectionRequest.ts");
     export_binding_if_changed::<ProviderConnectionResponse>("ProviderConnectionResponse.ts");
@@ -122,6 +146,21 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<ProtocolRecommendation>("ProtocolRecommendation.ts");
     export_binding_if_changed::<AuthSchemeDescriptor>("AuthSchemeDescriptor.ts");
     export_binding_if_changed::<ModelProtocolManifestResponse>("ModelProtocolManifestResponse.ts");
+}
+
+#[test]
+fn gateway_integer_response_types_are_lossless_and_scoped() {
+    let cfg=Config::default();
+    for declaration in [ModelGatewayBalance::decl(&cfg),ModelGatewayPrice::decl(&cfg),ModelGatewayQuota::decl(&cfg),ModelGatewayKey::decl(&cfg),ModelGatewayRateLimits::decl(&cfg)] {
+        assert!(!declaration.contains("number"),"financial/quota/rate integers must not become JS numbers: {declaration}");
+        assert!(declaration.contains("string"));
+    }
+    assert!(ModelGatewayBalance::decl(&cfg).contains("amount: string"));
+    assert!(ModelGatewayQuota::decl(&cfg).contains("total: string | null"));
+    assert!(ModelGatewayKey::decl(&cfg).contains("remaining_quota: string | null"));
+    // Physical token limits still use the existing editor's number contract;
+    // gateway import validates these are within Number.MAX_SAFE_INTEGER.
+    assert!(ModelGatewayCatalogModel::decl(&cfg).contains("context_window: number | null"));
 }
 
 #[test]
@@ -189,6 +228,9 @@ fn generated_shapes_mirror_single_source_wire_contract() {
     // name the capability persists it as, so the UI can prefill one from the
     // other without a translation table. Optional in both types.
     let catalog_model = ModelInfo::export_to_string(&cfg).unwrap();
+    assert!(catalog_model.contains("tasks_source?: ModelTaskSource,"), "got: {catalog_model}");
+    assert!(catalog_model.contains("output_limit?: number,"), "got: {catalog_model}");
+    assert!(catalog_model.contains("token_limit_sources?: ModelTokenLimitSources,"), "got: {catalog_model}");
     assert!(
         catalog_model.contains("context_limit?: number,"),
         "got: {catalog_model}"
@@ -204,6 +246,7 @@ fn generated_shapes_mirror_single_source_wire_contract() {
         "got: {catalog_model}"
     );
     let catalog = FetchModelsResponse::export_to_string(&cfg).unwrap();
+    assert!(catalog.contains("catalog_source?: ModelCatalogSource,"), "got: {catalog}");
     assert!(
         catalog.contains("models: Array<ModelInfo>,"),
         "got: {catalog}"

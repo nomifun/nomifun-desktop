@@ -1,7 +1,7 @@
 //! Shared dynamic-bind helpers for repositories that build SQL with a
 //! runtime-sized list of parameters.
 //!
-//! Several repositories (`sqlite_conversation`, `sqlite_cron`,
+//! Several repositories (`sqlite_cron`,
 //! `sqlite_requirement`) assemble `UPDATE ... SET` / filtered `SELECT`
 //! statements whose bind count is only known at runtime. They each used to
 //! carry a private copy of this `BindValue` tagged union plus the per-query

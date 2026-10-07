@@ -1,7 +1,7 @@
 # 简介
 
 **NomiFun** 是一个面向 AI agent 工作流的本地优先工作台。它把一个内置
-Nomi 引擎、可扩展 provider/模型控制面、创意工坊、MCP 服务、技能、终端、
+Nomi 引擎、可扩展 provider/模型控制面、创作、MCP 服务、技能、终端、
 知识库、计划任务和远程 WebUI 收拢到同一个 Rust + Tauri monorepo 中。
 
 > 想立刻开始？请先读 [安装](installation.zh.md)，再读
@@ -24,8 +24,8 @@ Nomi 引擎、可扩展 provider/模型控制面、创意工坊、MCP 服务、�
   统一管理，会话、设定、伙伴与计划任务都能复用。
 - **一个工作区，不只是消息流。** 会话有工作目录、文件树、预览面板和后端
   管理的 PTY 终端。
-- **一套不止于聊天的创作系统。** 创意工坊包含持久化无限 Canvas、独立
-  Image/Video Workbench、提示词与素材库、私有模板和受限 Director。
+- **一套不止于聊天的创作系统。** 创作包含持久化无限 Canvas、独立
+  Image/Video Workbench、提示词与素材库和私有模板。
 - **后端驱动的自动化。** 计划任务、AutoWork、IDMM、WebUI 远程访问、
   MCP 暴露和频道能力都由 Rust 后端持久化管理。
 - **桌面与 Web 共用后端。** Tauri 桌面端和 `nomifun-web` 自托管服务使用
@@ -53,8 +53,8 @@ NomiFun 更适合已经在用 agent 做真实工作的用户。它要求你理�
 - **会话与工作区**：`/guid` 创建会话，`/conversation/:id` 运行会话。
 - **模型配置**：`/models` 管理 provider、可扩展模型目录、任务能力、
   上下文/输出限制和全局故障转移队列。
-- **创意工坊**：`/workshop/*` 管理无限 Canvas、独立 Image/Video Workbench、
-  提示词、可复用素材、私有模板与 Director。
+- **创作**：`/workshop/*` 管理无限 Canvas、独立 Image/Video Workbench、
+  提示词、可复用素材与私有模板。
 - **设定与技能**：`/presets` 管理可复用启动设定；`/skills` 独立管理技能。
 - **MCP**：`/mcp` 管理 MCP server、连接测试、OAuth 和 agent 配置同步。
 - **开放能力**：`/open-capabilities` 管理 WebUI 远程访问、MCP/API 暴露等外部入口。

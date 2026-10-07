@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assignTurnIdsFromUserRequests,
   buildTurnDisclosureItems,
+  collectPublicContinuationIds,
   type TurnDisclosureInputItem,
 } from './turnDisclosureModel';
 import { parseMessageId } from '@/common/types/ids';
@@ -34,7 +35,43 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
-  test('collapses completed intermediate steps into a disclosure before the final answer', () => {
+  test('typed output continuation keeps every linked public part outside the process disclosure', () => {
+    const first=item('first','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
+    const tail=item('tail','assistant',{createdAt:3000,sourceMessageIds:[SOURCE_2],publicText:true,continuationOfMessageId:SOURCE_1});
+    const result=buildTurnDisclosureItems([item('user','user'),first,tail],{tailClosed:true});
+    expect(result.filter(entry=>entry.type==='item').map(entry=>entry.id)).toEqual(['user','first','tail']);
+    const disclosure=result.find(entry=>entry.type==='turn_disclosure');
+    expect(disclosure?.type==='turn_disclosure' ? disclosure.processItemIds : []).not.toContain('first');
+    expect([...collectPublicContinuationIds([first,tail],tail)]).toEqual(['tail','first']);
+  });
+
+  test('unlinked tool preamble, missing and foreign continuation sources are not invented final text', () => {
+    const first=item('preamble','assistant',{createdAt:2000,sourceMessageIds:[SOURCE_1],publicText:true});
+    const final=item('final','assistant',{createdAt:4000,sourceMessageIds:[SOURCE_2],publicText:true});
+    const result=buildTurnDisclosureItems([item('user','user'),first,item('tool','process',{createdAt:3000}),final],{tailClosed:true});
+    expect(result.filter(entry=>entry.type==='item').map(entry=>entry.id)).toEqual(['user','final']);
+    const linked={...final,continuationOfMessageId:SOURCE_1};
+    expect([...collectPublicContinuationIds([linked],linked)]).toEqual(['final']);
+    expect([...collectPublicContinuationIds([{...first,turnId:TURN_2},linked],linked)]).toEqual(['final']);
+    expect([...collectPublicContinuationIds([first,{...linked,terminal:true}],{...linked,terminal:true})]).toEqual([]);
+  });
+
+  test('a durable cancelled summary survives reload and partial assistant text', () => {
+    for (const withProcess of [false, true]) {
+      const result = buildTurnDisclosureItems([
+        item('user', 'user'),
+        ...(withProcess ? [item('tool','process',{createdAt:2000,processState:'canceled'})] : []),
+        item('partial','assistant',{createdAt:2500,processState:'completed'}),
+        item('summary','metadata',{createdAt:3000,turnEndedAt:3000,processState:'canceled'}),
+      ], {tailClosed:true});
+      const disclosure = result.find(entry=>entry.type==='turn_disclosure');
+      expect(disclosure?.state).toBe('canceled');
+      expect(disclosure?.running).toBe(false);
+      expect(disclosure?.endAt).toBe(3000);
+    }
+  });
+
+  test('collapses completed intermediate steps while keeping the final answer visible', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user', 'user', { createdAt: 1000 }),
@@ -83,6 +120,107 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['analysis', 'tool']);
     expect(disclosure.startAt).toBe(0);
     expect(disclosure.endAt).toBe(35600);
+  });
+
+  test('uses canonical turn timing instead of synthetic message timestamps', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user', 'user', { createdAt: 1_000 }),
+        item('turn-metadata', 'metadata', {
+          createdAt: 1_001,
+          turnStartedAt: 4_000_000,
+          turnEndedAt: 4_002_000,
+        }),
+        item('error', 'assistant', {
+          createdAt: 4_080_000,
+          processState: 'failed',
+          terminal: true,
+        }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual(['user', DISCLOSURE_1, 'error']);
+    const disclosure = result[1];
+    expect(disclosure.type).toBe('turn_disclosure');
+    if (disclosure.type !== 'turn_disclosure') return;
+    expect(disclosure.startAt).toBe(4_000_000);
+    expect(disclosure.endAt).toBe(4_002_000);
+    expect(disclosure.processItemIds).toEqual([]);
+    expect(disclosure.state).toBe('failed');
+  });
+
+  test('keeps a terminal error outside the process when partial text arrived later', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user', 'user', { createdAt: 1000 }),
+        item('terminal-error', 'assistant', {
+          createdAt: 1500,
+          processState: 'failed',
+          terminal: true,
+        }),
+        item('late-partial-text', 'assistant', { createdAt: 2000 }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual(['user', DISCLOSURE_1, 'terminal-error']);
+    const disclosure = result[1];
+    expect(disclosure.type).toBe('turn_disclosure');
+    if (disclosure.type !== 'turn_disclosure') return;
+    expect(disclosure.processItemIds).toEqual(['late-partial-text']);
+    expect(disclosure.state).toBe('failed');
+  });
+
+  test('keeps the last partial result visible beside a terminal failure', () => {
+    const result = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1000 }),
+      item('progress-note', 'assistant', { createdAt: 1500 }),
+      item('patch', 'process', { createdAt: 2000, processState: 'failed' }),
+      item('partial-result', 'assistant', { createdAt: 2500 }),
+      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true }),
+    ], { tailClosed: true });
+    expect(result.map(entry => entry.id)).toEqual(['user', DISCLOSURE_1, 'partial-result', 'terminal-error']);
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure');
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('missing disclosure');
+    expect(disclosure.processItemIds).toEqual(['progress-note', 'patch']);
+    expect(disclosure.state).toBe('failed');
+    expect(disclosure.endAt).toBe(3000);
+  });
+
+  test('uses message wall time when the failure row has a stable cursor timestamp', () => {
+    const result = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1000 }),
+      item('terminal-error', 'assistant', { createdAt: 1020, turnEndedAt: 4000, processState: 'failed', terminal: true }),
+      item('partial-result', 'assistant', { createdAt: 1050, displayAt: 3500 }),
+      item('late-text', 'assistant', { createdAt: 1060, displayAt: 4500 }),
+      item('delayed-old-text', 'assistant', { createdAt: 1070, displayAt: 3000 }),
+    ], { tailClosed: true });
+    const visible = result.filter(entry => entry.type === 'item').map(entry => entry.id);
+    expect(visible).toEqual(['user', 'terminal-error', 'partial-result']);
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('missing disclosure');
+    expect(disclosure.processItemIds).toEqual(['late-text', 'delayed-old-text']);
+    expect(disclosure.state).toBe('failed');
+    expect(disclosure.endAt).toBe(4000);
+  });
+
+  test('late text and another turn cannot replace the preserved failure result', () => {
+    const result = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1000 }),
+      item('partial-result', 'assistant', { createdAt: 2500 }),
+      item('other-user', 'user', { turnId: TURN_2, createdAt: 2600 }),
+      item('other-answer', 'assistant', { turnId: TURN_2, createdAt: 2700 }),
+      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true }),
+      item('late-partial', 'assistant', { createdAt: 3500 }),
+    ], { tailClosed: true });
+    const visible = result.filter(entry => entry.type === 'item').map(entry => entry.id);
+    expect(visible).toEqual(['user', 'partial-result', 'other-user', 'other-answer', 'terminal-error']);
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure' && entry.turnId === TURN_1);
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('missing disclosure');
+    expect(disclosure.processItemIds).toEqual(['late-partial']);
+    expect(disclosure.state).toBe('failed');
   });
 
   test('keeps the final assistant answer outside the disclosure when earlier assistant text was intermediate', () => {
@@ -196,7 +334,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(result).toEqual([{ type: 'item', id: 'user' }]);
   });
 
-  test('collapses stale running process steps after a closed turn has a final answer', () => {
+  test('settles stale running process steps after a closed turn has a final answer', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user', 'user', { createdAt: 1000 }),
@@ -235,7 +373,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemStates).toEqual({ thinking: 'completed' });
   });
 
-  test('keeps running assistant text visible after the live disclosure', () => {
+  test('keeps provisional assistant text inside the live disclosure', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('progress-note', 'assistant', { createdAt: 1500 }),
@@ -246,34 +384,32 @@ describe('buildTurnDisclosureItems', () => {
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
       DISCLOSURE_1,
-      'partial-answer',
     ]);
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
-    expect(disclosure.processItemIds).toEqual(['progress-note', 'scan']);
+    expect(disclosure.processItemIds).toEqual(['progress-note', 'scan', 'partial-answer']);
   });
 
-  test('keeps waiting confirmation steps visible in the live disclosure', () => {
+  test('keeps active process steps visible in the live disclosure', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
-      item('permission', 'process', { createdAt: 2000, processState: 'waiting' }),
+      item('active-process', 'process', { createdAt: 2000, processState: 'running' }),
       item('partial-answer', 'assistant', { createdAt: 3000 }),
     ]);
 
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
       DISCLOSURE_1,
-      'partial-answer',
     ]);
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.state).toBe('waiting');
+    expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
     expect(disclosure.defaultCollapsed).toBe(false);
-    expect(disclosure.processItemIds).toEqual(['permission']);
+    expect(disclosure.processItemIds).toEqual(['active-process', 'partial-answer']);
   });
 
   test('keeps an intermediate failure in details but marks a closed answered turn as processed', () => {
@@ -294,7 +430,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemStates).toEqual({ tool: 'failed' });
   });
 
-  test('marks a closed failed process-only turn as processed while retaining failed details', () => {
+  test('keeps a closed failed process-only turn failed while retaining details', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user', 'user', { createdAt: 1000 }),
@@ -311,7 +447,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.state).toBe('completed');
+    expect(disclosure.state).toBe('failed');
     expect(disclosure.running).toBe(false);
     expect(disclosure.startAt).toBe(1000);
     expect(disclosure.endAt).toBe(3000);
@@ -405,7 +541,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['tool']);
   });
 
-  test('keeps a completed tail in the live disclosure while assistant text remains readable', () => {
+  test('keeps a completed tail and provisional assistant text in the live disclosure', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('tool', 'process', { createdAt: 2000, processState: 'completed' }),
@@ -415,16 +551,15 @@ describe('buildTurnDisclosureItems', () => {
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
       DISCLOSURE_1,
-      'assistant-text',
     ]);
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
-    expect(disclosure.processItemIds).toEqual(['tool']);
+    expect(disclosure.processItemIds).toEqual(['tool', 'assistant-text']);
   });
 
-  test('collapses a completed process-only segment once the next user request closes it', () => {
+  test('settles a completed process-only segment once the next request closes it', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
@@ -503,6 +638,32 @@ describe('buildTurnDisclosureItems', () => {
     expect(firstDisclosure.endAt).toBe(3000);
   });
 
+  test('places delayed persisted process rows before each turn final answer instead of stacking them at the tail', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 2000 }),
+        item('user-2', 'user', { turnId: TURN_2, createdAt: 3000 }),
+        item('final-2', 'assistant', { turnId: TURN_2, createdAt: 4000 }),
+        item('persisted-process-1', 'process', { turnId: TURN_1, createdAt: 1500 }),
+        item('persisted-process-2', 'process', { turnId: TURN_2, createdAt: 3500 }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual([
+      'user-1',
+      DISCLOSURE_1,
+      'final-1',
+      'user-2',
+      DISCLOSURE_2,
+      'final-2',
+    ]);
+    const disclosures = result.filter((entry) => entry.type === 'turn_disclosure');
+    expect(disclosures).toHaveLength(2);
+    expect(new Set(disclosures.map((entry) => entry.turnId))).toEqual(new Set([TURN_1, TURN_2]));
+  });
+
   test('selects final assistant content across non-contiguous fragments of the same turn', () => {
     const result = buildTurnDisclosureItems(
       [
@@ -528,6 +689,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure?.type !== 'turn_disclosure') return;
     expect(disclosure.processItemIds).toEqual(['intro-1', 'tool-1']);
     expect(disclosure.endAt).toBe(3000);
+    expect(disclosure.defaultCollapsed).toBe(true);
   });
 
   test('uses the latest fragment state when a canceled turn later completes', () => {
@@ -562,14 +724,14 @@ describe('buildTurnDisclosureItems', () => {
     });
   });
 
-  test('uses the latest fragment state when a waiting turn resumes running', () => {
+  test('uses the latest fragment state when an active turn resumes running', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
-        item('permission-1', 'process', {
+        item('active-1', 'process', {
           turnId: TURN_1,
           createdAt: 2000,
-          processState: 'waiting',
+          processState: 'running',
         }),
         item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 2500 }),
         item('running-1', 'process', {
@@ -588,6 +750,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure?.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
   });
 
   test('does not let an older process state win merely because every fragment includes the global final time', () => {

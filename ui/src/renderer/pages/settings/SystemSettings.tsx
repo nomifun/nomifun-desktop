@@ -8,17 +8,17 @@ import React from 'react';
 import { useLocation } from 'react-router-dom';
 import SystemModalContent from '@/renderer/components/settings/SettingsModal/contents/SystemModalContent';
 import AboutModalContent from '@/renderer/components/settings/SettingsModal/contents/AboutModalContent';
-import ComputerUseSettingsContent from '@/renderer/components/settings/SettingsModal/contents/ComputerUseSettingsContent';
+import CapabilityPermissionsContent from '@/renderer/components/settings/SettingsModal/contents/CapabilityPermissionsContent';
 import SettingsPageWrapper from './components/SettingsPageWrapper';
 
 const SystemSettings: React.FC = () => {
   const location = useLocation();
   const isAboutPage = location.pathname === '/settings/about';
-  const isComputerUsePage = location.pathname === '/settings/computer-use';
+  const isPermissionsPage = location.pathname === '/settings/permissions';
 
   const content = (() => {
     if (isAboutPage) return <AboutModalContent />;
-    if (isComputerUsePage) return <ComputerUseSettingsContent />;
+    if (isPermissionsPage) return <CapabilityPermissionsContent />;
     return <SystemModalContent />;
   })();
 

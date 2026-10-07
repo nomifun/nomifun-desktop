@@ -21,14 +21,12 @@ import {
   type CreativeTask,
   type CreativeTaskReference,
 } from '../../tasks';
-import {
-  useCreativeWorkbenchRuntime,
-  type CreativeWorkbenchRuntimeSnapshot,
-  type PreparedCreativeWorkbenchRun,
-} from '../../workbenches/runtime';
+import { useCanvasGenerationRuntime, type CanvasGenerationRuntimeSnapshot, type PreparedCanvasGenerationRun } from '../generation';
+
 import type { CreativeCanvasEditorHandle } from '../editor';
 import {
   canvasImageComposeConfigForReference,
+  canvasImageComposeSourceNodeId,
   canvasImageComposeResumeRequests,
   isCanvasImageComposeConfig,
 } from './canvasImageComposerCanvas';
@@ -55,23 +53,25 @@ import {
 } from './imageMaskEditRuntime';
 
 export interface CanvasImageTaskRuntimeBridgeHandle {
-  submit(plan: PreparedCreativeWorkbenchRun): Promise<CanvasImageMaskEditAdmission>;
+  submit(plan: PreparedCanvasGenerationRun): Promise<CanvasImageMaskEditAdmission>;
   retrySubmission(order: number, idempotencyKey: string): Promise<CanvasImageMaskEditAdmission>;
-  retryTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
-  cancelTask(taskId: string): Promise<CreativeWorkbenchRuntimeSnapshot>;
-  recoverTask(reference: CreativeTaskReference): Promise<CreativeWorkbenchRuntimeSnapshot>;
+  dismissSubmission(order: number): CanvasGenerationRuntimeSnapshot;
+  retryTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
+  cancelTask(taskId: string): Promise<CanvasGenerationRuntimeSnapshot>;
+  recoverTask(reference: CreativeTaskReference): Promise<CanvasGenerationRuntimeSnapshot>;
   /** Returns false only when the backend authoritatively answers 404. */
   taskExists(reference: CreativeTaskReference): Promise<boolean>;
-  snapshot(): CreativeWorkbenchRuntimeSnapshot;
+  isNodeBusy(nodeId: string): boolean;
+  snapshot(): CanvasGenerationRuntimeSnapshot;
 }
 
-export interface CanvasImageTaskRuntimeBridgeProps {
+interface CanvasImageTaskRuntimeBridgeProps {
   projectId: string;
   initialDocument: CreativeProjectDocument;
   editorRef: React.RefObject<CreativeCanvasEditorHandle | null>;
   viewportSize: CreativeSize;
   onAsset(asset: CreativeAsset): void;
-  onSnapshot(snapshot: CreativeWorkbenchRuntimeSnapshot): void;
+  onSnapshot(snapshot: CanvasGenerationRuntimeSnapshot): void;
   onNotice(message: string): void;
 }
 
@@ -155,6 +155,17 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
     ...canvasImageComposeResumeRequests(props.initialDocument),
   ]);
   const initialResumeRequests = initialResumeRequestsRef.current;
+
+  const nodeIdForTask = useCallback((reference: CreativeTaskReference) => {
+    const current = latest.current;
+    const editor = requiredEditor(current.editorRef, t);
+    const document = { projectId: current.projectId, nodes: editor.getState().document.nodes };
+    const kind = taskKindForReference(editor, current.projectId, reference, t);
+    const config = kind === 'compose'
+      ? canvasImageComposeConfigForReference(document, reference)
+      : canvasImageMaskEditConfigForReference(document, reference);
+    return canvasImageComposeSourceNodeId(config);
+  }, [t]);
 
   const onPendingTask = useCallback(
     async (reference: CreativeTaskReference, signal: AbortSignal) => {
@@ -292,11 +303,12 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
     [t]
   );
 
-  const runtime = useCreativeWorkbenchRuntime({
+  const runtime = useCanvasGenerationRuntime({
     scopeKey: `${props.projectId}:canvas-image-tasks`,
     tasks: creativeTaskClient,
     assets: creativeAssetClient,
     initialResumeRequests,
+    nodeIdForTask,
     onPendingTask,
     onSettledTask,
     onRecoveryFailure,
@@ -362,6 +374,7 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
           idempotencyKey,
           start: () => runtime.controller.retrySubmission(order),
         }),
+      dismissSubmission: (order) => runtime.controller.dismissSubmission(order),
       retryTask: (taskId) => runtime.controller.retry(taskId),
       cancelTask: (taskId) => runtime.controller.cancel(taskId),
       recoverTask: (reference) =>
@@ -375,6 +388,7 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
           throw error;
         }
       },
+      isNodeBusy: (nodeId) => runtime.controller.isNodeBusy(latest.current.projectId, nodeId),
       snapshot: () => runtime.controller.snapshot(),
     }),
     [runtime.controller]
@@ -386,7 +400,7 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
 CanvasImageTaskRuntimeBridge.displayName = 'CanvasImageTaskRuntimeBridge';
 
 export const canvasImageTaskReferenceFromPlan = (
-  plan: PreparedCreativeWorkbenchRun
+  plan: PreparedCanvasGenerationRun
 ): CreativeTaskReference => creativeTaskReferenceFromInput(plan.input);
 
 export default CanvasImageTaskRuntimeBridge;

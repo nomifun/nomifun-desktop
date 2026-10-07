@@ -15,12 +15,12 @@ import { supportsPreviewHistory } from '../../constants';
  * Toolbar button style tokens.
  *
  * Exported so viewers that publish their own buttons into the toolbar-extras
- * portal (e.g. `MiniAppViewer`) render identical chrome instead of pasting the
- * literals again. Complete literal class strings — never composed at runtime.
+ * portal render identical chrome instead of pasting the literals again.
+ * Complete literal class strings — never composed at runtime.
  */
-export const PREVIEW_TOOLBAR_BTN_CLASS =
+const PREVIEW_TOOLBAR_BTN_CLASS =
   'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-3';
-export const PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
+const PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
 
 /**
  * PreviewToolbar 组件属性

@@ -1,0 +1,597 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "schema_version": "1.0.0",
+    "inventory_version": "2.0.0",
+    "version_policy": {
+      "package_version": "1.0.0"
+    },
+    "packages": [
+      {
+        "package": {
+          "id": "nomifun.plugin-development",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.plugin-development"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "plugin.development"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.model-management",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.model-management"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "model.management"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.web-research",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.web-research"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "web.research"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.agent-execution",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.agent-execution"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "agent.collaboration"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.workspace-execution",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.workspace-execution"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "workspace.files"
+            },
+            "kind": "tool"
+          },
+          {
+            "capability": {
+              "id": "workspace.vcs"
+            },
+            "kind": "tool"
+          },
+          {
+            "capability": {
+              "id": "workspace.process"
+            },
+            "kind": "tool"
+          },
+          {
+            "capability": {
+              "id": "workspace.artifacts"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.ssh",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.ssh"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "ssh"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.knowledge",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.knowledge"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "knowledge"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.project-memory",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.project-memory"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "project.memory"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.companion-memory",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.companion-memory"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "companion.memory"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.browser",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.browser"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "browser"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": [],
+        "role_contracts": [
+          {
+            "key": {
+              "role_id": "system.browser_use",
+              "contract_version": "2.0.0"
+            },
+            "members": [
+              {
+                "capability": {
+                  "id": "browser"
+                },
+                "capability_manifest_digest": "0b4f260dee2707c98834d458ce50a84423c69c7ce7def6e3077bc86c7876294a",
+                "requirement": "required"
+              }
+            ],
+            "serialized_target_resource_kind": "browser"
+          }
+        ],
+        "role_providers": [
+          {
+            "role": {
+              "key": {
+                "role_id": "system.browser_use",
+                "contract_version": "2.0.0"
+              },
+              "contract_digest": "d126627d165f2f8572a34c3e7e2bbe556ec522618f8e73b299b4f2866280cb36"
+            },
+            "display": {
+              "name": "Browser Use",
+              "description": "Bundled first-party execution-role provider."
+            },
+            "members": {
+              "browser": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "package": {
+          "id": "nomifun.computer-a11y",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.computer-a11y"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "computer"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": [],
+        "role_contracts": [
+          {
+            "key": {
+              "role_id": "system.computer_use",
+              "contract_version": "1.0.0"
+            },
+            "members": [
+              {
+                "capability": {
+                  "id": "computer"
+                },
+                "capability_manifest_digest": "0fbc3af16699c855cd934d74a47f3d78fe6f0f338d1a45b6c371a2ecb82d6941",
+                "requirement": "required"
+              }
+            ],
+            "serialized_target_resource_kind": "computer"
+          }
+        ],
+        "role_providers": [
+          {
+            "role": {
+              "key": {
+                "role_id": "system.computer_use",
+                "contract_version": "1.0.0"
+              },
+              "contract_digest": "92e2fbccfd92cb82cabef53f9f6df582e4af2dcfea161ecb05d2cbc71d19827b"
+            },
+            "display": {
+              "name": "Computer Use",
+              "description": "Bundled first-party execution-role provider."
+            },
+            "members": {
+              "computer": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "computer"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "package": {
+          "id": "nomifun.requirements",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.requirements"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "requirements"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.automation-schedule",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.automation-schedule"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "automation.schedule"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.companion",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.companion"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "companion"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.channel",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.channel"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "channel.messaging"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.customer-service",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.customer-service"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "customer.service"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.robot",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.robot"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "robot"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.creation",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.creation"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "creation.media"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.workshop",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.workshop"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "creative.workshop"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [
+          {
+            "id": "creative-studio-canvas",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creative-studio-organize",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creative-studio-template",
+            "version": "1.0.0"
+          }
+        ],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.office",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.office"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "office"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.tool-discovery",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.tool-discovery"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "agent.tool-discovery"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.notification",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.notification"
+        },
+        "capabilities": [],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
+          "id": "nomifun.remote-ingress",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.remote-ingress"
+        },
+        "capabilities": [],
+        "skills": [],
+        "mcp_tools": []
+      }
+    ]
+  },
+  "payload_digest": "744a4bd350ef88285b465d43f22a42dcc83fe69ef7d5a5566283d2ef9fe96d43"
+}

@@ -328,6 +328,11 @@ impl PtyHandle {
         }
     }
 
+    /// Retry a failed persistence pass even if the child produces no more output.
+    pub(crate) fn mark_scrollback_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
     pub fn subscribe_output(&self) -> broadcast::Receiver<Vec<u8>> {
         self.out_tx.subscribe()
     }
@@ -777,5 +782,160 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("PTY leader remained alive after exact force-kill");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shell_sentinel_starts_a_real_login_shell_and_exits_cleanly() {
+        let (program, args) = crate::types::resolve_command(crate::types::SHELL_SENTINEL, &[]);
+        assert_eq!(program, crate::types::default_login_shell());
+        assert_eq!(args.first().map(String::as_str), Some("-l"));
+
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let output = Arc::clone(&captured);
+        let exited = Arc::new(tokio::sync::Notify::new());
+        let exit_signal = Arc::clone(&exited);
+        let handle = PtyHandle::spawn(
+            SpawnParams {
+                program: program.clone(),
+                args,
+                cwd: String::new(),
+                env: HashMap::new(),
+                cols: 80,
+                rows: 24,
+            },
+            0,
+            move |chunk| output.lock().unwrap().extend_from_slice(&chunk),
+            move |exit, _scrollback| {
+                assert!(matches!(exit, PtyExit::Exited(Some(0))));
+                exit_signal.notify_one();
+            },
+        )
+        .await
+        .expect("spawn product login shell");
+        handle.activate();
+        let shell_name = std::path::Path::new(&program)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let probe = match shell_name {
+            "zsh" => "printf '\\nNOMIFUN_LOGIN=%s\\n' \"$options[login]\"; exit\n",
+            "bash" => {
+                "if shopt -q login_shell; then v=on; else v=off; fi; printf '\\nNOMIFUN_LOGIN=%s\\n' \"$v\"; exit\n"
+            }
+            _ => {
+                "case \"$(ps -p $$ -o command=)\" in -*) v=on;; *) v=off;; esac; printf '\\nNOMIFUN_LOGIN=%s\\n' \"$v\"; exit\n"
+            }
+        };
+        handle
+            .write(probe.as_bytes())
+            .await
+            .expect("write login-shell probe");
+        tokio::time::timeout(Duration::from_secs(5), exited.notified())
+            .await
+            .expect("login shell should exit");
+        let output = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        let login = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("NOMIFUN_LOGIN="))
+            .expect("shell must print login state");
+        assert_eq!(login, "on", "shell must enable login mode: {output:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_kill_reaps_interactive_shell_job_group() {
+        let handle = PtyHandle::spawn(
+            SpawnParams {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-i".to_owned()],
+                cwd: String::new(),
+                env: HashMap::new(),
+                cols: 80,
+                rows: 24,
+            },
+            0,
+            |_chunk| {},
+            |_exit, _scrollback| {},
+        )
+        .await
+        .expect("spawn interactive shell");
+        handle.activate();
+        handle
+            .write(b"set +H\nsleep 60 & printf '\\nNOMIFUN_JOB_PID=%s\\n' \"$!\"; wait\n")
+            .await
+            .expect("start background job");
+        let mut job_pid = None;
+        for _ in 0..150 {
+            let output = handle.scrollback();
+            job_pid = String::from_utf8_lossy(&output).lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("NOMIFUN_JOB_PID=")?
+                    .parse::<i32>()
+                    .ok()
+            });
+            if job_pid.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let job_group = job_pid.map(|pid| unsafe { libc::getpgid(pid) });
+        let job_generation = job_pid.map(|pid| macos_test_process_generation(pid).expect("live job identity"));
+        let leader = handle.pid().expect("leader pid") as i32;
+        let cleanup = handle.kill().await;
+        let job_pid = job_pid.unwrap_or_else(|| {
+            panic!(
+                "shell must report the actual background job pid: {}",
+                String::from_utf8_lossy(&handle.scrollback())
+            )
+        });
+        let generation = job_generation.expect("observed job generation");
+        for _ in 0..100 {
+            let gone = match macos_test_process_generation(job_pid) {
+                Ok(observed) => observed != generation,
+                Err(libc::ESRCH) => true,
+                Err(error) => panic!("cannot verify job identity: {error}"),
+            };
+            if gone {
+                assert_eq!(
+                    job_group,
+                    Some(job_pid),
+                    "job control creates its own group"
+                );
+                assert_ne!(job_pid, leader);
+                cleanup.expect("cleanup must prove both process groups stopped");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // The kernel verifies the observed generation: a failed regression
+        // must not signal a different process that reused the numeric PID.
+        macos_test_kill_generation(job_pid, generation);
+        panic!("interactive PTY job survived cleanup: {cleanup:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_test_process_generation(pid: i32) -> Result<u32, i32> {
+        // Darwin PROC_PIDUNIQIDENTIFIERINFO (17): 56 bytes, pidversion at 32.
+        // Keep this test-only probe independent of production cleanup results.
+        let mut info = [0u8; 56];
+        let count = unsafe { libc::proc_pidinfo(pid, 17, 1, info.as_mut_ptr().cast(), 56) };
+        if count != 56 {
+            return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EPROTO));
+        }
+        Ok(u32::from_ne_bytes(info[32..36].try_into().unwrap()))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_test_kill_generation(pid: i32, generation: u32) {
+        type Signal = unsafe extern "C" fn(*mut [u32; 8], i32) -> i32;
+        let pointer = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"proc_signal_with_audittoken".as_ptr()) };
+        assert!(!pointer.is_null(), "PTY creation already checked this API");
+        let signal = unsafe { std::mem::transmute::<*mut libc::c_void, Signal>(pointer) };
+        let mut token = [0u32; 8];
+        token[5] = pid as u32;
+        token[7] = generation;
+        let result = unsafe { signal(&mut token, libc::SIGKILL) };
+        assert!(matches!(result, 0 | libc::ESRCH), "exact test cleanup failed: {result}");
     }
 }

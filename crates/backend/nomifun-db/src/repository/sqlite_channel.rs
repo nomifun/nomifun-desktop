@@ -68,14 +68,15 @@ async fn lock_conversation(
         ))
     })?;
     let parent = sqlx::query(
-        "UPDATE conversations SET updated_at = updated_at WHERE conversation_id = ?",
+        "UPDATE agent_sessions SET next_seq = next_seq \
+         WHERE agent_session_id = ? AND state = 'live'",
     )
     .bind(conversation_id.as_str())
     .execute(&mut **tx)
     .await?;
     if parent.rows_affected() == 0 {
         return Err(DbError::Conflict(format!(
-            "{context} conversation '{}' does not exist",
+            "{context} AgentSession '{}' does not exist",
             conversation_id
         )));
     }
@@ -144,8 +145,6 @@ fn merge_chat_kind(existing: &str, incoming: &str) -> Result<String, DbError> {
     validate_chat_kind(existing)?;
     validate_chat_kind(incoming)?;
     match (existing, incoming) {
-        (crate::models::CHANNEL_CHAT_KIND_UNKNOWN, value) => Ok(value.to_owned()),
-        (value, crate::models::CHANNEL_CHAT_KIND_UNKNOWN) => Ok(value.to_owned()),
         (left, right) if left == right => Ok(left.to_owned()),
         (left, right) => Err(DbError::Conflict(format!(
             "channel session chat_kind cannot change from '{left}' to '{right}'"
@@ -897,9 +896,7 @@ impl IChannelRepository for SqliteChannelRepository {
         )
         .await?;
 
-        // The binding is the durable authority for a chat scope. Migration 003
-        // deterministically backfills the earliest legacy session when old
-        // databases contain duplicate rows, without deleting any history.
+        // The binding is the sole durable authority for a chat scope.
         let bound_session_id: Option<String> = sqlx::query_scalar(
             "SELECT channel_session_id FROM channel_session_bindings \
              WHERE channel_plugin_id = ? AND channel_user_id = ? AND chat_id = ?",
@@ -925,16 +922,7 @@ impl IChannelRepository for SqliteChannelRepository {
             // Touch last_activity.
             let now = nomifun_common::now_ms();
             let chat_kind = merge_chat_kind(&row.chat_kind, &new_row.chat_kind)?;
-            // Legacy sessions could point at a private/shared conversation
-            // before chat scope was persisted. Reclassification must sever
-            // that link atomically so a group cannot inherit private context.
-            let conversation_id = if row.chat_kind == crate::models::CHANNEL_CHAT_KIND_UNKNOWN
-                && chat_kind != crate::models::CHANNEL_CHAT_KIND_UNKNOWN
-            {
-                None
-            } else {
-                row.conversation_id.clone()
-            };
+            let conversation_id = row.conversation_id.clone();
             sqlx::query(
                 "UPDATE channel_sessions \
                  SET last_activity = ?, chat_kind = ?, conversation_id = ? \
@@ -955,59 +943,21 @@ impl IChannelRepository for SqliteChannelRepository {
             });
         }
 
-        // Defensive recovery for a database whose binding was removed outside
-        // the repository: bind the earliest matching legacy row instead of
-        // authorizing a second session for the same scope.
-        let legacy = sqlx::query_as::<_, ChannelSessionRow>(
-            "SELECT * FROM channel_sessions \
-             WHERE channel_user_id = ? AND chat_id = ? AND channel_plugin_id = ? \
-             ORDER BY id ASC LIMIT 1",
+        // A row without its scope binding cannot prove context ownership.
+        // Refuse it instead of deriving authority from a historical row.
+        let unbound: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM channel_sessions \
+             WHERE channel_user_id = ? AND chat_id = ? AND channel_plugin_id = ?)",
         )
         .bind(channel_user_id.as_str())
         .bind(chat_id)
         .bind(channel_plugin_id)
-        .fetch_optional(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
-        if let Some(row) = legacy {
-            sqlx::query(
-                "INSERT INTO channel_session_bindings \
-                    (channel_plugin_id, channel_user_id, chat_id, channel_session_id, created_at) \
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(channel_plugin_id)
-            .bind(channel_user_id.as_str())
-            .bind(chat_id)
-            .bind(&row.channel_session_id)
-            .bind(row.created_at)
-            .execute(&mut *tx)
-            .await?;
-            let now = nomifun_common::now_ms();
-            let chat_kind = merge_chat_kind(&row.chat_kind, &new_row.chat_kind)?;
-            let conversation_id = if row.chat_kind == crate::models::CHANNEL_CHAT_KIND_UNKNOWN
-                && chat_kind != crate::models::CHANNEL_CHAT_KIND_UNKNOWN
-            {
-                None
-            } else {
-                row.conversation_id.clone()
-            };
-            sqlx::query(
-                "UPDATE channel_sessions \
-                 SET last_activity = ?, chat_kind = ?, conversation_id = ? \
-                 WHERE channel_session_id = ?",
-            )
-            .bind(now)
-            .bind(&chat_kind)
-            .bind(&conversation_id)
-            .bind(&row.channel_session_id)
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            return Ok(ChannelSessionRow {
-                last_activity: now,
-                chat_kind,
-                conversation_id,
-                ..row
-            });
+        if unbound {
+            return Err(DbError::Conflict(
+                "channel session exists without its canonical scope binding".into(),
+            ));
         }
 
         // Insert new session.
@@ -1418,11 +1368,12 @@ impl IChannelRepository for SqliteChannelRepository {
                  conversation_scope_id = ?, message_scope_id = ?, \
                  conversation_id = CASE \
                      WHEN ? IS NOT NULL AND EXISTS(\
-                         SELECT 1 FROM conversations WHERE conversation_id = ?\
+                         SELECT 1 FROM agent_sessions \
+                          WHERE agent_session_id = ? AND state = 'live'\
                      ) THEN ? ELSE NULL END, \
                  message_id = CASE \
                      WHEN ? IS NOT NULL AND EXISTS(\
-                         SELECT 1 FROM messages WHERE message_id = ?\
+                         SELECT 1 FROM agent_messages WHERE projection_id = ?\
                      ) THEN ? ELSE NULL END, \
                  outcome_json = ?, error_text = ?, \
                  updated_at = ?, completed_at = ? \
@@ -2768,6 +2719,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_or_create_session_rejects_a_row_without_its_scope_binding() {
+        let (repo, db) = setup().await;
+        let plugin = seed_channel(&repo, "Telegram Stub").await;
+        let user = seed_user(&repo, plugin.channel_plugin_id.as_str()).await;
+        let proposed = sample_session(
+            user.channel_user_id.as_str(),
+            plugin.channel_plugin_id.as_str(),
+            "chat-unbound",
+        );
+        let created = repo.get_or_create_session(
+            user.channel_user_id.as_str(), "chat-unbound",
+            plugin.channel_plugin_id.as_str(), &proposed,
+        ).await.unwrap();
+        sqlx::query("DELETE FROM channel_session_bindings WHERE channel_session_id = ?")
+            .bind(&created.channel_session_id)
+            .execute(db.pool()).await.unwrap();
+
+        let error = repo.get_or_create_session(
+            user.channel_user_id.as_str(), "chat-unbound",
+            plugin.channel_plugin_id.as_str(), &proposed,
+        ).await.unwrap_err();
+        assert!(matches!(error, DbError::Conflict(_)));
+        let bindings: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_session_bindings WHERE channel_session_id = ?",
+        ).bind(&created.channel_session_id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(bindings, 0);
+        assert_eq!(repo.get_all_sessions().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_session_cannot_reclassify_an_existing_chat_scope() {
+        let (repo, _db) = setup().await;
+        let plugin = seed_channel(&repo, "Telegram Stub").await;
+        let user = seed_user(&repo, plugin.channel_plugin_id.as_str()).await;
+        let proposed = sample_session(
+            user.channel_user_id.as_str(),
+            plugin.channel_plugin_id.as_str(),
+            "chat-scoped",
+        );
+        let created = repo.get_or_create_session(
+            user.channel_user_id.as_str(), "chat-scoped",
+            plugin.channel_plugin_id.as_str(), &proposed,
+        ).await.unwrap();
+        let classified = NewChannelSessionRow {
+            chat_kind: crate::models::CHANNEL_CHAT_KIND_DIRECT.to_owned(),
+            ..proposed
+        };
+        let error = repo.get_or_create_session(
+            user.channel_user_id.as_str(), "chat-scoped",
+            plugin.channel_plugin_id.as_str(), &classified,
+        ).await.unwrap_err();
+        assert!(matches!(error, DbError::Conflict(_)));
+        let retained = repo.get_session(&created.channel_session_id).await.unwrap().unwrap();
+        assert_eq!(retained.chat_kind, created.chat_kind);
+        assert_eq!(retained.conversation_id, created.conversation_id);
+    }
+
+    #[tokio::test]
     async fn concurrent_get_or_create_session_uses_one_canonical_binding() {
         let (repo, db) = setup().await;
         let plugin = seed_channel(&repo, "Telegram Stub").await;
@@ -2938,18 +2947,21 @@ mod tests {
         repo.delete_sessions_by_user(MISSING_ID).await.unwrap();
     }
 
-    /// Helper to create an installation-owned stub conversation for
-    /// channel-session logical-reference tests. Channel sessions may point at a
-    /// host-capable Conversation, so the fixture must use the one principal
+    /// Helper to create an installation-owned canonical AgentSession for
+    /// Channel logical-reference tests. Channel sessions may point at a
+    /// host-capable AgentSession, so the fixture must use the one principal
     /// that is allowed to own host execution.
-    async fn create_stub_conversation(pool: &SqlitePool, conv_id: &str) {
+    async fn create_stub_agent_session(pool: &SqlitePool, agent_session_id: &str) {
         let now = nomifun_common::now_ms();
         let installation_owner = crate::installation_owner_id(pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, ?2, 'Test Conv', 'nomi', ?3, ?3)",
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, title, archived, pinned, \
+                agent_binding_json, next_seq, created_at\
+             ) VALUES (?1, json_object('principal_kind','user','principal_id',?2), \
+                       'live', 'Test AgentSession', 0, 0, '{}', 1, ?3)",
         )
-        .bind(conv_id)
+        .bind(agent_session_id)
         .bind(installation_owner)
         .bind(now)
         .execute(pool)
@@ -2970,7 +2982,7 @@ mod tests {
             .await
             .unwrap();
 
-        create_stub_conversation(db.pool(), &conversation_id).await;
+        create_stub_agent_session(db.pool(), &conversation_id).await;
 
         repo.update_session_conversation(&created.channel_session_id, &conversation_id)
             .await
@@ -2988,7 +3000,7 @@ mod tests {
     async fn update_session_conversation_not_found() {
         let (repo, db) = setup().await;
         let conversation_id = nomifun_common::ConversationId::new();
-        create_stub_conversation(db.pool(), conversation_id.as_str()).await;
+        create_stub_agent_session(db.pool(), conversation_id.as_str()).await;
         let err = repo
             .update_session_conversation("nope", conversation_id.as_str())
             .await

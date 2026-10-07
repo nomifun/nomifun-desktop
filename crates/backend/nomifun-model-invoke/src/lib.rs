@@ -16,9 +16,11 @@ pub mod adapter;
 pub mod adapters;
 pub mod auth;
 pub mod call;
+pub mod chat_executor;
 pub mod error;
+mod provider_diagnostic;
+pub mod default_model;
 pub mod manifest;
-mod media_prompt;
 pub mod realtime;
 pub mod materialize;
 pub mod resolve;
@@ -27,6 +29,7 @@ pub mod service;
 pub mod transport;
 pub mod types;
 pub mod url_algebra;
+pub mod voice;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
 pub use adapters::{
@@ -38,7 +41,13 @@ pub use call::{
     ResolvedCall, ResolvedConnection, ResolvedTaskConfig, ResolvedTaskTransport,
     resolve_submit_url, validate_credentialed_target_url,
 };
-pub use error::{InvokeError, InvokeErrorKind};
+pub use chat_executor::{
+    OpaqueCredentialLease, OpaqueCredentialResolver, SingleAttemptFrame,
+    SingleAttemptFraming, SingleAttemptHttpExecutor, SingleAttemptRequest,
+    SingleAttemptStream,
+};
+pub use error::{GatewayBusinessError, InvokeError, InvokeErrorKind};
+pub use default_model::default_model_preference_key;
 pub use manifest::{
     ALL_MODEL_TASKS, AuthSchemeDescriptor, ModelProtocolManifestResponse,
     PlatformPresetDescriptor, ProtocolDefaultConnection, ProtocolDescriptor,
@@ -48,7 +57,8 @@ pub use manifest::{
     default_protocol_registry, platform_presets, protocol_descriptor,
     protocol_manifest_for, protocol_manifest_for_connection,
     protocol_manifest_for_model_connection, protocol_task_descriptor,
-    protocol_requires_output_ceiling,
+    protocol_requires_output_ceiling, protocol_supports_reasoning_effort,
+    protocol_supports_reasoning_effort_value,
     try_default_protocol_registry, validate_endpoint_template,
     expand_protocol_endpoint_template, validate_provider_params_for_protocol,
 };
@@ -65,7 +75,7 @@ pub use transport::{
 };
 pub use types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
-    ModelRef, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
+    ModelRef, MusicGenRequest, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
     TtsRequest, VideoGenRequest,
 };
 pub use url_algebra::{

@@ -14,15 +14,12 @@ use serde_json::json;
 use crate::adapter::{AdapterRegistry, ProtocolAdapter};
 use crate::adapters::default_realtime_adapters;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::media_prompt::{
-    apply_known_media_prompt_limit, apply_media_prompt_length_retry,
-};
 use crate::realtime::{
     RealtimeAdapterRegistry, RealtimeServerEvent, RealtimeSession, RealtimeSessionConfig,
 };
 use crate::types::{
     AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle, ModelRef,
-    RerankRequest, TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
+    MusicGenRequest, RerankRequest, TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
 };
 use crate::ResolvedCall;
 
@@ -214,6 +211,20 @@ impl ModelInvokeService {
         &self.provider_model_capability_repo
     }
 
+    /// Return the owning protocol adapter's minimum status-query interval.
+    /// Unknown or no-longer-compatible jobs deliberately return no hint; the
+    /// subsequent poll still performs the authoritative resume validation.
+    pub fn recommended_poll_interval(
+        &self,
+        job: &JobHandle,
+        task: ModelTask,
+    ) -> Option<Duration> {
+        self.registry
+            .get(&job.adapter_id, task)
+            .ok()
+            .and_then(|adapter| adapter.recommended_poll_interval())
+    }
+
     /// Resolve and validate a catalog model locally without making an upstream
     /// request.  This is the capability-discovery counterpart to [`Self::invoke`]:
     /// it shares the exact provider/model/task/adapter/connection resolver, then
@@ -260,40 +271,58 @@ impl ModelInvokeService {
         m: &ModelRef,
         req: TaskRequest,
     ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
+        self.invoke_with_expected_revision(m, req, None).await
+    }
+
+    /// Invoke only when the provider's complete invocation graph still has the
+    /// revision frozen by the caller. The check happens after one internally
+    /// consistent resolution and before any adapter submission.
+    pub async fn invoke_at_config_revision(
+        &self,
+        m: &ModelRef,
+        expected_config_revision: i64,
+        req: TaskRequest,
+    ) -> Result<TaskOutcome, InvokeError> {
+        self.invoke_with_expected_revision(m, req, Some(expected_config_revision))
+            .await
+            .map(|(outcome, _context)| outcome)
+    }
+
+    async fn invoke_with_expected_revision(
+        &self,
+        m: &ModelRef,
+        req: TaskRequest,
+        expected_config_revision: Option<i64>,
+    ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
         let task = req.task();
         let (call, adapter) = self.resolve(m, task, req).await?;
-        let mut context = InvocationContext::from_resolved(call, adapter)?;
-        let _ = apply_known_media_prompt_limit(
-            &context.call.protocol,
-            &context.call.model,
-            &mut context.call.request,
-        );
+        validate_typed_task_controls(&call.protocol, &call.request)?;
+
+        if expected_config_revision
+            .is_some_and(|expected| call.config_revision != expected)
+        {
+            return Err(InvokeError::config(format!(
+                "provider config revision changed: expected {}, found {}",
+                expected_config_revision.expect("checked"),
+                call.config_revision
+            )));
+        }
+        let context = InvocationContext::from_resolved(call, adapter)?;
         let redactor = context.call.connection.auth.secret_redactor();
-        let first_attempt = context
+        // Submit the complete caller prompt. Provider length errors must not
+        // trigger a second generation with changed user instructions.
+        let outcome = context
             .adapter
             .submit(&self.http, &context.call)
             .await
-            .map_err(|error| error.redacted(&redactor));
-        let outcome = match first_attempt {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if apply_media_prompt_length_retry(
-                    &context.call.protocol,
-                    &context.call.model,
-                    &mut context.call.request,
-                    &error,
-                )
-                .is_none()
-                {
-                    return Err(error);
-                }
-                context
-                    .adapter
-                    .submit(&self.http, &context.call)
-                    .await
-                    .map_err(|retry_error| retry_error.redacted(&redactor))?
-            }
-        };
+            .map_err(|error| {
+                let error = if let Ok(endpoint) = context.call.endpoint_url() {
+                    error.with_request_context(&endpoint, &context.call.protocol,
+                        Some(context.call.connection.auth.scheme.diagnostic_id()))
+                } else { error };
+                error.with_provider_id(&context.call.provider_id)
+                    .with_model_name(&context.call.model).redacted(&redactor)
+            })?;
         let outcome = bind_pending_job(
             &context.call.protocol,
             context.call.config_revision,
@@ -613,6 +642,7 @@ fn probe_request_for_protocol(
             prompt: "health check".into(),
             count: 1,
             size: None,
+            quality: None,
             // A real (minimal) PNG: openai.images rejects an input-less edit
             // locally, and a probe that never reaches the wire is vacuous.
             // The stub is not meaningful content. Any upstream rejection still
@@ -630,7 +660,15 @@ fn probe_request_for_protocol(
             prompt: "health check".into(),
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
+            extra: json!({}),
+        })),
+        ModelTask::MusicGeneration => Some(TaskRequest::MusicGeneration(MusicGenRequest {
+            prompt: "Calm acoustic guitar instrumental".into(),
+            lyrics: None,
+            instrumental: true,
+            format: None,
             extra: json!({}),
         })),
         ModelTask::SpeechSynthesis => Some(TaskRequest::SpeechSynthesis(TtsRequest {
@@ -681,10 +719,34 @@ fn probe_request_for_protocol(
     }
 }
 
+// Reject controls before any billable adapter request when an existing protocol
+// cannot carry them. Protocol-specific cardinality/role checks live in adapters.
+fn validate_typed_task_controls(protocol: &str, request: &TaskRequest) -> Result<(), InvokeError> {
+    match request {
+            TaskRequest::VideoGeneration(request) if request.resolution.is_some() && !matches!(protocol, "ark.video_jobs" | "xai.video_jobs") => {
+                return Err(InvokeError::new(InvokeErrorKind::InvalidParams, format!("{} has no separate resolution control; use its supported size setting", protocol)));
+            }
+            TaskRequest::ImageEdit(request) if request.quality.is_some() && protocol != "openai.images" => {
+                return Err(InvokeError::new(InvokeErrorKind::InvalidParams, format!("{} does not support image-edit quality", protocol)));
+            }
+            TaskRequest::VideoGeneration(request) if !request.inputs.is_empty() => {
+                let supported = match protocol {
+                    "ark.video_jobs" | "xai.video_jobs" | "openai.videos" | "agnes.video_jobs" => true,
+                    "siliconflow.video_jobs" => request.inputs.len() == 1 && matches!(request.inputs[0].role.as_str(), "first_frame" | "reference" | "image"),
+                    _ => false,
+                };
+                if !supported {
+                    return Err(InvokeError::new(InvokeErrorKind::InvalidParams, format!("{protocol} cannot preserve the supplied video input roles")));
+                }
+            }
+            _ => {}
+        }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use nomifun_api_types::ModelTask;
     use nomifun_common::encrypt_string;
@@ -700,6 +762,25 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+
+    #[test]
+    fn unsupported_video_inputs_fail_before_adapter_execution() {
+        for (protocol, roles, valid) in [
+            ("siliconflow.video_jobs", vec!["first_frame"], true),
+            ("siliconflow.video_jobs", vec!["first_frame", "last_frame"], false),
+            // Agnes validates ordered keyframe roles in its adapter.
+            ("agnes.video_jobs", vec!["reference", "reference", "reference"], true),
+            ("agnes.video_jobs", vec!["first_frame", "last_frame"], true),
+            ("zhipu.video_jobs", vec!["first_frame"], false),
+        ] {
+            let request = TaskRequest::VideoGeneration(VideoGenRequest {
+                prompt: "test".into(), seconds: None, size: None, resolution: None,
+                inputs: roles.into_iter().map(|role| crate::InputAsset { id: None, role: role.into(), bytes: b"frame".to_vec(), mime: "image/png".into() }).collect(), extra: json!({}),
+            });
+            assert_eq!(validate_typed_task_controls(protocol, &request).is_ok(), valid, "{protocol}");
+        }
+    }
+
     use crate::{
         AdapterRegistry, ProducedData, ProtocolEndpointPurpose, TaskResult, TaskRoute,
         default_adapters, preset_protocol_recommendation, protocol_task_descriptor,
@@ -776,6 +857,7 @@ mod tests {
             provider_params,
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
         }
     }
 
@@ -933,6 +1015,7 @@ mod tests {
             prompt: prompt.into(),
             seconds: None,
             size: None,
+            resolution: None,
             inputs: vec![],
             extra: json!({}),
         })
@@ -967,7 +1050,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stepfun_long_image_prompt_is_fitted_before_the_provider_wire() {
+    async fn invoke_at_config_revision_succeeds_exactly_then_rejects_catalog_change_before_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": [{"b64_json": "aGk="}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(
+            &pool,
+            &pid,
+            "gpt-image-1",
+            r#"["image_generation"]"#,
+            "{}",
+            true,
+        )
+        .await;
+        let revision = provider_revision(&pool, &pid).await;
+        svc.invoke_at_config_revision(
+            &mref(&pid, "gpt-image-1"),
+            revision,
+            image_request("first"),
+        )
+        .await
+        .expect("same revision invokes");
+
+        nomifun_db::sqlx::query(
+            "UPDATE providers SET config_revision = config_revision + 1 WHERE provider_id = ?",
+        )
+            .bind(&pid)
+            .execute(&pool)
+            .await
+            .expect("advance provider revision");
+        let error = svc
+            .invoke_at_config_revision(
+                &mref(&pid, "gpt-image-1"),
+                revision,
+                image_request("must not reach wire"),
+            )
+            .await
+            .expect_err("stale revision must fail closed");
+        assert_eq!(error.kind, InvokeErrorKind::Config);
+        assert!(error.message.contains("revision changed"));
+    }
+
+    #[tokio::test]
+    async fn stepfun_long_image_prompt_is_submitted_and_retained_without_changes() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/images/generations"))
@@ -993,8 +1128,8 @@ mod tests {
         .await;
         let canonical_prompt = format!("START-{}-END", "角色细节".repeat(300));
 
-        let output = svc
-            .invoke(
+        let (output, context) = svc
+            .invoke_with_context(
                 &mref(&pid, "step-image-edit-2"),
                 image_request(&canonical_prompt),
             )
@@ -1003,64 +1138,59 @@ mod tests {
         assert!(matches!(output, TaskOutcome::Done(TaskResult::Assets(_))));
 
         let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         let wire_prompt = body["prompt"].as_str().expect("StepFun prompt string");
-        assert!(wire_prompt.chars().count() <= 512);
-        assert!(wire_prompt.starts_with("START-"));
-        assert!(wire_prompt.ends_with("-END"));
-        assert!(canonical_prompt.chars().count() > 512, "canonical prompt remains complete");
+        assert_eq!(wire_prompt, canonical_prompt);
+        let TaskRequest::ImageGeneration(retained) = &context.call.request else {
+            panic!("expected retained image request")
+        };
+        assert_eq!(retained.prompt, canonical_prompt);
     }
 
     #[tokio::test]
-    async fn provider_prompt_too_long_response_retries_video_once_with_reported_limit() {
-        let server = MockServer::start().await;
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let responder_attempts = Arc::clone(&attempts);
-        Mock::given(method("POST"))
-            .and(path("/v1/videos"))
-            .respond_with(move |_request: &wiremock::Request| {
-                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    ResponseTemplate::new(400).set_body_json(json!({
+    async fn provider_prompt_too_long_errors_preserve_full_video_prompt_without_retry() {
+        for message in ["prompt max 256", "prompt too long; actual length is 1810"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/videos"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
                         "error": {
                             "type": "prompt_too_long",
-                            "message": "prompt max 256"
+                            "message": message
                         }
-                    }))
-                } else {
-                    ResponseTemplate::new(200)
-                        .set_body_json(json!({"id": "v1", "status": "queued"}))
-                }
-            })
-            .expect(2)
-            .mount(&server)
-            .await;
+                    })))
+                .expect(1)
+                .mount(&server)
+                .await;
 
-        let (svc, pool) = setup().await;
-        let pid = seed_provider(&pool, &server.uri()).await;
-        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
-        let canonical_prompt = format!("START-{}-END", "scene ".repeat(300));
+            let (svc, pool) = setup().await;
+            let pid = seed_provider(&pool, &server.uri()).await;
+            seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+            let canonical_prompt = format!("START-{}-END", "scene ".repeat(300));
 
-        let outcome = svc
-            .invoke(
-                &mref(&pid, "sora-2"),
-                video_request_with_prompt(&canonical_prompt),
-            )
-            .await
-            .unwrap();
-        let TaskOutcome::Pending(job) = outcome else {
-            panic!("expected retried video request to be accepted")
-        };
-        assert_eq!(job.remote_id, "v1");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            let error = svc
+                .invoke(
+                    &mref(&pid, "sora-2"),
+                    video_request_with_prompt(&canonical_prompt),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+            assert_eq!(error.http_status, Some(400));
+            assert!(error.is_context_length_rejected());
+            assert!(error.message.contains("prompt_too_long"));
+            assert!(error.message.contains(message));
 
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        let first = String::from_utf8_lossy(&requests[0].body);
-        let second = String::from_utf8_lossy(&requests[1].body);
-        assert!(second.len() < first.len());
-        assert!(second.contains("START-"));
-        assert!(second.contains("-END"));
-        assert!(canonical_prompt.chars().count() > 256, "canonical prompt remains complete");
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let body = String::from_utf8_lossy(&requests[0].body);
+            let wire_prompt = body
+                .split_once("name=\"prompt\"").expect("multipart prompt field").1
+                .split_once("\r\n\r\n").expect("multipart prompt content").1
+                .split_once("\r\n--").expect("multipart prompt boundary").0;
+            assert_eq!(wire_prompt, canonical_prompt);
+        }
     }
 
     #[tokio::test]
@@ -1123,17 +1253,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_task_mismatch_is_unsupported_task_without_network() {
+    async fn chat_only_model_rejects_every_media_task_before_network_or_automatic_selection() {
         let server = MockServer::start().await;
-        // No mock mounted: any request reaching the server would 404 — but the
-        // gate must reject before the wire.
         let (svc, pool) = setup().await;
         let pid = seed_provider(&pool, &server.uri()).await;
         seed_model(&pool, &pid, "gpt-4o", r#"["chat"]"#, "{}", true).await;
 
-        let err = svc.invoke(&mref(&pid, "gpt-4o"), image_request("a fox")).await.unwrap_err();
-        assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
-        assert!(server.received_requests().await.unwrap().is_empty(), "gate must fire before the wire");
+        // A model ID, even one saved with a working Chat protocol, cannot
+        // supply any other task. Missing task configuration must remain an
+        // explicit local error rather than reusing Chat or choosing a default.
+        for task in [
+            ModelTask::ImageGeneration,
+            ModelTask::ImageEdit,
+            ModelTask::VideoGeneration,
+            ModelTask::MusicGeneration,
+            ModelTask::SpeechSynthesis,
+            ModelTask::SpeechRecognition,
+            ModelTask::Embedding,
+            ModelTask::Rerank,
+        ] {
+            let request = probe_request(task, &json!({})).expect("one-shot task request");
+            let err = svc.invoke(&mref(&pid, "gpt-4o"), request).await.unwrap_err();
+            assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask, "{task:?}: {err}");
+            assert!(
+                err.message.contains("no configured capability")
+                    && err.message.contains(&format!("{task:?}")),
+                "missing-task error must identify the requested task: {err}"
+            );
+            assert!(
+                svc.available_task_models(task).await.unwrap().is_empty(),
+                "Chat cannot become an automatic candidate for {task:?}"
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty(), "all task gates must fire before the wire");
+    }
+
+    #[tokio::test]
+    async fn shared_model_id_routes_asr_and_tts_through_their_exact_task_protocols() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "recognized audio"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .and(body_partial_json(json!({"model": "shared-model", "input": "hi"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/mpeg")
+                    .set_body_bytes(b"synthesized audio".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(
+            &pool,
+            &pid,
+            "shared-model",
+            r#"["chat","speech_recognition","speech_synthesis"]"#,
+            "{}",
+            true,
+        ).await;
+        let selected = mref(&pid, "shared-model");
+        let asr = svc.invoke(
+            &selected,
+            probe_request(ModelTask::SpeechRecognition, &json!({})).unwrap(),
+        ).await.unwrap();
+        assert!(matches!(asr, TaskOutcome::Done(TaskResult::Transcript { text, .. }) if text == "recognized audio"));
+        let tts = svc.invoke(
+            &selected,
+            probe_request(ModelTask::SpeechSynthesis, &json!({})).unwrap(),
+        ).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = tts else { panic!("expected synthesized audio") };
+        assert!(matches!(&assets[0].data, ProducedData::Bytes(bytes) if bytes == b"synthesized audio"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2, "only the exact ASR and TTS interfaces may receive requests");
+        assert!(requests.iter().all(|request| request.url.path() != "/v1/chat/completions"));
     }
 
     // -- probe ---------------------------------------------------------------

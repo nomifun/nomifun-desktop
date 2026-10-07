@@ -1,4 +1,11 @@
 mod conpty;
+pub use conpty::WindowsConPtyCloseMetrics;
+
+/// Inspect only the already-created pseudoconsole close executor. None means
+/// it has not been initialized; an initialization error remains distinguishable.
+pub fn windows_conpty_close_metrics() -> Result<Option<WindowsConPtyCloseMetrics>, &'static str> {
+    conpty::windows_conpty_close_metrics()
+}
 mod handles;
 
 use std::{
@@ -8,7 +15,7 @@ use std::{
     io,
     mem,
     os::windows::ffi::{OsStrExt, OsStringExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr,
     sync::{
         Arc, Mutex, OnceLock,
@@ -597,8 +604,11 @@ impl WindowsProcessJob {
 pub(super) async fn spawn_pipe(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
+    cancellation: Arc<StartCancellation>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_pipe_inner(request, output, Arc::new(SystemWin32)).await
+    spawn_inner_with_cancellation(
+        request, output, Arc::new(SystemWin32), SpawnTransport::Pipe, Some(cancellation),
+    ).await
 }
 
 #[derive(Clone)]
@@ -1268,10 +1278,13 @@ struct ChildProcessJobPoller {
 impl ChildProcessJobPoller {
     fn publish(&self, result: io::Result<()>) {
         let result = result.map_err(ChildProcessCleanupFailure::from_error);
+        // A completed cleanup receipt is the public terminal barrier. Retire
+        // the exact registry entry before publishing it so a waiter can never
+        // observe completion while stale lookup authority is still reachable.
+        remove_child_process_job(self.pid, &self.process);
         if self.process.completion.borrow().is_none() {
             self.process.completion.send_replace(Some(result));
         }
-        remove_child_process_job(self.pid, &self.process);
     }
 }
 
@@ -1579,20 +1592,23 @@ pub(super) async fn spawn_pty(
     output: Arc<OutputBuffer>,
     cols: u16,
     rows: u16,
+    cancellation: Arc<StartCancellation>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_inner(
+    spawn_inner_with_cancellation(
         request,
         output,
         Arc::new(SystemWin32),
         SpawnTransport::Pty { cols, rows },
+        Some(cancellation),
     )
     .await
 }
 
-    async fn spawn_pipe_inner(
-        request: NormalizedProcessRequest,
-        output: Arc<OutputBuffer>,
-        api: Arc<dyn Win32Facade>,
+#[cfg(test)]
+async fn spawn_pipe_inner(
+    request: NormalizedProcessRequest,
+    output: Arc<OutputBuffer>,
+    api: Arc<dyn Win32Facade>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     spawn_inner(request, output, api, SpawnTransport::Pipe).await
 }
@@ -1614,11 +1630,22 @@ async fn spawn_pty_inner(
     .await
 }
 
+#[cfg(test)]
 async fn spawn_inner(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
     api: Arc<dyn Win32Facade>,
     transport: SpawnTransport,
+) -> Result<SpawnedPlatformProcess, ProcessError> {
+    spawn_inner_with_cancellation(request, output, api, transport, None).await
+}
+
+async fn spawn_inner_with_cancellation(
+    request: NormalizedProcessRequest,
+    output: Arc<OutputBuffer>,
+    api: Arc<dyn Win32Facade>,
+    transport: SpawnTransport,
+    external_cancellation: Option<Arc<StartCancellation>>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     enforce_sandbox(&request)?;
     let prepared = PreparedCommand::new(&request)?;
@@ -1642,7 +1669,10 @@ async fn spawn_inner(
         .map_err(spawn_failed)?
         .reserve()
         .map_err(spawn_failed)?;
-    let mut cancellation = StartCancellationGuard::new();
+    let mut cancellation = match external_cancellation {
+        Some(state) => StartCancellationGuard { state, armed: true },
+        None => StartCancellationGuard::new(),
+    };
     let cancelled = cancellation.worker_flag();
     let mut transaction = tokio::task::spawn_blocking(move || {
         spawn_transaction(
@@ -1735,6 +1765,7 @@ async fn spawn_inner(
 
     Ok(SpawnedPlatformProcess {
         owner: Arc::new(owner),
+        startup_failure: None,
     })
 }
 
@@ -2144,10 +2175,7 @@ struct StartCancellationGuard {
 impl StartCancellationGuard {
     fn new() -> Self {
         Self {
-            state: Arc::new(StartCancellation {
-                cancelled: AtomicBool::new(false),
-                resume_gate: Mutex::new(()),
-            }),
+            state: Arc::new(StartCancellation::new()),
             armed: true,
         }
     }
@@ -2165,13 +2193,24 @@ impl StartCancellationGuard {
     }
 }
 
-struct StartCancellation {
+pub(super) struct StartCancellation {
     cancelled: AtomicBool,
     resume_gate: Mutex<()>,
 }
 
 impl StartCancellation {
-    fn cancel(&self) {
+    pub(super) fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            resume_gate: Mutex::new(()),
+        }
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(AtomicOrdering::Acquire)
+    }
+
+    pub(super) fn cancel(&self) {
         let _gate = match self.resume_gate.lock() {
             Ok(gate) => gate,
             Err(poisoned) => poisoned.into_inner(),
@@ -3536,6 +3575,10 @@ impl Drop for WindowsOwner {
 
 #[async_trait]
 impl PlatformProcess for WindowsOwner {
+    fn supports_interrupt(&self) -> bool {
+        self.pseudoconsole.is_some()
+    }
+
     fn pid(&self) -> u32 {
         self.pid
     }
@@ -3764,15 +3807,31 @@ struct PreparedCommand {
 impl PreparedCommand {
     fn new(request: &NormalizedProcessRequest) -> Result<Self, ProcessError> {
         let (program, args) = command_argv(&request.command)?;
-        let application = encode_nul_terminated(&program, "program")?;
-        let command_line = encode_command_line(&program, &args)?;
+        let application_program = resolve_program_on_path(&program, &request.env);
+        let application = encode_nul_terminated(&application_program, "program")?;
+        let command_line = if is_system_program(&application_program, Path::new("cmd.exe")) {
+            encode_cmd_command_line(&program, &args)?
+        } else {
+            encode_command_line(&program, &args)?
+        };
         let cwd = encode_nul_terminated(request.cwd.as_os_str(), "working directory").map_err(
             |error| ProcessError::InvalidWorkingDirectory {
                 path: request.cwd.clone(),
                 reason: error.to_string(),
             },
         )?;
-        let environment = encode_environment(&request.env)?;
+        let environment = if is_system_powershell(&application_program) {
+            // A host launched from PowerShell 7 inherits its module search path.
+            // Windows PowerShell 5.1 then selects incompatible modules ahead of
+            // its own, so ordinary cmdlets such as Get-FileHash cannot autoload.
+            // Let 5.1 construct its native defaults; explicit caller overrides
+            // retain their existing semantics.
+            encode_environment_from(std::env::vars_os().filter(|(key, _)| {
+                compare_os_case_insensitive(key, OsStr::new("PSModulePath")) != Ordering::Equal
+            }), &request.env)?
+        } else {
+            encode_environment(&request.env)?
+        };
         Ok(Self {
             application,
             command_line,
@@ -3780,6 +3839,50 @@ impl PreparedCommand {
             environment,
         })
     }
+}
+
+/// With a non-null lpApplicationName, CreateProcessW does not search PATH for
+/// a bare command. Resolve only native executable names from the effective
+/// child PATH. Never search the current directory or interpret .cmd/.bat via
+/// a shell; explicit paths keep their existing direct-launch semantics.
+fn resolve_program_on_path(
+    program: &OsStr,
+    overrides: &std::collections::BTreeMap<OsString, OsString>,
+) -> OsString {
+    let units = program.encode_wide().collect::<Vec<_>>();
+    if units.iter().any(|unit| matches!(*unit, value if value == b'\\' as u16
+        || value == b'/' as u16 || value == b':' as u16)) {
+        return program.to_os_string();
+    }
+    let path = Path::new(program);
+    let explicit_extension = path.extension().is_some();
+    let effective_path = overrides.iter()
+        .find(|(key, _)| compare_os_case_insensitive(key, OsStr::new("PATH")) == Ordering::Equal)
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os("PATH"));
+    let Some(effective_path) = effective_path else { return program.to_os_string() };
+    for directory in std::env::split_paths(&effective_path) {
+        if !directory.is_absolute() { continue; }
+        let base = directory.join(program);
+        let candidates = if explicit_extension {
+            vec![base]
+        } else {
+            vec![base.with_extension("exe"), base.with_extension("com"), base]
+        };
+        for candidate in candidates {
+            if candidate.is_file() {
+                // `canonicalize` alone returns a \\?\ disk path on Windows.
+                // Windows PowerShell 5.1 can fail during .NET initialization
+                // when CreateProcessW receives that spelling as its explicit
+                // application path. Keep the verified final file identity but
+                // use the ordinary Win32 spelling when it round-trips.
+                if let Ok(canonical) = crate::request::canonicalize_compatible(&candidate) {
+                    return canonical.into_os_string();
+                }
+            }
+        }
+    }
+    program.to_os_string()
 }
 
 fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), ProcessError> {
@@ -3825,6 +3928,23 @@ fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), Process
 }
 
 fn powershell_executable() -> Result<OsString, ProcessError> {
+    let executable = windows_directory()?
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if !executable.is_file() {
+        return Err(ProcessError::SpawnFailed {
+            failure: SpawnFailure {
+                code: "powershell_unavailable".to_owned(),
+                message: format!("trusted Windows PowerShell executable is unavailable: {}", executable.display()),
+            },
+        });
+    }
+    Ok(executable.into_os_string())
+}
+
+fn windows_directory() -> Result<std::path::PathBuf, ProcessError> {
     let mut buffer = vec![0_u16; 32_768];
     // SAFETY: `buffer` is writable for its declared length and the API writes a
     // NUL-terminated Windows directory path or returns zero on failure.
@@ -3845,23 +3965,24 @@ fn powershell_executable() -> Result<OsString, ProcessError> {
         ));
     }
     buffer.truncate(length);
-    let executable = std::path::PathBuf::from(OsString::from_wide(&buffer))
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    if !executable.is_file() {
-        return Err(ProcessError::SpawnFailed {
-            failure: SpawnFailure {
-                code: "powershell_unavailable".to_owned(),
-                message: format!(
-                    "trusted Windows PowerShell executable is unavailable: {}",
-                    executable.display()
-                ),
-            },
-        });
+    Ok(std::path::PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+fn is_system_powershell(program: &OsStr) -> bool {
+    is_system_program(program, Path::new("WindowsPowerShell/v1.0/powershell.exe"))
+}
+
+fn is_system_program(program: &OsStr, relative: &Path) -> bool {
+    if !Path::new(program).file_name().is_some_and(|name| {
+        relative.file_name().is_some_and(|expected| compare_os_case_insensitive(name, expected) == Ordering::Equal)
+    }) {
+        return false;
     }
-    Ok(executable.into_os_string())
+    let Ok(directory) = windows_directory() else { return false };
+    let trusted = directory.join("System32").join(relative);
+    let Ok(actual) = crate::request::canonicalize_compatible(Path::new(program)) else { return false };
+    let Ok(expected) = crate::request::canonicalize_compatible(&trusted) else { return false };
+    compare_os_case_insensitive(actual.as_os_str(), expected.as_os_str()) == Ordering::Equal
 }
 
 fn powershell_payload(script: &str) -> String {
@@ -3893,6 +4014,30 @@ fn powershell_payload(script: &str) -> String {
     )
 }
 
+fn encode_cmd_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16>, ProcessError> {
+    // cmd /c and /k parse a command string rather than CRT argv. Preserve the
+    // caller's one script argument literally inside the required outer quotes.
+    // https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html#tymethod.raw_arg
+    let Some(mode) = args.iter().position(|arg| {
+        compare_os_case_insensitive(arg, OsStr::new("/c")) == Ordering::Equal
+            || compare_os_case_insensitive(arg, OsStr::new("/k")) == Ordering::Equal
+    }).filter(|index| *index + 2 == args.len()) else {
+        return encode_command_line(program, args);
+    };
+    let mut command_line = Vec::new();
+    append_quoted(program, &mut command_line)?;
+    for arg in &args[..=mode] {
+        command_line.push(b' ' as u16);
+        append_quoted(arg, &mut command_line)?;
+    }
+    let script = args[mode + 1].encode_wide().collect::<Vec<_>>();
+    if script.contains(&0) { return Err(invalid_command("Windows command-line arguments cannot contain NUL")); }
+    command_line.extend_from_slice(&[b' ' as u16, b'"' as u16]);
+    command_line.extend_from_slice(&script);
+    command_line.push(b'"' as u16);
+    finish_command_line(command_line)
+}
+
 fn encode_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16>, ProcessError> {
     let mut command_line = Vec::new();
     append_quoted(program, &mut command_line)?;
@@ -3900,6 +4045,10 @@ fn encode_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16>, P
         command_line.push(b' ' as u16);
         append_quoted(arg, &mut command_line)?;
     }
+    finish_command_line(command_line)
+}
+
+fn finish_command_line(mut command_line: Vec<u16>) -> Result<Vec<u16>, ProcessError> {
     command_line.push(0);
     if command_line.len() > MAX_COMMAND_LINE_UNITS {
         return Err(invalid_command(
@@ -4263,7 +4412,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn every_post_create_child_spawn_failure_is_reaped_by_the_bounded_poller() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let cases = [
@@ -4344,7 +4493,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_job_registry_removes_the_exact_entry_at_terminal_cleanup() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4370,7 +4519,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_cleanup_survives_a_temporary_member_snapshot_failure() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4409,7 +4558,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_cleanup_recovers_a_temporary_supplemental_snapshot_failure() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4445,7 +4594,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn persistent_supplemental_snapshot_failure_kills_but_fails_closed() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4486,7 +4635,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn reaper_fails_closed_without_any_complete_member_snapshot() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4516,7 +4665,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_cleanup_retries_a_temporary_terminate_failure() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4559,7 +4708,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn persistent_terminate_failure_kills_on_close_but_remains_unproven() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4596,7 +4745,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn reaper_fallback_publishes_success_after_exact_handles_terminate() {
         let mut command = tokio::process::Command::new(command_shell());
         command
@@ -4653,6 +4802,7 @@ mod tests {
     struct AuditFacade {
         events: Mutex<Vec<SpawnAuditEvent>>,
         fail_assignment: bool,
+        assignment_delay: Duration,
         created: Mutex<Option<CreatedProcess>>,
     }
 
@@ -4666,6 +4816,7 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 fail_assignment: true,
+                assignment_delay: Duration::ZERO,
                 created: Mutex::new(None),
             }
         }
@@ -4674,7 +4825,15 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 fail_assignment: false,
+                assignment_delay: Duration::ZERO,
                 created: Mutex::new(None),
+            }
+        }
+
+        fn delayed_assignment(delay: Duration) -> Self {
+            Self {
+                assignment_delay: delay,
+                ..Self::successful()
             }
         }
 
@@ -4744,6 +4903,9 @@ mod tests {
                 .lock()
                 .map_err(|_| io::Error::other("spawn audit event mutex is poisoned"))?
                 .push(SpawnAuditEvent::Assigned);
+            if !self.assignment_delay.is_zero() {
+                std::thread::sleep(self.assignment_delay);
+            }
             if self.fail_assignment {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -4764,7 +4926,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn assignment_failure_never_resumes_or_executes_user_code() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("must-not-exist.marker");
@@ -4814,7 +4976,56 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
+    async fn setup_deadline_during_assignment_never_resumes_or_restarts_the_timeout() {
+        let temporary = TempDir::new().expect("temporary marker directory should be created");
+        let marker = temporary.path().join("deadline-must-not-exist.marker");
+        let facade = Arc::new(AuditFacade::delayed_assignment(Duration::from_millis(200)));
+        let mut request = program_request(
+            command_shell(),
+            &[
+                OsString::from("/D"),
+                OsString::from("/C"),
+                OsString::from(format!(">\"{}\" echo resumed", marker.display())),
+            ],
+        );
+        request.policy.deadline = Some(Instant::now() + Duration::from_millis(50));
+        let started_at = Instant::now();
+        let result = spawn_pipe_inner(
+            request,
+            Arc::new(OutputBuffer::new(4096)),
+            facade.clone(),
+        )
+        .await;
+        let elapsed = started_at.elapsed();
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the shared process deadline must stop ownership setup"),
+        };
+        let ProcessError::SpawnFailed { failure } = error else {
+            panic!("suspended pre-resume timeout must be a proven SpawnFailed: {error:?}");
+        };
+        assert_eq!(failure.code, "spawn_failed");
+        assert!(
+            facade.events() == [SpawnAuditEvent::Created, SpawnAuditEvent::Assigned],
+            "ResumeThread must never run after the shared deadline"
+        );
+        assert!(!marker.exists(), "the suspended child executed user code");
+        assert!(
+            facade
+                .created_process_is_signaled()
+                .expect("the exact process liveness probe should succeed"),
+            "the suspended child was not reaped before SpawnFailed returned"
+        );
+        assert!(
+            elapsed < SETUP_TIMEOUT,
+            "setup received another full timeout after the shared deadline: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(windows_process_runtime)]
     async fn conpty_assignment_failure_never_resumes_or_executes_user_code() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("conpty-must-not-exist.marker");
@@ -4855,7 +5066,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn spawn_order_is_create_then_assign_then_resume() {
         let facade = Arc::new(AuditFacade::successful());
         let request = program_request(
@@ -4891,7 +5102,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn dropping_start_future_after_create_cannot_resume_later() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("drop-must-not-resume.marker");
@@ -4936,7 +5147,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn dropping_conpty_start_after_create_cannot_resume_later() {
         let temporary = TempDir::new().expect("temporary marker directory should be created");
         let marker = temporary.path().join("drop-conpty-must-not-resume.marker");
@@ -4985,7 +5196,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn dropped_write_keeps_stdin_open_until_the_blocking_write_finishes() {
         let spawned = spawn_pipe_inner(
             program_request(
@@ -5035,7 +5246,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(windows_process_runtime)]
     async fn child_inherits_only_the_three_whitelisted_stdio_handles() {
         let sentinel = create_inheritable_pipe().expect("sentinel pipe should be created");
         clear_inheritance(sentinel.read.as_raw())
@@ -5157,6 +5368,22 @@ mod tests {
             environment_entries(&block),
             vec!["alpha=first", "Beta=middle", "PATH=new", "ZETA=last"]
         );
+    }
+
+    #[test]
+    fn bare_program_resolves_only_native_executables_on_effective_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fixture.exe");
+        std::fs::write(&executable, b"").unwrap();
+        let overrides = BTreeMap::from([(
+            OsString::from("Path"), directory.path().as_os_str().to_os_string(),
+        )]);
+        let expected = crate::request::canonicalize_compatible(&executable)
+            .unwrap().into_os_string();
+        assert_eq!(resolve_program_on_path(OsStr::new("fixture"), &overrides), expected);
+        assert_eq!(resolve_program_on_path(OsStr::new("fixture.exe"), &overrides), expected);
+        assert_eq!(resolve_program_on_path(OsStr::new("missing"), &overrides), OsString::from("missing"));
+        assert_eq!(resolve_program_on_path(executable.as_os_str(), &overrides), executable.as_os_str());
     }
 
     #[test]

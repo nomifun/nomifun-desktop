@@ -15,6 +15,10 @@ import {
   type CreativeModelCatalogSnapshot,
   type CreativeModelSelectionRef,
 } from "../../models";
+import {
+  CREATIVE_CANVAS_MODAL_LAYER_STYLE,
+  getCreativeCanvasModalPopupContainer,
+} from "../canvasOverlayLayers";
 import type { CreativeImageMaskSelection } from "./browserMask";
 import {
   CREATIVE_IMAGE_MASK_BRUSH_DEFAULT,
@@ -538,9 +542,9 @@ const CreativeImageMaskEditDialog: React.FC<
     escToExit={!props.busy && !props.retryLocked}
     closable={!props.busy && !props.retryLocked}
     unmountOnExit
-    getPopupContainer={() =>
-      document.getElementById("creative-studio-portal-root") ?? document.body
-    }
+    getPopupContainer={getCreativeCanvasModalPopupContainer}
+    maskStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
+    wrapStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
     onCancel={props.onClose}
   >
     <CreativeImageMaskEditDialogContent {...props} />

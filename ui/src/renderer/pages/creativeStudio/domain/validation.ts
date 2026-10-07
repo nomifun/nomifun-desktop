@@ -20,7 +20,6 @@ import {
   type CreativeComposerModel,
   type CreativeConfigNodeData,
   type CreativeConfigOperation,
-  type CreativeDirectorNodeData,
   type CreativeGenerationStatus,
   type CreativeGroupNodeData,
   type CreativeImageComposerDraft,
@@ -29,7 +28,6 @@ import {
   type CreativeJsonValue,
   type CreativeLeftPanelView,
   type CreativeModelTask,
-  type CreativePanoramaNodeData,
   type CreativeProjectDetail,
   type CreativeProjectDocument,
   type CreativeProjectListResponse,
@@ -38,6 +36,8 @@ import {
   type CreativeRightPanelView,
   type CreativeStudioPanelState,
   type CreativeTextNodeData,
+  type CreativeTimelineClip,
+  type CreativeTimelineNodeData,
   type CreativeVideoNodeData,
   type CreativeVideoComposerDraft,
   type RenameCreativeProjectRequest,
@@ -314,37 +314,13 @@ const parseImageData = (value: unknown, path: string): CreativeImageNodeData => 
   };
 };
 
-const parseImageComposerDraft = (
-  value: unknown,
-  path: string
-): CreativeImageComposerDraft => {
+const parseComposerMentions = (value: unknown, prompt: string, path: string) => {
   const code = 'INVALID_DOCUMENT';
-  const record = asRecord(value, path, code);
-  exactKeys(
-    record,
-    [
-      'prompt',
-      'model',
-      'interfaceMode',
-      'quality',
-      'width',
-      'height',
-      'aspectRatio',
-      'count',
-    ],
-    ['mentions'],
-    path,
-    code
-  );
-  const prompt = asString(record.prompt, `${path}.prompt`, code, {
-    allowEmpty: true,
-    maxLength: 1_000_000,
-  });
   const mentions =
-    record.mentions === undefined
+    value === undefined
       ? []
       : asArray(
-          record.mentions,
+          value,
           `${path}.mentions`,
           code,
           (entry, indexPath) => {
@@ -416,6 +392,36 @@ const parseImageComposerDraft = (
       fail(code, `${path}.mentions[${index}].start`, 'range not overlapping another mention');
     }
   }
+  return mentions;
+};
+
+const parseImageComposerDraft = (
+  value: unknown,
+  path: string
+): CreativeImageComposerDraft => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(
+    record,
+    [
+      'prompt',
+      'model',
+      'interfaceMode',
+      'quality',
+      'width',
+      'height',
+      'aspectRatio',
+      'count',
+    ],
+    ['mentions'],
+    path,
+    code
+  );
+  const prompt = asString(record.prompt, `${path}.prompt`, code, {
+    allowEmpty: true,
+    maxLength: 1_000_000,
+  });
+  const mentions = parseComposerMentions(record.mentions, prompt, path);
   const model = parseComposerModel(record.model, `${path}.model`);
   const nullableDimension = (entry: unknown, entryPath: string): number | null =>
     entry === null
@@ -463,19 +469,6 @@ const parseImageComposerDraft = (
       max: 10,
       integer: true,
     }),
-  };
-};
-
-const parsePanoramaData = (value: unknown, path: string): CreativePanoramaNodeData => {
-  const code = 'INVALID_DOCUMENT';
-  const record = asRecord(value, path, code);
-  exactKeys(record, ['assetId', 'projection', 'yaw', 'pitch', 'fieldOfView'], [], path, code);
-  return {
-    assetId: asNullableId(record.assetId, `${path}.assetId`, code),
-    projection: asLiteral(record.projection, ['equirectangular'], `${path}.projection`, code),
-    yaw: asNumber(record.yaw, `${path}.yaw`, code, { min: -360, max: 360 }),
-    pitch: asNumber(record.pitch, `${path}.pitch`, code, { min: -90, max: 90 }),
-    fieldOfView: asNumber(record.fieldOfView, `${path}.fieldOfView`, code, { min: 10, max: 150 }),
   };
 };
 
@@ -692,7 +685,7 @@ const parseVideoComposerDraft = (
   exactKeys(
     record,
     ['prompt', 'model', 'resolution', 'aspectRatio', 'seconds'],
-    [],
+    ['mentions'],
     path,
     code
   );
@@ -703,10 +696,14 @@ const parseVideoComposerDraft = (
     }
     return parsed;
   };
+  const prompt = asString(record.prompt, `${path}.prompt`, code, {
+    allowEmpty: true,
+    maxLength: 1_000_000,
+  });
   return {
-    prompt: asString(record.prompt, `${path}.prompt`, code, {
-      allowEmpty: true,
-      maxLength: 1_000_000,
+    prompt,
+    ...(record.mentions === undefined ? {} : {
+      mentions: parseComposerMentions(record.mentions, prompt, path),
     }),
     model: parseComposerModel(record.model, `${path}.model`),
     resolution: trimmed(record.resolution, `${path}.resolution`),
@@ -803,16 +800,56 @@ const parseAudioData = (value: unknown, path: string): CreativeAudioNodeData => 
   };
 };
 
-const parseDirectorData = (value: unknown, path: string): CreativeDirectorNodeData => {
+const parseTimelineClip = (value: unknown, path: string): CreativeTimelineClip => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
-  exactKeys(record, ['sceneId', 'cameraId', 'timelineMs', 'durationMs'], [], path, code);
-  const durationMs = asNumber(record.durationMs, `${path}.durationMs`, code, { min: 0 });
+  exactKeys(
+    record,
+    ['id', 'assetId', 'kind', 'startMs', 'durationMs', 'sourceStartMs', 'sourceDurationMs'],
+    [],
+    path,
+    code
+  );
+  const startMs = asNumber(record.startMs, `${path}.startMs`, code, {
+    min: 0,
+    max: 86_400_000,
+  });
+  const durationMs = asNumber(record.durationMs, `${path}.durationMs`, code, {
+    min: 100,
+    max: 86_400_000,
+  });
+  const sourceStartMs = asNumber(record.sourceStartMs, `${path}.sourceStartMs`, code, {
+    min: 0,
+    max: 86_400_000,
+  });
+  const sourceDurationMs = record.sourceDurationMs === null
+    ? null
+    : asNumber(record.sourceDurationMs, `${path}.sourceDurationMs`, code, {
+        min: sourceStartMs + durationMs,
+        max: 86_400_000,
+      });
   return {
-    sceneId: asNullableId(record.sceneId, `${path}.sceneId`, code),
-    cameraId: asNullableId(record.cameraId, `${path}.cameraId`, code),
-    timelineMs: asNumber(record.timelineMs, `${path}.timelineMs`, code, { min: 0, max: durationMs }),
+    id: asId(record.id, `${path}.id`, code),
+    assetId: asId(record.assetId, `${path}.assetId`, code),
+    kind: asLiteral(record.kind, ['image', 'video'], `${path}.kind`, code),
+    startMs,
     durationMs,
+    sourceStartMs,
+    sourceDurationMs,
+  };
+};
+
+const parseTimelineData = (value: unknown, path: string): CreativeTimelineNodeData => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(record, ['title', 'muted', 'clips'], [], path, code);
+  const clips = asArray(record.clips, `${path}.clips`, code, parseTimelineClip);
+  if (clips.length > 2_000) fail(code, `${path}.clips`, 'array with at most 2000 clips');
+  assertUnique(clips.map((clip) => clip.id), `${path}.clips[].id`, code);
+  return {
+    title: asString(record.title, `${path}.title`, code, { maxLength: 1_000 }),
+    muted: asBoolean(record.muted, `${path}.muted`, code),
+    clips,
   };
 };
 
@@ -832,24 +869,36 @@ const parseGroupData = (value: unknown, path: string): CreativeGroupNodeData => 
 
 const NODE_KINDS: readonly CreativeCanvasNodeKind[] = [
   'image',
-  'panorama',
   'text',
   'config',
   'video',
   'audio',
-  'director',
+  'timeline',
   'group',
 ];
 
 const parseNode = (value: unknown, path: string): CreativeCanvasNode => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
-  exactKeys(record, ['id', 'type', 'position', 'size', 'groupId', 'zIndex', 'locked', 'data'], [], path, code);
+  exactKeys(
+    record,
+    ['id', 'type', 'position', 'size', 'groupId', 'zIndex', 'locked', 'data'],
+    ['name'],
+    path,
+    code
+  );
   const type = asLiteral(record.type, NODE_KINDS, `${path}.type`, code);
   const position = asRecord(record.position, `${path}.position`, code);
   exactKeys(position, ['x', 'y'], [], `${path}.position`, code);
+  const name = record.name === undefined
+    ? undefined
+    : asString(record.name, `${path}.name`, code, { maxLength: 80 });
+  if (name !== undefined && name !== name.trim()) {
+    fail(code, `${path}.name`, 'trimmed non-empty string <= 80 chars');
+  }
   const base = {
     id: asId(record.id, `${path}.id`, code),
+    ...(name === undefined ? {} : { name }),
     position: {
       x: asNumber(position.x, `${path}.position.x`, code),
       y: asNumber(position.y, `${path}.position.y`, code),
@@ -863,8 +912,6 @@ const parseNode = (value: unknown, path: string): CreativeCanvasNode => {
   switch (type) {
     case 'image':
       return { ...base, type, data: parseImageData(record.data, `${path}.data`) };
-    case 'panorama':
-      return { ...base, type, data: parsePanoramaData(record.data, `${path}.data`) };
     case 'text':
       return { ...base, type, data: parseTextData(record.data, `${path}.data`) };
     case 'config':
@@ -873,8 +920,8 @@ const parseNode = (value: unknown, path: string): CreativeCanvasNode => {
       return { ...base, type, data: parseVideoData(record.data, `${path}.data`) };
     case 'audio':
       return { ...base, type, data: parseAudioData(record.data, `${path}.data`) };
-    case 'director':
-      return { ...base, type, data: parseDirectorData(record.data, `${path}.data`) };
+    case 'timeline':
+      return { ...base, type, data: parseTimelineData(record.data, `${path}.data`) };
     case 'group':
       return { ...base, type, data: parseGroupData(record.data, `${path}.data`) };
   }
@@ -1032,7 +1079,7 @@ const parsePanels = (value: unknown, path: string): CreativeStudioPanelState => 
       height: asNumber(bottom.height, `${path}.bottom.height`, code, { min: 120, max: 800 }),
       activeView: asLiteral<CreativeBottomPanelView>(
         bottom.activeView,
-        ['timeline', 'history'],
+        ['history'],
         `${path}.bottom.activeView`,
         code
       ),
@@ -1153,12 +1200,6 @@ export function parseCreativeProjectDocument(
     }
     if (source.type === 'config' && target.type === 'config') {
       fail(code, `$.connections[${index}]`, 'connection other than config to config');
-    }
-    if (source.type === 'director') {
-      fail(code, `$.connections[${index}].sourceNodeId`, 'non-director source node');
-    }
-    if (target.type === 'director' && source.type !== 'image' && source.type !== 'panorama') {
-      fail(code, `$.connections[${index}].sourceNodeId`, 'image or panorama source for director');
     }
   }
   const pendingChatSessions: CreativeChatSessionReference[] = [];

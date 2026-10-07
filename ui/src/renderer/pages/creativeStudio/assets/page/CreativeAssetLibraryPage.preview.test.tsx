@@ -16,6 +16,7 @@ import type { CreativeAsset, CreativeAssetLibraryPort } from '../types';
 
 // Arco reads DOM availability on import, so initialize the test DOM first.
 const { default: CreativeAssetLibraryPage } = await import('./CreativeAssetLibraryPage');
+const { default: CreativeAssetPreviewModal } = await import('./CreativeAssetPreviewModal');
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
@@ -35,6 +36,37 @@ const asset: CreativeAsset = {
 afterEach(cleanup);
 
 describe('CreativeAssetLibraryPage video preview', () => {
+  test.each(['image', 'video', 'audio', 'text'] as const)('shows %s in the shared layout with full prompt and optional metadata', async (kind) => {
+    const prompt = '纯白色纸张破洞视角，洞边缘有撕纸纤维质感，蓝色头发的小女孩从洞中探出。';
+    const current: CreativeAsset = {
+      ...asset, kind, title: prompt, origin: { prompt, model: 'agnes-image-2.1-flash', providerId: 'agnes' },
+      textContent: kind === 'text' ? '完整文本内容\n第二行' : null,
+    };
+    const props = { asset: current, onClose: () => undefined, onSaveAs: async () => undefined, locale: 'zh-CN' };
+    const page = render(<I18nextProvider i18n={testI18n}><CreativeAssetPreviewModal {...props} /></I18nextProvider>);
+    const preview = await waitFor(() => {
+      const element = document.querySelector(`[data-creative-asset-preview="${kind}"]`) as HTMLElement;
+      expect(element).not.toBeNull();
+      return element;
+    });
+    const visual = preview.querySelector('[data-creative-detail-visual]')!;
+    const info = preview.querySelector('[data-creative-detail-info]') as HTMLElement;
+    expect(visual.querySelector(kind === 'image' ? 'img' : kind === 'text' ? 'pre' : kind)).not.toBeNull();
+    expect(within(info).getByText(prompt)).not.toBeNull();
+    expect(within(info).getByRole('heading').textContent).toBe('纯白色纸张破洞视角，洞边缘有撕');
+    expect(within(info).getByRole('button', { name: '复制提示词' })).not.toBeNull();
+    expect(within(info).getByText('agnes')).not.toBeNull();
+    expect(within(info).getByText('720 × 1280')).not.toBeNull();
+    expect(within(info).queryByText('合集')).toBeNull();
+    expect(within(info).queryByText('素材标签')).toBeNull();
+    expect(preview.textContent?.includes('未分组')).toBe(false);
+    expect(preview.textContent?.includes('无标签')).toBe(false);
+
+    page.rerender(<I18nextProvider i18n={testI18n}><CreativeAssetPreviewModal {...props} asset={{ ...current, collection: '品牌素材', tags: ['蓝色', ''] }} /></I18nextProvider>);
+    expect(within(info).getByText('品牌素材')).not.toBeNull();
+    expect(within(info).getByText('蓝色')).not.toBeNull();
+  });
+
   test('uses the shared player and preserves download, deletion and close behavior', async () => {
     const client: CreativeAssetLibraryPort = {
       list: async () => ({ items: [asset], total: 1 }),
@@ -66,24 +98,43 @@ describe('CreativeAssetLibraryPage video preview', () => {
     expect(video?.hasAttribute('disablepictureinpicture')).toBe(true);
     expect(preview.textContent?.includes('画中画')).toBe(false);
 
-    const downloads: Array<{ href: string | null; filename: string }> = [];
-    const anchorClick = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function () {
-      downloads.push({ href: this.getAttribute('href'), filename: this.download });
+    const writes: Blob[] = [];
+    const pickerOptions: Array<{ suggestedName?: string }> = [];
+    const browserWindow = window as Window & { showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<unknown> };
+    const originalPicker = browserWindow.showSaveFilePicker;
+    const originalFetch = globalThis.fetch;
+    browserWindow.showSaveFilePicker = async (options) => {
+      pickerOptions.push(options);
+      return {
+        createWritable: async () => ({
+          write: async (blob: Blob) => { writes.push(blob); },
+          close: async () => undefined,
+        }),
+      };
     };
+    globalThis.fetch = async () => new Response('video-bytes', {
+      status: 200,
+      headers: { 'Content-Type': 'video/mp4' },
+    });
     try {
-      const download = within(preview).getByRole('button', { name: '下载原始文件' }) as HTMLButtonElement;
-      fireEvent.click(download);
-      expect(downloads).toEqual([{ href: asset.originalUrl, filename: `${asset.title}.mp4` }]);
+      const saveAs = within(preview).getByRole('button', { name: '原始文件另存为' }) as HTMLButtonElement;
+      fireEvent.click(saveAs);
+      await waitFor(() => expect(writes).toHaveLength(1));
+      expect(pickerOptions).toEqual([{ suggestedName: `${asset.title}.mp4`, types: [{
+        description: 'video/mp4',
+        accept: { 'video/mp4': ['.mp4'] },
+      }] }]);
 
       act(() => notifyCreativeAssetDeleted(client, asset.id));
       await waitFor(() => expect(preview.querySelector('video')).toBeNull());
       expect(within(preview).getByRole('status').textContent).toBe('素材已删除');
-      expect(download.disabled).toBe(true);
-      fireEvent.click(download);
-      expect(downloads).toHaveLength(1);
+      expect(saveAs.disabled).toBe(true);
+      fireEvent.click(saveAs);
+      expect(writes).toHaveLength(1);
     } finally {
-      HTMLAnchorElement.prototype.click = anchorClick;
+      if (originalPicker) browserWindow.showSaveFilePicker = originalPicker;
+      else delete browserWindow.showSaveFilePicker;
+      globalThis.fetch = originalFetch;
     }
 
     fireEvent.click(within(preview).getByRole('button', { name: '关闭' }));

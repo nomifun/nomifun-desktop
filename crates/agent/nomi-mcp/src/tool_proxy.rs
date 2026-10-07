@@ -81,8 +81,8 @@ pub struct McpToolProxy {
     manager: Arc<McpManager>,
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     deferred: bool,
-    /// MCP behaviour hints used to derive the approval category. `None` means
-    /// the server declared no annotations → safe default (`Exec`, needs approval).
+    /// MCP behaviour hints used to derive the side-effect category. `None` means
+    /// the server declared no annotations → safe default (`Exec`, is state-changing).
     annotations: Option<ToolAnnotations>,
 }
 
@@ -113,17 +113,15 @@ impl McpToolProxy {
         }
     }
 
-    /// Map MCP annotations to an approval [`ToolCategory`].
     ///
-    /// Rule (mirrors codex `requires_mcp_tool_approval`, collapsed onto nomi's
     /// Info/Exec axis):
-    /// - `readOnlyHint == Some(true)` → [`ToolCategory::Info`] (approval-free).
+    /// - `readOnlyHint == Some(true)` → [`ToolCategory::Info`] (read-only).
     /// - everything else — `destructiveHint`, no hints, or an old server with no
-    ///   `annotations` block at all — → [`ToolCategory::Exec`] (needs approval).
+    ///   `annotations` block at all — → [`ToolCategory::Exec`] (is state-changing).
     ///
     /// The from-strict default is deliberate: an unannotated tool could mutate
-    /// the world, so we never silently auto-approve it.
-    fn category_from_annotations(&self) -> ToolCategory {
+    /// the world, so we never silently treat as read-only it.
+    fn effect_category_from_annotations(&self) -> ToolCategory {
         if self.is_read_only() {
             ToolCategory::Info
         } else {
@@ -132,7 +130,7 @@ impl McpToolProxy {
     }
 
     /// Whether the tool declared `readOnlyHint == true` (no side effects).
-    /// Drives both the approval category and concurrency-safety.
+    /// Drives both the side-effect category and concurrency-safety.
     fn is_read_only(&self) -> bool {
         self.annotations
             .as_ref()
@@ -276,6 +274,14 @@ impl Tool for McpToolProxy {
         self.deferred
     }
 
+    async fn preflight_hook(
+        &self,
+        input: &Value,
+        _context: &ToolExecutionContext,
+    ) -> Result<(), String> {
+        self.manager.preflight_tool(&self.server_name, &self.tool_name, input)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let call = self
             .manager
@@ -302,11 +308,11 @@ impl Tool for McpToolProxy {
     }
 
     fn category(&self) -> ToolCategory {
-        // Annotation-driven: readOnly tools are approval-free Info, everything
-        // else (destructive or unannotated) is Exec → needs approval. We no
+        // Annotation-driven: readOnly tools are read-only Info, everything
+        // else (destructive or unannotated) is Exec → is state-changing. We no
         // longer collapse every MCP tool into the single `Mcp` bucket, which
-        // forced even read-only snapshots through the approval gate.
-        self.category_from_annotations()
+        // forced even read-only snapshots through the parallel execution path.
+        self.effect_category_from_annotations()
     }
 
     fn describe(&self, input: &Value) -> String {
@@ -449,8 +455,13 @@ pub fn canonical_mcp_display_name(server_name: &str, original_name: &str) -> Str
     let digest = Sha256::digest(identity.as_bytes());
     let digest = base32_no_pad(&digest);
     let digest = &digest[..MCP_DISPLAY_HASH_LEN];
-    let mut slug = sanitize_display_slug(&format!("{server_name}__{original_name}"));
-    slug.truncate(MCP_DISPLAY_SLUG_LEN);
+    let mut origin = sanitize_display_slug(server_name);
+    let mut action = sanitize_display_slug(original_name);
+    // Reserve the action's space so a long server name cannot hide it.
+    let origin_budget = origin.len().min(20).min(MCP_DISPLAY_SLUG_LEN - 10);
+    origin.truncate(origin_budget);
+    action.truncate(MCP_DISPLAY_SLUG_LEN - origin_budget - 2);
+    let slug = format!("{}__{}", origin.trim_end_matches('_'), action.trim_end_matches('_'));
     let display_name =
         format!("{MCP_PROVIDER_NAME_PREFIX}{slug}{MCP_DISPLAY_SEPARATOR}{digest}");
     debug_assert!(display_name.len() <= MAX_PROVIDER_TOOL_NAME_LEN);
@@ -461,7 +472,7 @@ fn sanitize_display_slug(value: &str) -> String {
     let mut slug = String::new();
     let mut last_was_separator = false;
     for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
+        if byte.is_ascii_alphanumeric() || byte == b'-' {
             slug.push(char::from(byte));
             last_was_separator = false;
         } else if !last_was_separator {
@@ -610,7 +621,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // category(): annotations → approval class (readOnly→Info, else→Exec)
+    // category(): annotations → effect class (readOnly→Info, else→Exec)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -626,7 +637,7 @@ mod tests {
 
     #[test]
     fn category_destructive_hint_is_exec() {
-        // destructive (and not read-only) must require approval.
+        // destructive (and not read-only) must be classified as state-changing.
         let proxy = make_proxy_with_annotations(Some(ToolAnnotations {
             destructive_hint: Some(true),
             ..Default::default()
@@ -636,7 +647,7 @@ mod tests {
 
     #[test]
     fn category_read_only_false_is_exec() {
-        // Explicit readOnlyHint=false → still needs approval.
+        // Explicit readOnlyHint=false → still is state-changing.
         let proxy = make_proxy_with_annotations(Some(ToolAnnotations {
             read_only_hint: Some(false),
             ..Default::default()
@@ -904,8 +915,8 @@ mod tests {
 
         let a_alias = canonical_mcp_display_name("a", "b__c");
         let ab_alias = canonical_mcp_display_name("a__b", "c");
-        assert!(a_alias.starts_with("mcp__a__b__c__"));
-        assert!(ab_alias.starts_with("mcp__a__b__c__"));
+        assert!(a_alias.starts_with("mcp__a__b_c__"));
+        assert!(ab_alias.starts_with("mcp__a_b__c__"));
         assert_ne!(a_alias, ab_alias);
         assert_eq!(
             registry.tool_names(),
@@ -975,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_identity_retains_tool_suffix_hidden_by_bounded_provider_name() {
+    fn readable_alias_retains_action_and_artifact_identity_retains_full_origin() {
         let server_name = "server-with-an-extremely-long-origin-name-that-consumes-the-readable-provider-slug";
         for tool_name in ["export_pdf", "render_video"] {
             let manager = manager_with_tool_response(server_name, tool_name, "done");
@@ -989,8 +1000,8 @@ mod tests {
                 None,
             );
 
-            assert_eq!(proxy.name().len(), MAX_PROVIDER_TOOL_NAME_LEN);
-            assert!(!proxy.name().contains(tool_name));
+            assert!(proxy.name().len() <= MAX_PROVIDER_TOOL_NAME_LEN);
+            assert!(proxy.name().contains(tool_name));
             assert_eq!(
                 proxy.artifact_identity(),
                 format!("{server_name}__{tool_name}")
@@ -1221,7 +1232,7 @@ mod tests {
         assert_eq!(
             canonical_policy.get(&alias).unwrap().category(),
             ToolCategory::Exec,
-            "approval classification must resolve through the unique canonical route"
+            "effect classification must resolve through the unique canonical route"
         );
     }
 

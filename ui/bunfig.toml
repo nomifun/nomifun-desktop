@@ -1,0 +1,4 @@
+# ReactDOM and Arco probe DOM availability when their modules are evaluated.
+# Initialize it before any test imports, including pure tests that reach UI code.
+[test]
+preload = ["./test/setup-dom.ts"]

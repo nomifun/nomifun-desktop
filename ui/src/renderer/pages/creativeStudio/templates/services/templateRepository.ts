@@ -45,7 +45,7 @@ export class CreativeTemplateRepositoryError extends Error {
   }
 }
 
-export function isCreativeTemplateRepositoryError(
+function isCreativeTemplateRepositoryError(
   error: unknown
 ): error is CreativeTemplateRepositoryError {
   return (
@@ -57,7 +57,7 @@ export function isCreativeTemplateRepositoryError(
   );
 }
 
-export function toCreativeTemplateRepositoryError(
+function toCreativeTemplateRepositoryError(
   error: unknown
 ): CreativeTemplateRepositoryError {
   if (isCreativeTemplateRepositoryError(error)) return error;

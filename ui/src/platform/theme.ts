@@ -18,15 +18,5 @@ export const Color = {
     error: '#f53f3f',
     warn: '#ff7d00',
     success: '#00b42a',
-    link: '#165dff',
-    yellow: '#fadc19',
-    cyan: '#13c1b8',
-    purple: '#722ed1',
-  },
-} as const;
-
-export const Size = {
-  IconSize: {
-    normal: 16,
   },
 } as const;
