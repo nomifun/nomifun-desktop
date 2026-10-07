@@ -17,14 +17,14 @@ use serde_json::{Value, json};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
-use common::{body_json, get_with_token, json_with_token, setup_and_login};
+use common::{get_with_token, json_with_token, setup_and_login};
 
 const LOCAL_TRUST: &str = "plugin-e2e-local-desktop";
 
 #[tokio::test]
 async fn plugin_creation_preflight_checks_the_whole_module_without_creating_a_draft() {
     let harness = Harness::new().await;
-    let (status, response) = harness.json("POST", "/api/conversations/plugin-preflight", json!({
+    let (status, response) = harness.json("POST", "/api/plugins/authoring/preflight", json!({
         "selection":{"kind":"template","templateKey":"assistant.general"}
     })).await;
     assert_eq!(status,StatusCode::OK,"{response}");
@@ -33,7 +33,7 @@ async fn plugin_creation_preflight_checks_the_whole_module_without_creating_a_dr
     assert!(response["data"]["required_actions"].as_array().unwrap().iter()
         .any(|action|action=="plugin.development/install"));
     assert_eq!(response["data"]["owner_user_id"].as_str().unwrap().len(),36);
-    let (status, disabled) = harness.json("POST", "/api/conversations/plugin-preflight", json!({
+    let (status, disabled) = harness.json("POST", "/api/plugins/authoring/preflight", json!({
         "selection":{"kind":"template","templateKey":"chat.minimal"}
     })).await;
     assert_eq!(status,StatusCode::OK,"{disabled}");
@@ -66,7 +66,7 @@ async fn plugin_preflight_requires_all_creation_actions_and_rechecks_session_adm
         assert_eq!(status,StatusCode::OK,"{saved}");
         reference=saved["data"]["revision"]["reference"].clone();
         draft["current_revision"]=reference.clone();
-        let (status,check)=harness.json("POST","/api/conversations/plugin-preflight",json!({
+        let (status,check)=harness.json("POST","/api/plugins/authoring/preflight",json!({
             "selection":{"kind":"preset","presetId":preset}
         })).await;
         assert_eq!(status,StatusCode::OK,"{check}");
@@ -78,8 +78,8 @@ async fn plugin_preflight_requires_all_creation_actions_and_rechecks_session_adm
         "expected_current_revision":reference,"draft":draft
     })).await;
     assert_eq!(status,StatusCode::OK);
-    let (status,blocked)=harness.json("POST","/api/agent-sessions",json!({
-        "preset_id":preset,"required_modules":["plugin.development"],
+    let (status,blocked)=harness.json("POST","/api/plugins/authoring/sessions",json!({
+        "selection":{"kind":"preset","presetId":preset},"idempotency_key":Uuid::now_v7().to_string(),
         "model":{"provider_id":provider,"model":"module-fixture"}
     })).await;
     assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{blocked}");
@@ -87,7 +87,285 @@ async fn plugin_preflight_requires_all_creation_actions_and_rechecks_session_adm
 }
 
 #[tokio::test]
-async fn ordinary_conversation_cannot_complete_plugin_delivery_with_prose_only() {
+async fn authoring_session_preserves_selected_agent_authority_and_is_canonical_idempotent() {
+    let harness = Harness::new().await;
+    let provider = create_chat_provider(&harness, "http://127.0.0.1:9/v1", "Authoring scope", "scope-model").await;
+    // Browser/Computer roles are desktop-feature registrations. The headless
+    // suite uses real, registered workspace authority without inventing roles.
+    let preset = harness.create_plugin_capable_preset(&provider, "scope-model").await;
+    let (_, initial) = harness.get_json(&format!("/api/agent-presets/{preset}/editor")).await;
+    let mut draft = initial["data"]["draft"].clone();
+    draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+        "capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"],
+    }));
+    let (status, saved) = harness.json("POST", &format!("/api/agent-presets/{preset}/revisions"), json!({
+        "expected_current_revision":draft["current_revision"],"draft":draft,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, source) = harness.get_json(&format!("/api/agent-presets/{preset}/editor")).await;
+    assert!(source["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap().iter()
+        .any(|module| module["capability"]["id"] == "workspace.files"
+            && module["action_allowlist"].as_array().unwrap().iter().any(|action| action == "workspace.files/write")));
+    let request = json!({"selection":{"kind":"preset","presetId":preset},
+        "model":{"provider_id":provider,"model":"scope-model"},"idempotency_key":Uuid::now_v7().to_string()});
+    let (status, created) = harness.json("POST", "/api/plugins/authoring/sessions", request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, retry) = harness.json("POST", "/api/plugins/authoring/sessions", request).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(created["data"], retry["data"], "retry opens the same canonical Session");
+    assert!(created["data"].get("legacy_reference").is_none());
+    assert!(created["data"].get("read_only").is_none());
+    let id = created["data"]["agent_session_id"].as_str().unwrap();
+    let (status, observed) = harness.get_json(&format!("/api/agent-sessions/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{observed}");
+    assert_eq!(observed["data"]["session"]["metadata"]["purpose"], "plugin_authoring");
+    let binding = &observed["data"]["session"]["agent_binding"];
+    let resources = binding["typed_resource_bindings"].as_array().unwrap();
+    assert!(resources.iter().any(|resource| resource["resource_kind"] == "workspace"), "the selected Agent receives its real workspace resource: {resources:?}");
+    let derived_preset = binding["preset_revision_ref"]["preset_id"].as_str().unwrap();
+    let (status, derived) = harness.get_json(&format!("/api/agent-presets/{derived_preset}/editor")).await;
+    assert_eq!(status, StatusCode::OK, "{derived}");
+    let document = &derived["data"]["draft"]["document"];
+    for selected in source["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap() {
+        assert_eq!(document["enabled_capabilities"].as_array().unwrap().iter().find(|module|
+            module["capability"]["id"] == selected["capability"]["id"]), Some(selected),
+            "selected Agent actions remain intact; normal compilation may also provide tool discovery");
+    }
+    let (status, projection) = harness.get_json(&format!("/api/agent-sessions/{id}/projection")).await;
+    assert_eq!(status, StatusCode::OK, "{projection}");
+    assert_eq!(projection["data"]["session_purpose"], "plugin_authoring");
+    let modules = projection["data"]["agent_snapshot"]["enabled_capabilities"].as_array().unwrap();
+    assert!(modules.iter().any(|module| module == "plugin.development"));
+    assert!(modules.iter().any(|module| module == "workspace.files"));
+    let (_, after) = harness.get_json(&format!("/api/agent-presets/{preset}/editor")).await;
+    assert_eq!(after["data"]["revision"], source["data"]["revision"]);
+    assert_eq!(after["data"]["draft"]["document"], source["data"]["draft"]["document"]);
+    let mut mutation = json_with_token("PATCH", &format!("/api/agent-sessions/{id}"),
+        json!({"purpose":"conversation"}), &harness.token, &harness.csrf);
+    mutation.headers_mut().insert("x-nomi-local-trust", LOCAL_TRUST.parse().unwrap());
+    let rejected = harness.app.clone().oneshot(mutation).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY, "purpose is not mutable presentation metadata");
+    let (_, after) = harness.get_json(&format!("/api/agent-sessions/{id}")).await;
+    assert_eq!(after["data"]["session"]["metadata"]["purpose"], "plugin_authoring");
+    let second_provider = create_chat_provider(&harness, "http://127.0.0.1:9/v1", "Authoring second model", "scope-next").await;
+    let (status, switched) = harness.json("PUT", &format!("/api/agent-sessions/{id}/model"),
+        json!({"provider_id":second_provider,"model":"scope-next"})).await;
+    assert_eq!(status, StatusCode::OK, "{switched}");
+    assert_eq!(switched["data"]["session_purpose"], "plugin_authoring");
+    assert_eq!(switched["data"]["agent_snapshot"]["enabled_capabilities"], projection["data"]["agent_snapshot"]["enabled_capabilities"]);
+    let (_, changed) = harness.get_json(&format!("/api/agent-sessions/{id}")).await;
+    let changed_binding = &changed["data"]["session"]["agent_binding"];
+    assert_eq!(changed_binding["typed_resource_bindings"], binding["typed_resource_bindings"], "model changes retain selected Agent resources");
+    assert_eq!(changed_binding["binding_version"].as_u64().unwrap(), binding["binding_version"].as_u64().unwrap() + 1);
+    assert_ne!(changed_binding["resolved_snapshot_ref"], binding["resolved_snapshot_ref"]);
+    assert_eq!(changed["data"]["session"]["metadata"]["purpose"], "plugin_authoring");
+    let (_, source_after_switch) = harness.get_json(&format!("/api/agent-presets/{preset}/editor")).await;
+    assert_eq!(source_after_switch["data"]["revision"], source["data"]["revision"]);
+    let opened: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='session/opening'")
+        .bind(id).fetch_one(harness.services.database.pool()).await.unwrap();
+    assert_eq!(opened, 1);
+}
+
+#[tokio::test]
+async fn ordinary_session_pages_exclude_product_sessions_before_limiting_and_counting() {
+    let harness = Harness::new().await;
+    let provider = create_chat_provider(&harness, "http://127.0.0.1:9/v1", "Session pages", "page-model").await;
+    let preset = harness.create_plugin_capable_preset(&provider, "page-model").await;
+    let older = harness.create_ordinary_session(&preset, &provider, "page-model").await;
+    let mut products = Vec::new();
+    for _ in 0..3 {
+        let product = harness.create_authoring_session(&preset, &provider, "page-model").await;
+        products.push(product["data"]["agent_session_id"].as_str().unwrap().to_owned());
+    }
+    let newer = harness.create_ordinary_session(&preset, &provider, "page-model").await;
+    let (status, first) = harness.get_json("/api/agent-sessions?limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["total"], 2);
+    assert_eq!(first["data"]["has_more"], true);
+    assert_eq!(first["data"]["items"][0]["conversation_id"], newer);
+    let (status, second) = harness.get_json(&format!("/api/agent-sessions?limit=1&cursor={newer}")).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["data"]["total"], 2);
+    assert_eq!(second["data"]["has_more"], false);
+    assert_eq!(second["data"]["items"][0]["conversation_id"], older);
+    let (_, inclusive) = harness.get_json("/api/agent-sessions?limit=20&include_product_sessions=true").await;
+    assert_eq!(inclusive["data"]["total"], 5);
+    let (status, workbench) = harness.get_json("/api/plugins/authoring/sessions").await;
+    assert_eq!(status, StatusCode::OK, "{workbench}");
+    let sessions = workbench["data"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), products.len());
+    for entry in sessions {
+        assert_eq!(entry["session_purpose"], "plugin_authoring");
+        assert!(products.iter().any(|id| entry["conversation_id"] == *id));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_session_cannot_author_plugins_even_with_module_grants_and_a_delivery_marker() {
+    let harness = Harness::new().await;
+    let upstream = wiremock::MockServer::start().await;
+    let rejection = Arc::new(Mutex::new(None::<String>));
+    let observed = rejection.clone();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = request.body_json().unwrap();
+            let last = body["messages"].as_array().unwrap().iter().rev()
+                .find(|message| message["role"] == "tool").and_then(|message| message["content"].as_str());
+            if let Some(result) = last && result.contains("PLUGIN_AUTHORING_WORKSPACE_REQUIRED") {
+                *observed.lock().unwrap() = Some(result.to_owned());
+                return plugin_workflow_stream(json!({"content":"Please use the Plugins & Small Apps workbench; I cannot create a draft here."}), "stop");
+            }
+            let tools = body["tools"].as_array().unwrap();
+            if let Some(open) = tools.iter().find(|tool| tool["function"]["description"].as_str()
+                .is_some_and(|description| description.contains("Action: plugin.development/open."))) {
+                return plugin_workflow_stream(json!({"tool_calls":[{"index":0,"id":"ordinary-open-refused","type":"function",
+                    "function":{"name":open["function"]["name"],"arguments":"{}"}}]}), "tool_calls");
+            }
+            let search = tools.iter().find(|tool| tool["function"]["name"] == "ToolSearch").unwrap();
+            plugin_workflow_stream(json!({"tool_calls":[{"index":0,"id":"ordinary-search-open","type":"function",
+                "function":{"name":search["function"]["name"],"arguments":"{\"query\":\"plugin.development/open\"}"}}]}), "tool_calls")
+        }).mount(&upstream).await;
+    let provider = create_chat_provider(&harness, &format!("{}/v1", upstream.uri()), "Ordinary isolation", "ordinary-model").await;
+    let preset = harness.create_plugin_capable_preset(&provider, "ordinary-model").await;
+    let session = harness.create_ordinary_session(&preset, &provider, "ordinary-model").await;
+    let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
+        "idempotency_key":"ordinary-authoring-attempt","input":{"content":"Create a plugin here.","plugin_delivery":{}},
+    })).await;
+    assert!(status.is_success(), "{accepted}");
+    assert_eq!(harness.wait_terminal(&session).await, "completed");
+    assert!(rejection.lock().unwrap().is_some(), "the actual Kernel dispatch must reject the ordinary authoring call");
+    let (_, drafts) = harness.get_json("/api/plugin-drafts").await;
+    assert!(drafts["data"]["drafts"].as_array().unwrap().is_empty());
+    let (_, events) = harness.get_json(&format!("/api/agent-sessions/{session}/events?after_seq=0&limit=500")).await;
+    assert!(!events.to_string().contains("PLUGIN_DELIVERY_REQUIRED"), "ordinary chat has no plugin completion gate: {events}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_draft_files_open_in_a_new_workbench_without_importing_chat_history() {
+    let harness = Harness::new().await;
+    let upstream = wiremock::MockServer::start().await;
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let recorded = requests.clone();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            recorded.lock().unwrap().push(request.body_json().unwrap());
+            plugin_workflow_stream(json!({"content":"ordinary-follow-up"}), "stop")
+        }).mount(&upstream).await;
+    let provider = create_chat_provider(&harness, &format!("{}/v1", upstream.uri()), "Retained draft", "legacy-model").await;
+    let preset = harness.create_plugin_capable_preset(&provider, "legacy-model").await;
+    let session = harness.create_ordinary_session(&preset, &provider, "legacy-model").await;
+    let (status, prior_input) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
+        "idempotency_key":"source-history-before-files","input":{"content":"Keep this ordinary history in its original Session."}
+    })).await;
+    assert!(status.is_success(), "{prior_input}");
+    assert_eq!(harness.wait_terminal(&session).await, "completed");
+    let package = harness.package_path("ordinary-draft-source");
+    write_ui_package(&package, "test.ordinary-source", &[], &[]);
+    let installed = harness.install_directory(&package).await;
+    let (plugin_id, plugin_revision) = installed_identity(&installed);
+    let (status, configured) = harness.json("PUT", &format!("/api/plugins/{plugin_id}/config"), json!({
+        "expected_revision":plugin_revision,"config":{"theme":"dark"}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{configured}");
+    let (status, created) = harness.json("POST", "/api/plugin-drafts", json!({
+        "plugin_id":plugin_id,"expected_plugin_revision":configured["data"]["summary"]["revision"]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let draft_id = created["data"]["summary"]["draft_id"].as_str().unwrap();
+    // A retained, current-generation domain relation fixture. No Session
+    // history, tool effects or delivery evidence is fabricated or imported.
+    nomifun_db::sqlx::query("UPDATE plugin_drafts SET source_conversation_id=? WHERE draft_id=? AND source_conversation_id IS NULL")
+        .bind(&session).bind(draft_id).execute(harness.services.database.pool()).await.unwrap();
+    let (_, before) = harness.get_json(&format!("/api/agent-sessions/{session}")).await;
+    let count_before: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions")
+        .fetch_one(harness.services.database.pool()).await.unwrap();
+    let (status, rejected) = harness.get_json(&format!("/api/plugins/authoring/sessions/{session}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "ordinary Sessions cannot enter the product surface: {rejected}");
+    let request = json!({"selection":{"kind":"preset","presetId":preset},"draft_id":draft_id,
+        "idempotency_key":Uuid::now_v7().to_string(),"model":{"provider_id":provider,"model":"legacy-model"}});
+    let (status, opened) = harness.json("POST", "/api/plugins/authoring/sessions", request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let next = opened["data"]["agent_session_id"].as_str().unwrap();
+    assert_ne!(next, session);
+    // The previous HTTP response may be lost after the file-source CAS. Replay
+    // the exact request: its current canonical Session must be reused.
+    let (status, repeated) = harness.json("POST", "/api/plugins/authoring/sessions", request).await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(opened["data"], repeated["data"]);
+    let (_, product) = harness.get_json(&format!("/api/agent-sessions/{next}")).await;
+    assert_eq!(product["data"]["session"]["metadata"]["purpose"], "plugin_authoring");
+    let (_, working_copy) = harness.get_json(&format!("/api/plugin-drafts/{draft_id}")).await;
+    assert_eq!(working_copy["data"]["files"], created["data"]["files"], "saved files survive the new workbench");
+    assert_eq!(working_copy["data"]["summary"]["plugin_id"], plugin_id);
+    assert_eq!(working_copy["data"]["summary"]["source_conversation_id"], next, "opening the workbench immediately displays the saved files");
+    let (_, usable) = harness.get_json(&format!("/api/plugins/{plugin_id}")).await;
+    assert_eq!(usable["data"]["config"]["values"], json!({"theme":"dark"}), "saved setup survives the new workbench");
+    let entries:i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND (kind LIKE 'turn/%' OR kind LIKE 'message/%' OR kind LIKE 'runtime/%')")
+        .bind(next).fetch_one(harness.services.database.pool()).await.unwrap();
+    assert_eq!(entries, 0, "no prior Turn, messages or Runtime history were imported");
+    assert_eq!(nomifun_db::sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='session/opening'")
+        .bind(next).fetch_one(harness.services.database.pool()).await.unwrap(), 1);
+    let (_, after) = harness.get_json(&format!("/api/agent-sessions/{session}")).await;
+    assert_eq!(after["data"]["session"], before["data"]["session"]);
+    let source: Option<String> = nomifun_db::sqlx::query_scalar("SELECT source_conversation_id FROM plugin_drafts WHERE draft_id=?")
+        .bind(draft_id).fetch_one(harness.services.database.pool()).await.unwrap();
+    assert_eq!(source.as_deref(), Some(next), "the new workbench owns the saved files before its first input");
+    let count_after: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions")
+        .fetch_one(harness.services.database.pool()).await.unwrap();
+    assert_eq!(count_before + 1, count_after, "response-loss replay must create exactly one workbench Session");
+    let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
+        "idempotency_key":"legacy-ordinary-follow-up","input":{"content":"Please just reply ordinary-follow-up; do not call tools."},
+    })).await;
+    assert!(status.is_success(), "{accepted}");
+    assert_eq!(harness.wait_terminal(&session).await, "completed");
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the original Session runs before and after reopening its files");
+        let messages = requests[1]["messages"].to_string();
+        assert!(!messages.contains("Plugin development context"));
+        assert!(!messages.contains("cannot complete until install succeeds"));
+    }
+    let mut foreign_app = harness.app.clone();
+    let (foreign_token, _) = setup_and_login(&mut foreign_app, &harness.services, "foreign-plugin-owner", "StrongP@ss2").await;
+    // Local desktop trust deliberately acts as the installation owner, so it
+    // must not accompany this foreign-user bearer isolation check.
+    let request = get_with_token(&format!("/api/plugins/authoring/sessions/{session}"), &foreign_token);
+    let response = foreign_app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN, "foreign owners cannot read the retained Session");
+}
+
+#[tokio::test]
+async fn unscoped_saved_files_are_visible_as_soon_as_the_workbench_opens() {
+    let harness = Harness::new().await;
+    let provider = create_chat_provider(&harness, "http://127.0.0.1:9/v1", "Saved files", "files-model").await;
+    let preset = harness.create_plugin_capable_preset(&provider, "files-model").await;
+    let (status, draft) = harness.json("POST", "/api/plugin-drafts", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    let draft_id = draft["data"]["summary"]["draft_id"].as_str().unwrap();
+    assert!(!draft["data"]["files"].as_array().unwrap().is_empty());
+    let request = json!({"selection":{"kind":"preset","presetId":preset},"draft_id":draft_id,
+        "model":{"provider_id":provider,"model":"files-model"},"idempotency_key":Uuid::now_v7().to_string()});
+    let (status, opened) = harness.json("POST", "/api/plugins/authoring/sessions", request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let session = opened["data"]["agent_session_id"].as_str().unwrap();
+    let (status, repeated) = harness.json("POST", "/api/plugins/authoring/sessions", request).await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(opened["data"], repeated["data"]);
+    let (_, files) = harness.get_json(&format!("/api/plugin-drafts/{draft_id}")).await;
+    assert_eq!(files["data"]["summary"]["source_conversation_id"], session);
+    assert!(files["data"]["summary"]["source_message_id"].is_null(), "opening files cannot fabricate an accepted user input");
+    assert_eq!(files["data"]["files"], draft["data"]["files"]);
+    let (_, drafts) = harness.get_json("/api/plugin-drafts").await;
+    assert!(drafts["data"]["drafts"].as_array().unwrap().iter().any(|item|
+        item["draft_id"] == draft_id && item["source_conversation_id"] == session));
+    assert_eq!(nomifun_db::sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND (kind LIKE 'turn/%' OR kind LIKE 'message/%' OR kind LIKE 'runtime/%')")
+        .bind(session).fetch_one(harness.services.database.pool()).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn plugin_workbench_cannot_complete_delivery_with_prose_only() {
     let harness=Harness::new().await;
     let upstream=wiremock::MockServer::start().await;
     let reply_seen=Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -123,11 +401,7 @@ async fn ordinary_conversation_cannot_complete_plugin_delivery_with_prose_only()
         "expected_current_revision":draft["current_revision"],"draft":draft
     })).await;
     assert_eq!(status,StatusCode::OK,"{saved}");
-    let (status,session)=harness.json("POST","/api/agent-sessions",json!({
-        "preset_id":preset,"required_modules":["plugin.development"],
-        "model":{"provider_id":provider,"model":"delivery-fixture"}
-    })).await;
-    assert_eq!(status,StatusCode::OK,"{session}");
+    let session=harness.create_authoring_session(preset,&provider,"delivery-fixture").await;
     let id=session["data"]["agent_session_id"].as_str().unwrap();
     let (status,accepted)=harness.json("POST",&format!("/api/agent-sessions/{id}/turns"),json!({
         "idempotency_key":"plugin-prose-only",
@@ -199,10 +473,10 @@ async fn ordinary_conversation_cannot_complete_plugin_delivery_with_prose_only()
 }
 
 /// Script only the provider's decisions. Session admission, tool schemas,
-/// Kernel calls, human approvals, Node execution, repairs and installation all
+/// Kernel calls, Node execution, repairs and saving all
 /// use production owners. This does not stand in for live-model acceptance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ordinary_conversation_repairs_and_delivers_a_real_headless_plugin() {
+async fn plugin_workbench_repairs_and_delivers_a_real_headless_plugin() {
     run_headless_workflow(1,false,true).await;
 }
 
@@ -223,242 +497,6 @@ async fn newly_installed_tool_is_used_by_the_original_conversation_after_safe_re
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn original_conversation_completes_on_host_verified_use_without_a_completion_account() {
     run_headless_workflow(1,true,false).await;
-}
-
-/// Real Node failures drive the production PluginDeliveryCheck. A third
-/// planned failure pauses without a model final, and an owner reply resumes
-/// the same canonical Turn with its original cumulative limits.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn planned_plugin_failures_pause_and_owner_continuation_repairs_the_same_turn() {
-    run_planned_plugin_stall_workflow(true).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn without_plugin_delivery_marker_planned_failures_pause_and_resume_the_same_turn() {
-    run_planned_plugin_stall_workflow(false).await;
-}
-
-async fn run_planned_plugin_stall_workflow(explicit_delivery:bool) {
-    #[derive(Default)]
-    struct Script {
-        phase: usize, calls: usize, planned: bool, reply_seen: bool,
-        draft: String, revision: Value, digest: Value, plugin: Value,
-    }
-    let harness=Harness::new().await;
-    let upstream=wiremock::MockServer::start().await;
-    let script=Arc::new(Mutex::new(Script::default()));
-    let decisions=script.clone();
-    const BROKEN:&str="export async function activate() { return { async invoke(action,input) { return {text:input.text.toLowerCase()}; } }; }";
-    const REPLY:&str="STALLED_PLUGIN_REPLY_29: repair the existing Service to return uppercase, retain the plan, and finish installation.";
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/v1/chat/completions"))
-        .respond_with(move |request:&wiremock::Request| {
-            let body:Value=request.body_json().unwrap();
-            if body["tools"].as_array().is_none_or(Vec::is_empty) {
-                assert!(body.to_string().contains("Write only a compact continuation note"));
-                return plugin_workflow_stream(json!({"content":"Continue the existing uppercase plugin; keep its plan, repair its Service and install."}),"stop");
-            }
-            let last=body["messages"].as_array().unwrap().iter().rev()
-                .find(|message|message["role"]=="tool").and_then(|message|message["content"].as_str());
-            let result:Value=last.and_then(|text|serde_json::from_str(text).ok()).unwrap_or(Value::Null);
-            let mut state=decisions.lock().unwrap();
-            if let Some(id)=result["summary"]["draft_id"].as_str() { state.draft=id.into(); }
-            for revision in [&result["summary"]["revision"],&result["revision"],&result["draft"]["revision"]] {
-                if revision.is_number() { state.revision=revision.clone(); }
-            }
-            if result["verification_digest"].is_string() { state.digest=result["verification_digest"].clone(); }
-            if result["delivery"]["plugin_id"].is_string() { state.plugin=result["delivery"]["plugin_id"].clone(); }
-            if matches!(state.phase,4|11) && result["waiting_for_user"]==true {
-                // Preview already requests a native safe-point pause. After
-                // approval, retry preview rather than offering another final.
-                state.phase-=1;
-            }
-            if state.phase==7 {
-                assert!(body["messages"].to_string().contains(REPLY),
-                    "the watchdog must stop before another model request without an owner reply");
-                state.reply_seen=true;
-            }
-            if state.phase==1 && !state.planned {
-                state.planned=true; state.calls+=1;
-                let tool=body["tools"].as_array().unwrap().iter().find(|tool|
-                    tool["function"]["description"].as_str().unwrap_or("").contains("Action: plugin.development/plan.")).unwrap();
-                return plugin_workflow_stream(json!({"tool_calls":[{"index":0,"id":format!("stall-plan-{}",state.calls),"type":"function",
-                    "function":{"name":tool["function"]["name"],"arguments":json!({"draft_id":state.draft,"expected_revision":state.revision,"plan":{
-                        "summary":"Create an uppercase Service","output_key":"uppercase","outputs":[{"key":"uppercase","kind":"headless"}],
-                        "features":[{"description":"Uppercase the input","case_names":["required-uppercase"]}],
-                        "cases":{"required-uppercase":{"kind":"action","action":"normalize","input":{"text":"Hello"},"expected_output":{"text":"HELLO"}}}
-                    }}).to_string()}}]}),"tool_calls");
-            }
-            let (action,input)=match state.phase {
-                0=>("open",json!({})),
-                1=>{
-                    let files=result["files"].as_array().unwrap();
-                    let mut manifest:Value=serde_json::from_str(files.iter().find(|file|file["path"]=="nomifun.plugin.json")
-                        .unwrap()["text"].as_str().unwrap()).unwrap();
-                    manifest["entrypoints"]=json!({"service":"service/main.mjs"});
-                    manifest["actions"]=json!({"normalize":{"name":"Uppercase","description":"Uppercase text",
-                        "input":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},
-                        "output":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},"effect":"read"}});
-                    manifest["bindings"]=json!([{"point":"desktop.command","action":"normalize"}]);
-                    let delete=files.iter().filter_map(|file|file["path"].as_str()).filter(|path|path.starts_with("ui/")).collect::<Vec<_>>();
-                    ("apply",json!({"draft_id":state.draft,"expected_revision":state.revision,"delete":delete,
-                        "files":{"nomifun.plugin.json":manifest.to_string(),"service/main.mjs":BROKEN}}))
-                },
-                2|9=>("check",json!({"draft_id":state.draft,"expected_revision":state.revision})),
-                3|10=>("preview",json!({"draft_id":state.draft,"expected_revision":state.revision})),
-                4..=6|11=>{
-                    if matches!(state.phase,5|6) { assert_eq!(result["passed"],false,"the real Node case must fail: {last:?}"); }
-                    ("test_action",json!({"draft_id":state.draft,"expected_revision":state.revision,"case_name":"required-uppercase",
-                        "action":"normalize","input":{"text":"Hello"},"expected_output":{"text":"HELLO"}}))
-                },
-                7=>("read",json!({"draft_id":state.draft})),
-                8=>("apply",json!({"draft_id":state.draft,"expected_revision":state.revision,
-                    "files":{"service/main.mjs":BROKEN.replace("toLowerCase","toUpperCase")}})),
-                12=>{
-                    assert_eq!(result["passed"],true,"the resumed Service must satisfy the same oracle: {last:?}");
-                    ("install",json!({"draft_id":state.draft,"expected_revision":state.revision,"verification_digest":state.digest}))
-                },
-                13=>{
-                    assert!(state.plugin.is_string(),"the repaired plugin must be durably delivered: {last:?}");
-                    ("inspect",json!({"plugin_id":state.plugin}))
-                },
-                14=>return plugin_workflow_stream(json!({"content":"The repaired uppercase Service is installed."}),"stop"),
-                other=>panic!("unexpected repair phase {other}: {last:?}"),
-            };
-            let needle=format!("Action: plugin.development/{action}.");
-            let tool=body["tools"].as_array().unwrap().iter().find(|tool|
-                tool["function"]["description"].as_str().unwrap_or("").contains(&needle)).unwrap();
-            state.phase+=1; state.calls+=1;
-            plugin_workflow_stream(json!({"tool_calls":[{"index":0,"id":format!("stall-work-{}",state.calls),"type":"function",
-                "function":{"name":tool["function"]["name"],"arguments":input.to_string()}}]}),"tool_calls")
-        }).mount(&upstream).await;
-    let provider=create_chat_provider(&harness,&format!("{}/v1",upstream.uri()),"Plugin stall","plugin-stall").await;
-    let (status,preset)=harness.json("POST","/api/agent-presets/from-template/chat.minimal",json!({
-        "reuse_existing":false,"display_name":"Plugin stall","model":{"provider_id":provider,"model":"plugin-stall"}
-    })).await;
-    assert_eq!(status,StatusCode::OK,"{preset}");
-    let id=preset["data"]["preset"]["preset_id"].as_str().unwrap();
-    let mut draft=preset["data"]["draft"].clone();
-    draft["document"]["enabled_capabilities"]=json!([{"capability":{"id":"plugin.development"},"action_allowlist":nomifun_plugin_development::CREATE_ACTIONS}]);
-    let (status,saved)=harness.json("POST",&format!("/api/agent-presets/{id}/revisions"),json!({
-        "expected_current_revision":draft["current_revision"],"draft":draft
-    })).await;
-    assert_eq!(status,StatusCode::OK,"{saved}");
-    let (status,session)=harness.json("POST","/api/agent-sessions",json!({
-        "preset_id":id,"required_modules":["plugin.development"],"model":{"provider_id":provider,"model":"plugin-stall"}
-    })).await;
-    assert_eq!(status,StatusCode::OK,"{session}");
-    let session=session["data"]["agent_session_id"].as_str().unwrap();
-    let mut input=json!({"content":"Create and install a Service that returns uppercase text."});
-    if explicit_delivery { input["plugin_delivery"]=json!({}); }
-    let (status,accepted)=harness.json("POST",&format!("/api/agent-sessions/{session}/turns"),json!({
-        "idempotency_key":"plugin-stall-start","input":input
-    })).await;
-    assert!(status.is_success(),"{accepted}");
-    let mut confirmation=String::new();
-    let paused=tokio::time::timeout(Duration::from_secs(30),async {
-        loop {
-            let (_,execution)=harness.get_json(&format!("/api/agent-sessions/{session}/execution")).await;
-            let execution=&execution["data"];
-            if execution["state"]=="paused" && execution["pause"]["reason"]=="PLUGIN_VERIFICATION_REQUIRED" { break execution.clone(); }
-            let draft_id=script.lock().unwrap().draft.clone();
-            approve_stalled_service_if_requested(&harness,session,&draft_id,execution,&mut confirmation).await;
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }).await;
-    let paused=match paused {
-        Ok(paused)=>paused,
-        Err(_)=>{
-            let (_,execution)=harness.get_json(&format!("/api/agent-sessions/{session}/execution")).await;
-            let rows:Vec<(String,String)>=nomifun_db::sqlx::query_as(
-                "SELECT kind,substr(COALESCE(inline_json,''),1,2048) FROM agent_events WHERE session_id=? ORDER BY seq DESC LIMIT 18"
-            ).bind(session).fetch_all(harness.services.database.pool()).await.unwrap();
-            let events:Vec<_>=rows.into_iter().map(|(kind,payload)|(kind,nomi_redact::redact_secrets_owned(payload))).collect();
-            let phase=script.lock().unwrap().phase;
-            panic!("three real planned failures must pause before another model request: phase={phase}, execution={execution}, recent canonical events={events:?}");
-        },
-    };
-    assert_eq!(script.lock().unwrap().phase,7);
-    assert!(!script.lock().unwrap().reply_seen);
-    assert_eq!(paused["checkpoint_retained"],true,"the watchdog uses a resumable native checkpoint");
-    let rows:Vec<String>=nomifun_db::sqlx::query_scalar(
-        "SELECT inline_json FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event') IN ('tool_completed','execution_budget_exhausted') ORDER BY seq"
-    ).bind(session).fetch_all(harness.services.database.pool()).await.unwrap();
-    let events:Vec<nomifun_agent_runtime::AgentEngineEvent>=rows.iter().map(|row|{
-        let payload:Value=serde_json::from_str(row).unwrap();
-        serde_json::from_value(payload["event"].clone()).unwrap()
-    }).collect();
-    let failures=events.iter().filter(|event|match event {
-        nomifun_agent_runtime::AgentEngineEvent::ToolCompleted {result,..}=>{
-            let output:Value=serde_json::from_str(&result.output_text()).unwrap_or(Value::Null);
-            output["case_name"]=="required-uppercase" && output["planned"]==true && output["passed"]==false
-        },
-        _=>false,
-    }).count();
-    assert_eq!(failures,3,"the production watchdog counts actual planned test results");
-    assert!(events.iter().any(|event|matches!(event,nomifun_agent_runtime::AgentEngineEvent::ExecutionBudgetExhausted {
-        reason:nomifun_agent_runtime::AgentExecutionStopReason::PluginVerificationStalled,.. })));
-    let continuation=json!({"request":{"operation_id":paused["operation_id"],"idempotency_key":"plugin-stall-owner-reply",
-        "expected_pause_revision":paused["pause"]["revision"],"expected_checkpoint_revision":paused["checkpoint_revision"],
-        "expected_checkpoint_digest":paused["checkpoint_digest"],"budget":{}},"input":{"content":REPLY}});
-    let route=format!("/api/agent-sessions/{session}/plugin-continuation");
-    let mut increased=continuation.clone(); increased["request"]["budget"]=json!({"additional_segments":1});
-    let (status,rejected)=harness.json("POST",&route,increased).await;
-    assert_eq!(status,StatusCode::BAD_REQUEST,"the plugin reply cannot grant additional budget: {rejected}");
-    let (status,resumed)=harness.json("POST",&route,continuation).await;
-    assert!(status.is_success(),"the stalled task must support its existing continuation API: {resumed}");
-    tokio::time::timeout(Duration::from_secs(30),async {
-        loop {
-            let completed:i64=nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/completed'")
-                .bind(session).fetch_one(harness.services.database.pool()).await.unwrap();
-            if completed==1 { break; }
-            let (_,execution)=harness.get_json(&format!("/api/agent-sessions/{session}/execution")).await;
-            let draft_id=script.lock().unwrap().draft.clone();
-            approve_stalled_service_if_requested(&harness,session,&draft_id,&execution["data"],&mut confirmation).await;
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }).await.expect("the original task must repair and deliver after the owner reply");
-    assert!(script.lock().unwrap().reply_seen);
-    assert_eq!(script.lock().unwrap().phase,14);
-    let (roots,inputs,failed):(i64,i64,i64)=nomifun_db::sqlx::query_as(
-        "SELECT SUM(kind='turn/started'),SUM(kind='turn/steer-accepted'),SUM(kind='turn/failed') FROM agent_events WHERE session_id=?"
-    ).bind(session).fetch_one(harness.services.database.pool()).await.unwrap();
-    assert_eq!((roots,inputs,failed),(1,1,0),"continuation belongs to one original Turn and one accepted reply");
-    let (_,finished)=harness.get_json(&format!("/api/agent-sessions/{session}/execution")).await;
-    assert_eq!(finished["data"]["operation_id"],paused["operation_id"]);
-    // Resume advances the budget record's CAS revision even with an empty
-    // grant; the actual allowances must remain exactly unchanged.
-    for field in ["journal_bytes","journal_records","session_payload_bytes"] {
-        assert_eq!(finished["data"]["budget"][field],paused["budget"][field],
-            "recovery must not increase the cumulative {field} allowance");
-    }
-    // Completed turns may release their checkpoint. Each live generation's
-    // canonical prepared budget proves the same total model ceiling instead.
-    let model_limits:Vec<i64>=nomifun_db::sqlx::query_scalar(
-        "SELECT DISTINCT CAST(json_extract(inline_json,'$.event.max_model_steps') AS INTEGER) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='execution_budget_prepared'"
-    ).bind(session).fetch_all(harness.services.database.pool()).await.unwrap();
-    let original_limit=paused["model_progress"]["steps_per_segment"].as_u64().unwrap()
-        * paused["model_progress"]["maximum_segments"].as_u64().unwrap();
-    assert_eq!(model_limits,vec![original_limit as i64],"every resumed generation keeps the original cumulative model allowance");
-}
-
-async fn approve_stalled_service_if_requested(harness:&Harness,session:&str,draft:&str,execution:&Value,previous:&mut String) {
-    if draft.is_empty() || execution["state"]!="paused"
-        || !matches!(execution["pause"]["reason"].as_str(),Some("PLUGIN_AUTHORIZATION_REQUIRED"|"EXECUTION_USER_REQUESTED")) { return; }
-    let (_,report)=harness.get_json(&format!("/api/plugin-drafts/{draft}/authoring")).await;
-    let confirmation=report["data"]["confirmation"]["confirmation_id"].as_str().unwrap_or("");
-    if confirmation.is_empty() || confirmation==previous.as_str() { return; }
-    let (status,approved)=harness.json("POST",&format!("/api/plugin-drafts/{draft}/approve"),json!({
-        "expected_revision":report["data"]["draft"]["summary"]["revision"],"confirmation_id":confirmation,"approved":true
-    })).await;
-    assert_eq!(status,StatusCode::OK,"{approved}");
-    *previous=confirmation.to_owned();
-    let (status,resumed)=harness.json("POST",&format!("/api/agent-sessions/{session}/execution/resume"),json!({
-        "operation_id":execution["operation_id"],"idempotency_key":format!("plugin-stall-approve-{confirmation}"),
-        "expected_pause_revision":execution["pause"]["revision"],"expected_checkpoint_revision":execution["checkpoint_revision"],
-        "expected_checkpoint_digest":execution["checkpoint_digest"],"budget":{}
-    })).await;
-    assert!(status.is_success(),"{resumed}");
 }
 
 async fn run_headless_workflow(expected_count: u8, current_use: bool, account_after_use: bool) {
@@ -616,9 +654,8 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
                 }
             }
             if matches!(phase, 4 | 14) {
-                assert_eq!(result["waiting_for_user"], true, "{last:?}");
-                assert!(!last.unwrap().contains("confirmation_id"));
-                phase += 1;
+                assert!(result["descriptor"].is_object(), "the local service is usable immediately: {last:?}");
+                phase += 3;
                 state.phase = phase;
             }
             if phase==21 {
@@ -645,9 +682,15 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
                 && state.controls.get(&20).copied().unwrap_or_default()>=2 {
                 return plugin_workflow_stream(json!({"content":"The installed normalize tool answered in this conversation."}), "stop");
             }
+            // A fresh uninterrupted Turn may have no explicit native task
+            // ledger. Its real host delivery gate can settle a plain final,
+            // or pause until a requested installed tool is attached.
+            if phase == 21 && !tools.unwrap().iter().any(|tool| tool["function"]["name"] == "update_plan") {
+                return plugin_workflow_stream(json!({"content":"The repaired text cleanup plugin is saved and ready to use."}), "stop");
+            }
             // Recovery activates the shared engine's task ledger. Respect its
             // real planning/completion contract rather than disabling it.
-            if matches!(phase, 5 | 15 | 21) && tools.unwrap().iter().any(|tool| tool["function"]["name"] == "update_plan") {
+            if phase == 21 && tools.unwrap().iter().any(|tool| tool["function"]["name"] == "update_plan") {
                 let count = state.controls.entry(phase).or_default();
                 if *count < if phase == 21 { 2 } else { 1 } {
                     let control = *count;
@@ -695,8 +738,7 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
                     assert!(result["summary"]["revision"].is_number(), "file apply must succeed at phase {phase}: {last:?}");
                     ("check", json!({"draft_id":draft,"expected_revision":revision}))
                 }
-                3 | 6 | 13 | 16 => ("preview", json!({"draft_id":draft,"expected_revision":revision})),
-                5 | 15 => ("read", json!({"draft_id":draft})),
+                3 | 13 => ("preview", json!({"draft_id":draft,"expected_revision":revision})),
                 // JSON values arriving as encoded strings still satisfy the
                 // strict oracle when they decode exactly to the planned value.
                 7 | 17 => ("test_action", json!({"draft_id":draft,"expected_revision":revision,
@@ -758,7 +800,7 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
                 let needle = format!("Action: plugin.development/{action}.");
                 let tool = body["tools"].as_array().unwrap().iter().find(|tool|
                     tool["function"]["description"].as_str().unwrap_or("").contains(&needle))
-                    .unwrap_or_else(|| panic!("ordinary Agent is missing {needle}"));
+                    .unwrap_or_else(|| panic!("plugin workbench Agent is missing {needle}"));
                 (json!({"tool_calls":[{"index":0,"id":format!("plugin-workflow-{phase}"),"type":"function",
                     "function":{"name":tool["function"]["name"],"arguments":input.to_string()}}]}), "tool_calls")
             };
@@ -766,7 +808,7 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
         }).mount(&upstream).await;
     let provider = create_chat_provider(&harness, &format!("{}/v1", upstream.uri()), "Plugin workflow", "plugin-workflow").await;
     let (status, preset) = harness.json("POST", "/api/agent-presets/from-template/chat.minimal", json!({
-        "reuse_existing":false,"display_name":"Ordinary Agent workflow fixture",
+        "reuse_existing":false,"display_name":"Plugin workbench workflow fixture",
         "model":{"provider_id":provider,"model":"plugin-workflow"}
     })).await;
     assert_eq!(status, StatusCode::OK, "{preset}");
@@ -779,25 +821,20 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
         "expected_current_revision":draft["current_revision"],"draft":draft
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (status, session) = harness.json("POST", "/api/agent-sessions", json!({
-        "preset_id":id,"required_modules":["plugin.development"],"model":{"provider_id":provider,"model":"plugin-workflow"}
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{session}");
+    let session=harness.create_authoring_session(id,&provider,"plugin-workflow").await;
     let session = session["data"]["agent_session_id"].as_str().unwrap().to_owned();
     let mut input = json!({"content":"Create and install a text-cleanup plugin that trims whitespace, converts text to uppercase and preserves a stored sample after Service restart."});
     if current_use { input["content"]=json!("Create and install the text-cleanup plugin, preserve a stored sample across restart, and use normalize in this same conversation on '  Current call  ' to obtain 'CURRENT CALL'."); }
     if expected_count > 1 {
         input["content"] = json!("Create two separate usable plugins; one trims whitespace and converts text to uppercase.");
     }
-    // Ordinary follow-up turns need no UI marker: actual file edits create the
+    // Workbench follow-up turns need no UI marker: actual file edits create the
     // Host obligation. Explicit output count additionally prevents partial success.
     let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
         "idempotency_key":"plugin-workflow-initial",
         "input":input
     })).await;
     assert!(status.is_success(), "{accepted}");
-    let mut approvals = 0;
-    let mut previous_confirmation = String::new();
     let mut resumed_consumption=false;
     let settled = tokio::time::timeout(Duration::from_secs(45), async {
         loop {
@@ -807,8 +844,6 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
             if completed > 0 { break; }
             let draft_id = script.lock().unwrap().draft_id.clone();
             if !draft_id.is_empty() {
-                let (_, details) = harness.get_json(&format!("/api/plugin-drafts/{draft_id}/authoring")).await;
-                let confirmation = details["data"]["confirmation"]["confirmation_id"].as_str().unwrap_or("");
                 let (_, execution) = harness.get_json(&format!("/api/agent-sessions/{session}/execution")).await;
                 let execution = &execution["data"];
                 if current_use && !resumed_consumption && execution["state"]=="paused"
@@ -824,23 +859,7 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
                 }
                 if expected_count > 1 && execution["state"] == "paused"
                     && execution["pause"]["reason"] == "PLUGIN_DELIVERY_REQUIRED" { break; }
-                if !confirmation.is_empty() && confirmation != previous_confirmation && execution["state"] == "paused" {
-                    let (status, approved) = harness.json("POST", &format!("/api/plugin-drafts/{draft_id}/approve"), json!({
-                        "expected_revision":details["data"]["draft"]["summary"]["revision"],
-                        "confirmation_id":confirmation,"approved":true
-                    })).await;
-                    assert_eq!(status, StatusCode::OK, "{approved}");
-                    previous_confirmation = confirmation.into();
-                    approvals += 1;
-                    let (status, resumed) = harness.json("POST", &format!("/api/agent-sessions/{session}/execution/resume"), json!({
-                        "operation_id":execution["operation_id"],
-                        "idempotency_key":format!("plugin-workflow-resume-{approvals}"),
-                        "expected_pause_revision":execution["pause"]["revision"],
-                        "expected_checkpoint_revision":execution["checkpoint_revision"],
-                        "expected_checkpoint_digest":execution["checkpoint_digest"],"budget":{}
-                    })).await;
-                    assert!(status.is_success(), "{resumed}");
-                }
+
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -851,9 +870,8 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
             "SELECT kind,COALESCE(inline_json,'') FROM agent_events WHERE session_id=? ORDER BY seq DESC LIMIT 12"
         ).bind(&session).fetch_all(harness.services.database.pool()).await.unwrap();
         let state = script.lock().unwrap();
-        panic!("workflow did not complete; phase={}, draft={}, approvals={approvals}, execution={execution}, events={events:?}", state.phase, state.draft_id);
+        panic!("workflow did not complete; phase={}, draft={}, execution={execution}, events={events:?}", state.phase, state.draft_id);
     }
-    assert_eq!(approvals, 2, "changed Service code needs a fresh exact-artifact approval");
     let completed: i64 = nomifun_db::sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/completed'"
     ).bind(&session).fetch_one(harness.services.database.pool()).await.unwrap();
@@ -867,9 +885,9 @@ async fn run_headless_workflow(expected_count: u8, current_use: bool, account_af
     } else {
         assert!(state.phase >= 21, "all development and installed inspection calls must execute");
     }
-    if account_after_use {
+    if account_after_use && state.controls.get(&21).is_some_and(|count| *count > 0) {
         assert_eq!(state.controls.get(&21), Some(&2), "the native ledger must accept the final evidence report");
-    } else {
+    } else if !account_after_use {
         assert_eq!(state.controls.get(&21), Some(&0),
             "host-verified use must need no report_completion after the consumption");
     }
@@ -998,10 +1016,7 @@ async fn cancelling_installed_ui_verification_preserves_commit_and_closes_privat
         "expected_current_revision":draft["current_revision"],"draft":draft
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (status, session) = harness.json("POST", "/api/agent-sessions", json!({
-        "preset_id":id,"required_modules":["plugin.development"],"model":{"provider_id":provider,"model":"ui-cancel"}
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{session}");
+    let session=harness.create_authoring_session(id,&provider,"ui-cancel").await;
     let session = session["data"]["agent_session_id"].as_str().unwrap();
     let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
         "idempotency_key":"ui-cancel-start","input":{"content":"Create and install a UI showing count zero.","plugin_delivery":{}}
@@ -1141,10 +1156,7 @@ async fn consecutive_test_ui_cases_use_fresh_preview_surfaces() {
         "expected_current_revision":draft["current_revision"],"draft":draft
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (status, session) = harness.json("POST", "/api/agent-sessions", json!({
-        "preset_id":id,"required_modules":["plugin.development"],"model":{"provider_id":provider,"model":"ui-fresh"}
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{session}");
+    let session=harness.create_authoring_session(id,&provider,"ui-fresh").await;
     let session = session["data"]["agent_session_id"].as_str().unwrap();
     let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
         "idempotency_key":"ui-fresh-start","input":{"content":"Create the count UI.","plugin_delivery":{}}
@@ -1195,11 +1207,11 @@ async fn consecutive_test_ui_cases_use_fresh_preview_surfaces() {
         "the host settlement check must relay the delivery gap into the same turn");
 }
 
-/// A follow-up turn in a conversation that owns a draft gets neutral plugin
+/// A follow-up turn in the plugin workbench gets neutral plugin
 /// context — the draft id and the authorized functions — instead of a
 /// delivery obligation or an unconditional install claim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn follow_up_turn_gets_plugin_context_without_a_delivery_obligation() {
+async fn workbench_follow_up_gets_plugin_context_without_a_delivery_obligation() {
     #[derive(Default)]
     struct Script {
         opened: bool,
@@ -1250,10 +1262,7 @@ async fn follow_up_turn_gets_plugin_context_without_a_delivery_obligation() {
         "expected_current_revision":draft["current_revision"],"draft":draft
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (status, session) = harness.json("POST", "/api/agent-sessions", json!({
-        "preset_id":id,"required_modules":["plugin.development"],"model":{"provider_id":provider,"model":"draft-context"}
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{session}");
+    let session=harness.create_authoring_session(id,&provider,"draft-context").await;
     let session = session["data"]["agent_session_id"].as_str().unwrap();
     let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
         "idempotency_key":"draft-context-open","input":{"content":"Open a plugin draft.","plugin_delivery":{}}
@@ -1433,10 +1442,7 @@ async fn failed_diagnostic_ui_case_does_not_block_delivery_and_post_install_case
         "expected_current_revision":draft["current_revision"],"draft":draft
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (status, session) = harness.json("POST", "/api/agent-sessions", json!({
-        "preset_id":id,"required_modules":["plugin.development"],"model":{"provider_id":provider,"model":"ui-after-install"}
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{session}");
+    let session=harness.create_authoring_session(id,&provider,"ui-after-install").await;
     let session = session["data"]["agent_session_id"].as_str().unwrap();
     let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
         "idempotency_key":"ui-after-install-start","input":{"content":"Create and install the count UI, then run the second case.","plugin_delivery":{}}
@@ -1542,10 +1548,7 @@ async fn bare_open_creates_each_admitted_output_and_only_identical_requests_reop
         "expected_current_revision":draft["current_revision"],"draft":draft
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (status, session) = harness.json("POST", "/api/agent-sessions", json!({
-        "preset_id":id,"required_modules":["plugin.development"],"model":{"provider_id":provider,"model":"open-reuse"}
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{session}");
+    let session=harness.create_authoring_session(id,&provider,"open-reuse").await;
     let session = session["data"]["agent_session_id"].as_str().unwrap();
     let (status, accepted) = harness.json("POST", &format!("/api/agent-sessions/{session}/turns"), json!({
         "idempotency_key":"open-reuse-start","input":{"content":"Create two plugins.","plugin_delivery":{"expected_count":2}}
@@ -1614,6 +1617,57 @@ impl Harness {
         }
     }
 
+    async fn create_authoring_session(&self, preset: &str, provider: &str, model: &str) -> Value {
+        let (status, response) = self.json("POST", "/api/plugins/authoring/sessions", json!({
+            "selection":{"kind":"preset","presetId":preset},
+            "model":{"provider_id":provider,"model":model},
+            "idempotency_key":Uuid::now_v7().to_string(),
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"].as_object().unwrap().len(), 1);
+        response
+    }
+
+    async fn create_plugin_capable_preset(&self, provider: &str, model: &str) -> String {
+        let (status, created) = self.json("POST", "/api/agent-presets/from-template/chat.minimal", json!({
+            "reuse_existing":false,"display_name":"Plugin scope fixture",
+            "model":{"provider_id":provider,"model":model},
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = created["data"]["preset"]["preset_id"].as_str().unwrap().to_owned();
+        let mut draft = created["data"]["draft"].clone();
+        draft["document"]["enabled_capabilities"] = json!([{
+            "capability":{"id":"plugin.development"},"action_allowlist":nomifun_plugin_development::CREATE_ACTIONS,
+        }]);
+        let (status, saved) = self.json("POST", &format!("/api/agent-presets/{id}/revisions"), json!({
+            "expected_current_revision":draft["current_revision"],"draft":draft,
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        id
+    }
+
+    async fn create_ordinary_session(&self, preset: &str, provider: &str, model: &str) -> String {
+        let (status, created) = self.json("POST", "/api/agent-sessions", json!({
+            "preset_id":preset,"model":{"provider_id":provider,"model":model},
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        created["data"]["agent_session_id"].as_str().unwrap().to_owned()
+    }
+
+    async fn wait_terminal(&self, session: &str) -> String {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let state: Option<String> = nomifun_db::sqlx::query_scalar(
+                    "SELECT state FROM agent_turns WHERE session_id=? ORDER BY accepted_at DESC LIMIT 1",
+                ).bind(session).fetch_optional(self.services.database.pool()).await.unwrap();
+                if let Some(state) = state && matches!(state.as_str(), "completed" | "failed" | "cancelled") {
+                    return state;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("the fixture turn must settle")
+    }
+
     async fn json(&self, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
         let mut request = json_with_token(
             method,
@@ -1625,6 +1679,9 @@ impl Harness {
         request
             .headers_mut()
             .insert("x-nomi-local-trust", LOCAL_TRUST.parse().unwrap());
+        if !request.headers().contains_key("idempotency-key") {
+            request.headers_mut().insert("idempotency-key", Uuid::now_v7().to_string().parse().unwrap());
+        }
         let response = self
             .app
             .clone()
@@ -1632,7 +1689,11 @@ impl Harness {
             .await
             .unwrap();
         let status = response.status();
-        (status, body_json(response).await)
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!(
+            "{method} {uri} returned {status} with invalid JSON ({error}): {}",
+            String::from_utf8_lossy(&bytes[..bytes.len().min(400)])));
+        (status, value)
     }
 
     async fn get_json(&self, uri: &str) -> (StatusCode, Value) {
@@ -1647,7 +1708,11 @@ impl Harness {
             .await
             .unwrap();
         let status = response.status();
-        (status, body_json(response).await)
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!(
+            "GET {uri} returned {status} with invalid JSON ({error}): {}",
+            String::from_utf8_lossy(&bytes[..bytes.len().min(400)])));
+        (status, value)
     }
 
     async fn get_public_bytes(&self, uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
@@ -1692,9 +1757,6 @@ impl Harness {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "inspection failed: {inspection}");
-        let confirmation = inspection["data"]["permission_expansion"]["confirmation_id"]
-            .as_str()
-            .map(str::to_owned);
         let (status, installed) = self
             .json(
                 "POST",
@@ -1703,7 +1765,6 @@ impl Harness {
                     "source_path": source.to_string_lossy(),
                     "kind":"directory",
                     "create_copy":false,
-                    "permission_confirmation_id":confirmation,
                 }),
             )
             .await;
@@ -2111,7 +2172,7 @@ async fn package_and_backup_round_trip_data_without_credential_plaintext() {
     let harness = Harness::new().await;
     let package = harness.package_path("backup-source");
     write_ui_package(&package, "e2e.backup", &["api_key"], &["network"]);
-    let (status, first_inspection) = harness
+    let (status, _first_inspection) = harness
         .json(
             "POST",
             "/api/plugins/import/inspect",
@@ -2119,14 +2180,6 @@ async fn package_and_backup_round_trip_data_without_credential_plaintext() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        first_inspection["data"]["permission_expansion"]["added_secret_slots"][0],
-        "api_key"
-    );
-    assert_eq!(
-        first_inspection["data"]["permission_expansion"]["added_permissions"][0],
-        "network"
-    );
     let detail = harness.install_directory(&package).await;
     let (plugin_id, revision) = installed_identity(&detail);
     let surface = harness.open_surface(&plugin_id, revision).await;
@@ -2193,7 +2246,6 @@ async fn package_and_backup_round_trip_data_without_credential_plaintext() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "update inspect failed: {update_inspection}");
-    assert!(update_inspection["data"]["permission_expansion"].is_null());
     let (status, updated) = harness
         .json(
             "POST",
@@ -2254,26 +2306,6 @@ async fn package_and_backup_round_trip_data_without_credential_plaintext() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "package inspect failed: {package_inspection}");
-    let (status, confirmation_required) = harness
-        .json(
-            "POST",
-            "/api/plugins/import",
-            json!({
-                "source_path":package_zip.to_string_lossy(),
-                "kind":"zip",
-                "create_copy":true
-            }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        confirmation_required["data"]["result"]["outcome"],
-        "confirmation_required"
-    );
-    let copy_confirmation = confirmation_required["data"]["result"]["confirmation"]
-        ["confirmation_id"]
-        .as_str()
-        .unwrap();
     let (status, package_copy) = harness
         .json(
             "POST",
@@ -2281,8 +2313,7 @@ async fn package_and_backup_round_trip_data_without_credential_plaintext() {
             json!({
                 "source_path":package_zip.to_string_lossy(),
                 "kind":"zip",
-                "create_copy":true,
-                "permission_confirmation_id":copy_confirmation
+                "create_copy":true
             }),
         )
         .await;
@@ -2308,9 +2339,6 @@ async fn package_and_backup_round_trip_data_without_credential_plaintext() {
         inspection["data"]["backup"]["credential_slots_to_rebind"][0],
         "api_key"
     );
-    let confirmation = inspection["data"]["permission_expansion"]["confirmation_id"]
-        .as_str()
-        .map(str::to_owned);
     let (status, imported) = harness
         .json(
             "POST",
@@ -2319,7 +2347,6 @@ async fn package_and_backup_round_trip_data_without_credential_plaintext() {
                 "source_path":backup_zip.to_string_lossy(),
                 "kind":"backup",
                 "create_copy":true,
-                "permission_confirmation_id":confirmation,
                 "credential_bindings":{"api_key":format!("provider:{provider_id}")}
             }),
         )

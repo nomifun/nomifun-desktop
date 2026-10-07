@@ -1283,6 +1283,20 @@ impl AgentSessionStore {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<AgentSessionListPage, SessionStoreError> {
+        self.list_live_sessions_inner(owner, cursor, limit, None).await
+    }
+
+    pub async fn list_live_sessions_for_purpose(
+        &self, owner: &PrincipalRef, cursor: Option<&str>, limit: u32,
+        purpose: nomifun_agent_contracts::SessionPurpose,
+    ) -> Result<AgentSessionListPage, SessionStoreError> {
+        self.list_live_sessions_inner(owner, cursor, limit, Some(purpose)).await
+    }
+
+    async fn list_live_sessions_inner(
+        &self, owner: &PrincipalRef, cursor: Option<&str>, limit: u32,
+        purpose: Option<nomifun_agent_contracts::SessionPurpose>,
+    ) -> Result<AgentSessionListPage, SessionStoreError> {
         validate_principal(owner)?;
         if limit == 0 || limit > 10_000 {
             return Err(SessionStoreError::InvalidSession(format!(
@@ -1294,43 +1308,47 @@ impl AgentSessionStore {
         }
         let owner_json = serde_json::to_string(owner)?;
         let mut tx = self.pool.begin().await?;
-        let total: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live'",
-        )
-        .bind(&owner_json)
-        .fetch_one(&mut *tx)
-        .await?;
+        const ROW_SELECT: &str = "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
+            agent_binding_json, remote_binding_id, remote_binding_version, parent_agent_session_id, \
+            fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at, \
+            (SELECT e.inline_json FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id \
+             AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1) AS opening_json FROM agent_sessions";
+        const PURPOSE_SQL: &str = "COALESCE((SELECT json_extract(e.inline_json, '$.metadata.purpose') \
+            FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id \
+            AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1), 'conversation')";
+        const BAD_PURPOSE_SQL: &str = "(NOT EXISTS (SELECT 1 FROM agent_events e \
+            WHERE e.session_id = agent_sessions.agent_session_id AND e.seq = 1 \
+            AND e.kind = 'session/opening' AND e.kind_version = 1) \
+            OR EXISTS (SELECT 1 FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id \
+            AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1 \
+            AND CASE WHEN e.inline_json IS NULL OR NOT json_valid(e.inline_json) THEN 1 ELSE \
+                json_type(e.inline_json, '$.metadata.purpose') IS NOT NULL AND \
+                (json_type(e.inline_json, '$.metadata.purpose') <> 'text' OR \
+                 json_extract(e.inline_json, '$.metadata.purpose') NOT IN ('conversation', 'plugin_authoring')) END))";
+        let purpose_name = purpose.map(|purpose| match purpose {
+            nomifun_agent_contracts::SessionPurpose::Conversation => "conversation",
+            nomifun_agent_contracts::SessionPurpose::PluginAuthoring => "plugin_authoring",
+        });
+        // Keep malformed/unknown purpose facts visible to either predicate.
+        // The selected page still parses exact typed opening facts and fails
+        // closed; listing one page never scans all Agent bindings in the owner.
+        let mut count_query = sqlx::QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM agent_sessions");
+        count_query.push(" WHERE owner_ref_json = ").push_bind(&owner_json).push(" AND state = 'live'");
+        if let Some(purpose) = purpose_name {
+            count_query.push(" AND (").push(PURPOSE_SQL).push(" = ").push_bind(purpose)
+                .push(" OR ").push(BAD_PURPOSE_SQL).push(")");
+        }
+        let total: i64 = count_query.build_query_scalar().fetch_one(&mut *tx).await?;
         let fetch_limit = i64::from(limit) + 1;
-        let rows = match cursor {
-            Some(cursor) => {
-                sqlx::query_as::<_, StoredSessionRow>(
-                    "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
-                            agent_binding_json, remote_binding_id, remote_binding_version, \
-                            parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
-                     FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
-                       AND agent_session_id < ? \
-                     ORDER BY agent_session_id DESC LIMIT ?",
-                )
-                .bind(&owner_json)
-                .bind(cursor)
-                .bind(fetch_limit)
-                .fetch_all(&mut *tx)
-                .await?
-            }
-            None => {
-                sqlx::query_as::<_, StoredSessionRow>(
-                    "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
-                            agent_binding_json, remote_binding_id, remote_binding_version, \
-                            parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
-                     FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
-                     ORDER BY agent_session_id DESC LIMIT ?",
-                )
-                .bind(&owner_json)
-                .bind(fetch_limit)
-                .fetch_all(&mut *tx)
-                .await?
-            }
-        };
+        let mut page_query = sqlx::QueryBuilder::<Sqlite>::new(ROW_SELECT);
+        page_query.push(" WHERE owner_ref_json = ").push_bind(&owner_json).push(" AND state = 'live'");
+        if let Some(purpose) = purpose_name {
+            page_query.push(" AND (").push(PURPOSE_SQL).push(" = ").push_bind(purpose)
+                .push(" OR ").push(BAD_PURPOSE_SQL).push(")");
+        }
+        if let Some(cursor) = cursor { page_query.push(" AND agent_session_id < ").push_bind(cursor); }
+        page_query.push(" ORDER BY agent_session_id DESC LIMIT ").push_bind(fetch_limit);
+        let rows = page_query.build_query_as::<StoredSessionRow>().fetch_all(&mut *tx).await?;
         let has_more = rows.len() > limit as usize;
         let mut items = Vec::with_capacity(rows.len().min(limit as usize));
         for row in rows.into_iter().take(limit as usize) {
@@ -3910,7 +3928,7 @@ impl AgentSessionStore {
             "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                     agent_binding_json, remote_binding_id, remote_binding_version, \
                     parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
-             FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
+             , (SELECT e.inline_json FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1) AS opening_json FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
              ORDER BY agent_session_id",
         )
         .bind(owner_json)
@@ -3959,6 +3977,9 @@ impl AgentSessionStore {
         let mut tx = self.begin_write_transaction().await?;
         if let Some(receipt) = existing_fork_receipt_tx(&mut tx, &request.child_owner_ref, parent_session_id,
             request.parent_through_seq, request.child_metadata.title.as_deref(), &request.producer_id, &request.idempotency_key).await? {
+            if receipt.child_session.metadata.purpose != request.child_metadata.purpose {
+                return Err(SessionStoreError::IdempotencyConflict("fork replay changed its product purpose".into()));
+            }
             tx.commit().await?;
             return Ok(receipt);
         }
@@ -3967,6 +3988,9 @@ impl AgentSessionStore {
             return Err(SessionStoreError::Conflict(
                 "fork child owner must match parent owner".to_owned(),
             ));
+        }
+        if parent.metadata.purpose != request.child_metadata.purpose {
+            return Err(SessionStoreError::Conflict("fork must preserve its parent's product purpose".into()));
         }
 
         let parent_head = head_by_id_tx(&mut tx, parent_session_id.as_ref()).await?;
@@ -4035,6 +4059,7 @@ impl AgentSessionStore {
                 causation_event_id: None,
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                     "operation_id": request.operation_id.as_ref(),
+                    "metadata": &request.child_metadata,
                     "agent_binding": &request.child_agent_binding,
                     "parent_session_id": parent_session_id,
                     "parent_through_seq": request.parent_through_seq,
@@ -4285,7 +4310,7 @@ impl AgentSessionStore {
                     agent_binding_json, remote_binding_id, remote_binding_version, \
                     parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, \
                     created_at, deleted_at \
-             FROM agent_sessions WHERE agent_session_id = ? AND state = 'deleting'",
+             , (SELECT e.inline_json FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1) AS opening_json FROM agent_sessions WHERE agent_session_id = ? AND state = 'deleting'",
         )
         .bind(session_id.as_ref())
         .fetch_optional(&self.pool)
@@ -4304,7 +4329,7 @@ impl AgentSessionStore {
                     agent_binding_json, remote_binding_id, remote_binding_version, \
                     parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, \
                     created_at, deleted_at \
-             FROM agent_sessions WHERE state = 'deleting' ORDER BY agent_session_id",
+             , (SELECT e.inline_json FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1) AS opening_json FROM agent_sessions WHERE state = 'deleting' ORDER BY agent_session_id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -4344,7 +4369,17 @@ impl AgentSessionStore {
         let session_row = session_row_by_id_tx(tx, append.agent_session_id.as_ref()).await?;
         let permitted_states: &[&str] = match state_policy {
             AppendSessionStatePolicy::LiveOnly => {
-                require_live_row(session_row)?;
+                if append.semantic_event.kind.0 == "session/opening"
+                    && session_row.next_seq == Some(1) && session_row.opening_json.is_none()
+                {
+                    // The atomic create/fork transaction has inserted its row
+                    // but has not committed the immutable opening fact yet.
+                    if session_row.state != "live" {
+                        return Err(SessionStoreError::Deleted(session_row.agent_session_id));
+                    }
+                } else {
+                    require_live_row(session_row)?;
+                }
                 &["live"]
             }
             AppendSessionStatePolicy::EffectSettlement => {
@@ -4750,6 +4785,8 @@ struct StoredSessionRow {
     next_seq: Option<i64>,
     created_at: Option<i64>,
     deleted_at: Option<i64>,
+    /// Read-only projection of the exact creation fact, never another column.
+    opening_json: Option<String>,
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -6315,7 +6352,7 @@ async fn optional_session_row_by_id(
         "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                 agent_binding_json, remote_binding_id, remote_binding_version, \
                 parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
-         FROM agent_sessions WHERE agent_session_id = ?",
+         , (SELECT e.inline_json FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1) AS opening_json FROM agent_sessions WHERE agent_session_id = ?",
     )
     .bind(session_id)
     .fetch_optional(pool)
@@ -6330,7 +6367,7 @@ async fn session_row_by_id_tx(
         "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                 agent_binding_json, remote_binding_id, remote_binding_version, \
                 parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
-         FROM agent_sessions WHERE agent_session_id = ?",
+         , (SELECT e.inline_json FROM agent_events e WHERE e.session_id = agent_sessions.agent_session_id AND e.seq = 1 AND e.kind = 'session/opening' AND e.kind_version = 1) AS opening_json FROM agent_sessions WHERE agent_session_id = ?",
     )
     .bind(session_id)
     .fetch_optional(&mut **tx)
@@ -6377,6 +6414,7 @@ fn live_from_row(row: StoredSessionRow) -> Result<AgentSessionLiveRecord, Sessio
         )));
     }
     let owner_ref: PrincipalRef = serde_json::from_str(&row.owner_ref_json)?;
+    let purpose = opening_purpose(&row)?;
     let binding_json = row.agent_binding_json.ok_or_else(|| {
         SessionStoreError::InvalidSession("live AgentSession lost agent_binding".to_owned())
     })?;
@@ -6402,6 +6440,7 @@ fn live_from_row(row: StoredSessionRow) -> Result<AgentSessionLiveRecord, Sessio
         agent_session_id: AgentSessionId(row.agent_session_id),
         owner_ref,
         metadata: nomifun_agent_contracts::AgentSessionMetadata {
+            purpose,
             title: row.title,
             archived: bool_from_i64(row.archived, "archived")?,
             pinned: bool_from_i64(row.pinned, "pinned")?,
@@ -6418,6 +6457,37 @@ fn live_from_row(row: StoredSessionRow) -> Result<AgentSessionLiveRecord, Sessio
             "next_seq",
         )?,
     })
+}
+
+fn opening_purpose(row: &StoredSessionRow) -> Result<nomifun_agent_contracts::SessionPurpose, SessionStoreError> {
+    #[derive(serde::Deserialize)]
+    struct OpeningMetadata {
+        operation_id: OperationId,
+        agent_binding: AgentBindingValue,
+        #[serde(default)] metadata: Option<nomifun_agent_contracts::AgentSessionMetadata>,
+        #[serde(default)] parent_session_id: Option<AgentSessionId>,
+        #[serde(default)] fork_base_payload_id: Option<ArtifactId>,
+    }
+    let json = row.opening_json.as_deref().ok_or_else(||
+        SessionStoreError::InvalidSession("live AgentSession lost its canonical opening fact".into()))?;
+    let opening: OpeningMetadata = serde_json::from_str(json)?;
+    if opening.operation_id.as_ref().trim().is_empty() {
+        return Err(SessionStoreError::InvalidSession("canonical opening operation is empty".into()));
+    }
+    // Parsing the original binding validates its typed shape without requiring
+    // it to equal the current binding after an explicit Agent/model switch.
+    let _ = opening.agent_binding;
+    if let Some(metadata) = opening.metadata { return Ok(metadata.purpose); }
+    // Current-generation fork openings predate purpose and did not include
+    // metadata. Recognize that exact canonical shape; do not recover a purpose
+    // from mutable row columns, message projections or a different Session.
+    let value: Value = serde_json::from_str(json)?;
+    if opening.parent_session_id.as_ref().map(AsRef::as_ref) == row.parent_agent_session_id.as_deref()
+        && opening.fork_base_payload_id.as_ref().map(AsRef::as_ref) == row.fork_base_payload_id.as_deref()
+        && row.parent_agent_session_id.is_some() && row.fork_base_payload_id.is_some()
+        && value.as_object().is_some_and(|value| value.contains_key("fork_request_title") && !value.contains_key("metadata"))
+    { return Ok(nomifun_agent_contracts::SessionPurpose::Conversation); }
+    Err(SessionStoreError::InvalidSession("canonical opening metadata is missing".into()))
 }
 
 fn tombstone_from_row(row: StoredSessionRow) -> Result<AgentSessionTombstone, SessionStoreError> {

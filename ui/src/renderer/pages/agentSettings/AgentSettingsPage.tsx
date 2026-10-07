@@ -17,22 +17,11 @@ import OfficialTemplateOverview from './OfficialTemplateOverview';
 import { useAgentSettingsController } from './useAgentSettingsController';
 import { useAgentWorkbenchEntry } from './useAgentWorkbenchEntry';
 import styles from './AgentSettingsPage.module.css';
-import { configService } from '@/common/config/configService';
-import { launchPluginConversation } from '../plugins/pluginConversationLaunch';
 
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
-  const pluginIntent = new URLSearchParams(location.search).get('pluginIntent');
-  const [pluginLaunchError, setPluginLaunchError] = useState('');
-  const continuePlugin = async (preset?: AgentPresetSummary) => {
-    if (!pluginIntent) return;
-    try {
-      if (preset) await configService.set('guid.defaultAgentSelection', { kind: 'preset', presetId: preset.preset_id });
-      await launchPluginConversation(navigate, {}, pluginIntent);
-    } catch (error) { setPluginLaunchError(error instanceof Error ? error.message : String(error)); }
-  };
   const navigationHistory = useNavigationHistory();
   const [returned] = useState(() => agentEditorReturn(location.state, location.search));
   const [templateEditing, setTemplateEditing] = useState<TemplateEditingState | null>(null);
@@ -272,15 +261,6 @@ const AgentSettingsPage: React.FC = () => {
           className={styles.pageError}
         />
       )}
-      {pluginIntent && <Alert type={pluginLaunchError ? 'error' : 'info'} showIcon
-        title={t('pluginPlatform.authoring.title')}
-        content={<div>
-          <p>{pluginLaunchError || t('pluginPlatform.authoring.workbenchHint')}</p>
-          <Button disabled={controller.busyAction !== null} onClick={() => void continuePlugin()}>
-            {t('pluginPlatform.authoring.continue')}
-          </Button>
-        </div>} />}
-
       {controller.loading && !controller.library ? (
         <div className={styles.loading}>
           <Spin size={24} />
@@ -300,12 +280,10 @@ const AgentSettingsPage: React.FC = () => {
               initialEditing={(returned?.kind === 'template' && selectedTemplate.template_key === returned.templateKey ? templateInitialEditing : undefined)
                 ?? controller.editingDrafts?.readTemplate(selectedTemplate)}
               onEditingChange={rememberTemplateEditing}
-              saveLabel={pluginIntent ? t('pluginPlatform.authoring.saveContinue') : undefined}
               onSave={(displayName, document, description) => {
                 void controller.createConfiguredPreset(displayName, document, description)
                   .then(saved => {
                     if (saved) controller.editingDrafts?.removeTemplate(selectedTemplate);
-                    if (saved && pluginIntent) return continuePlugin(saved.preset);
                   });
               }}
             />
@@ -319,10 +297,7 @@ const AgentSettingsPage: React.FC = () => {
               busyAction={controller.busyAction}
               dirty={controller.dirty}
               onDraftChange={controller.setDraft}
-              saveLabel={pluginIntent ? t('pluginPlatform.authoring.saveContinue') : undefined}
-              onSave={() => void controller.saveRevision().then(saved => {
-                if (saved && pluginIntent) return continuePlugin(saved.preset);
-              })}
+              onSave={() => void controller.saveRevision()}
               onDiscard={controller.discardChanges}
               onOpenModels={() => { void openKeepingEdits('/models'); }}
               onOpenAuthor={openKeepingEdits}

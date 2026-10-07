@@ -1,0 +1,43 @@
+.workspace { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.artifactPicker { display: flex; flex-shrink: 0; gap: 6px; padding: 12px 14px 0; overflow-x: auto; }
+.artifactPicker button { padding: 7px 10px; border: 1px solid var(--color-border-2); border-radius: 8px; color: var(--color-text-3); background: var(--color-bg-2); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.artifactPicker button[aria-selected='true'] { border-color: var(--color-primary-light-2); color: var(--color-primary); background: var(--color-primary-light-1); }
+.artifactSlot, .artifact { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.artifactSlot[hidden], .content[hidden], .source[hidden] { display: none; }
+.artifactHeading { display: flex; align-items: center; flex-shrink: 0; gap: 11px; padding: 18px 16px; }
+.appIcon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 42px; height: 42px; border: 1px solid var(--color-primary-light-2); border-radius: 12px; color: var(--color-primary); background: var(--color-primary-light-1); }
+.appCopy { flex: 1; min-width: 0; }
+.appCopy h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-1); font-size: 14px; font-weight: 600; }
+.appCopy p { margin: 5px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-3); font-size: 11px; line-height: 1.6; }
+.artifactHeading :global(.arco-btn) { flex-shrink: 0; height: 28px; border-radius: 7px; font-size: 12px; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 10px; margin: 0 16px 12px; }
+.viewTabs { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--color-border-1); border-radius: 9px; background: var(--color-fill-1); }
+.viewTabs button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 28px; padding: 0 12px; border: 0; border-radius: 6px; color: var(--color-text-3); background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
+.viewTabs button[aria-selected='true'] { color: var(--color-text-1); background: var(--color-bg-2); box-shadow: 0 1px 3px color-mix(in srgb, var(--color-text-1) 7%, transparent); }
+.iconButton { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; border: 1px solid var(--color-border-2); border-radius: 8px; color: var(--color-text-3); background: var(--color-bg-2); font-size: 15px; cursor: pointer; }
+.iconButton:hover { color: var(--color-text-1); background: var(--color-fill-2); }
+.iconButton:disabled { opacity: .45; cursor: default; }
+.iconButton:focus-visible, .viewTabs button:focus-visible, .artifactPicker button:focus-visible, .fileSelector select:focus-visible { outline: 2px solid var(--control-focus-ring); outline-offset: 2px; }
+.content, .source { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+.preview { display: flex; flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--color-border-2); }
+.preview > section { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 230px; margin: 0; border: 0; border-radius: 0; }
+.preview > section > header { min-height: 44px; padding: 8px 12px; }
+.preview > section > header > div:first-child { display: none; }
+.preview > section > header > div:last-child { margin-left: auto; }
+.preview > section > header :global(.arco-btn) { height: 26px; padding: 0 8px; border-radius: 6px; font-size: 11px; }
+.preview > section > div:last-child { flex: 1; min-height: 180px; }
+.empty { display: flex; flex: 1; min-height: 0; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; gap: 12px; padding: 26px; text-align: center; }
+.emptyMark { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; margin-bottom: 4px; border: 1px solid var(--color-border-2); border-radius: 15px; color: var(--color-text-3); background: var(--color-fill-1); }
+.empty h3 { margin: 0; color: var(--color-text-2); font-size: 14px; font-weight: 600; }
+.empty p { max-width: 265px; margin: 0; color: var(--color-text-3); font-size: 12px; line-height: 1.9; }
+.fileSelector { display: flex; flex-direction: column; gap: 9px; padding: 12px 16px; border-top: 1px solid var(--color-border-2); border-bottom: 1px solid var(--color-border-2); }
+.fileSelector label { display: inline-flex; align-items: center; gap: 7px; color: var(--color-text-3); font-size: 11px; }
+.fileSelector select { min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--color-border-2); border-radius: 7px; color: var(--color-text-2); background: var(--color-bg-2); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.editor { box-sizing: border-box; flex: 1; width: 100%; min-height: 150px; padding: 16px; resize: none; border: 0; outline: none; color: var(--color-text-2); background: var(--color-bg-1); font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.75; tab-size: 2; white-space: pre; overflow: auto; }
+.editor:focus { box-shadow: inset 2px 0 var(--color-primary-light-3); }
+.footer { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 10px; min-height: 52px; padding: 8px 16px; border-top: 1px solid var(--color-border-2); background: var(--color-bg-2); }
+.footer :global(.arco-btn) { height: 28px; border-radius: 7px; font-size: 11px; }
+.saveStatus { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-3); font-size: 10px; }
+.saveStatus[data-dirty] { color: var(--color-primary); }
+.saveStatus > span { color: var(--success); }
+.error { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }

@@ -23,9 +23,7 @@ pub struct PluginRecord {
     pub enabled: bool,
     pub trashed_at_ms: Option<i64>,
     pub active_artifact_digest: DigestHex,
-    pub previous_artifact_digest: Option<DigestHex>,
     pub data_generation: String,
-    pub previous_data_generation: Option<String>,
     pub revision: u64,
     pub config: Value,
     pub last_error: Option<String>,
@@ -78,9 +76,6 @@ pub struct PluginDraftRecord {
     pub source_request_digest: Option<String>,
     /// Host-produced exact-artifact verification; never writable through file tools.
     pub verification: Value,
-    /// Immutable imported context. Historical text is data, never live dialogue
-    /// or evidence that this task executed or delivered anything.
-    pub imported_context: Value,
     pub status: PluginDraftStatus,
     pub last_error: Option<String>,
     pub created_at_ms: i64,
@@ -119,7 +114,6 @@ pub struct PluginLibraryState {
 pub enum PluginMutationKind {
     Install,
     Update,
-    Restore,
     PermanentDelete,
 }
 
@@ -128,7 +122,6 @@ impl PluginMutationKind {
         match self {
             Self::Install => "install",
             Self::Update => "update",
-            Self::Restore => "restore",
             Self::PermanentDelete => "permanent_delete",
         }
     }
@@ -201,7 +194,6 @@ pub struct InstallCommit {
 pub struct PluginInventory {
     pub plugin: PluginRecord,
     pub artifact: StoredArtifactRecord,
-    pub previous_artifact: Option<StoredArtifactRecord>,
     pub credential_bindings: BTreeMap<String, String>,
     pub grants: BTreeMap<String, PluginGrant>,
     pub library: PluginLibraryState,

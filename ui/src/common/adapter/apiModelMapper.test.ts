@@ -51,6 +51,10 @@ const thrownMessage = (run: () => unknown): string => {
 };
 
 describe('fromApiConversation first-class fields', () => {
+  test('retains canonical opening purpose without borrowing a purpose from extra', () => {
+    expect(fromApiConversation(apiConv({ session_purpose: 'plugin_authoring', extra: {} })).session_purpose).toBe('plugin_authoring');
+    expect(fromApiConversation(apiConv({ extra: { session_purpose: 'plugin_authoring' } })).session_purpose).toBeUndefined();
+  });
   test('maps the explicit wire conversation_id to the UI id and removes the wire field', () => {
     const mapped = fromApiConversation(apiConv({ extra: {} })) as {
       id?: string;

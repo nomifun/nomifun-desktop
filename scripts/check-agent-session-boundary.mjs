@@ -73,12 +73,20 @@ for (const path of paths) {
 }
 
 const migrations = paths.filter((path) => path.startsWith('crates/backend/nomifun-db/migrations/') && path.endsWith('.sql'));
-if (migrations.length !== 1 || !migrations[0].endsWith('/001_canonical_baseline.sql')) {
-  failures.push('Agent clean cut must ship one current canonical database baseline');
+const baseline = 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql';
+const pluginForwardMigration = 'crates/backend/nomifun-db/migrations/002_simplify_plugin_library.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration].includes(path))) {
+  failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward product migrations');
+}
+if (migrations.includes(pluginForwardMigration)) {
+  const source = readFileSync(resolve(ROOT, pluginForwardMigration), 'utf8');
+  if (/\b(?:agent_\w+|schema_metadata|_sqlx_migrations)\b/i.test(source)) {
+    failures.push(`${pluginForwardMigration}: a Plugin forward migration cannot alter canonical Agent data or lineage receipts`);
+  }
 }
 if (failures.length) {
   console.error(`Agent Session boundary failed (${failures.length}):\n${failures.map((message) => `  - ${message}`).join('\n')}`);
   process.exitCode = 1;
 } else {
-  console.log('Agent Session boundary passed: canonical event history, native reasoning, current stream and one baseline.');
+  console.log('Agent Session boundary passed: canonical event history, native reasoning, current stream and immutable baseline.');
 }

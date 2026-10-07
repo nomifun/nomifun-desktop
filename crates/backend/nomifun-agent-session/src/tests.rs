@@ -149,6 +149,7 @@ fn live_session(id: AgentSessionId) -> AgentSessionLiveRecord {
         agent_session_id: id,
         owner_ref: owner(),
         metadata: AgentSessionMetadata {
+            purpose: Default::default(),
             title: Some("Session fixture".to_owned()),
             archived: false,
             pinned: false,
@@ -242,6 +243,74 @@ async fn create_ready(store: &AgentSessionStore, key: &str) -> (AgentSessionLive
     );
     let ready_ack = store.append_event(&ready).await.unwrap().ack.unwrap();
     (created.session, ready_ack.event_id)
+}
+
+#[tokio::test]
+async fn session_purpose_reads_only_valid_current_generation_opening_facts() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "purpose-source").await;
+    assert_eq!(session.metadata.purpose, nomifun_agent_contracts::SessionPurpose::Conversation);
+    let id = session.agent_session_id.as_ref();
+    let original: String = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND seq=1")
+        .bind(id).fetch_one(store.test_pool()).await.unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&original).unwrap()["metadata"].get("purpose").is_none(),
+        "existing default Conversation metadata retains its original serialized shape");
+    sqlx::query("UPDATE agent_events SET inline_json=json_set(inline_json,'$.metadata.purpose','unknown') WHERE session_id=? AND seq=1")
+        .bind(id).execute(store.test_pool()).await.unwrap();
+    assert!(store.get_live_session(&session.agent_session_id).await.is_err());
+    assert!(store.list_live_sessions(&owner(), None, 10).await.is_err());
+    for purpose in [nomifun_agent_contracts::SessionPurpose::Conversation, nomifun_agent_contracts::SessionPurpose::PluginAuthoring] {
+        assert!(store.list_live_sessions_for_purpose(&owner(), None, 10, purpose).await.is_err(),
+            "an unknown purpose is included for typed rejection rather than silently filtered away");
+    }
+    sqlx::query("UPDATE agent_events SET inline_json=? WHERE session_id=? AND seq=1")
+        .bind(&original).bind(id).execute(store.test_pool()).await.unwrap();
+    assert_eq!(store.get_live_session(&session.agent_session_id).await.unwrap().metadata.purpose,
+        nomifun_agent_contracts::SessionPurpose::Conversation);
+    // Keep event identities referenced by activation/causation intact, while
+    // making the opening unavailable under the supported canonical version.
+    sqlx::query("UPDATE agent_events SET kind_version=2 WHERE session_id=? AND seq=1")
+        .bind(id).execute(store.test_pool()).await.unwrap();
+    assert!(matches!(store.get_live_session(&session.agent_session_id).await,
+        Err(SessionStoreError::InvalidSession(_))), "a missing creation fact cannot fall back to row/projection metadata");
+    for purpose in [nomifun_agent_contracts::SessionPurpose::Conversation, nomifun_agent_contracts::SessionPurpose::PluginAuthoring] {
+        assert!(store.list_live_sessions_for_purpose(&owner(), None, 10, purpose).await.is_err(),
+            "a missing opening cannot disappear into another product's predicate");
+    }
+}
+
+#[tokio::test]
+async fn purpose_filtered_session_pages_count_and_cursor_only_the_requested_product() {
+    use nomifun_agent_contracts::SessionPurpose;
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    for index in 0..9 {
+        let mut session = live_session(session_id());
+        session.metadata.purpose = if index % 3 == 0 { SessionPurpose::PluginAuthoring } else { SessionPurpose::Conversation };
+        store.create_session(create_request(session, &format!("purpose-page-{index}"))).await.unwrap();
+    }
+    let mut foreign = live_session(session_id());
+    foreign.owner_ref.principal_id = "another-owner".into();
+    foreign.metadata.purpose = SessionPurpose::PluginAuthoring;
+    store.create_session(create_request(foreign, "purpose-page-foreign")).await.unwrap();
+    let all = store.list_live_sessions(&owner(), None, 20).await.unwrap();
+    assert_eq!(all.total, 9, "the existing all-products method preserves its owner-scoped meaning");
+    for (purpose, count) in [(SessionPurpose::Conversation, 6), (SessionPurpose::PluginAuthoring, 3)] {
+        let expected: Vec<_> = all.items.iter().filter(|item| item.session.metadata.purpose == purpose)
+            .map(|item| item.session.agent_session_id.clone()).collect();
+        let mut collected = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = store.list_live_sessions_for_purpose(&owner(), cursor.as_deref(), 2, purpose).await.unwrap();
+            assert_eq!(page.total, count);
+            assert!(page.items.iter().all(|item| item.session.metadata.purpose == purpose));
+            assert!(!page.items.is_empty());
+            collected.extend(page.items.iter().map(|item| item.session.agent_session_id.clone()));
+            if !page.has_more { assert!(page.next_cursor.is_none()); break; }
+            assert_eq!(page.next_cursor.as_deref(), page.items.last().map(|item| item.session.agent_session_id.as_ref()));
+            cursor = page.next_cursor;
+        }
+        assert_eq!(collected, expected, "interleaved products must not cause empty pages, duplicates or lost results");
+    }
 }
 
 async fn create_turn(
@@ -3137,6 +3206,7 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         child_session_id: child_id.clone(),
         child_owner_ref: owner(),
         child_metadata: AgentSessionMetadata {
+            purpose: Default::default(),
             title: Some("Fork child".to_owned()),
             archived: false,
             pinned: false,
@@ -3158,6 +3228,10 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         base_media_type: "application/json".to_owned(),
         child_initial_active_capability_ids: vec!["coding.workspace".to_owned()],
     };
+    let mut other_purpose = request.clone();
+    other_purpose.child_metadata.purpose = nomifun_agent_contracts::SessionPurpose::PluginAuthoring;
+    assert!(matches!(store.fork_session(&parent.agent_session_id, other_purpose.clone()).await,
+        Err(SessionStoreError::Conflict(_))), "a fork cannot choose another product's ownership");
     let forked = store
         .fork_session(&parent.agent_session_id, request.clone())
         .await
@@ -3178,6 +3252,17 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
         .unwrap();
     assert_eq!(replay.child_session.agent_session_id, child_id);
     assert_eq!(replay.fork_ack, forked.fork_ack);
+    assert!(matches!(store.fork_session(&parent.agent_session_id, other_purpose).await,
+        Err(SessionStoreError::IdempotencyConflict(_))), "a replay cannot change the fork's purpose");
+    // Current-generation fork openings originally omitted metadata entirely.
+    // Its exact parent/base/title facts still identify a default Conversation.
+    sqlx::query("UPDATE agent_events SET inline_json=json_remove(inline_json,'$.metadata') WHERE session_id=? AND seq=1")
+        .bind(child_id.as_ref()).execute(store.test_pool()).await.unwrap();
+    let ordinary = store.list_live_sessions_for_purpose(&owner(), None, 20,
+        nomifun_agent_contracts::SessionPurpose::Conversation).await.unwrap();
+    assert!(ordinary.items.iter().any(|item| item.session.agent_session_id == child_id));
+    assert!(store.list_live_sessions_for_purpose(&owner(), None, 20,
+        nomifun_agent_contracts::SessionPurpose::PluginAuthoring).await.unwrap().items.is_empty());
 
     let mut changed_cursor = request.clone();
     changed_cursor.parent_through_seq = 2;

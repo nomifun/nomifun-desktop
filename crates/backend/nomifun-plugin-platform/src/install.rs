@@ -29,12 +29,6 @@ pub enum PluginInstallError {
     DataRoot(#[from] PluginDataRootError),
     #[error(transparent)]
     Repository(#[from] PluginRepositoryError),
-    #[error("Plugin permissions require confirmation: {0:?}")]
-    PermissionConfirmationRequired(BTreeSet<String>),
-    #[error("Plugin Credential slots require confirmation: {0:?}")]
-    SecretConfirmationRequired(BTreeSet<String>),
-    #[error("Plugin local Service code requires confirmation")]
-    LocalServiceConfirmationRequired,
     #[error("Plugin Config does not match configSchema: {0}")]
     InvalidConfig(String),
     #[error("Plugin update is invalid: {0}")]
@@ -90,11 +84,6 @@ pub struct InstallArtifactRequest {
     pub local_package_id: Option<String>,
     pub config: Value,
     pub credential_bindings: BTreeMap<String, String>,
-    /// Exact permissions the user confirmed for this Artifact. Existing grants
-    /// are reused without prompting and need not be repeated here.
-    pub confirmed_permissions: BTreeSet<String>,
-    pub confirmed_secret_slots: BTreeSet<String>,
-    pub trusted_local_service_confirmed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -445,17 +434,7 @@ impl PluginInstallService {
                 actions: action_publications(&current.plugin, &imported.stored.artifact),
             });
         }
-        validate_non_permission_confirmations(
-            &imported.stored.artifact,
-            current.as_ref(),
-            &request.confirmed_secret_slots,
-            request.trusted_local_service_confirmed,
-        )?;
-        let mut grants = resolved_grants(
-            &imported.stored.artifact,
-            current.as_ref(),
-            &request.confirmed_permissions,
-        )?;
+        let mut grants = resolved_grants(&imported.stored.artifact, current.as_ref());
         if let Some(backup) = backup.as_ref() {
             grants = backup.grants.clone();
         }
@@ -473,7 +452,7 @@ impl PluginInstallService {
         let new_data_version = imported.stored.artifact.manifest.data_version;
         if new_data_version < old_data_version {
             return Err(PluginInstallError::InvalidUpdate(format!(
-                "dataVersion cannot decrease from {old_data_version} to {new_data_version}; use restore"
+                "dataVersion cannot decrease from {old_data_version} to {new_data_version}"
             )));
         }
 
@@ -1129,85 +1108,6 @@ impl PluginInstallService {
         Ok(committed)
     }
 
-    pub async fn restore_previous(
-        &self,
-        owner_user_id: &str,
-        plugin_id: &PluginId,
-        expected_revision: u64,
-        restore_data: bool,
-    ) -> PluginInstallResult<PluginRecord> {
-        let _guard = self.mutations.acquire(plugin_id).await;
-        let previous = self
-            .inventory_at_revision(owner_user_id, plugin_id, expected_revision)
-            .await?;
-        if previous.plugin.trashed_at_ms.is_some() {
-            return Err(PluginInstallError::InvalidUpdate(
-                "a trashed Plugin cannot restore Previous".into(),
-            ));
-        }
-        let new_artifact_digest = previous
-            .plugin
-            .previous_artifact_digest
-            .clone()
-            .ok_or_else(|| PluginInstallError::InvalidUpdate("Previous Artifact is absent".into()))?;
-        let new_data_generation = if restore_data {
-            previous.plugin.previous_data_generation.clone().ok_or_else(|| {
-                PluginInstallError::InvalidUpdate("Previous DataRoot is absent".into())
-            })?
-        } else {
-            previous.plugin.data_generation.clone()
-        };
-        self.revoke_admission(&previous).await?;
-        let mutation = PluginMutationRecord {
-            mutation_id: PluginMutationId::from(Uuid::now_v7().to_string()),
-            owner_user_id: owner_user_id.to_owned(),
-            plugin_id: plugin_id.clone(),
-            kind: PluginMutationKind::Restore,
-            phase: PluginMutationPhase::Prepared,
-            old_artifact_digest: Some(previous.plugin.active_artifact_digest.clone()),
-            new_artifact_digest: Some(new_artifact_digest),
-            old_data_generation: Some(previous.plugin.data_generation.clone()),
-            new_data_generation: Some(new_data_generation),
-            expected_revision: Some(expected_revision),
-            draft_association: None,
-            error: None,
-            created_at_ms: positive_now_ms(),
-            updated_at_ms: positive_now_ms(),
-        };
-        let committed = match self
-            .repository
-            .restore_previous(&mutation, expected_revision, restore_data, positive_now_ms())
-            .await
-        {
-            Ok(plugin) => plugin,
-            Err(error) => {
-                self.admit_inventory(&previous).await?;
-                return Err(error.into());
-            }
-        };
-        let current = self
-            .repository
-            .inventory(owner_user_id, plugin_id)
-            .await?
-            .ok_or(PluginRepositoryError::NotFound)?;
-        if let Err(error) = self.admit_inventory(&current).await {
-            let rollback = self
-                .repository
-                .rollback_install(
-                    &mutation.mutation_id,
-                    owner_user_id,
-                    plugin_id,
-                    positive_now_ms(),
-                )
-                .await;
-            return self
-                .finish_lifecycle_rollback(owner_user_id, error, rollback)
-                .await;
-        }
-        self.repository.finish_mutation(&mutation.mutation_id).await?;
-        Ok(committed)
-    }
-
     pub async fn permanent_delete(
         &self,
         owner_user_id: &str,
@@ -1365,12 +1265,9 @@ impl PluginInstallService {
     }
 
     fn prune_retired_generations(&self, plugin: &PluginRecord) -> PluginInstallResult<()> {
-        let mut keep = BTreeSet::from([DataGeneration::new(
+        let keep = BTreeSet::from([DataGeneration::new(
             plugin.data_generation.clone(),
         )?]);
-        if let Some(previous) = &plugin.previous_data_generation {
-            keep.insert(DataGeneration::new(previous.clone())?);
-        }
         self.data_roots
             .prune_generations(&plugin.plugin_id, &keep)?;
         Ok(())
@@ -1502,55 +1399,10 @@ fn contains_declared_secret_field(value: &Value, slots: &[String]) -> bool {
     }
 }
 
-fn validate_non_permission_confirmations(
-    artifact: &PluginArtifact,
-    current: Option<&PluginInventory>,
-    confirmed_secret_slots: &BTreeSet<String>,
-    trusted_local_service_confirmed: bool,
-) -> PluginInstallResult<()> {
-    let existing_secret_slots = current
-        .map(|inventory| {
-            inventory
-                .artifact
-                .artifact
-                .manifest
-                .secrets
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let required_secret_slots = artifact
-        .manifest
-        .secrets
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let added_secret_slots = required_secret_slots
-        .difference(&existing_secret_slots)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let missing = added_secret_slots
-        .difference(confirmed_secret_slots)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if !missing.is_empty() {
-        return Err(PluginInstallError::SecretConfirmationRequired(missing));
-    }
-    let adds_local_service = artifact.manifest.has_service()
-        && current
-            .is_none_or(|inventory| !inventory.artifact.artifact.manifest.has_service());
-    if adds_local_service && !trusted_local_service_confirmed {
-        return Err(PluginInstallError::LocalServiceConfirmationRequired);
-    }
-    Ok(())
-}
-
 fn resolved_grants(
     artifact: &PluginArtifact,
     current: Option<&PluginInventory>,
-    confirmed: &BTreeSet<String>,
-) -> PluginInstallResult<BTreeMap<String, bool>> {
+) -> BTreeMap<String, bool> {
     let existing = current
         .map(|inventory| {
             inventory
@@ -1561,19 +1413,7 @@ fn resolved_grants(
         })
         .unwrap_or_default();
     let required = &artifact.manifest.permissions;
-    let existing_permissions = existing.keys().cloned().collect::<BTreeSet<_>>();
-    let expansion = required
-        .difference(&existing_permissions)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let missing = expansion
-        .difference(confirmed)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if !missing.is_empty() {
-        return Err(PluginInstallError::PermissionConfirmationRequired(missing));
-    }
-    Ok(required
+    required
         .iter()
         .map(|permission| {
             (
@@ -1581,7 +1421,7 @@ fn resolved_grants(
                 existing.get(permission).copied().unwrap_or(true),
             )
         })
-        .collect())
+        .collect()
 }
 
 fn migration_chain(
@@ -1634,8 +1474,6 @@ fn staged_plugin_record(
         })
         .transpose()?
         .unwrap_or(1);
-    let changed_generation = current
-        .is_some_and(|inventory| inventory.plugin.data_generation != data_generation);
     Ok(PluginRecord {
         plugin_id: request.target.plugin_id().clone(),
         owner_user_id: request.owner_user_id.clone(),
@@ -1651,12 +1489,7 @@ fn staged_plugin_record(
             .unwrap_or(true),
         trashed_at_ms: None,
         active_artifact_digest: artifact.artifact_digest.clone(),
-        previous_artifact_digest: current
-            .map(|inventory| inventory.plugin.active_artifact_digest.clone()),
         data_generation: data_generation.to_owned(),
-        previous_data_generation: current
-            .filter(|_| changed_generation)
-            .map(|inventory| inventory.plugin.data_generation.clone()),
         revision,
         config: request.config.clone(),
         last_error: None,

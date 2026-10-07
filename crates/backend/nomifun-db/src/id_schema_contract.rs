@@ -716,7 +716,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, Cascade),
     text_ref!("plugins", "owner_user_id" => "users", "user_id", false, Cascade),
     opaque_text_ref!("plugins", "active_artifact_digest" => "plugin_artifacts", "artifact_digest", false, Restrict),
-    opaque_text_ref!("plugins", "previous_artifact_digest" => "plugin_artifacts", "artifact_digest", true, Restrict),
     text_ref!("plugin_drafts", "owner_user_id" => "users", "user_id", false, Cascade),
     text_ref!("plugin_drafts", "plugin_id" => "plugins", "plugin_id", true, SetNull)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
@@ -740,8 +739,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("plugin_mutations", "plugin_id" => "plugins", "plugin_id", false, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     opaque_text_ref!("plugin_mutations", "old_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
-        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    opaque_text_ref!("plugin_mutations", "old_previous_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     opaque_text_ref!("plugin_mutations", "new_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),    // Delivery receipts intentionally survive Terminal/Requirement deletion so
@@ -1641,8 +1638,8 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE ON PLUGIN_DRAFTS",
                 "NEW.DRAFT_ID IS NOT OLD.DRAFT_ID",
-                "NEW.IMPORTED_CONTEXT_JSON IS NOT OLD.IMPORTED_CONTEXT_JSON",
-                "RAISE(ABORT, 'PLUGIN DRAFT IDENTITY, IMPORTED HISTORY AND TIME ARE IMMUTABLE')",
+                "NEW.OWNER_USER_ID IS NOT OLD.OWNER_USER_ID",
+                "RAISE(ABORT, 'PLUGIN DRAFT IDENTITY AND TIME ARE IMMUTABLE')",
             ],
         ),
         (

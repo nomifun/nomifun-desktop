@@ -977,12 +977,13 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 })
                 .transpose()?;
             let mut plugin_obligation = false;
-            if super::plugin_delivery_route::has_plugin_development(&turn_plan) {
-                // The observer starts dormant when this ordinary conversation
-                // has no draft or explicit delivery request. A later accepted
-                // plugin plan can still create host-owned delivery facts, so
-                // natural authoring needs the same watchdog/settlement port.
-                // Routing continues to control only presentation and guidance.
+            if response.session_purpose == nomifun_agent_contracts::SessionPurpose::PluginAuthoring
+                && super::plugin_delivery_route::has_plugin_development(&turn_plan) {
+                // Settlement starts dormant without a draft or explicit delivery
+                // request. A later accepted plugin plan can create host-owned
+                // verification and delivery facts through the same native port.
+                // Product purpose selects this route, not a capability ceiling
+                // or a separate execution budget.
                 plugin_delivery_check = true;
                 let drafts = self
                     .session_host

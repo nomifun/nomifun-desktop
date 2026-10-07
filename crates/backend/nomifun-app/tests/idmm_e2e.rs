@@ -60,6 +60,7 @@ async fn seed_session(
             principal_id: services.authoritative_user_id.to_string(),
         },
         metadata: AgentSessionMetadata {
+            purpose: Default::default(),
             title: Some("IDMM E2E".to_owned()),
             archived: false,
             pinned: false,

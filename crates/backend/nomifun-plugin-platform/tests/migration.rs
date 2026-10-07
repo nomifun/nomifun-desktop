@@ -92,9 +92,6 @@ impl RealFixture {
                     local_package_id: None,
                     config: json!({}),
                     credential_bindings: BTreeMap::new(),
-                    confirmed_permissions: BTreeSet::new(),
-                    confirmed_secret_slots: BTreeSet::new(),
-                    trusted_local_service_confirmed: false,
                 },
                 files,
                 None,
@@ -120,9 +117,6 @@ impl RealFixture {
                     local_package_id: None,
                     config: json!({}),
                     credential_bindings: BTreeMap::new(),
-                    confirmed_permissions: BTreeSet::new(),
-                    confirmed_secret_slots: BTreeSet::new(),
-                    trusted_local_service_confirmed: false,
                 },
                 files,
                 None,
@@ -294,7 +288,7 @@ fn staging_is_empty(roots: &PluginDataRootManager, plugin_id: &PluginId) -> bool
 }
 
 #[tokio::test]
-async fn same_data_version_update_switches_only_code_and_restore_reuses_the_live_data() {
+async fn same_data_version_update_switches_code_and_preserves_live_data() {
     let Some(fixture) = RealFixture::new().await else {
         return;
     };
@@ -324,15 +318,10 @@ async fn same_data_version_update_switches_only_code_and_restore_reuses_the_live
         installed.plugin.active_artifact_digest
     );
     assert_eq!(
-        updated.plugin.previous_artifact_digest.as_ref(),
-        Some(&installed.plugin.active_artifact_digest)
-    );
-    assert_eq!(
         updated.plugin.data_generation,
         installed.plugin.data_generation,
         "same-dataVersion updates must reuse the live generation"
     );
-    assert!(updated.plugin.previous_data_generation.is_none());
     assert_eq!(root.storage().file_read("state.txt").unwrap(), b"original-file");
     assert_eq!(
         root.storage()
@@ -345,23 +334,6 @@ async fn same_data_version_update_switches_only_code_and_restore_reuses_the_live
         [vec![PluginSqlValue::Text("original".into())]]
     );
 
-    let restored = fixture
-        .install
-        .restore_previous(
-            &fixture.owner,
-            &plugin_id,
-            updated.plugin.revision,
-            false,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        restored.active_artifact_digest,
-        installed.plugin.active_artifact_digest
-    );
-    assert_eq!(restored.data_generation, installed.plugin.data_generation);
-    assert!(restored.previous_data_generation.is_none());
-    assert_eq!(root.storage().file_read("state.txt").unwrap(), b"original-file");
     fixture.runtime.shutdown().await.unwrap();
 }
 
@@ -388,14 +360,6 @@ async fn real_node_migration_switches_atomically_and_failed_next_version_is_full
         .await
         .unwrap();
     assert_ne!(migrated.plugin.data_generation, installed.plugin.data_generation);
-    assert_eq!(
-        migrated.plugin.previous_data_generation.as_deref(),
-        Some(installed.plugin.data_generation.as_str())
-    );
-    assert_eq!(
-        migrated.plugin.previous_artifact_digest.as_ref(),
-        Some(&installed.plugin.active_artifact_digest)
-    );
     let v1_root = fixture
         .roots
         .open_generation(
@@ -420,18 +384,7 @@ async fn real_node_migration_switches_atomically_and_failed_next_version_is_full
         Some(json!(1))
     );
     assert_eq!(v1_root.storage().migrations().unwrap().len(), 1);
-    assert_eq!(
-        v0_root
-            .storage()
-            .db_query(&PluginSqlStatement::new(
-                "SELECT body FROM items ORDER BY id",
-                vec![],
-            ))
-            .unwrap()
-            .rows,
-        [vec![PluginSqlValue::Text("original".into())]]
-    );
-    assert_eq!(v0_root.storage().file_read("state.txt").unwrap(), b"original-file");
+    assert!(!fixture.roots.root().join(plugin_id.as_ref()).join("generations").join(&installed.plugin.data_generation).exists());
 
     let before_failure = fixture
         .repository
@@ -483,37 +436,6 @@ async fn real_node_migration_switches_atomically_and_failed_next_version_is_full
             .unwrap()
             .unwrap(),
         before_failure
-    );
-    let restored = fixture
-        .install
-        .restore_previous(
-            &fixture.owner,
-            &plugin_id,
-            before_failure.revision,
-            true,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        restored.active_artifact_digest,
-        installed.plugin.active_artifact_digest
-    );
-    assert_eq!(restored.data_generation, installed.plugin.data_generation);
-    assert_eq!(
-        restored.previous_data_generation.as_deref(),
-        Some(migrated.plugin.data_generation.as_str())
-    );
-    assert_eq!(
-        v0_root
-            .storage()
-            .db_query(&PluginSqlStatement::new(
-                "SELECT body FROM items ORDER BY id",
-                vec![],
-            ))
-            .unwrap()
-            .rows,
-        [vec![PluginSqlValue::Text("original".into())]],
-        "full Previous restore must select the exact pre-migration DataRoot"
     );
     fixture.runtime.shutdown().await.unwrap();
     assert!(matches!(
@@ -678,9 +600,7 @@ async fn shutdown_waits_for_admitted_spawn_then_stops_it_and_permanently_fences_
         enabled: true,
         trashed_at_ms: None,
         active_artifact_digest: artifact.artifact_digest.clone(),
-        previous_artifact_digest: None,
         data_generation: generation.as_str().to_owned(),
-        previous_data_generation: None,
         revision: 1,
         config: json!({}),
         last_error: None,
@@ -813,9 +733,6 @@ async fn ui_only_install_and_activation_never_acquire_a_node_runtime() {
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &invalid_ui,
             None,
@@ -844,9 +761,6 @@ async fn ui_only_install_and_activation_never_acquire_a_node_runtime() {
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &v0_package(),
             None,

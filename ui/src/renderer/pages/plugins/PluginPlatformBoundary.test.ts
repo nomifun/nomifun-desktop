@@ -3,10 +3,10 @@ import { expect, test } from 'bun:test';
 
 const read = (name: string) => readFileSync(new URL(name, import.meta.url), 'utf8');
 
-test('Library, conversation artifacts and Detail use only the unified bridge', () => {
+test('Library, authoring artifacts and Detail use only the unified bridge', () => {
   const source = [
     read('./PluginLibraryPage.tsx'),
-    read('./ConversationPluginArtifacts.tsx'),
+    read('./PluginAuthoringArtifacts.tsx'),
     read('./PluginRunPage.tsx'),
     read('./PluginImportDialog.tsx'),
   ].join('\n');
@@ -19,7 +19,7 @@ test('Library, conversation artifacts and Detail use only the unified bridge', (
 });
 
 test('Preview and installed UI share one Surface host with no in-frame fake storage', () => {
-  const creator = read('./ConversationPluginArtifacts.tsx');
+  const creator = read('./PluginAuthoringArtifacts.tsx');
   const detail = read('./PluginRunPage.tsx');
   const surface = read('./PluginSurfacePanel.tsx');
   expect(creator).toContain('<PluginSurfacePanel');
@@ -32,20 +32,23 @@ test('Preview and installed UI share one Surface host with no in-frame fake stor
 
 test('creation uses the default Agent gate and no independent model worker', () => {
   const library = read('./PluginLibraryPage.tsx');
-  const launch = read('./pluginConversationLaunch.ts');
+  const launch = read('./pluginAuthoringLaunch.ts');
+  const page = read('./PluginAuthoringPage.tsx');
   const bridge = read('../../../common/adapter/pluginPlatformBridge.ts');
-  expect(library).toContain('launchPluginConversation');
-  expect(launch).toContain('readGuidDefaultAgentSelection');
-  expect(launch).toContain('pluginPlatform.authoring.preflight');
-  expect(launch).toContain('/agent?');
-  expect(launch).toContain('/guid?');
+  expect(library).toContain('launchPluginAuthoring');
+  expect(page).toContain('readGuidDefaultAgentSelection');
+  expect(page).toContain('pluginPlatform.authoring.preflight');
+  expect(page).toContain('pluginPlatform.authoring.createSession');
+  expect(launch).toContain('/plugins/create');
+  expect(launch).not.toContain('sessionStorage');
+  expect(launch).not.toContain('/guid');
   expect(bridge).not.toContain('cancelGeneration');
   expect(bridge).not.toContain('GeneratePluginDraftRequest');
 });
 
 test('remote WebUI keeps Plugin reads while every local mutation is desktop-gated', () => {
   const library = read('./PluginLibraryPage.tsx');
-  const creator = read('./ConversationPluginArtifacts.tsx');
+  const creator = read('./PluginAuthoringArtifacts.tsx');
   const detail = read('./PluginRunPage.tsx');
   const importing = read('./PluginImportDialog.tsx');
   const configuration = read('./PluginConfigurationDialog.tsx');
@@ -58,7 +61,7 @@ test('remote WebUI keeps Plugin reads while every local mutation is desktop-gate
   expect(library).toContain("t('pluginPlatform.readOnly.body')");
   expect(creator).toContain('!isDesktopShell()');
   expect(detail).toContain('desktopShell &&');
-  expect(importing).toContain('if (!desktopShell) return');
+  expect(importing).toMatch(/if \(!desktopShell(?: \|\| [^)]+)?\) return/);
   expect(configuration).toContain('if (!desktopShell || !detail) return');
   expect(organization).toContain('if (!isDesktopShell())');
   expect(surface).toContain('const source = desktopShell ?');
@@ -66,7 +69,7 @@ test('remote WebUI keeps Plugin reads while every local mutation is desktop-gate
 });
 
 test('Preview and Config bind only listed Host Credential references', () => {
-  const creator = read('./ConversationPluginArtifacts.tsx');
+  const creator = read('./PluginAuthoringArtifacts.tsx');
   const configuration = read('./PluginConfigurationDialog.tsx');
   const importing = read('./PluginImportDialog.tsx');
   for (const source of [configuration, importing]) {
@@ -94,13 +97,14 @@ test('UI-only, headless and mixed Plugins stay one product flow', () => {
   expect(detail).not.toContain('setServiceRunning');
 });
 
-test('Import and restore explain trust, Backup, permissions and data loss', () => {
+test('Import is immediately usable and management omits retired checks and version controls', () => {
   const importing = read('./PluginImportDialog.tsx');
   const detail = read('./PluginRunPage.tsx');
-  expect(importing).toContain('trusted_local_service');
+  const library = read('./PluginLibraryPage.tsx');
   expect(importing).toContain('credential_slots_to_rebind');
-  expect(importing).toContain('confirmation_required');
+  expect(importing).toContain('response.result.plugin');
+  expect(importing).toContain('<details');
+  expect(importing).not.toMatch(/confirmation_required|permission_confirmation_id|trusted_local_service/);
   expect(importing).not.toMatch(/expected_(?:artifact|bundle)_digest/);
-  expect(detail).toContain('previous_code_and_data');
-  expect(detail).toContain('acknowledge_data_loss');
+  expect(`${importing}\n${detail}\n${library}`).not.toMatch(/recentCheck|currentVersion|versionAndData|package_version|previous_code_and_data|acknowledge_data_loss/);
 });

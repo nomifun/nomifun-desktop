@@ -25,7 +25,7 @@ const CANONICAL_FILES = [
   'ui/src/common/types/pluginPlatform.ts',
   'ui/src/common/adapter/pluginPlatformBridge.ts',
   'ui/src/renderer/pages/plugins/PluginLibraryPage.tsx',
-  'ui/src/renderer/pages/plugins/ConversationPluginArtifacts.tsx',
+  'ui/src/renderer/pages/plugins/PluginAuthoringArtifacts.tsx',
   'ui/src/renderer/pages/plugins/PluginRunPage.tsx',
   'ui/src/renderer/pages/plugins/PluginSurfacePanel.tsx',
 ];
@@ -73,7 +73,7 @@ const RETIRED_FILES = [
 ];
 
 const RETIRED_TEXT = [
-  { id: 'parallel-api', pattern: /\/api\/plugins\/(?:runtimes|projects|installations|operations|authoring)(?:\/|['"`]|$)/i },
+  { id: 'parallel-api', pattern: /\/api\/plugins\/(?:runtimes|projects|installations|operations|authoring(?!\/(?:sessions|preflight)(?:\/|['"`]|$)))(?:\/|['"`]|$)/i },
   { id: 'parallel-domain-type', pattern: /\b(?:PluginProduct|PluginProject|PluginMount|ReadyCandidate|ReadyRelease|AutoApply|AutoPublish|PublishAuthorization)\b/ },
   { id: 'parallel-host', pattern: /\b(?:SharedExtensionHost|RuntimeBoundExtensionHost|CandidateTestHost|ServiceTestReceipt)\b/ },
   { id: 'stage-name', pattern: /\bplugin[_-]?(?:n1|m1)\b/i },

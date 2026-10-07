@@ -9,7 +9,7 @@ test('one Plugin entry owns library, creator, and App/detail routes', () => {
   expect(router.match(/path='\/plugins'/g)).toHaveLength(1);
   expect(router).not.toContain("path='/plugins/new'");
   expect(router).not.toContain("path='/plugins/create/:draftId'");
-  expect(library).toContain('launchPluginConversation(navigate');
+  expect(library).toContain('launchPluginAuthoring(navigate');
   expect(router).toContain("path='/plugins/run/:id'");
   expect(router).not.toMatch(/PluginRuntime|PluginProduct|PluginMount/);
 });

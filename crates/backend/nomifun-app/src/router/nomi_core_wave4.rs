@@ -1402,6 +1402,7 @@ mod tests {
     ) -> Arc<ChannelMessageService> {
         let session = nomifun_api_types::ConversationResponse {
             conversation_id: agent_session_id.to_owned(),
+            session_purpose: Default::default(),
             name: "Wave 4 AgentSession".to_owned(),
             r#type: nomifun_common::AgentType::Nomi,
             model: None,

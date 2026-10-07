@@ -1,0 +1,20 @@
+.parameters, .fields { display: flex; min-width: 0; flex-direction: column; gap: 14px; }
+.field { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.label { display: flex; align-items: center; gap: 6px; color: var(--color-text-2); font-size: 13px; font-weight: 500; }
+.description, .hint { margin: 0; color: var(--color-text-3); font-size: 12px; line-height: 1.7; }
+.optional, .unset { color: var(--color-text-4); font-size: 11px; font-weight: 400; }
+.required { margin-left: 3px; color: var(--color-primary); }
+.booleanRow { display: flex; align-items: center; gap: 9px; min-height: 32px; }
+.booleanRow :global(.arco-checkbox) { color: var(--color-text-2); font-size: 13px; }
+.clear { margin-left: auto; padding: 3px 0; border: 0; color: var(--color-text-3); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.clear:hover { color: var(--color-primary); }
+.clear:disabled { cursor: default; opacity: .5; }
+.clear:focus-visible { outline: 2px solid var(--control-focus-ring); outline-offset: 3px; }
+.fields :global(.arco-input-wrapper), .fields :global(.arco-input-number), .fields :global(.arco-select-view) { border-radius: 8px; }
+.fields :global(.arco-input-number) { width: 100%; }
+.json { padding-top: 13px; border-top: 1px solid var(--color-border-2); }
+.json > summary, .schema > summary { color: var(--color-text-3); font-size: 12px; cursor: pointer; }
+.json > .field { margin-top: 14px; }
+.schema { margin-top: 12px; }
+.schema pre { max-height: 200px; margin-bottom: 0; padding: 12px; overflow: auto; border-radius: 9px; background: var(--color-fill-1); color: var(--color-text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.editor, .schema pre { font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; line-height: 1.7; }

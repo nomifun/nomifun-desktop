@@ -40,13 +40,8 @@ import {
   validateExistingWorkspaceDirectory,
 } from '@/renderer/components/workspace';
 import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
-import type { PluginDeliveryRequirement } from '@/common/types/pluginDevelopment';
 
 export type GuidSendDeps = {
-  requiredModules?: string[];
-  pluginDelivery?: PluginDeliveryRequirement;
-  beforeSend?: () => Promise<void>;
-  afterSend?: () => void;
   input: string;
   setInput: React.Dispatch<React.SetStateAction<string>>;
   files: string[];
@@ -184,15 +179,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
     beginPending,
     endPending,
-    requiredModules,
-    pluginDelivery,
-    beforeSend,
-    afterSend,
   } = deps;
   const sendingRef = useRef(false);
 
   const handleSend = useCallback(async () => {
-    await beforeSend?.();
     const entryPlan = planGuidEntry(input, autoWork);
     if (!current_model) throw new Error('MODEL_REQUIRED');
     if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
@@ -229,7 +219,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       throw new Error('AGENT_PRESET_REQUIRED');
     }
     const session = await ipcBridge.agentPlatform.sessions.create.invoke({
-      ...(requiredModules?.length ? { required_modules: requiredModules } : {}),
       preset_id: launchPreset.preset_id,
       title: entryPlan.conversationName,
       model: {
@@ -292,7 +281,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
             input,
             files: files.length > 0 ? files : undefined,
             idempotency_key: uuidv7(),
-            ...(pluginDelivery ? { plugin_delivery: pluginDelivery } : {}),
           })
         );
       }
@@ -323,9 +311,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     sessionCapabilities,
     workspaceEnabled,
     t,
-    requiredModules,
-    pluginDelivery,
-    beforeSend,
   ]);
 
   const launch = useCallback(() => {
@@ -359,7 +344,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
 
     handleSend()
       .then(() => {
-        afterSend?.();
         setInput('');
         setMentionOpen(false);
         setMentionQuery(null);
@@ -403,7 +387,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     setMentionQuery,
     setMentionSelectorOpen,
     t,
-    afterSend,
   ]);
 
   const hasAgentLaunchTarget = selection.kind === 'template'

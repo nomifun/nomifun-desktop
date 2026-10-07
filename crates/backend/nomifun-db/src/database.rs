@@ -413,7 +413,16 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
         ));
     }
     crate::agent_store_clean_cut::clean_cut_agent_store(&mut conn, &DB_MIGRATOR).await?;
-    run_migrations_with_retry(&mut conn).await?;
+    // SQLite cannot toggle foreign keys inside sqlx's migration transaction.
+    // A table replacement keeps relationship names intact while copying rows;
+    // disable enforcement only on this startup-owned connection, then restore
+    // it even on failure. The migration checks every foreign key before commit,
+    // and sqlx records its receipt in the same transaction as the replacement.
+    sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await?;
+    let migrated = run_migrations_with_retry(&mut conn).await;
+    sqlx::query("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON")
+        .execute(&mut *conn).await?;
+    migrated?;
     crate::agent_store_clean_cut::ensure_schema_metadata(&mut conn).await?;
     // Always truncate committed migration WAL frames. Besides keeping startup
     // deterministic, this retries the only safety-critical step if a previous

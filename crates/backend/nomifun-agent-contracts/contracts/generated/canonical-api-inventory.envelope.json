@@ -36,6 +36,38 @@
         "canonical_errors": []
       },
       {
+        "operation_id": "plugins.authoring.preflight",
+        "method": "POST",
+        "path": "/api/plugins/authoring/preflight",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "plugins.authoring.sessions.create",
+        "method": "POST",
+        "path": "/api/plugins/authoring/sessions",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "plugins.authoring.sessions.list",
+        "method": "GET",
+        "path": "/api/plugins/authoring/sessions",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "plugins.authoring.sessions.get",
+        "method": "GET",
+        "path": "/api/plugins/authoring/sessions/{agent_session_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
         "operation_id": "plugins.config.put",
         "method": "PUT",
         "path": "/api/plugins/{plugin_id}/config",
@@ -499,5 +531,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "0dff87b295c7e967afb84ad461cbf6da41cec0960749137fd525990622d589d8"
+  "payload_digest": "6cec82b61998d1f7fda54e3c448def72bb2721175116e0c4144e4b95f999df8f"
 }

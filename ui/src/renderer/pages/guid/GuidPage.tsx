@@ -38,11 +38,6 @@ import React, {
   useState,
 } from 'react';
 import { useTranslation } from 'react-i18next';
-import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
-import { PLUGIN_DEVELOPMENT_MODULE } from '@/common/types/pluginDevelopment';
-import { launchPluginConversation, readPluginLaunchIntent, consumePluginLaunchIntent } from '../plugins/pluginConversationLaunch';
-import type { PluginLaunchIntent } from '../plugins/pluginConversationLaunch';
-import { initialPluginDelivery } from '../plugins/pluginConversationRequest';
 import { useLocation, useNavigate } from 'react-router-dom';
 import GuidAgentSelector from './components/GuidAgentSelector';
 import GuidCompanionShowcase from './components/GuidCompanionShowcase';
@@ -97,10 +92,6 @@ const GuidPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
-  const pluginIntentToken = new URLSearchParams(location.search).get('pluginIntent');
-  const [pluginLaunchError, setPluginLaunchError] = useState('');
-  const [pluginLaunch, setPluginLaunch] = useState<{ intent: PluginLaunchIntent; bootstrap: string } | null>(null);
-  const appliedPluginIntent = useRef<string | null>(null);
   const pendingConversation = usePendingConversation();
   const guidContainerRef = useRef<HTMLDivElement>(null);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
@@ -140,30 +131,6 @@ const GuidPage: React.FC = () => {
   const guidInput = useGuidInput({
     locationState: navigationState,
   });
-  useEffect(() => {
-    if (!pluginIntentToken || !agentSelection.isLoaded || agentSelection.isLoading
-      || appliedPluginIntent.current === pluginIntentToken) return;
-    let active = true;
-    void pluginPlatform.authoring.preflight.invoke({ selection: agentSelection.selection }).then(response => {
-      if (!active) return;
-      const intent = readPluginLaunchIntent(pluginIntentToken, response.owner_user_id);
-      if (!intent) { setPluginLaunchError(t('pluginPlatform.creator.launchFailed')); return; }
-      if (response.status !== 'ready') {
-        return launchPluginConversation(navigate, {}, pluginIntentToken);
-      }
-      appliedPluginIntent.current = pluginIntentToken;
-      const bootstrap = intent.requirement
-        ?? (intent.plugin_id ? t('pluginPlatform.authoring.editPrompt', { id: intent.plugin_id, revision: intent.expected_plugin_revision })
-          : intent.draft_id ? t('pluginPlatform.authoring.draftPrompt', { id: intent.draft_id })
-          : intent.template ? t('pluginPlatform.authoring.templatePrompt') : t('pluginPlatform.authoring.createPrompt'));
-      setPluginLaunch({ intent, bootstrap });
-      if (bootstrap) guidInput.setInput(bootstrap);
-      if (intent.files) guidInput.setFiles(intent.files);
-    }).catch(error => {
-      if (active) setPluginLaunchError(error instanceof Error ? error.message : String(error));
-    });
-    return () => { active = false; };
-  }, [pluginIntentToken, agentSelection.selection, agentSelection.isLoaded, agentSelection.isLoading, navigate, t]);
   const advancedConfig = useGuidSessionOptions();
   const clearSentInput = useCallback(() => {
     guidInput.setInput('');
@@ -349,17 +316,6 @@ const GuidPage: React.FC = () => {
   });
 
   const send = useGuidSend({
-    requiredModules: pluginIntentToken ? [PLUGIN_DEVELOPMENT_MODULE] : undefined,
-    pluginDelivery: pluginIntentToken
-      ? initialPluginDelivery(pluginLaunch?.intent ?? null, guidInput.input, pluginLaunch?.bootstrap ?? '') : undefined,
-    beforeSend: pluginIntentToken ? async () => {
-      const result = await pluginPlatform.authoring.preflight.invoke({ selection: agentSelection.selection });
-      if (result.status !== 'ready') {
-        await launchPluginConversation(navigate, { requirement: guidInput.input, files: guidInput.files }, pluginIntentToken);
-        throw new Error(t('pluginPlatform.authoring.moduleNeeded'));
-      }
-    } : undefined,
-    afterSend: pluginIntentToken ? () => consumePluginLaunchIntent(pluginIntentToken) : undefined,
     input: guidInput.input,
     setInput: guidInput.setInput,
     files: guidInput.files,
@@ -714,7 +670,6 @@ const GuidPage: React.FC = () => {
       getPopupContainer={() => guidContainerRef.current || document.body}
     >
       <div ref={guidContainerRef} className={styles.guidContainer}>
-        {pluginIntentToken && pluginLaunchError && <Alert type='error' showIcon content={pluginLaunchError} />}
         <div className={styles.guidAdvancedControls}>
           {!creation.draft.mode && advancedControlsNode}
         </div>

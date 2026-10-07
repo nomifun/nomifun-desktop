@@ -35,7 +35,7 @@ function installFetchFixture(): void {
     const data = path === '/api/plugin-drafts'
       ? method === 'GET'
         ? { drafts: [] }
-        : { summary: {}, imported_context: {}, files: [] }
+        : { summary: {}, files: [] }
       : path === '/api/plugins'
         ? { revision: 1, plugins: [] }
         : path === '/api/plugins/library-state'
@@ -125,7 +125,6 @@ describe('Unified Plugin Core bridge', () => {
       request: {
         expected_revision: 6,
         expected_plugin_revision: 2,
-        permission_confirmation_id: 'confirmation-1',
         config: { theme: 'dark' },
         credential_bindings: { api_key: 'provider:credential-1' },
       },
@@ -150,7 +149,6 @@ describe('Unified Plugin Core bridge', () => {
     expect(calls[6]?.body).toEqual({
       expected_revision: 6,
       expected_plugin_revision: 2,
-      permission_confirmation_id: 'confirmation-1',
       config: { theme: 'dark' },
       credential_bindings: { api_key: 'provider:credential-1' },
     });
@@ -163,7 +161,6 @@ describe('Unified Plugin Core bridge', () => {
       kind: 'zip',
       expected_plugin_revision: 8,
       create_copy: false,
-      permission_confirmation_id: 'confirmation-2',
       config: { color: 'blue' },
       credential_bindings: { api_key: 'provider:credential-2' },
     };
@@ -193,8 +190,6 @@ describe('Unified Plugin Core bridge', () => {
       plugin_id: pluginId,
       request: {
         expected_revision: 10,
-        mode: 'previous_code_and_data',
-        acknowledge_data_loss: true,
       },
     });
     await pluginPlatform.plugins.trash.invoke({
@@ -331,10 +326,11 @@ describe('Unified Plugin Core bridge', () => {
       '/projects',
       '/installations',
       '/operations',
-      '/api/plugins/authoring',
+      '/approve',
     ]) {
       expect(bridge).not.toContain(route);
     }
+    expect(bridge).toContain('/api/plugins/authoring/sessions');
     for (const retiredType of [
       /PluginProject/,
       /PluginMount/,

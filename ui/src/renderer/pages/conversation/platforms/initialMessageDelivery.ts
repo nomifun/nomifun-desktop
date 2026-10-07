@@ -15,7 +15,6 @@ export type PersistedInitialMessage = {
   input: string;
   files: string[];
   idempotency_key: string;
-  plugin_delivery?: import('@/common/types/pluginDevelopment').PluginDeliveryRequirement;
 };
 
 type InitialMessageStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -72,8 +71,6 @@ export const readInitialMessageDelivery = (
       input: candidate.input,
       files: candidate.files === undefined ? [] : [...candidate.files],
       idempotency_key: candidate.idempotency_key,
-      ...(candidate.plugin_delivery && typeof candidate.plugin_delivery === 'object'
-        ? { plugin_delivery: candidate.plugin_delivery as import('@/common/types/pluginDevelopment').PluginDeliveryRequirement } : {}),
     };
   } catch {
     storage.removeItem(storageKey);

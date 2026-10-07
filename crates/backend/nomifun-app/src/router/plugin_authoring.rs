@@ -3,7 +3,7 @@
 //! the existing draft/conversation, not in a second job or publication platform.
 use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 use axum::{Json, extract::{State, Extension, Path}};
-use nomifun_agent_contracts::{DigestHex, PluginArtifact, digest_payload};
+use nomifun_agent_contracts::digest_payload;
 use nomifun_api_types::*;
 use nomifun_auth::CurrentUser;
 use nomifun_plugin_platform::{PluginDraftRecord, PluginRepository};
@@ -230,96 +230,11 @@ async fn credential_versions(pool: &nomifun_db::SqlitePool, bindings: &Value) ->
     Ok(Value::Object(versions))
 }
 
-pub(super) fn has_authoring_approval(draft:&PluginDraftRecord,digest:&DigestHex,execution:&Value)->bool {
-    let approval=&draft.verification["approval"];
-    approval["approved"]==json!(true)
-        && approval["artifact_digest"].as_str()==Some(digest.as_ref())
-        && approval["execution_digest"].as_str()==Some(hash(execution).as_str())
-        && approval["expires_at_ms"].as_i64().is_some_and(|until|until>nomifun_common::now_ms())
-}
-
-pub(super) async fn request_authoring_approval(
-    state:&PluginRouterState,owner:&str,draft:&PluginDraftRecord,artifact:&PluginArtifact,execution:&Value,
-)->Result<Value,PluginHttpError>{
-    let existing=if let Some(id)=&draft.plugin_id {
-        state.repository.get_plugin(owner,id).await?
-    }else{None};
-    let decision=plugin::consume_confirmation(state,owner,artifact,None,existing.as_ref()).await?;
-    let mut next=draft.clone();
-    let approved=decision.required.is_none();
-    next.verification["approval"]=json!({
-        "approved":approved,"artifact_digest":artifact.artifact_digest.as_ref(),
-        "execution_digest":hash(execution),"expires_at_ms":nomifun_common::now_ms()+5*60*1000,
-        "confirmation":decision.required,"execution":execution,
-    });
-    next.updated_at_ms=nomifun_common::now_ms();
-    let next=state.repository.update_draft(&next,draft.revision).await?;
-    state.events.send_to_user(owner,WebSocketMessage::new("plugin.authoring.changed",json!({
-        "conversation_id":draft.source_conversation_id,"draft_id":draft.draft_id.as_ref(),"revision":next.revision,
-    })));
-    // Confirmation tokens are available only through the authenticated UI read.
-    // Never return them to a model as an argument it can echo to approve itself.
-    Ok(json!({"waiting_for_user":!approved,"approved_from_existing_grants":approved,
-        "draft_id":draft.draft_id.as_ref(),"revision":next.revision,
-        "message":if approved{"Existing instance grants cover this artifact; retry preview at this revision."}
-            else{"Approve the actual code/permissions in the conversation card, then continue this draft."}}))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ApproveRequest { expected_revision:u64, confirmation_id:String, approved:bool }
-
-pub(super) async fn approve(
-    State(state):State<PluginRouterState>,Extension(user):Extension<CurrentUser>,
-    Path(id):Path<String>,Json(request):Json<ApproveRequest>,
-)->Result<Json<ApiResponse<Value>>,PluginHttpError>{
-    let owner=user.id.to_string();
-    let mut draft=plugin::draft_owned(&state,&owner,&id).await?;
-    plugin::require_draft_revision(&draft,request.expected_revision)?;
-    let pending=&draft.verification["approval"];
-    if pending["confirmation"]["confirmation_id"].as_str()!=Some(request.confirmation_id.as_str())
-        || pending["expires_at_ms"].as_i64().is_none_or(|until|until<=nomifun_common::now_ms())
-    { return Err(PluginHttpError::conflict("Authoring confirmation expired or changed")); }
-    let record=state.confirmations.lock().await.get(&request.confirmation_id).cloned()
-        .ok_or_else(||PluginHttpError::conflict("Authoring confirmation is no longer active"))?;
-    if record.owner_user_id!=owner
-        || pending["artifact_digest"].as_str()!=Some(record.artifact_digest.as_ref())
-        || record.expires_at_ms<nomifun_common::now_ms()
-    { return Err(PluginHttpError::forbidden("Confirmation owner or Artifact changed")); }
-    let files=state.drafts.freeze(&owner,&draft.draft_id)?;
-    let artifact=state.artifacts.inspect_files(&files,&nomifun_plugin_platform::NeverCancel)?;
-    if artifact.artifact_digest!=record.artifact_digest {return Err(PluginHttpError::conflict("Code changed before confirmation"));}
-    draft.verification["approval"]["approved"]=json!(request.approved);
-    draft.updated_at_ms=nomifun_common::now_ms();
-    let updated=state.repository.update_draft(&draft,request.expected_revision).await?;
-    state.events.send_to_user(&owner,WebSocketMessage::new("plugin.authoring.changed",json!({
-        "conversation_id":updated.source_conversation_id,"draft_id":id,"revision":updated.revision,
-    })));
-    Ok(Json(ApiResponse::ok(json!({"approved":request.approved,"revision":updated.revision}))))
-}
-
 pub(super) async fn save_authoring_draft(
     state:&PluginRouterState,owner:&str,id:&str,mut request:SavePluginDraftRequest,draft:&PluginDraftRecord,
 )->Result<SavePluginDraftResponseDto,PluginHttpError>{
     if request.expected_plugin_revision.is_none(){request.expected_plugin_revision=draft.base_revision;}
-    if let Some(confirmation)=draft.verification["approval"]["confirmation"]["confirmation_id"].as_str(){
-        if draft.verification["approval"]["approved"]!=json!(true){
-            return Err(PluginHttpError::forbidden("The user has not approved this Artifact"));
-        }
-        request.permission_confirmation_id=Some(confirmation.to_owned());
-    }
-    let outcome=plugin::save_draft_owned(state,owner,id,request).await?;
-    if let PluginInstallOutcomeDto::ConfirmationRequired{confirmation}=&outcome.result {
-        let mut current=plugin::draft_owned(state,owner,id).await?;
-        current.verification["approval"]=json!({"approved":false,
-            "artifact_digest":current.verification["artifact_digest"],"confirmation":confirmation,
-            "execution_digest":hash(&current.verification["execution"]),
-            "execution":current.verification["execution"],"expires_at_ms":nomifun_common::now_ms()+5*60*1000,
-        });
-        current.updated_at_ms=nomifun_common::now_ms();
-        state.repository.update_draft(&current,current.revision).await?;
-    }
-    Ok(outcome)
+    plugin::save_draft_owned(state,owner,id,request).await
 }
 
 #[derive(Clone, Serialize)]
@@ -428,12 +343,9 @@ pub(super) async fn details(
     let commands=state.ui_tests.pending.lock().expect("UI queue").values()
         .filter(|entry|entry.owner==owner && entry.command.draft_id==id)
         .map(|entry|entry.command.clone()).collect::<Vec<_>>();
-    let mut public=draft.verification.clone();
-    public.as_object_mut().expect("verification object").remove("approval");
-    let confirmation=draft.verification["approval"]["confirmation"].clone();
+    let public=draft.verification.clone();
     Ok(Json(ApiResponse::ok(json!({
         "draft":plugin::draft_detail(&state,&draft)?,"verification":public,"commands":commands,
-        "confirmation":if draft.verification["approval"]["approved"]==json!(true){Value::Null}else{confirmation},
     }))))
 }
 

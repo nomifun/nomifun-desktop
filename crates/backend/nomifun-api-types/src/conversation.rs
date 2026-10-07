@@ -279,6 +279,9 @@ pub struct SearchMessagesQuery {
 pub struct ConversationResponse {
     #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_id")]
     pub conversation_id: String,
+    /// Product presentation comes from the canonical Session opening fact.
+    #[serde(default)]
+    pub session_purpose: nomifun_agent_contracts::SessionPurpose,
     pub name: String,
     pub r#type: AgentType,
     #[serde(
@@ -845,6 +848,7 @@ mod tests {
     fn serialize_conversation_response_snake_case() {
         let resp = ConversationResponse {
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
+            session_purpose: Default::default(),
             name: "Test".into(),
             r#type: AgentType::Nomi,
             model: Some(ProviderWithModel {
@@ -910,6 +914,7 @@ mod tests {
     fn serialize_conversation_response_omits_none_keys() {
         let resp = ConversationResponse {
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678902".into(),
+            session_purpose: Default::default(),
             name: "Test".into(),
             r#type: AgentType::Nomi,
             model: None,
@@ -962,6 +967,7 @@ mod tests {
     fn conversation_response_roundtrip() {
         let resp = ConversationResponse {
             conversation_id: "0190f5fe-7c00-7a00-8abc-012345678903".into(),
+            session_purpose: Default::default(),
             name: "Round".into(),
             r#type: AgentType::Nomi,
             model: None,
@@ -1117,6 +1123,7 @@ mod tests {
             preview_text: "matched snippet".into(),
             conversation: ConversationResponse {
                 conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
+                session_purpose: Default::default(),
                 name: "Code Review".into(),
                 r#type: AgentType::Nomi,
                 model: None,
@@ -1168,6 +1175,7 @@ mod tests {
             preview_text: "some content preview".into(),
             conversation: ConversationResponse {
                 conversation_id: "0190f5fe-7c00-7a00-8abc-012345678903".into(),
+                session_purpose: Default::default(),
                 name: "Search Test".into(),
                 r#type: AgentType::Nomi,
                 model: None,
@@ -1249,6 +1257,7 @@ mod tests {
         let list: ConversationListResponse = PaginatedResult {
             items: vec![ConversationResponse {
                 conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
+                session_purpose: Default::default(),
                 name: "Test".into(),
                 r#type: AgentType::Nomi,
                 model: None,
@@ -1304,6 +1313,7 @@ mod tests {
                 preview_text: "matched".into(),
                 conversation: ConversationResponse {
                     conversation_id: "0190f5fe-7c00-7a00-8abc-012345678903".into(),
+                    session_purpose: Default::default(),
                     name: "Conv".into(),
                     r#type: AgentType::Nomi,
                     model: None,

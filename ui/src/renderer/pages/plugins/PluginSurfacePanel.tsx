@@ -296,9 +296,6 @@ export default function PluginSurfacePanel({
       <header className={styles.surfaceHeader}>
         <div>
           <strong>{title}</strong>
-          <div className={styles.muted}>
-            {descriptor.is_preview ? t('pluginPlatform.preview.temporaryData') : t('pluginPlatform.detail.activeData')}
-          </div>
         </div>
         <div className={styles.actions}>
           <Button icon={<Refresh />} disabled={closing} onClick={reload}>{t('pluginPlatform.actions.refresh')}</Button>

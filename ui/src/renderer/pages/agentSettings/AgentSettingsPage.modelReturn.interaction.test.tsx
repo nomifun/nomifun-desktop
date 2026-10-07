@@ -12,7 +12,7 @@ import { AGENT_SIDER_TOGGLE_EVENT } from '@/renderer/utils/workspace/agentSiderE
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
-import type { PluginDevelopmentPreflight } from '@/common/types/pluginDevelopment';
+
 import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
   type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import * as roleDefaults from './AgentRoleDefaults';
@@ -104,7 +104,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   const view = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
     fallback: { providers: [] } }}><PresetCacheProbe /><MemoryRouter initialEntries={[options.entry ?? (initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal')]}>
     <NavigationHistoryProvider><Probe /><HistoryControls /><SidebarControls /><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='/models' element={<Models />} />
-      <Route path='/guid' element={<Author />} /><Route path='/plugins/run/:id' element={<Saved />} /></Routes></NavigationHistoryProvider>
+      <Route path='/plugins/create' element={<Author />} /><Route path='/plugins/run/:id' element={<Saved />} /></Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
   if (initialEditor) await view.findByRole('heading', { name: initialEditor.preset.display_name });
   else await view.findByRole('heading', { name: options.entry?.includes('assistant.general') ? en.template.assistant.general.name : en.template.chat.minimal.name });
@@ -233,14 +233,12 @@ test('return snapshots exclude model configuration and cannot cross a changed te
   expect(agentEditorReturn({ agentEditorReturn: snapshot }, '?preset=another')).toBeNull();
 });
 
-test('opening before-tool authoring in a conversation returns to the same unsaved Agent edits without saving or sending', async () => {
+test('opening before-tool authoring in the plugin workspace returns to the same unsaved Agent edits without saving or sending', async () => {
   (window as typeof window & { __backendPort?: number }).__backendPort = 11451;
   const document = createEmptyAgentPresetDocument();
   const original: AgentPresetEditorResponse = { preset: { preset_id: presetId, source: 'user', display_name: 'Saved Agent', bound_target_count: 0,
     current_stable_revision: revision }, draft: { preset_id: presetId, display_name: 'Saved Agent', document, current_revision: revision },
     revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 } };
-  let finish!: (preflight: PluginDevelopmentPreflight) => void;
-  const preflight = spyOn(pluginPlatform.authoring.preflight, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   const createCheck = spyOn(pluginPlatform.drafts.create, 'invoke');
   const v = await mount(undefined, original);
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
@@ -249,8 +247,6 @@ test('opening before-tool authoring in a conversation returns to the same unsave
   await v.findByRole('heading', { name: 'Unsaved Agent' });
   fireEvent.click(v.getByRole('tab', { name: en.workbench.extensionsTab }));
   fireEvent.click(v.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
-  await waitFor(() => expect(preflight).toHaveBeenCalledTimes(1));
-  await act(async () => { finish({ status: 'ready', owner_user_id: 'owner', reason: '', selection: { kind: 'template', templateKey: 'assistant.general' } }); });
   await v.findByRole('heading', { name: 'Check authoring' });
   fireEvent.click(v.getByRole('button', { name: 'Saved destination' }));
   await v.findByRole('heading', { name: 'Saved check' });

@@ -753,6 +753,10 @@ impl NomiCoreSessionOwner {
         &self.canonical
     }
 
+    pub(super) fn domain_pool(&self) -> &nomifun_db::SqlitePool {
+        &self.pool
+    }
+
     pub(crate) fn session_operation_locks(&self) -> Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>> {
         self.session_operation_locks.clone()
     }
@@ -4986,6 +4990,7 @@ fn canonical_conversation_response(
         visible_conversation_execution(execution_link);
     Ok(ConversationResponse {
         conversation_id: session.agent_session_id.as_ref().to_owned(),
+        session_purpose: session.metadata.purpose,
         name,
         r#type: request.r#type,
         model: request.model,
@@ -6128,7 +6133,8 @@ mod session_boundary_tests {
                 .await
                 .unwrap(),
         );
-        assert_eq!(workspace.parent(), Some(std::fs::canonicalize(&managed_root).unwrap().as_path()));
+        assert_eq!(std::fs::canonicalize(workspace.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(&managed_root).unwrap());
         assert!(workspace.is_dir());
         assert!(
             nomifun_file::list_workspace_level(&workspace, ".", None)
@@ -6206,6 +6212,7 @@ mod session_boundary_tests {
         };
         let response = super::ConversationResponse {
             conversation_id: SESSION_ID.to_owned(),
+            session_purpose: Default::default(),
             name: "Session".to_owned(),
             r#type: AgentType::Nomi,
             model: Some(ProviderWithModel {
@@ -6436,6 +6443,7 @@ mod session_boundary_tests {
     fn session_revision_ignores_presentation_only_changes() {
         let mut base = super::ConversationResponse {
             conversation_id: SESSION_ID.to_owned(),
+            session_purpose: Default::default(),
             name: "original".to_owned(),
             r#type: AgentType::Nomi,
             model: None,
@@ -8397,6 +8405,8 @@ struct NomiCoreSessionPageQuery {
 #[serde(deny_unknown_fields)]
 struct NomiCoreSessionListQuery {
     #[serde(default)]
+    include_product_sessions: bool,
+    #[serde(default)]
     cursor: Option<String>,
     #[serde(default = "default_nomi_core_page_limit")]
     limit: u32,
@@ -9853,17 +9863,14 @@ async fn list_nomi_core_agent_sessions(
             "AgentSession list limit must be between 1 and 10000",
         ));
     }
-    let page = state
-        .session_owner
-        .canonical()
-        .store()
-        .list_live_sessions(
-            &authenticated_principal(&owner),
-            query.cursor.as_deref(),
-            query.limit,
-        )
-        .await
-        .map_err(agent_session_store_error)?;
+    let store = state.session_owner.canonical().store();
+    let principal = authenticated_principal(&owner);
+    let page = if query.include_product_sessions {
+        store.list_live_sessions(&principal, query.cursor.as_deref(), query.limit).await
+    } else {
+        store.list_live_sessions_for_purpose(&principal, query.cursor.as_deref(), query.limit,
+            nomifun_agent_contracts::SessionPurpose::Conversation).await
+    }.map_err(agent_session_store_error)?;
     let mut items = Vec::with_capacity(page.items.len());
     for item in page.items {
         let projection = state
@@ -10535,6 +10542,48 @@ async fn create_nomi_core_agent_session(
         state: "ready".to_owned(),
         cursor: session_cursor(&opened.session.agent_session_id, opened.cursor.seq),
     })))
+}
+
+/// The plugin workbench shares the canonical owner and official Runtime, but
+/// opens with an immutable product purpose and the user's resolved Agent binding.
+pub(super) async fn create_plugin_authoring_session(
+    state: &NomiCoreAgentApiState,
+    owner: &UserId,
+    binding: AgentBindingValueDto,
+    reasoning_effort: Option<SessionReasoningEffortDto>,
+    creation_key: &str,
+) -> Result<String, NomiCoreApiError> {
+    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(owner, &binding).await?;
+    let selections = snapshot.content.required_resource_kinds.iter().filter_map(|kind| {
+        automatic_agent_resource_id(kind.as_ref()).map(|resource_id| AgentResourceSelectionDto {
+            resource_kind: kind.as_ref().to_owned(), resource_id: resource_id.to_owned(),
+        })
+    }).collect::<Vec<_>>();
+    let binding = state.resource_bindings.resolve_for_saved_binding(
+        &state.control_plane, owner, binding, &selections,
+    ).await?;
+    let authenticated = AuthenticatedOwner(owner.clone());
+    let projection = resolve_saved_binding_projection(state, &authenticated, &binding, Some("Plugin authoring")).await?;
+    super::plugin_authoring_sessions::validate_scope(&binding, &projection.snapshot)?;
+    if let Some(effort) = reasoning_effort {
+        if !saved_binding_supports_reasoning_effort(state, &authenticated, &binding, contract_reasoning_effort(effort)).await? {
+            return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
+                "AGENT_SESSION_REASONING_UNSUPPORTED", "The selected model does not support this reasoning effort"));
+        }
+    }
+    let idmm = idmm_config_from_runtime_policy(&projection.runtime_policy)?;
+    state.session_owner.validate_idmm_state(&idmm).await?;
+    let binding_contract: AgentBindingValue = serde_json::from_value(serde_json::to_value(&binding)?)?;
+    let active = projection.snapshot.content.contributions().map(|value| value.capability.id.as_ref().to_owned()).collect();
+    let opened = state.session_owner.canonical().open_with_purpose(authenticated_principal(&authenticated),
+        binding_contract, Some("Plugin authoring".into()), active,
+        reasoning_effort.map(contract_reasoning_effort), nomifun_agent_contracts::SessionPurpose::PluginAuthoring,
+        creation_key, now_ms()).await?;
+    // Materialize the selected binding's workspace, or its managed scratch directory.
+    state.session_owner.materialize_workspace_for_binding(owner.as_ref(), &opened.session.agent_session_id,
+        &opened.session.agent_binding).await?;
+    state.session_owner.initialize_idmm_state(opened.session.agent_session_id.as_ref(), idmm).await?;
+    Ok(opened.session.agent_session_id.as_ref().to_owned())
 }
 
 fn freeze_agent_session_knowledge_policy(
@@ -12098,6 +12147,11 @@ async fn apply_nomi_core_agent_session_agent_switch(
         .session_operation_lock(session_id.as_ref())
         .write_owned()
         .await;
+    let current = state
+        .session_owner
+        .canonical()
+        .get(&authenticated_principal(&owner), &session_id)
+        .await?;
     if let Some(replayed) = replay_agent_session_switch(
         &state,
         &owner,
@@ -12109,11 +12163,6 @@ async fn apply_nomi_core_agent_session_agent_switch(
     {
         return Ok(Json(ApiResponse::ok(replayed)));
     }
-    let current = state
-        .session_owner
-        .canonical()
-        .get(&authenticated_principal(&owner), &session_id)
-        .await?;
     if request.expected_binding_version != current.session.agent_binding.binding_version {
         return Err(NomiCoreApiError::with_details(
             StatusCode::CONFLICT,

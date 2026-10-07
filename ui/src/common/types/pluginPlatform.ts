@@ -119,7 +119,6 @@ export interface PluginSummary {
   trashed_at_ms?: number;
   revision: number;
   active: PluginArtifactDataPointer;
-  previous?: PluginArtifactDataPointer;
   has_ui: boolean;
   has_service: boolean;
   service_mode?: PluginServiceMode;
@@ -235,7 +234,6 @@ export interface PluginDraftFile {
 
 export interface PluginDraftDetail {
   summary: PluginDraftSummary;
-  imported_context: Record<string, unknown>;
   files: PluginDraftFile[];
 }
 
@@ -275,8 +273,6 @@ export interface PreviewPluginDraftRequest {
 export interface SavePluginDraftRequest {
   expected_revision: number;
   expected_plugin_revision?: number;
-  /** Opaque Host-issued confirmation bound to the staged bytes. */
-  permission_confirmation_id?: string;
   config: Record<string, unknown>;
   credential_bindings: Record<string, string>;
 }
@@ -286,7 +282,7 @@ export interface DeletePluginDraftRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Import, install and permission confirmation
+// Import and use
 // ---------------------------------------------------------------------------
 
 export type PluginImportKind = 'directory' | 'zip' | 'backup';
@@ -301,8 +297,6 @@ export interface InstallPluginImportRequest {
   kind: PluginImportKind;
   expected_plugin_revision?: number;
   create_copy?: boolean;
-  /** Opaque Host-issued confirmation bound to the freshly staged bytes. */
-  permission_confirmation_id?: string;
   config?: Record<string, unknown>;
   credential_bindings?: Record<string, string>;
 }
@@ -316,31 +310,17 @@ export interface PluginBackupDataSummary {
   credential_slots_to_rebind: string[];
 }
 
-export interface PluginPermissionExpansion {
-  confirmation_id: string;
-  added_permissions: string[];
-  added_secret_slots: string[];
-  trusted_local_service: boolean;
-}
-
 export interface PluginImportInspection {
   kind: PluginImportKind;
   /** Computed by the Host; never supplied by the caller. */
   artifact_digest: string;
   manifest: PluginManifestSummary;
-  trusted_local_service: boolean;
   target_plugin_id?: PluginId;
   target_plugin_revision?: number;
   backup?: PluginBackupDataSummary;
-  permission_expansion?: PluginPermissionExpansion;
 }
 
-export type PluginInstallOutcome =
-  | { outcome: 'installed'; plugin: PluginDetail }
-  | {
-      outcome: 'confirmation_required';
-      confirmation: PluginPermissionExpansion;
-    };
+export type PluginInstallOutcome = { outcome: 'installed'; plugin: PluginDetail };
 
 export interface InstallPluginImportResponse {
   result: PluginInstallOutcome;
@@ -368,15 +348,8 @@ export interface ConfigurePluginRequest {
   grants?: Record<string, boolean>;
 }
 
-export type PluginRestoreMode =
-  | 'previous_code'
-  | 'previous_code_and_data'
-  | 'from_trash';
-
 export interface RestorePluginRequest {
   expected_revision: number;
-  mode: PluginRestoreMode;
-  acknowledge_data_loss?: boolean;
 }
 
 export interface TrashPluginRequest {
