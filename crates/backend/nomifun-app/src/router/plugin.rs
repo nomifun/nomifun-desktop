@@ -951,7 +951,7 @@ pub(super) async fn create_draft_with_source(
         source_message_id: source.as_ref().map(|value| value.message_id.clone()),
         source_operation_key: source.as_ref().map(|value| value.operation_key.clone()),
         source_request_digest: source.as_ref().map(|_| request_digest.clone()),
-        verification: serde_json::json!({}),
+        verification: serde_json::json!({"edit_revision": 1}),
         imported_context: json!({}),
         status: PluginDraftStatus::Ready,
         last_error: None,
@@ -1031,14 +1031,9 @@ async fn replace_draft_file(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(request.content_base64)
         .map_err(|_| PluginHttpError::bad_request("content_base64 is invalid"))?;
-    state
-        .drafts
-        .write(&draft.owner_user_id, &draft.draft_id, &request.path, &bytes)?;
-    draft.updated_at_ms = now_ms();
-    let updated = state
-        .repository
-        .update_draft(&draft, request.expected_revision)
-        .await?;
+    let mut files = state.drafts.freeze(&draft.owner_user_id, &draft.draft_id)?;
+    files.insert(request.path, bytes);
+    let updated = publish_draft_edit(&state, &mut draft, &files, request.expected_revision).await?;
     Ok(Json(ApiResponse::ok(draft_detail(&state, &updated)?)))
 }
 
@@ -1053,15 +1048,35 @@ async fn delete_draft_file(
     if request.path == "nomifun.plugin.json" {
         return Err(PluginHttpError::bad_request("the Plugin manifest cannot be deleted"));
     }
-    state
-        .drafts
-        .delete_file(&draft.owner_user_id, &draft.draft_id, &request.path)?;
-    draft.updated_at_ms = now_ms();
-    let updated = state
-        .repository
-        .update_draft(&draft, request.expected_revision)
-        .await?;
+    let mut files = state.drafts.freeze(&draft.owner_user_id, &draft.draft_id)?;
+    if files.remove(&request.path).is_none() {
+        return Err(PluginHttpError::bad_request("Draft file does not exist"));
+    }
+    let updated = publish_draft_edit(&state, &mut draft, &files, request.expected_revision).await?;
     Ok(Json(ApiResponse::ok(draft_detail(&state, &updated)?)))
+}
+
+/// Keep the filesystem lock through the row CAS. A losing editor restores the
+/// package it actually replaced, never leaving rejected bytes in the draft.
+async fn publish_draft_edit(
+    state: &PluginRouterState, draft: &mut PluginDraftRecord,
+    files: &BTreeMap<String, Vec<u8>>, expected_revision: u64,
+) -> Result<PluginDraftRecord, PluginHttpError> {
+    let mut replacement = state.drafts.stage_exact_replacement(
+        &draft.owner_user_id, &draft.draft_id, files, &NeverCancel,
+    )?;
+    mark_draft_edit(draft)?;
+    draft.updated_at_ms = now_ms();
+    revoke_draft_surfaces(state, &draft.draft_id).await?;
+    replacement.publish()?;
+    match state.repository.update_draft(draft, expected_revision).await {
+        Ok(updated) => { replacement.commit()?; Ok(updated) }
+        Err(error) => {
+            replacement.rollback().map_err(|rollback| PluginHttpError::internal(
+                format!("{error}; draft rollback failed: {rollback}")))?;
+            Err(error.into())
+        }
+    }
 }
 
 async fn preview_draft(
@@ -2518,6 +2533,10 @@ pub(super) fn draft_summary(
         plugin_id: draft.plugin_id.as_ref().map(|id| id.as_ref().to_owned()),
         base_plugin_revision: draft.base_revision,
         package_id: manifest.as_ref().map(|manifest| manifest.id.clone()),
+        delivered_artifact_digest: draft
+            .verification["delivery"]["artifact_digest"]
+            .as_str()
+            .map(str::to_owned),
         display_name: manifest
             .as_ref()
             .map(|manifest| manifest.name.clone())
@@ -2893,6 +2912,37 @@ pub(super) fn require_draft_revision(draft: &PluginDraftRecord, expected: u64) -
     Ok(())
 }
 
+/// Evidence writes advance the row CAS without changing the editable source or
+/// plan. An authoring caller may reuse a revision in that exact interval; file
+/// and plan edits raise the floor, including a change subsequently reverted.
+/// HTTP editors still use `require_draft_revision` and the exact row CAS.
+/// Drafts without a valid host watermark fail closed at the current revision.
+pub(super) fn require_authoring_revision(draft: &PluginDraftRecord, expected: u64) -> Result<(), PluginHttpError> {
+    let edit_revision = draft.verification["edit_revision"].as_u64()
+        .filter(|revision| *revision > 0 && *revision <= draft.revision)
+        .unwrap_or(draft.revision);
+    if expected < edit_revision || expected > draft.revision {
+        return Err(PluginHttpError::conflict(&format!(
+            "Draft revision changed: expected_revision {expected} predates the current editable state or is unknown. Call read to load its current files and revision, then continue from that state; do not resend edits based on the older revision."
+        )));
+    }
+    Ok(())
+}
+
+fn mark_draft_edit(draft: &mut PluginDraftRecord) -> Result<(), PluginHttpError> {
+    let next = draft.revision.checked_add(1)
+        .ok_or_else(|| PluginHttpError::conflict("Draft revision exhausted"))?;
+    // GUI source edits invalidate the same derived facts as Agent apply.
+    // Preserve the accepted requirement, but never carry old runtime,
+    // authorization or delivery evidence onto newly edited bytes.
+    draft.verification = json!({
+        "edit_revision": next,
+        "task_message_id": draft.verification["task_message_id"],
+        "plan": draft.verification["plan"],
+    });
+    Ok(())
+}
+
 pub(super) fn parse_plugin_id(value: &str) -> Result<PluginId, PluginHttpError> {
     let id = Uuid::parse_str(value).map_err(|_| PluginHttpError::not_found())?;
     if id.get_version_num() != 7 || id.to_string() != value {
@@ -3247,9 +3297,77 @@ mod surface_policy_tests {
 }
 
 #[cfg(test)]
-mod legacy_draft_recovery_tests {
+mod authoring_revision_tests {
     use super::*;
 
+    fn draft(revision: u64, verification: Value) -> PluginDraftRecord {
+        PluginDraftRecord {
+            owner_user_id: "owner".into(), draft_id: "draft".into(), revision,
+            plugin_id: None, base_revision: None, name: "App".into(),
+            workspace_path: "workspace".into(), source_conversation_id: None,
+            source_message_id: None, source_operation_key: None, source_request_digest: None,
+            verification, imported_context: json!({}), status: PluginDraftStatus::Ready,
+            last_error: None, created_at_ms: 1, updated_at_ms: 1,
+        }
+    }
 
+    #[test]
+    fn observations_allow_reusing_source_revision_but_edits_invalidate_it() {
+        let mut draft = draft(9, json!({"edit_revision": 4}));
+        assert!(require_authoring_revision(&draft, 4).is_ok());
+        assert!(require_authoring_revision(&draft, 8).is_ok());
+        assert!(require_authoring_revision(&draft, 9).is_ok());
+        assert!(require_authoring_revision(&draft, 3).is_err());
+        assert!(require_authoring_revision(&draft, 10).is_err());
+        assert!(require_draft_revision(&draft, 8).is_err(), "GUI keeps exact CAS");
+        mark_draft_edit(&mut draft).unwrap();
+        draft.revision = 10;
+        assert!(require_authoring_revision(&draft, 9).is_err());
+        assert!(require_authoring_revision(&draft, 10).is_ok());
+    }
 
+    #[test]
+    fn gui_source_edit_preserves_requirements_but_invalidates_prior_evidence() {
+        let plan = json!({"output_key":"todo","outputs":[{"key":"todo","kind":"ui"}],
+            "cases":{"persist":{"kind":"ui","steps":[{"operation":"reopen"}]}}});
+        let mut draft = draft(9, json!({
+            "edit_revision":4,"task_message_id":"request","plan":plan,
+            "structure_passed":true,"artifact_digest":"old-artifact",
+            "runtime_ready":true,"has_ui":true,"has_service":false,
+            "cases":{"persist":{"passed":true,"persistence_checked":true}},
+            "execution":{"config":{}},"context":{"verifier":"old"},
+            "approval":{"approved":true},"surface":{"surface_session_id":"old"},
+            "installed_observation":{"artifact_digest":"old-artifact","ui_ready":true},
+            "delivery":{"artifact_digest":"old-artifact","plugin_revision":1},
+            "future_derived_evidence":true,
+        }));
+        draft.source_conversation_id = Some("conversation".into());
+        draft.source_message_id = Some("source-message".into());
+        draft.source_operation_key = Some("source-operation".into());
+        draft.source_request_digest = Some("source-digest".into());
+
+        mark_draft_edit(&mut draft).unwrap();
+        // Both successful GUI edit routes call this helper before their CAS.
+        // Exact equality also prevents any new derived evidence surviving.
+        assert_eq!(draft.verification, json!({
+            "edit_revision":10,"task_message_id":"request","plan":plan,
+        }));
+        assert_eq!(draft.source_conversation_id.as_deref(), Some("conversation"));
+        assert_eq!(draft.source_message_id.as_deref(), Some("source-message"));
+        assert_eq!(draft.source_operation_key.as_deref(), Some("source-operation"));
+        assert_eq!(draft.source_request_digest.as_deref(), Some("source-digest"));
+        draft.revision = 10;
+        assert!(require_authoring_revision(&draft, 9).is_err());
+        assert!(require_authoring_revision(&draft, 10).is_ok());
+    }
+
+    #[test]
+    fn missing_or_invalid_edit_watermark_requires_the_exact_current_revision() {
+        for verification in [json!({}), json!({"edit_revision": 0}),
+            json!({"edit_revision": 10}), json!({"edit_revision": "4"})] {
+            let draft = draft(9, verification);
+            assert!(require_authoring_revision(&draft, 8).is_err());
+            assert!(require_authoring_revision(&draft, 9).is_ok());
+        }
+    }
 }

@@ -3,8 +3,9 @@
 //! Run explicitly with the credential-isolating runner:
 //! `bun scripts/validation/run-nomi-core-live-provider-smoke.mjs`
 //! The default runner exercises the selected canonical Session → Runtime path.
-//! `NOMIFUN_LIVE_STEPFUN_MODEL` selects step-3.7-flash or step-5-preview,
-//! never an endpoint or fallback. Only the runner may read the credential env.
+//! `NOMIFUN_LIVE_STEPFUN_MODEL` selects a confirmed model (step-3.7-flash by
+//! default, or step-5-preview), never an endpoint or fallback. Only the runner
+//! may read the credential env.
 
 use std::fmt;
 use std::future::Future;
@@ -32,9 +33,13 @@ mod live_reasoning_lifecycle;
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
 mod live_general_desktop;
+#[cfg(all(feature = "browser-use", feature = "computer-use"))]
+#[path = "support/live_general_plugin.rs"]
+mod live_general_plugin;
 
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
+const STEPFUN_PLAN_MODELS: [&str; 2] = [STEPFUN_PLAN_MODEL, "step-5-preview"];
 const LIVE_MODEL_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_MODEL";
 const LIVE_API_KEY_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_API_KEY";
 const STDIN_CREDENTIAL_LIMIT_BYTES: u64 = 16 * 1024;
@@ -210,7 +215,7 @@ fn required_secret_from_stdin() -> Result<Zeroizing<String>, SmokeFailure> {
 
 fn live_model() -> Result<String, SmokeFailure> {
     match std::env::var(LIVE_MODEL_ENVIRONMENT_NAME) {
-        Ok(model) if matches!(model.as_str(), STEPFUN_PLAN_MODEL | "step-5-preview") => Ok(model),
+        Ok(model) if STEPFUN_PLAN_MODELS.contains(&model.as_str()) => Ok(model),
         Err(std::env::VarError::NotPresent) => Ok(STEPFUN_PLAN_MODEL.to_owned()),
         _ => Err(SmokeFailure::new("provider.model", "LIVE_MODEL_INVALID", 400)),
     }
@@ -3063,6 +3068,16 @@ async fn nomi_core_official_creative_studio_reaches_live_stepfun() {
 #[ignore = "requires a live credential on stdin; use the runner --general-desktop-smoke"]
 async fn nomi_core_general_desktop_reaches_live_stepfun() {
     if let Err(failure) = live_general_desktop::run().await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[cfg(all(feature = "browser-use", feature = "computer-use"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --plugin-smoke"]
+async fn nomi_core_general_plugin_creation_reaches_live_stepfun() {
+    if let Err(failure) = live_general_plugin::run().await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }

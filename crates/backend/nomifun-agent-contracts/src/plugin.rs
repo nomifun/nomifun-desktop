@@ -444,8 +444,12 @@ impl PluginActionPublication {
     }
 }
 
+/// Stable capability id prefix for Unified Plugin Actions; the Agent binds
+/// them under `plugin:<plugin_id>/<action>` (see plugin_action_id).
+pub const PLUGIN_ACTION_ID_PREFIX: &str = "plugin:";
+
 pub fn plugin_action_id(plugin_id: &PluginId, action_id: &str) -> String {
-    format!("plugin:{}/{action_id}", plugin_id.as_ref())
+    format!("{PLUGIN_ACTION_ID_PREFIX}{}/{action_id}", plugin_id.as_ref())
 }
 
 #[derive(Debug, Error)]
@@ -541,7 +545,7 @@ fn validate_text(
     Ok(())
 }
 
-fn validate_machine_id(
+pub fn validate_machine_id(
     value: &str,
     field: &'static str,
     maximum: usize,
@@ -557,9 +561,20 @@ fn validate_machine_id(
         })
         && value.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase());
     if !valid {
+        let mut shown = String::new();
+        let mut chars = value.chars();
+        for char in chars.by_ref().take(64) {
+            shown.extend(char.escape_debug());
+        }
+        if chars.next().is_some() {
+            shown.push('…');
+        }
         return Err(PluginContractError::InvalidField {
             field,
-            reason: "must be a lowercase machine identifier".into(),
+            reason: format!(
+                "'{shown}' must be a lowercase machine identifier of at most {maximum} bytes (start with a-z; then {})",
+                if allow_dot { "a-z, 0-9, '_', '-' or '.'" } else { "a-z, 0-9, '_' or '-'" }
+            ),
         });
     }
     Ok(())
@@ -714,6 +729,33 @@ mod tests {
             "properties":{"api_key":{"type":"string"}}
         }));
         assert!(secret_config.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_action_id_names_the_offending_identifier() {
+        let mut camel = manifest();
+        let action = camel.actions.remove("add_task").unwrap();
+        camel.actions.insert("addTask".into(), action);
+        let text = camel.validate().unwrap_err().to_string();
+        assert!(text.contains("'addTask'"), "{text}");
+        assert!(text.contains("lowercase machine identifier"), "{text}");
+        assert!(text.contains("actions.<id>"), "{text}");
+    }
+
+    #[test]
+    fn invalid_action_id_bounds_and_escapes_the_offending_identifier() {
+        let mut manifest = manifest();
+        let action = manifest.actions.remove("add_task").unwrap();
+        manifest.actions.insert("A".repeat(10_000), action.clone());
+        let text = manifest.validate().unwrap_err().to_string();
+        assert!(text.len() < 400, "{text}");
+        assert!(text.contains('…'), "{text}");
+        assert!(text.contains("at most 96 bytes"), "{text}");
+        manifest.actions.clear();
+        manifest.actions.insert("bad\nid".into(), action);
+        let text = manifest.validate().unwrap_err().to_string();
+        assert!(!text.contains('\n'), "control characters stay escaped: {text}");
+        assert!(text.contains("bad\\nid"), "{text}");
     }
 
     #[test]

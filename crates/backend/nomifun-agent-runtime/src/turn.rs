@@ -4,7 +4,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use nomifun_agent_contracts::{AgentSessionId, OperationId, PrincipalRef};
 use nomifun_chat_model_broker::{
-    ChatContentPart, ChatFinishReason, ChatMessage, ChatModelErrorCode, ChatModelEvent,
+    ChatCausality, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelErrorCode, ChatModelEvent,
     ChatModelRequest, ChatRole, ChatToolCall, ChatToolChoice, ProviderRoundId, ToolCallId,
 };
 use tokio_util::sync::CancellationToken;
@@ -52,11 +52,18 @@ pub struct AgentTurnRequest {
     pub resource_port: Option<Arc<dyn nomifun_engine_core::EngineResourcePort>>,
     pub tool_discovery_port: Option<Arc<dyn crate::AgentToolDiscoveryPort>>,
     pub history_port: Option<Arc<dyn crate::AgentHistoryPort>>,
+    /// Host settlement check consulted before an otherwise complete turn
+    /// closes; the host completion gate remains the final authority.
+    pub completion_check_port: Option<Arc<dyn crate::AgentCompletionCheckPort>>,
     /// Canonical latest closed task, not a checkpoint or live execution state.
     pub prior_task: Option<crate::AgentPriorTask>,
     /// Host-loaded permanent engine state, independent of the history window.
     pub patch_recovery: crate::AgentPatchRecoveryState,
     pub recovery: Option<Arc<crate::AgentTurnRecovery>>,
+    /// Host presentation hint with exactly the semantics of a successful
+    /// ToolSearch activation: reveals already-admitted deferred schemas from
+    /// the first model step. Never changes bindings or authority.
+    pub preactivated_tools: std::collections::BTreeSet<String>,
 }
 
 impl AgentTurnRequest {
@@ -89,10 +96,20 @@ impl AgentTurnRequest {
             resource_port: None,
             tool_discovery_port: None,
             history_port: None,
+            completion_check_port: None,
             prior_task: None,
             patch_recovery: Default::default(),
             recovery: None,
+            preactivated_tools: Default::default(),
         }
+    }
+
+    pub fn with_preactivated_tools(
+        mut self,
+        names: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.preactivated_tools = names.into_iter().collect();
+        self
     }
 
     pub fn with_max_model_steps(mut self, max_model_steps: u16) -> Self {
@@ -166,6 +183,14 @@ impl AgentTurnRequest {
 
     pub fn with_history_port(mut self, port: Arc<dyn crate::AgentHistoryPort>) -> Self {
         self.history_port = Some(port);
+        self
+    }
+
+    pub fn with_completion_check_port(
+        mut self,
+        port: Arc<dyn crate::AgentCompletionCheckPort>,
+    ) -> Self {
+        self.completion_check_port = Some(port);
         self
     }
 
@@ -252,6 +277,12 @@ pub(crate) async fn run_turn(
     }
     let model = request.voice_immediate.as_ref().map(|port| port.model_port()).unwrap_or(model);
     let recovery = request.recovery.take();
+    let event_sink: Arc<dyn AgentEventSink> = if let Some(port) = &request.completion_check_port {
+        if let Some(recovery) = &recovery {
+            for event in recovery.prefix.iter().chain(&recovery.tail) { port.observe(event)?; }
+        }
+        Arc::new(crate::completion_check::ObservedSink { sink: event_sink, port: port.clone() })
+    } else { event_sink };
     let interrupted_delivery_review = recovery.as_ref().is_some_and(|state|
         state.checkpoint.completion_review.delivery_pending && state.last_model_step > state.checkpoint.model_steps);
     if request.segment_policy.is_some() && !event_sink.supports_checkpoints() {
@@ -396,7 +427,23 @@ pub(crate) async fn run_turn(
             }
         }
     }
-    let mut discovered_tools = std::collections::BTreeSet::new();
+    let mut discovered_tools = recovery
+        .as_ref()
+        .map(|recovery| {
+            restore_discovered_tools(
+                recovery.prefix.iter().chain(&recovery.tail),
+                &request.tool_plan,
+            )
+        })
+        .unwrap_or_default();
+    // Host pre-activation is the same presentation state a successful
+    // ToolSearch would set: only already-admitted deferred names count.
+    discovered_tools.extend(request.preactivated_tools.iter().filter(|name| {
+        request
+            .tool_plan
+            .binding(name.as_str())
+            .is_some_and(|binding| binding.definition.deferred)
+    }).cloned());
 
     // The host supplies canonical facts; the engine selects its model context.
     // Do this only at turn entry: trimming individual messages inside an active
@@ -442,6 +489,21 @@ pub(crate) async fn run_turn(
             }
         }
     }
+    // Host completion checks are bounded across recovery too: a fresh
+    // accepted-input span starts at each steering boundary, and the recorded
+    // rejections after the last one are the durable count.
+    let mut relay_budget = crate::completion_check::RelayBudget::restore(
+        recovery.as_ref().into_iter()
+            .flat_map(|recovery| recovery.prefix.iter().chain(&recovery.tail)),
+        retained_inputs.len(),
+    );
+    // A host Pause/Delivered verdict settles an incidental ledger only when
+    // this turn did no ledger-requiring work; step-0 ToolStarted events are
+    // the engine's own instruction reads, not task work.
+    let mut ledger_work = recovery.as_ref().into_iter()
+        .flat_map(|recovery| recovery.prefix.iter().chain(&recovery.tail))
+        .any(|event| matches!(event, AgentEngineEvent::ToolStarted { step, capability_id, .. }
+            if *step > 0 && crate::execution_policy::requires_task_ledger_capability(capability_id.as_ref())));
     let mut adaptive_slots = AdaptiveContextSlots::default();
     let live_context_slot = if let Some(port) = &request.live_context_port {
         let slot = model_request.input.instructions.len();
@@ -530,6 +592,36 @@ pub(crate) async fn run_turn(
     }
 
     'model_steps: loop {
+    // A pure host-delivery exit retains the authorization and terminal-input
+    // fence. A newly accepted input keeps this same Turn executing.
+    macro_rules! settle_host_delivery {
+        ($work:expr, $state:expr) => {{
+            let candidate = AgentTurnResult {
+                agent_session_id: agent_session_id.clone(), turn_operation_id: turn_operation_id.clone(),
+                model_steps, output_text: output_text.clone(), reasoning_text: reasoning_text.clone(),
+                tool_call_count, provider_round_id: provider_round_id.clone(),
+                terminal: AgentTurnTerminal::Completed { finish_reason: ChatFinishReason::Completed },
+            };
+            match settle_host_delivered(request.completion_check_port.as_ref(), request.input_port.as_ref(),
+                &model_request.causality, ledger_work, $work,
+                &patch_recovery, &event_sink, &cancellation, candidate).await? {
+                HostDeliverySettlement::Unsettled => {},
+                HostDeliverySettlement::Terminal(result) => return Ok(result),
+                HostDeliverySettlement::Inputs(inputs) => {
+                    crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs,
+                        &mut steering_receipts, &mut steering_receipt_order)?;
+                    control_rejections.reset();
+                    completion_review_used = false;
+                    if let Some(state) = $state {
+                        state.execution_plan.needs_replan = true;
+                        state.completion.invalidate();
+                    }
+                    continue 'model_steps;
+                }
+            }
+        }};
+    }
+
         if interrupted_delivery_review {
             return fail_turn(&event_sink, model_steps,
                 "the single delivery review was interrupted after its model request started; it will not be automatically replayed or publish its candidate").await;
@@ -546,6 +638,24 @@ pub(crate) async fn run_turn(
                 provider_round_id.clone(),
             )
             .await;
+        }
+
+        // Incorporate an already accepted owner reply before consulting a
+        // replay-derived stall watchdog. Recovery alone does not reset it;
+        // the canonical SteeringInputs event for this reply does.
+        if let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, false).await?;
+            crate::completion_check::observe_inputs(request.completion_check_port.as_ref(), &inputs)?;
+            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
+                completion_review_used = false;
+                protocol_recovery.observe_new_input();
+                control_rejections.reset();
+                adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                    crate::AgentRuntimeActivationReason::Steering, event_sink.as_ref()).await?;
+                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
+            }
         }
 
         if let Some(current) = segments.as_ref() {
@@ -594,24 +704,6 @@ pub(crate) async fn run_turn(
 
         // This boundary is reached only after the previous batch has settled.
         // Never compact a stream with incomplete tool calls/results.
-        if let Some(port) = &request.input_port {
-            let inputs = port.take(&model_request.causality, false).await?;
-            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
-                completion_review_used = false;
-                protocol_recovery.observe_new_input();
-                control_rejections.reset();
-                adaptive
-                    .activate(
-                        crate::adaptive::LEDGER_MODULES,
-                        crate::AgentRuntimeActivationReason::Steering,
-                        event_sink.as_ref(),
-                    )
-                    .await?;
-                let state = long_horizon.get_or_insert_with(LongHorizonState::default);
-                state.execution_plan.needs_replan = true;
-                state.completion.invalidate();
-            }
-        }
         let refreshed_instructions = scoped_instructions.before_model(tools.as_ref(), event_sink.as_ref(), cancellation.clone()).await?;
         // before_calls may already have replaced layers. Comparing
         // the actual model slot also catches those changes on read-only batches
@@ -696,7 +788,18 @@ pub(crate) async fn run_turn(
                     || (state.execution_plan.revision > 0 && !state.execution_plan.is_open()))));
         let execution_surface = model_request.input.tools.iter().map(|tool| tool.name.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        let phase = synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used || account_repair || report_only_locked, review_can_report, review_has_running_processes, continuing_complex_task);
+        // Mirrors the plan gate in completion.rs submit_with_history: a
+        // non-stale revision-0 plan is bumped before checking, and a settled
+        // failure on an empty plan may still report blocked; report_completion
+        // is only guaranteed-rejected while a non-settled plan stays stale.
+        let plan_blocks_report = !report_only_locked && long_horizon.as_ref().is_some_and(|state|
+            state.execution_plan.needs_replan
+                && !(state.completion.settled_failure_gate()
+                    && state.execution_plan.revision == 0
+                    && state.execution_plan.steps.is_empty()));
+        let phase = synchronize_completion_review(&mut model_request, &mut adaptive_slots,
+            completion_review_used || account_repair || report_only_locked, review_can_report,
+            plan_blocks_report, review_has_running_processes, continuing_complex_task);
         let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.review.delivery_pending);
         let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
         if let Some(state) = long_horizon.as_mut() { state.completion.review.phase = phase; }
@@ -1129,6 +1232,7 @@ pub(crate) async fn run_turn(
         // its complete proposed batch before the ordinary failure branches.
         if delivery_review_step && let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, false).await?;
+            crate::completion_check::observe_inputs(request.completion_check_port.as_ref(), &inputs)?;
             if !inputs.is_empty() {
                 let discarded_tool_call_ids = step.call_order.clone();
                 crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
@@ -1263,10 +1367,28 @@ pub(crate) async fn run_turn(
         }
         output_limit_recovery.observe_complete_step();
         step.finalize()?;
-        let empty_task_response = matches!(finish_reason, ChatFinishReason::Completed)
-            && adaptive.task_ledger() && !step.has_tool_calls()
+        // A terminal answer with no public text and no native call is not a
+        // closing response once the turn has done tool work, and a private
+        // pseudo tool call (`<tool_call>` markup inside the reasoning channel)
+        // is never execution or evidence. Reject either carrier for one bounded
+        // correction; a genuinely empty plain-chat response still completes.
+        // The broader carriers (tool-loop work, pseudo-call markup) apply only
+        // while the host reports an actionable delivery gap for this accepted
+        // request; a dormant check (no host-owned gap, or a pending safe-point
+        // pause) keeps the original ledger-only rule.
+        let empty_terminal = matches!(finish_reason, ChatFinishReason::Completed)
+            && !step.has_tool_calls()
             && !step.assistant_content.iter().any(|part|
                 matches!(part, ChatContentPart::Text { text } if !text.trim().is_empty()));
+        let empty_task_response = empty_terminal
+            && (adaptive.task_ledger()
+                || ((adaptive.tool_loop()
+                        || step.assistant_content.iter().any(|part|
+                            matches!(part, ChatContentPart::Reasoning { text, .. }
+                                if text.contains(crate::public_output::TOOL_TAG)
+                                    || text.contains(crate::public_output::FUNCTION_TAG))))
+                    && crate::completion_check::actionable_gap(
+                        request.completion_check_port.as_ref(), &model_request.causality).await?));
         if delivery_review_step && !step.has_tool_calls() {
             return fail_turn(&event_sink, model_steps,
                 "the single delivery review did not submit its final report; the candidate was not delivered").await;
@@ -1286,6 +1408,7 @@ pub(crate) async fn run_turn(
         // proposed batch. Close every call/result pair without executing it.
         if let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, false).await?;
+            crate::completion_check::observe_inputs(request.completion_check_port.as_ref(), &inputs)?;
             if !inputs.is_empty() {
                 adaptive
                     .activate(
@@ -1355,7 +1478,9 @@ pub(crate) async fn run_turn(
                             )
                         })?;
                     if let Some(tool) = request.tool_plan.binding(&call.name) {
+                        relay_budget.observe_work();
                         if crate::execution_policy::requires_task_ledger(tool) {
+                            ledger_work = true;
                             long_horizon_calls = long_horizon_calls.saturating_add(1);
                         }
                     } else if call.name == crate::task_continuation::TOOL_NAME {
@@ -1715,6 +1840,43 @@ pub(crate) async fn run_turn(
                 && state.work_status.running_processes.is_empty()
                 && (!patch_recovery.pending() || terminal_report.as_ref().is_some_and(|report| report.is_blocked()))
             {
+                // A bounded host settlement check keeps the turn open while
+                // durable delivery facts are still missing; the post-turn
+                // completion gate remains the final authority. The port is
+                // consulted on every settlement attempt: rejections are
+                // relayed at most MAX_COMPLETION_CHECKS times per
+                // accepted-input span and only after intervening authorized
+                // tool work since the previous relay; an unrelayed rejection,
+                // a HostPause answer, or — for a turn that did no
+                // ledger-requiring work — a Delivered answer means the host
+                // owns the outcome at its safe point, so an honest blocked
+                // account below settles instead of failing.
+                let mut host_settles_blocked = false;
+                match crate::completion_check::settle(
+                    request.completion_check_port.as_ref(),
+                    &model_request.causality,
+                    relay_budget.can_relay(retained_inputs.len(), model_steps < total_model_limit),
+                )
+                .await?
+                {
+                    crate::completion_check::HostSettlement::Relay(feedback) => {
+                        let feedback = crate::completion_check::relayed_feedback(feedback,
+                            adaptive.task_ledger() && state.execution_plan.effect_gate().is_some());
+                        relay_budget.record_relay();
+                        event_sink.emit(AgentEngineEvent::CompletionCheckRejected {
+                            step: model_steps, feedback: feedback.clone(),
+                        }).await?;
+                        model_request.input.messages.push(crate::completion_check::notice(&feedback));
+                        model_request.input.provider_round_parent = None;
+                        provider_round_id = None;
+                        state.completion.resume_host_work();
+                        completion_review_used = false;
+                        continue 'model_steps;
+                    }
+                    crate::completion_check::HostSettlement::Pause => host_settles_blocked = true,
+                    crate::completion_check::HostSettlement::Delivered => host_settles_blocked = !ledger_work,
+                    crate::completion_check::HostSettlement::Settle => {}
+                }
                 // `take(..., true)` is the terminal fence: when it returns
                 // empty, the host atomically closes steering for this turn.
                 // A separate `has_pending` check would leave a race in which
@@ -1724,6 +1886,7 @@ pub(crate) async fn run_turn(
                     Some(port) => port.take(&model_request.causality, true).await?,
                     None => Vec::new(),
                 };
+                crate::completion_check::observe_inputs(request.completion_check_port.as_ref(), &terminal_inputs)?;
                 if terminal_inputs.is_empty() {
                     if cancellation.is_cancelled() {
                         return cancelled_turn(&event_sink,&agent_session_id,&turn_operation_id,
@@ -1734,7 +1897,7 @@ pub(crate) async fn run_turn(
                         if !output_text.is_empty() { delivery.insert_str(0, "\n\n"); }
                         output_text.push_str(&delivery);
                         event_sink.emit(AgentEngineEvent::CompletionDelivered { step:model_steps,text:delivery }).await?;
-                        if report.is_blocked() {
+                        if report.is_blocked() && !host_settles_blocked {
                             return fail_turn(&event_sink,model_steps,"completion account contains blocked work; this turn cannot be published as task completion").await;
                         }
                     }
@@ -1777,6 +1940,11 @@ pub(crate) async fn run_turn(
                 state.completion.invalidate();
             }
             if let Some(reason) = repeated_control_rejection {
+                // A report-control correction loop cannot overturn durable
+                // host delivery for a task with no ledger-requiring work.
+                // Its rejected reports remain recorded as errors; they are
+                // never promoted into a successful completion account.
+                settle_host_delivery!(Some(&state.work_status), Some(state));
                 return fail_turn(&event_sink, model_steps,
                     format!("engine control made no progress; {reason}")).await;
             }
@@ -1825,10 +1993,57 @@ pub(crate) async fn run_turn(
             }
             continue 'model_steps;
         }
+        // A bounded host settlement check keeps the turn open while durable
+        // delivery facts are still missing; it runs before the ledger
+        // completion review and the terminal ledger gates so actionable
+        // delivery feedback reaches the model first. The post-turn
+        // completion gate remains the final authority. The port is consulted
+        // on every settlement attempt: rejections are relayed at most
+        // MAX_COMPLETION_CHECKS times per accepted-input span and only after
+        // intervening authorized tool work since the previous relay; an
+        // unrelayed rejection pauses like HostPause, and a Pause or
+        // Delivered verdict for a turn that did no ledger-requiring work
+        // means the host owns the outcome, so the ledger's completion gates
+        // below do not apply.
+        let mut host_pause_pending = false;
+        let mut host_owns_outcome = false;
+        if matches!(finish_reason, ChatFinishReason::Completed) {
+            match crate::completion_check::settle(
+                request.completion_check_port.as_ref(),
+                &model_request.causality,
+                relay_budget.can_relay(retained_inputs.len(), model_steps < total_model_limit),
+            )
+            .await?
+            {
+                crate::completion_check::HostSettlement::Relay(feedback) => {
+                    let feedback = crate::completion_check::relayed_feedback(feedback,
+                        adaptive.task_ledger()
+                            && long_horizon.as_ref().is_some_and(|state| state.execution_plan.effect_gate().is_some()));
+                    relay_budget.record_relay();
+                    event_sink.emit(AgentEngineEvent::CompletionCheckRejected {
+                        step: model_steps, feedback: feedback.clone(),
+                    }).await?;
+                    model_request.input.messages.push(crate::completion_check::notice(&feedback));
+                    model_request.input.provider_round_parent = None;
+                    provider_round_id = None;
+                    if let Some(state) = long_horizon.as_mut() {
+                        state.completion.resume_host_work();
+                    }
+                    completion_review_used = false;
+                    continue 'model_steps;
+                }
+                crate::completion_check::HostSettlement::Pause => {
+                    host_pause_pending = true;
+                    host_owns_outcome = !ledger_work;
+                }
+                crate::completion_check::HostSettlement::Delivered => host_owns_outcome = !ledger_work,
+                crate::completion_check::HostSettlement::Settle => {}
+            }
+        }
         // At most one evidence review, never an unbounded self-retry. The
         // model may report a blocker/unverified result instead of invoking a
         // command; a user prohibition on verification remains authoritative.
-        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() {
+        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() && !host_owns_outcome {
             let state = long_horizon.as_ref().ok_or_else(|| {
                 AgentEngineError::InvalidContract(
                     "active task ledger has no turn-local state".into(),
@@ -1855,7 +2070,7 @@ pub(crate) async fn run_turn(
             }
         }
         if matches!(finish_reason, ChatFinishReason::Completed)
-            && adaptive.task_ledger()
+            && adaptive.task_ledger() && !host_owns_outcome
             && long_horizon
                 .as_ref()
                 .is_some_and(|state| state.execution_plan.is_open())
@@ -1869,7 +2084,7 @@ pub(crate) async fn run_turn(
         {
             return fail_turn(&event_sink, model_steps, "processes remain running; poll or cancel them explicitly before completion (host cleanup will still reap them)").await;
         }
-        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() {
+        if matches!(finish_reason, ChatFinishReason::Completed) && adaptive.task_ledger() && !host_owns_outcome {
             let state = long_horizon.as_ref().ok_or_else(|| {
                 AgentEngineError::InvalidContract(
                     "active task ledger has no turn-local state".into(),
@@ -1882,7 +2097,7 @@ pub(crate) async fn run_turn(
             ) else {
                 return fail_turn(&event_sink, model_steps, "completion account is missing or stale; call report_completion after the latest plan, input and tool observations").await;
             };
-            if report.is_blocked() {
+            if report.is_blocked() && !host_pause_pending {
                 return fail_turn(&event_sink, model_steps, "completion account contains blocked work; this turn cannot be published as task completion").await;
             }
         }
@@ -1891,6 +2106,7 @@ pub(crate) async fn run_turn(
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
         if let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, true).await?;
+            crate::completion_check::observe_inputs(request.completion_check_port.as_ref(), &inputs)?;
             if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
                 completion_review_used = false;
                 control_rejections.reset();
@@ -2087,6 +2303,7 @@ fn synchronize_completion_review(
     slots: &mut AdaptiveContextSlots,
     active: bool,
     can_report: bool,
+    plan_blocks_report: bool,
     has_running_processes: bool,
     continuing_complex_task: bool,
 ) -> AgentExecutionPhase {
@@ -2109,7 +2326,20 @@ fn synchronize_completion_review(
         // original inputs, evidence and authority remain unchanged.
         upsert_instruction(&mut request.input.instructions, &mut slots.completion_review,
             "Completion review is active for this same accepted task. The closing answer or completion call lacks a valid current completion report. Submit report_completion using available_evidence and exact observed failure counts. The original user inputs retained after a summary are the same inputs, not new requests to repeat work. Do not restart the task or repeat settled checks solely because history was summarized. Do not add file reads or directory listings to repair this account. When report_completion is the only advertised tool, submit that report alone; the unavailable action tools are intentionally closed for this phase, not missing capabilities to discover or test. Missing evidence must be disclosed as unverified/blocked; a summary is not proof, permission or a successful receipt. Settle any running process and preserve unresolved recovery obligations before claiming completion.".into());
-        if can_report && request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME) {
+        if can_report && plan_blocks_report
+            && request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME)
+        {
+            // completion.rs check_with_history rejects report_completion while
+            // the plan is missing or stale. Keep both controls exposed so the
+            // model can record the actual plan steps first; the explicit
+            // report rejection names update_plan rather than deadlocking.
+            if let Some(slot) = slots.completion_review {
+                request.input.instructions[slot].push_str(" The current plan is missing or stale, so report_completion would be rejected now: first call update_plan alone to record the steps that actually happened, then submit report_completion.");
+            }
+            request.input.tools.retain(|tool| tool.name == crate::planning::TOOL_NAME
+                || tool.name == crate::completion::TOOL_NAME);
+            request.input.tool_choice = ChatToolChoice::Required;
+        } else if can_report && request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME) {
             // Select the already exposed control after a terminal answer.
             // Some compatible providers ignore tool_choice, so expose only
             // this control for the review. The frozen authority is unchanged;
@@ -2427,6 +2657,47 @@ fn required_historical_report(archive:&crate::tool_archive::ToolArchive,inputs:&
         && catalog["records"].as_array().is_some_and(|records|!records.is_empty())
 }
 
+/// ToolSearch activations are turn-local presentation state, not durable
+/// authority. On checkpoint recovery, rebuild the set from the recorded
+/// ToolSearch results so the resumed turn re-exposes the same already-admitted
+/// deferred schemas instead of reporting the tools as not exposed.
+fn restore_discovered_tools<'a>(
+    events: impl Iterator<Item = &'a AgentEngineEvent>,
+    plan: &AgentToolPlan,
+) -> std::collections::BTreeSet<String> {
+    let mut discovery_calls = std::collections::BTreeSet::new();
+    let mut restored = std::collections::BTreeSet::new();
+    for event in events {
+        match event {
+            AgentEngineEvent::ToolCallCompleted { call, .. }
+                if call.name == crate::tool_discovery::TOOL_NAME =>
+            {
+                discovery_calls.insert(call.call_id.clone());
+            }
+            AgentEngineEvent::ToolCompleted { result, .. }
+                if !result.is_error && discovery_calls.contains(&result.call_id) =>
+            {
+                let Ok(entries) =
+                    serde_json::from_str::<Vec<serde_json::Value>>(&result.output_text())
+                else {
+                    continue;
+                };
+                for entry in entries {
+                    if let Some(name) = entry.get("name").and_then(serde_json::Value::as_str)
+                        && plan
+                            .binding(name)
+                            .is_some_and(|binding| binding.definition.deferred)
+                    {
+                        restored.insert(name.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    restored
+}
+
 fn upsert_instruction(
     instructions: &mut Vec<String>,
     slot: &mut Option<usize>,
@@ -2479,6 +2750,48 @@ fn configure_tools(
     if resources { request.input.tools.push(crate::context_resources::definition()); }
     if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
     Ok(())
+}
+
+enum HostDeliverySettlement {
+    Unsettled,
+    Inputs(Vec<crate::AgentSteeringInput>),
+    Terminal(AgentTurnResult),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_host_delivered(
+    completion_port: Option<&Arc<dyn crate::AgentCompletionCheckPort>>,
+    input_port: Option<&Arc<dyn crate::AgentInputPort>>,
+    causality: &ChatCausality, ledger_work: bool,
+    work: Option<&crate::AgentWorkStatus>, patch_recovery: &crate::patch_recovery::PatchRecovery,
+    event_sink: &Arc<dyn AgentEventSink>, cancellation: &CancellationToken,
+    result: AgentTurnResult,
+) -> Result<HostDeliverySettlement, AgentEngineError> {
+    if ledger_work || work.is_some_and(|work| !work.running_processes.is_empty())
+        || patch_recovery.pending() || patch_recovery.unresolved() {
+        return Ok(HostDeliverySettlement::Unsettled);
+    }
+    let Some(port) = completion_port else { return Ok(HostDeliverySettlement::Unsettled); };
+    if !matches!(crate::completion_check::normalize(port.check(causality).await?), crate::AgentCompletionCheck::Delivered) {
+        return Ok(HostDeliverySettlement::Unsettled);
+    }
+    let inputs = match input_port {
+        Some(port) => port.take(causality, true).await?, None => Vec::new(),
+    };
+    crate::completion_check::observe_inputs(completion_port, &inputs)?;
+    if !inputs.is_empty() { return Ok(HostDeliverySettlement::Inputs(inputs)); }
+    if cancellation.is_cancelled() {
+        return cancelled_turn(event_sink, &result.agent_session_id, &result.turn_operation_id,
+            result.model_steps, &result.output_text, &result.reasoning_text, result.tool_call_count,
+            result.provider_round_id.clone()).await.map(HostDeliverySettlement::Terminal);
+    }
+    // Delivery details already live in the host's receipts/tool results. Keep
+    // the exact journaled model output: no invented account or post-tool model
+    // stream fragment is needed to close this verified pure-host task.
+    event_sink.emit(AgentEngineEvent::TurnCompleted {
+        model_steps: result.model_steps, finish_reason: ChatFinishReason::Completed,
+    }).await?;
+    Ok(HostDeliverySettlement::Terminal(result))
 }
 
 async fn fail_turn(
@@ -2562,13 +2875,25 @@ async fn invoke_tool_calls(
     let completed = step.call_order.iter().map(|id| step.calls.get(id).and_then(|pending| pending.completed.clone())
         .ok_or_else(|| AgentEngineError::InvalidModelEvent("incomplete tool call".into())))
         .collect::<Result<Vec<_>, _>>()?;
-    if let Some(results) = argument_validators.reject_invalid_batch(&completed, plan, &model_request.input.tools)? {
+    if let Some(mut results) = argument_validators.reject_invalid_batch(&completed, plan, &model_request.input.tools)? {
         // This precedes instruction discovery, Kernel admission and controls.
         // All calls receive paired, non-executed results; no successful prefix
         // can be accidentally repeated when the model repairs the batch.
         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
         if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
             completion.invalidate_report();
+            let rejected = results.iter().filter(|(_, result)|result.as_ref().is_ok_and(|result|result.is_error)).count() as u32;
+            let next_count = work_status.failed_tools.saturating_add(rejected);
+            for (id, result) in &mut results {
+                if completed.iter().any(|call| &call.call_id == id && call.name == crate::completion::TOOL_NAME)
+                    && let Ok(result) = result {
+                    let mut feedback: serde_json::Value = serde_json::from_str(&result.output_text())
+                        .map_err(|error|AgentEngineError::InvalidContract(format!("invalid control refusal: {error}")))?;
+                    feedback["next_observed_tool_error_count"] = serde_json::json!(next_count);
+                    feedback["message"] = serde_json::json!(format!("{} After this rejected batch is recorded, the NEXT report must use observed_tool_error_count={next_count}; copy the next advertised const.", feedback["message"].as_str().unwrap_or_default()));
+                    *result = AgentToolResult::text(result.call_id.clone(), feedback.to_string(), true);
+                }
+            }
         }
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
@@ -5524,7 +5849,7 @@ mod tests {
         let transcript_review = work.completion_review_message().unwrap();
         request.input.messages.push(transcript_review.clone());
         let mut slots = AdaptiveContextSlots::default();
-        synchronize_completion_review(&mut request, &mut slots, true, false, false, false);
+        synchronize_completion_review(&mut request, &mut slots, true, false, false, false, false);
         assert!(slots.completion_review.is_some(), "active review must have a host instruction independent of the transcript");
         assert!(request.input.instructions.iter().any(|instruction| instruction.contains("explicit prohibitions, including read-only probes")),
             "user restrictions must be explicit in the preserved model policy");
@@ -5542,9 +5867,9 @@ mod tests {
         assert_eq!(request.input.tools,tools, "review context grants no new tools");
         assert_eq!(request.input.messages.iter().filter(|message| **message==original).count(),1);
         assert!(serde_json::to_vec(&request.input).unwrap().len()<=resource.max_context_bytes);
-        synchronize_completion_review(&mut request,&mut slots,true,false,false,false);
+        synchronize_completion_review(&mut request,&mut slots,true,false,false,false,false);
         assert_eq!(request.input.instructions,instructions, "reconstruction must not append duplicate phase instructions");
-        synchronize_completion_review(&mut request,&mut slots,false,false,false,false);
+        synchronize_completion_review(&mut request,&mut slots,false,false,false,false,false);
         assert!(request.input.instructions[slots.completion_review.unwrap()].is_empty(), "new input/observations clear the old phase");
         assert_eq!(request.input.instructions[0],instructions[0]);
         request.validate().expect("clearing the turn-local review must leave a valid model request");
@@ -6370,6 +6695,852 @@ mod tests {
         assert_eq!(*bounded_tools.calls.lock().unwrap(),["cwd","entries"],"empty output cannot replay effects");
     }
 
+    /// A pseudo tool call emitted only inside the reasoning channel after real
+    /// tool work is a rejected step, never a silent closing answer — and only
+    /// while the host check reports an actionable gap.
+    #[tokio::test]
+    async fn reasoning_only_terminal_after_tool_use_is_rejected_not_completed() {
+        #[derive(Debug)]
+        struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(if self.0.fetch_add(1,Ordering::SeqCst)==0 {
+                    crate::AgentCompletionCheck::Reject("PLUGIN_DELIVERY_REQUIRED: not installed".into())
+                } else { crate::AgentCompletionCheck::Settle })
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        #[derive(Default)]
+        struct Tools(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                Ok(workspace_result(invocation))
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("read","read_file",json!({"path":"b"})),
+            vec![
+                Ok(ChatModelEvent::ReasoningDelta {text:
+                    "PRIVATE <tool_call><function=read_file><parameter=path>b</parameter></function></tool_call>".into()}),
+                Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
+            ],
+            text_step("Done"),
+        ])});
+        let tools=Arc::new(Tools::default());
+        let sink=Arc::new(Sink::default());
+        let port=Arc::new(Port(AtomicUsize::new(0)));
+        let result=run_turn(binding(),model.clone(),tools.clone(),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(port.clone()),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(result.output_text,"Done");
+        assert_eq!(model.requests.lock().unwrap().len(),3);
+        assert_eq!(port.0.load(Ordering::SeqCst),2,
+            "the gap probe runs once for the empty carrier and the check once at settlement");
+        assert!(!sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::CompletionCheckRejected {..})),
+            "the empty-terminal correction is not a settlement rejection");
+        assert!(sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::ModelResponseRejected {step:2,..})),
+            "a reasoning-only pseudo call after tool work is rejected, not completion");
+        assert_eq!(*tools.0.lock().unwrap(),["read"],"only the real native call executes");
+        let correction=serde_json::to_string(&model.requests.lock().unwrap()[2].input).unwrap();
+        assert!(!correction.contains("<function=read_file>"),
+            "the rejected private call is not replayed as factual context");
+    }
+
+    /// The broader empty-terminal correction is scoped to host-checked
+    /// settlement turns: without a host completion check the same reasoning
+    /// pseudo-call step still completes as before.
+    #[tokio::test]
+    async fn without_a_host_check_an_empty_terminal_after_tool_use_still_completes() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("read","read_file",json!({"path":"b"})),
+            vec![
+                Ok(ChatModelEvent::ReasoningDelta {text:
+                    "PRIVATE <tool_call><function=read_file><parameter=path>b</parameter></function></tool_call>".into()}),
+                Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
+            ],
+        ])});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(model.requests.lock().unwrap().len(),2);
+        assert!(!sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::ModelResponseRejected {..})),
+            "an unchecked plain turn is not held to the host-check carriers");
+    }
+
+    /// A dormant host check (no actionable gap: Settle, or a pending
+    /// safe-point HostPause) must not reclassify an unrelated empty terminal:
+    /// the broader carriers apply only while a gap is actionable.
+    #[tokio::test]
+    async fn dormant_host_check_keeps_an_empty_terminal_after_tool_use_completing() {
+        #[derive(Debug)]
+        struct Port(crate::AgentCompletionCheck);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(self.0.clone())
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        for check in [crate::AgentCompletionCheck::Settle,crate::AgentCompletionCheck::HostPause] {
+            let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+                control_step("read","read_file",json!({"path":"b"})),
+                vec![
+                    Ok(ChatModelEvent::ReasoningDelta {text:
+                        "PRIVATE <tool_call><function=read_file><parameter=path>b</parameter></function></tool_call>".into()}),
+                    Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
+                ],
+            ])});
+            let sink=Arc::new(Sink::default());
+            let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+                AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                    .with_completion_check_port(Arc::new(Port(check))),
+                AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+            assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+            assert_eq!(model.requests.lock().unwrap().len(),2);
+            assert!(!sink.0.lock().unwrap().iter().any(|event|
+                matches!(event,AgentEngineEvent::ModelResponseRejected {..})),
+                "a dormant host check does not reject an unrelated empty terminal");
+        }
+    }
+
+    /// A plain reasoning-only terminal on a fresh turn with no tool work still
+    /// completes; only tool-loop turns and pseudo-call carriers are rejected.
+    #[tokio::test]
+    async fn plain_reasoning_only_terminal_without_tool_use_still_completes() {
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            vec![
+                Ok(ChatModelEvent::ReasoningDelta {text:"private thinking with no tool markup".into()}),
+                Ok(ChatModelEvent::Completed {finish_reason:ChatFinishReason::Completed}),
+            ],
+        ])});
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),Arc::new(NoopAgentEventSink),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(model.requests.lock().unwrap().len(),1);
+    }
+
+    /// A host settlement check relays actionable feedback into the same turn:
+    /// one bounded rejection, then the model settles on the next answer.
+    #[tokio::test]
+    async fn host_completion_check_relays_bounded_feedback_into_the_same_turn() {
+        #[derive(Debug)]
+        struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(if self.0.fetch_add(1,Ordering::SeqCst)==0 {
+                    crate::AgentCompletionCheck::Reject("PLUGIN_DELIVERY_REQUIRED: verified but not installed; call install then inspect".into())
+                } else { crate::AgentCompletionCheck::Settle })
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            text_step("The plugin is ready."),
+            text_step("The plugin is now installed and inspected."),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let port=Arc::new(Port(AtomicUsize::new(0)));
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(port.clone()),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(result.output_text.contains("The plugin is now installed and inspected."));
+        assert_eq!(port.0.load(Ordering::SeqCst),2,"the check runs once per settlement attempt");
+        assert_eq!(model.requests.lock().unwrap().len(),2);
+        let continuation=serde_json::to_string(&model.requests.lock().unwrap()[1].input).unwrap();
+        assert!(continuation.contains("Host completion check"));
+        assert!(continuation.contains("call install then inspect"));
+        assert!(!continuation.contains("update_plan alone first"),
+            "without a gating ledger plan the relayed feedback stays verbatim");
+        assert!(sink.0.lock().unwrap().iter().filter(|event|
+            matches!(event,AgentEngineEvent::CompletionCheckRejected{step:1,feedback}
+                if feedback.contains("call install"))).count()==1);
+    }
+
+    /// The settlement mapping itself: an unrelayed host-owned gap settles
+    /// like HostPause, and absent or settling ports never pause.
+    #[tokio::test]
+    async fn settle_maps_reject_pause_and_settle_against_the_relay_budget() {
+        use crate::completion_check::{settle,HostSettlement};
+        #[derive(Debug)]
+        struct Port(crate::AgentCompletionCheck);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(self.0.clone())
+            }
+        }
+        let causality=request().causality;
+        assert!(matches!(settle(None,&causality,true).await.unwrap(),HostSettlement::Settle));
+        let reject:Arc<dyn crate::AgentCompletionCheckPort>=
+            Arc::new(Port(crate::AgentCompletionCheck::Reject("gap".into())));
+        assert!(matches!(settle(Some(&reject),&causality,true).await.unwrap(),
+            HostSettlement::Relay(feedback) if feedback=="gap"));
+        assert!(matches!(settle(Some(&reject),&causality,false).await.unwrap(),HostSettlement::Pause),
+            "an unrelayed rejection is still an open host-owned gap");
+        let pause:Arc<dyn crate::AgentCompletionCheckPort>=
+            Arc::new(Port(crate::AgentCompletionCheck::HostPause));
+        for can_relay in [true,false] {
+            assert!(matches!(settle(Some(&pause),&causality,can_relay).await.unwrap(),HostSettlement::Pause));
+        }
+        let settle_port:Arc<dyn crate::AgentCompletionCheckPort>=
+            Arc::new(Port(crate::AgentCompletionCheck::Settle));
+        for can_relay in [true,false] {
+            assert!(matches!(settle(Some(&settle_port),&causality,can_relay).await.unwrap(),HostSettlement::Settle));
+        }
+        let delivered:Arc<dyn crate::AgentCompletionCheckPort>=
+            Arc::new(Port(crate::AgentCompletionCheck::Delivered));
+        for can_relay in [true,false] {
+            assert!(matches!(settle(Some(&delivered),&causality,can_relay).await.unwrap(),HostSettlement::Delivered));
+        }
+        assert!(!crate::completion_check::actionable_gap(Some(&delivered),&causality).await.unwrap(),
+            "a proven result is not an actionable gap");
+    }
+
+    /// Consecutive answers without intervening authorized work relay the same
+    /// host-owned gap once; the model answering again without acting is
+    /// deliberately stopping, so the post-turn host gate decides the gap.
+    #[tokio::test]
+    async fn consecutive_answers_without_work_relay_once_then_the_gate_decides() {
+        #[derive(Debug)]
+        struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(crate::AgentCompletionCheck::Reject("PLUGIN_DELIVERY_REQUIRED: still missing".into()))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            text_step("still claiming delivery"),
+            text_step("still claiming delivery"),
+            text_step("must not be requested"),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let port=Arc::new(Port(AtomicUsize::new(0)));
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(port.clone()),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(sink.0.lock().unwrap().iter().filter(|event|
+            matches!(event,AgentEngineEvent::CompletionCheckRejected{..})).count(),1,
+            "a repeated relay needs intervening authorized tool work");
+        assert_eq!(model.requests.lock().unwrap().len(),2,
+            "the unrelayed gap settles at once instead of polling the model again");
+        assert_eq!(port.0.load(Ordering::SeqCst),2,
+            "the check is consulted on every settlement attempt, not only while feedback can relay");
+    }
+
+    /// Intervening plan-bound tool work resumes relaying within the same
+    /// accepted-input span, still bounded by MAX_COMPLETION_CHECKS.
+    #[tokio::test]
+    async fn relays_resume_after_authorized_work_up_to_the_span_bound() {
+        #[derive(Debug)]
+        struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(crate::AgentCompletionCheck::Reject("PLUGIN_DELIVERY_REQUIRED: still missing".into()))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        // A plan-bound tool whose capability does not require the task
+        // ledger keeps this turn on the plain settlement path.
+        let plan=AgentToolPlan::new([tool_binding(
+            "make_image","creation.media","creation.media/image",
+            AgentEffectClass::ExternalUncertainEffect,false)]).unwrap();
+        let work=|id:&str| control_step(id,"make_image",json!({}));
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            text_step("still claiming delivery"),
+            work("work-1"),
+            text_step("still claiming delivery"),
+            work("work-2"),
+            text_step("still claiming delivery"),
+            work("work-3"),
+            text_step("still claiming delivery"),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let port=Arc::new(Port(AtomicUsize::new(0)));
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),plan,principal(),0)
+                .with_completion_check_port(port.clone()),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(sink.0.lock().unwrap().iter().filter(|event|
+            matches!(event,AgentEngineEvent::CompletionCheckRejected{..})).count(),
+            crate::completion_check::MAX_COMPLETION_CHECKS as usize,
+            "work between answers resumes relays up to the span bound");
+        assert_eq!(model.requests.lock().unwrap().len(),7);
+        assert_eq!(port.0.load(Ordering::SeqCst),
+            crate::completion_check::MAX_COMPLETION_CHECKS as usize + 1,
+            "the port is still consulted after the span bound is spent");
+    }
+
+    /// An unrelayed rejection is still an open host-owned gap: it settles
+    /// like HostPause, so an honest blocked completion account delivers its
+    /// report and the post-turn gate pauses at its safe point.
+    #[tokio::test]
+    async fn an_unrelayed_host_gap_lets_an_honest_blocked_account_settle_for_the_gate() {
+        #[derive(Debug)]
+        struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(crate::AgentCompletionCheck::Reject("PLUGIN_DELIVERY_REQUIRED: not installed".into()))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let report=|id:&str| control_step(id,"report_completion",json!({"summary":"Cannot deliver in this conversation yet",
+            "criteria":[{"disposition":"blocked","rationale":"the installed tool is attached only after a safe pause"}]}));
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("read-a","read_file",json!({"path":"a"})),
+            control_step("read-b","read_file",json!({"path":"b"})),
+            report("blocked-1"),
+            report("blocked-2"),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let port=Arc::new(Port(AtomicUsize::new(0)));
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(port.clone()),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(result.output_text.contains("Cannot deliver in this conversation yet"));
+        let events=sink.0.lock().unwrap();
+        assert_eq!(events.iter().filter(|event|
+            matches!(event,AgentEngineEvent::CompletionCheckRejected{..})).count(),1,
+            "the second blocked report without new plan-bound work is not relayed again");
+        assert_eq!(port.0.load(Ordering::SeqCst),2,
+            "the port is still consulted on the second settlement attempt");
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::CompletionDelivered{text,..}
+            if text.contains("Cannot deliver"))),"the blocked account delivers its report text");
+    }
+
+    /// A host-verified delivery settles the final answer even while an
+    /// incidental ledger plan stays open: this turn did no ledger-requiring
+    /// work, so the host owns the outcome and the ledger's completion gates
+    /// do not apply. The same script under a plain Settle verdict still runs
+    /// review and fails on the open plan, proving the bypass is the verdict's.
+    #[tokio::test]
+    async fn host_verified_delivery_settles_an_incidental_ledger_without_an_account() {
+        #[derive(Debug)]
+        struct Port(crate::AgentCompletionCheck);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(self.0.clone())
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        // The first plan call activates the ledger while the control is still
+        // unexposed; the second commits an open plan. No plan-bound
+        // ledger-requiring tool is ever invoked.
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            plan_step("in_progress","inspect"),
+            control_step("plan-open",crate::planning::TOOL_NAME,json!({
+                "plan":[{"step":"inspect","status":"in_progress"}],
+                "requirements":[{"id":"request","description":"inspect",
+                    "source":{"input":0,"quote":"inspect"}}]
+            })),
+            text_step("The plugin is installed and answered the request."),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(Arc::new(Port(crate::AgentCompletionCheck::Delivered))),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(result.output_text.contains("The plugin is installed and answered the request."));
+        assert!(!sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::CompletionReview{..})),
+            "a host-verified outcome needs no ledger evidence review");
+
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            plan_step("in_progress","inspect"),
+            control_step("plan-open",crate::planning::TOOL_NAME,json!({
+                "plan":[{"step":"inspect","status":"in_progress"}],
+                "requirements":[{"id":"request","description":"inspect",
+                    "source":{"input":0,"quote":"inspect"}}]
+            })),
+            text_step("The plugin is installed and answered the request."),
+            text_step("still no account"),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(Arc::new(Port(crate::AgentCompletionCheck::Settle))),
+            AgentContextBudget::default(),CancellationToken::new()).await;
+        let error=result.expect_err("without the verdict the same open plan still fails");
+        assert!(error.to_string().contains("execution plan remains unresolved"),"{error}");
+        assert!(sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::CompletionReview{..})),
+            "a neutral verdict keeps the ledger review gate");
+    }
+
+    /// A HostPause verdict likewise owns the outcome for a turn without
+    /// ledger-requiring work: the honest answer settles and the post-turn
+    /// gate pauses at its safe point.
+    #[tokio::test]
+    async fn host_pause_without_ledger_work_settles_an_open_plan_for_the_gate() {
+        #[derive(Debug)]
+        struct Port;
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::HostPause)
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            plan_step("in_progress","inspect"),
+            control_step("plan-open",crate::planning::TOOL_NAME,json!({
+                "plan":[{"step":"inspect","status":"in_progress"}],
+                "requirements":[{"id":"request","description":"inspect",
+                    "source":{"input":0,"quote":"inspect"}}]
+            })),
+            text_step("The installed tool is attached after a safe pause."),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(Arc::new(Port)),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(!sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::CompletionReview{..})));
+    }
+
+    /// Once the turn did ledger-requiring work the ledger keeps its
+    /// completion gates even under a host verdict: the review runs and an
+    /// unresolved plan still fails.
+    #[tokio::test]
+    async fn ledger_work_keeps_the_ledger_gates_under_a_host_verdict() {
+        #[derive(Debug)]
+        struct Port;
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::Delivered)
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("read","read_file",json!({"path":"b"})),
+            plan_step("in_progress","inspect"),
+            control_step("plan-open",crate::planning::TOOL_NAME,json!({
+                "plan":[{"step":"inspect","status":"in_progress"}],
+                "requirements":[{"id":"request","description":"inspect",
+                    "source":{"input":0,"quote":"inspect"}}]
+            })),
+            text_step("still no account"),
+            text_step("still no account"),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(Arc::new(Port)),
+            AgentContextBudget::default(),CancellationToken::new()).await;
+        let error=result.expect_err("ledger work keeps the open-plan gate under a host verdict");
+        assert!(error.to_string().contains("execution plan remains unresolved"),"{error}");
+        assert!(sink.0.lock().unwrap().iter().any(|event|
+            matches!(event,AgentEngineEvent::CompletionReview{..})),
+            "ledger work still owes the one evidence review");
+    }
+
+    /// With an active ledger and an open plan the host settlement check runs
+    /// before the completion review, so actionable delivery feedback reaches
+    /// the model instead of review narrowing or the open-plan failure.
+    #[tokio::test]
+    async fn host_completion_check_precedes_ledger_completion_review() {
+        #[derive(Debug)]
+        struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(if self.0.fetch_add(1,Ordering::SeqCst)==0 {
+                    crate::AgentCompletionCheck::Reject("PLUGIN_DELIVERY_REQUIRED: verified but not installed; call install then inspect".into())
+                } else { crate::AgentCompletionCheck::Settle })
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            // The first plan call activates the ledger even though the
+            // control was not yet exposed; the second commits an open plan.
+            plan_step("in_progress","inspect"),
+            control_step("plan-open",crate::planning::TOOL_NAME,json!({
+                "plan":[{"step":"inspect","status":"in_progress"}],
+                "requirements":[{"id":"request","description":"inspect",
+                    "source":{"input":0,"quote":"inspect"}}]
+            })),
+            text_step("The plugin is delivered."),
+            text_step("The plugin is delivered."),
+            text_step("The plugin is delivered."),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let port=Arc::new(Port(AtomicUsize::new(0)));
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(port.clone()),
+            AgentContextBudget::default(),CancellationToken::new()).await;
+        let error=result.expect_err("an open plan still fails once the host check passes");
+        assert!(error.to_string().contains("execution plan remains unresolved"),"{error}");
+        assert_eq!(port.0.load(Ordering::SeqCst),3,"the check runs once per completed settlement attempt");
+        let events=sink.0.lock().unwrap();
+        let rejected=events.iter().position(|event|
+            matches!(event,AgentEngineEvent::CompletionCheckRejected{..})).unwrap();
+        let review=events.iter().position(|event|
+            matches!(event,AgentEngineEvent::CompletionReview{..})).unwrap();
+        assert!(rejected<review,"the host check precedes the ledger completion review");
+        let requests=model.requests.lock().unwrap();
+        let continuation=serde_json::to_string(&requests[3].input).unwrap();
+        assert!(continuation.contains("Host completion check"),"the host feedback reaches the next request");
+        assert!(!continuation.contains("Completion review is active"),
+            "review narrowing does not precede the host notice");
+    }
+
+    /// HostPause tells the engine the post-turn gate pauses at its safe point:
+    /// an honest blocked completion account settles and delivers its report
+    /// instead of failing the turn.
+    #[tokio::test]
+    async fn host_pause_lets_an_honest_blocked_account_settle_for_the_gate() {
+        #[derive(Debug)]
+        struct Port;
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::HostPause)
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("read-a","read_file",json!({"path":"a"})),
+            control_step("read-b","read_file",json!({"path":"b"})),
+            control_step("blocked","report_completion",json!({"summary":"Cannot deliver in this conversation yet",
+                "criteria":[{"disposition":"blocked","rationale":"the installed tool is attached only after a safe pause"}]})),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(Arc::new(Port)),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(result.output_text.contains("Cannot deliver in this conversation yet"));
+        let events=sink.0.lock().unwrap();
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::CompletionDelivered{text,..}
+            if text.contains("Cannot deliver"))),"the blocked account delivers its report text");
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::TurnCompleted{..})));
+        assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::CompletionCheckRejected{..})),
+            "HostPause is not a rejection and consumes no check budget");
+    }
+
+    /// A blocked report commits a closed ledger plan; relayed check feedback
+    /// that asks for further actions must say to reopen that plan first, in
+    /// the journaled feedback itself so replay reconstructs the same notice.
+    #[tokio::test]
+    async fn relayed_check_after_a_closed_plan_says_to_reopen_it_first() {
+        #[derive(Debug)]
+        struct Port(AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(if self.0.fetch_add(1,Ordering::SeqCst)==0 {
+                    crate::AgentCompletionCheck::Reject("PLUGIN_DELIVERY_REQUIRED: not installed".into())
+                } else { crate::AgentCompletionCheck::HostPause })
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);Ok(())
+            }
+        }
+        let report=|id:&str| control_step(id,"report_completion",json!({"summary":"Cannot deliver in this conversation yet",
+            "criteria":[{"disposition":"blocked","rationale":"the installed tool is attached only after a safe pause"}]}));
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("read-a","read_file",json!({"path":"a"})),
+            control_step("read-b","read_file",json!({"path":"b"})),
+            report("blocked-1"),
+            report("blocked-2"),
+        ])});
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),sink.clone(),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(Arc::new(Port(AtomicUsize::new(0)))),
+            AgentContextBudget::default(),CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert!(result.output_text.contains("Cannot deliver in this conversation yet"));
+        let events=sink.0.lock().unwrap();
+        let rejected=events.iter().filter(|event|matches!(event,AgentEngineEvent::CompletionCheckRejected{..})).count();
+        assert_eq!(rejected,1,"one relayed rejection before HostPause");
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::CompletionCheckRejected{feedback,..}
+            if feedback.contains("not installed") && feedback.contains("update_plan alone first"))),
+            "a closed plan is part of the journaled feedback");
+        let requests=model.requests.lock().unwrap();
+        let continuation=serde_json::to_string(&requests[3].input).unwrap();
+        assert!(continuation.contains("Host completion check"),"{continuation}");
+        assert!(continuation.contains("update_plan alone first"),"{continuation}");
+    }
+
+    /// Without HostPause the same honest blocked account still cannot be
+    /// published as task completion.
+    #[tokio::test]
+    async fn settle_keeps_a_blocked_completion_account_failing() {
+        #[derive(Debug)]
+        struct Port;
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self,_causality:&ChatCausality)->Result<crate::AgentCompletionCheck,AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::Settle)
+            }
+        }
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("read-a","read_file",json!({"path":"a"})),
+            control_step("read-b","read_file",json!({"path":"b"})),
+            control_step("blocked","report_completion",json!({"summary":"Cannot deliver in this conversation yet",
+                "criteria":[{"disposition":"blocked","rationale":"the installed tool is attached only after a safe pause"}]})),
+        ])});
+        let result=run_turn(binding(),model.clone(),Arc::new(EchoTool),Arc::new(crate::NoopAgentEventSink),
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0)
+                .with_completion_check_port(Arc::new(Port)),
+            AgentContextBudget::default(),CancellationToken::new()).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+    }
+
+    #[test]
+    fn restore_discovered_tools_replays_only_matching_deferred_names() {
+        fn discovery_call(id:&str)->ChatToolCall {
+            ChatToolCall { call_id:id.into(), name:crate::tool_discovery::TOOL_NAME.into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"q":"plugin.development"})),
+                provider_metadata:None }
+        }
+        fn other_call(id:&str)->ChatToolCall {
+            ChatToolCall { call_id:id.into(), name:"read_file".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"b"})),
+                provider_metadata:None }
+        }
+        let mut deferred_alpha=tool_binding("deferred_alpha","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true);
+        deferred_alpha.definition.deferred=true;
+        let mut deferred_beta=tool_binding("deferred_beta","workspace.files","workspace.files/list",AgentEffectClass::ReadOnly,true);
+        deferred_beta.definition.deferred=true;
+        let visible=tool_binding("always_visible","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false);
+        let plan=AgentToolPlan::new([deferred_alpha,deferred_beta,visible]).unwrap();
+        let events=[
+            AgentEngineEvent::ToolCallCompleted {step:1,call:discovery_call("search-ok")},
+            AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("search-ok".into(),json!([
+                {"name":"deferred_alpha","activated":true},
+                {"name":"always_visible","activated":true},
+                {"name":"not_in_plan","activated":true},
+            ]).to_string(),false)},
+            // Error results restore nothing.
+            AgentEngineEvent::ToolCallCompleted {step:2,call:discovery_call("search-error")},
+            AgentEngineEvent::ToolCompleted {step:2,result:AgentToolResult::text("search-error".into(),
+                json!([{"name":"deferred_beta"}]).to_string(),true)},
+            // Malformed output restores nothing.
+            AgentEngineEvent::ToolCallCompleted {step:3,call:discovery_call("search-malformed")},
+            AgentEngineEvent::ToolCompleted {step:3,result:AgentToolResult::text("search-malformed".into(),
+                "not a json array".to_owned(),false)},
+            // Results for unrelated calls are ignored.
+            AgentEngineEvent::ToolCallCompleted {step:4,call:other_call("read-1")},
+            AgentEngineEvent::ToolCompleted {step:4,result:AgentToolResult::text("read-1".into(),
+                json!([{"name":"deferred_beta"}]).to_string(),false)},
+        ];
+        let restored=restore_discovered_tools(events.iter(),&plan);
+        assert_eq!(restored.into_iter().collect::<Vec<_>>(),["deferred_alpha"]);
+    }
+
+    /// Host pre-activation is ToolSearch-identical presentation: the deferred
+    /// schema is visible from step one and the executed binding is the frozen
+    /// one, still marked deferred.
+    #[tokio::test]
+    async fn preactivated_deferred_tools_are_exposed_with_the_frozen_binding() {
+        #[derive(Default)]
+        struct Tools(std::sync::Mutex<Vec<AgentToolBinding>>);
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                self.0.lock().unwrap().push(invocation.binding.clone());
+                Ok(workspace_result(invocation))
+            }
+        }
+        let mut deferred_alpha=tool_binding("deferred_alpha","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true);
+        deferred_alpha.definition.deferred=true;
+        let visible=tool_binding("always_visible","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false);
+        let plan=AgentToolPlan::new([deferred_alpha,visible]).unwrap();
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("call-alpha","deferred_alpha",json!({"path":"b"})),
+            text_step("Done"),
+        ])});
+        let tools=Arc::new(Tools::default());
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan.clone(),principal(),0)
+                .with_preactivated_tools(["deferred_alpha".to_owned(),"unknown".to_owned()])).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        let requests=model.requests.lock().unwrap();
+        let exposed=requests[0].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>();
+        assert!(exposed.contains(&"deferred_alpha"),"{exposed:?}");
+        assert!(!exposed.contains(&"unknown"),"{exposed:?}");
+        assert!(exposed.contains(&"always_visible"));
+        let invocations=tools.0.lock().unwrap();
+        assert_eq!(invocations.as_slice(),[plan.binding("deferred_alpha").unwrap().clone()]);
+        assert!(invocations[0].definition.deferred,
+            "the invoked binding is the frozen one: still deferred");
+        drop(invocations);
+        drop(requests);
+
+        let plain=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![text_step("Done")])});
+        open_session(plain.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(!plain.requests.lock().unwrap()[0].input.tools.iter().any(|tool|tool.name=="deferred_alpha"),
+            "without pre-activation the deferred schema stays hidden");
+    }
+
+    #[test]
+    fn completion_review_narrows_to_update_plan_when_report_would_be_rejected() {
+        let mut req=request();
+        req.input.tools=vec![
+            crate::planning::definition(),
+            crate::completion::definition(),
+            ChatToolDefinition {name:"read_file".into(),description:"read".into(),
+                input_schema:nomifun_agent_contracts::StrictJsonValue(json!({"type":"object"})),deferred:false},
+        ];
+        let mut slots=AdaptiveContextSlots::default();
+        let phase = synchronize_completion_review(&mut req,&mut slots,true,true,true,false,false);
+        assert_eq!(phase, AgentExecutionPhase::Execution,
+            "the plan correction must stay in execution so update_plan can reach its owner");
+        assert_eq!(req.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["update_plan","report_completion"],
+            "report_completion cannot close a missing or stale plan; keep update_plan exposed so a rejected report can be repaired");
+        assert!(matches!(req.input.tool_choice,ChatToolChoice::Required));
+        assert!(req.input.instructions[slots.completion_review.unwrap()].contains("first call update_plan alone"));
+
+        let mut without_plan=request();
+        without_plan.input.tools=vec![crate::completion::definition()];
+        let mut without_slots=AdaptiveContextSlots::default();
+        let phase = synchronize_completion_review(&mut without_plan,&mut without_slots,true,true,true,false,false);
+        assert_eq!(phase, AgentExecutionPhase::CompletionReview);
+        assert_eq!(without_plan.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["report_completion"],
+            "when update_plan is not exposed the original report narrowing applies");
+        assert!(matches!(without_plan.input.tool_choice,ChatToolChoice::Specific{ref name} if name=="report_completion"));
+    }
+
+    #[test]
+    fn completion_review_keeps_report_narrowing_when_the_plan_is_current() {
+        let mut req=request();
+        req.input.tools=vec![
+            crate::planning::definition(),
+            crate::completion::definition(),
+        ];
+        let mut slots=AdaptiveContextSlots::default();
+        let phase = synchronize_completion_review(&mut req,&mut slots,true,true,false,false,false);
+        assert_eq!(phase, AgentExecutionPhase::CompletionReview);
+        assert_eq!(req.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["report_completion"]);
+        assert!(matches!(req.input.tool_choice,ChatToolChoice::Specific{ref name} if name=="report_completion"));
+        assert!(!req.input.instructions[slots.completion_review.unwrap()].contains("first call update_plan alone"));
+    }
+
     #[tokio::test]
     async fn numbered_delivery_rejects_an_omitted_slot_without_reexecuting_work() {
         #[derive(Default)]
@@ -6578,6 +7749,17 @@ mod tests {
             }).expect("paired correction feedback");
         assert_eq!(feedback["correction_counters_after_rejected_batch"],json!({
             "observed_tool_error_count":2,"observed_command_failure_count":1}));
+        assert_eq!(feedback["next_observed_tool_error_count"], json!(2));
+        assert!(feedback["message"].as_str().unwrap().contains("NEXT report must use observed_tool_error_count=2"));
+        let counter_issues = feedback["issues"].as_array().unwrap().iter()
+            .filter(|issue| issue["schema_path"].as_str().unwrap_or_default()
+                .contains("/observed_tool_error_count/"))
+            .collect::<Vec<_>>();
+        assert!(!counter_issues.is_empty());
+        for issue in counter_issues {
+            assert_eq!(issue["expected"], json!(2),
+                "the issue's expected already includes the rejected batch so copying it is accepted");
+        }
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
         assert_eq!(requests.len(),3);
         assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
@@ -7900,6 +9082,182 @@ mod tests {
                 matches!(part, ChatContentPart::ToolResult { call_id, is_error: true, .. } if call_id.as_ref() == id)));
         }
         assert_eq!(result.model_steps, 8, "argument repair must not require a spurious plan exchange");
+    }
+
+    #[tokio::test]
+    async fn canonical_host_watchdog_pauses_a_tool_loop_at_a_native_checkpoint() {
+        #[derive(Debug, Default)]
+        struct Port(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            fn observe(&self, event: &AgentEngineEvent) -> Result<(), AgentEngineError> {
+                if matches!(event, AgentEngineEvent::ToolCompleted { step, .. } if *step > 0) {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(())
+            }
+            async fn execution_pressure(&self) -> Result<crate::AgentExecutionPressure, AgentEngineError> {
+                Ok(crate::AgentExecutionPressure { renew_window: false,
+                    stop: (self.0.load(std::sync::atomic::Ordering::SeqCst) >= 3)
+                        .then_some(crate::AgentExecutionStopReason::PluginVerificationStalled) })
+            }
+            async fn check(&self, _: &ChatCausality) -> Result<crate::AgentCompletionCheck, AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::Reject("not delivered".into()))
+            }
+        }
+        #[derive(Default)]
+        struct Sink {
+            events: std::sync::Mutex<Vec<AgentEngineEvent>>,
+            checkpoints: std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, checkpoint: crate::AgentExecutionCheckpoint)
+                -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                self.checkpoints.lock().unwrap().push(checkpoint);
+                Ok(Some(crate::AgentCheckpointReceipt { revision: 1, through_seq: 1, digest: "a".repeat(64).into() }))
+            }
+        }
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(
+            (0..4).map(|id| control_step(&format!("loop-{id}"), "read_file", json!({"path":"b"}))).collect()) });
+        let sink = Arc::new(Sink::default());
+        let result = run_turn(binding(), model.clone(), Arc::new(EchoTool), sink.clone(),
+            AgentTurnRequest::new(request(), tool_plan(), principal(), 0)
+                .with_max_model_steps(10)
+                .with_execution_segments(crate::AgentSegmentPolicy { max_segments: 1, max_no_progress_segments: 1 })
+                .with_completion_check_port(Arc::new(Port::default())),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Paused { ref reason } if reason == "PLUGIN_VERIFICATION_REQUIRED"));
+        assert_eq!(result.model_steps, 3, "the model never offered a final answer; the watchdog still pauses");
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(model.steps.lock().unwrap().len(), 1, "a fourth model request must not start");
+        assert_eq!(sink.checkpoints.lock().unwrap().last().unwrap().model_steps, 3);
+        assert!(!sink.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
+    }
+
+    #[tokio::test]
+    async fn accepted_owner_input_precedes_a_restored_stall_pressure_check() {
+        #[derive(Debug)]
+        struct Port(std::sync::atomic::AtomicBool);
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            fn observe(&self, event: &AgentEngineEvent) -> Result<(), AgentEngineError> {
+                if matches!(event, AgentEngineEvent::SteeringInputs { inputs } if !inputs.is_empty()) {
+                    self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(())
+            }
+            async fn execution_pressure(&self) -> Result<crate::AgentExecutionPressure, AgentEngineError> {
+                Ok(crate::AgentExecutionPressure { renew_window: false,
+                    stop: self.0.load(std::sync::atomic::Ordering::SeqCst)
+                        .then_some(crate::AgentExecutionStopReason::PluginVerificationStalled) })
+            }
+            async fn check(&self, _: &ChatCausality) -> Result<crate::AgentCompletionCheck, AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::Delivered)
+            }
+        }
+        struct Sink;
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, _: AgentEngineEvent) -> Result<(), AgentEngineError> { Ok(()) }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, _: crate::AgentExecutionCheckpoint)
+                -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                Ok(Some(crate::AgentCheckpointReceipt { revision: 1, through_seq: 1, digest: "a".repeat(64).into() }))
+            }
+        }
+        for reply in [false, true] {
+            let model = Arc::new(ObservingModel { requests: Default::default(),
+                steps: std::sync::Mutex::new(vec![text_step("The requested result is delivered.")]) });
+            let input = reply.then(||crate::AgentSteeringInput { receipt_operation_id: "reply".into(), message_id: "input".into(),
+                text: "Continue with the fix".into(), files: vec![], inject_skills: vec![], image_count: 0,
+                prepared_images: vec![], prepared_skill_instructions: vec![] });
+            let result = run_turn(binding(), model.clone(), Arc::new(EchoTool), Arc::new(Sink),
+                AgentTurnRequest::new(request(), tool_plan(), principal(), 0)
+                    .with_max_model_steps(10)
+                    .with_execution_segments(crate::AgentSegmentPolicy { max_segments: 1, max_no_progress_segments: 1 })
+                    .with_completion_check_port(Arc::new(Port(std::sync::atomic::AtomicBool::new(true))))
+                    .with_input_port(Arc::new(OneSteer { input: std::sync::Mutex::new(input) })),
+                AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+            if reply {
+                assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+                assert_eq!(model.requests.lock().unwrap().len(), 1);
+            } else {
+                assert!(matches!(result.terminal, AgentTurnTerminal::Paused { .. }));
+                assert!(model.requests.lock().unwrap().is_empty(), "recovery alone cannot buy another model request");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delivered_host_facts_precede_report_control_failure_only_without_ledger_work() {
+        #[derive(Debug)]
+        struct Port;
+        #[async_trait]
+        impl crate::AgentCompletionCheckPort for Port {
+            async fn check(&self, _: &ChatCausality) -> Result<crate::AgentCompletionCheck, AgentEngineError> {
+                Ok(crate::AgentCompletionCheck::Delivered)
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        for ledger in [false, true] {
+            let mut steps = Vec::new();
+            if ledger { steps.push(control_step("workspace-read", "read_file", json!({"path":"b"}))); }
+            steps.push(plan_step("in_progress", "inspect"));
+            steps.push(control_step("plan-open", crate::planning::TOOL_NAME, json!({
+                "plan":[{"step":"requested operations","status":"in_progress"}],
+                "requirements":[{"id":"request","description":"inspect","source":{"input":0,"quote":"inspect"}}],
+            })));
+            for id in 0..4 {
+                steps.push(control_step(&format!("bad-report-{id}"), "report_completion",
+                    json!({"summary":"The plugin is installed.", "criteria":[{"disposition":"supported"}]})));
+            }
+            steps.push(text_step("must not be requested"));
+            let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(steps) });
+            let sink = Arc::new(Sink::default());
+            let result = run_turn(binding(), model.clone(), Arc::new(EchoTool), sink.clone(),
+                AgentTurnRequest::new(request(), tool_plan(), principal(), 0)
+                    .with_completion_check_port(Arc::new(Port)),
+                AgentContextBudget::default(), CancellationToken::new()).await;
+            if ledger {
+                assert!(matches!(result, Err(AgentEngineError::TurnFailed(ref text)) if text.contains("engine control made no progress")), "{result:?}");
+            } else {
+                let result = result.expect("durable delivery cannot fail solely on rejected report controls");
+                assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+                let events = sink.0.lock().unwrap().clone();
+                assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::CompletionDelivered { .. })),
+                    "a host status cannot masquerade as an accepted completion account");
+                let mut history = Vec::new();
+                crate::history::replay_closed_turn(&mut history, request().input.messages[0].clone(), &events).unwrap();
+                assert!(result.output_text.is_empty(), "report refusals contain no public model output to append");
+                let mut next = request();
+                next.causality.turn_operation_id = "next-turn".into();
+                next.causality.causation_event_id = "next-input".into();
+                next.input.messages = history;
+                next.input.messages.push(crate::context_lifecycle::text_message(ChatRole::User,
+                    "Describe that earlier delivered result.".into()));
+                let next_model = Arc::new(ObservingModel { requests: Default::default(),
+                    steps: std::sync::Mutex::new(vec![text_step("The earlier result was delivered.")]) });
+                let next_result = run_turn(binding(), next_model.clone(), Arc::new(EchoTool), Arc::new(NoopAgentEventSink),
+                    AgentTurnRequest::new(next, AgentToolPlan::default(), principal(), 0),
+                    AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+                assert!(matches!(next_result.terminal, AgentTurnTerminal::Completed { .. }));
+                assert!(serde_json::to_string(&next_model.requests.lock().unwrap()[0].input.messages).unwrap()
+                    .contains("report_completion"), "the following Turn prepares the actual report refusals as canonical history");
+            }
+            assert_eq!(model.steps.lock().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]

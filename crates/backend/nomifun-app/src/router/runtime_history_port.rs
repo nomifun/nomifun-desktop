@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(super) struct HistoryPort {
     pub host: Arc<EngineSessionHost>,
-    pub receipt: EngineTurnReceipt,
+    pub receipt: Arc<EngineTurnReceipt>,
     pub cancellation: CancellationToken,
 }
 

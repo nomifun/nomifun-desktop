@@ -26,6 +26,8 @@ pub use completion::{AgentCompletionCriterion, AgentCompletionObservation, Agent
 mod delivery_review;
 mod completion_review;
 pub use completion_review::{AgentCompletionReviewState, AgentExecutionPhase};
+mod completion_check;
+pub use completion_check::{AgentCompletionCheck, AgentCompletionCheckPort};
 mod context;
 mod context_resources;
 mod remote_resources;

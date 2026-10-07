@@ -657,7 +657,7 @@ impl PluginServiceActionsPort for ProductionPluginActionsPort {
 
 fn validate_action_identity(value: &str) -> Result<(), PluginServicePortError> {
     let (plugin_id, action_id) = value
-        .strip_prefix("plugin:")
+        .strip_prefix(nomifun_agent_contracts::plugin::PLUGIN_ACTION_ID_PREFIX)
         .and_then(|value| value.split_once('/'))
         .filter(|(_, action)| !action.contains('/'))
         .ok_or_else(|| port_error("action_invalid"))?;

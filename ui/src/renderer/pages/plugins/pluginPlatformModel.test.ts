@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { PluginDraftFile, PluginDraftSummary, PluginSummary, PluginSurfaceDescriptor } from '@/common/types/pluginPlatform';
 import {
   draftManifest,
+  libraryDrafts,
   pluginEntryMatchesView,
   pluginLibraryCounts,
   pluginLibraryEntries,
@@ -53,6 +54,29 @@ describe('Unified Plugin UI model', () => {
       .toEqual(['draft:failed-draft', 'plugin:failed']);
     expect(entries.filter((entry) => pluginEntryMatchesView(entry, 'trash')).map((entry) => entry.key))
       .toEqual(['plugin:trashed']);
+  });
+
+  test('hides drafts already delivered as the installed artifact', () => {
+    const draft = (overrides: Partial<PluginDraftSummary> = {}): PluginDraftSummary => ({
+      draft_id: 'draft-1', revision: 1, display_name: 'Draft', description: '',
+      status: 'ready', updated_at_ms: 40, ...overrides,
+    });
+    const digest = 'a'.repeat(64);
+    const plugins = [
+      plugin({ plugin_id: 'installed-1', active: { ...plugin().active, artifact_digest: digest } }),
+      plugin({ plugin_id: 'installed-trashed', trashed_at_ms: 10, active: { ...plugin().active, artifact_digest: digest } }),
+    ];
+    const drafts = [
+      draft({ draft_id: 'delivered', plugin_id: 'installed-1', delivered_artifact_digest: digest }),
+      draft({ draft_id: 'edited', plugin_id: 'installed-1' }),
+      draft({ draft_id: 'superseded', plugin_id: 'installed-1', delivered_artifact_digest: 'b'.repeat(64) }),
+      draft({ draft_id: 'trashed-plugin', plugin_id: 'installed-trashed', delivered_artifact_digest: digest }),
+      draft({ draft_id: 'standalone' }),
+    ];
+    expect(libraryDrafts(plugins, drafts).map((entry) => entry.draft_id))
+      .toEqual(['edited', 'superseded', 'trashed-plugin', 'standalone']);
+    expect(pluginLibraryEntries(plugins, drafts).filter((entry) => entry.kind === 'draft').length).toBe(4);
+    expect(pluginLibraryCounts(plugins, drafts).drafts).toBe(4);
   });
 
   test('reads the canonical package manifest directly from Draft files', () => {

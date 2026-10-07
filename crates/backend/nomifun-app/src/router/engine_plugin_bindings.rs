@@ -47,6 +47,15 @@ fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Agent Plugin Binding: {message}"))
 }
 
+/// Deferral is model presentation, never binding identity: the frozen Plugin
+/// mapping must match every other field (name, schema digests, capability and
+/// action ids, effect class) exactly.
+fn same_binding_except_presentation(expected: &EngineToolBinding, actual: &EngineToolBinding) -> bool {
+    let mut normalized = actual.clone();
+    normalized.definition.deferred = expected.definition.deferred;
+    *expected == normalized
+}
+
 #[derive(Clone, Debug)]
 struct FrozenAction {
     stable_action_id: String,
@@ -190,8 +199,27 @@ impl FrozenAgentPluginBindings {
         self.tool_plan.clone()
     }
 
+    /// Every frozen tool binding, with `definition.deferred` copied from
+    /// `plan`'s binding of the same model name when present (all other fields
+    /// untouched).
+    pub(crate) fn tool_plan_presented_as(&self, plan: &EngineToolPlan) -> Result<EngineToolPlan, AppError> {
+        EngineToolPlan::new(self.tool_plan.model_definitions().into_iter().map(|definition| {
+            let mut binding = self.tool_plan
+                .binding(&definition.name)
+                .expect("frozen plan definitions have bindings")
+                .clone();
+            if let Some(presented) = plan.binding(&binding.model_name) {
+                binding.definition.deferred = presented.definition.deferred;
+            }
+            binding
+        }))
+        .map_err(failure)
+    }
+
     pub(crate) fn contains_tool_binding(&self, binding: &EngineToolBinding) -> bool {
-        self.tool_plan.binding(&binding.model_name) == Some(binding)
+        self.tool_plan
+            .binding(&binding.model_name)
+            .is_some_and(|frozen| same_binding_except_presentation(frozen, binding))
     }
 
     pub(crate) fn retain_active(
@@ -341,7 +369,8 @@ impl EngineToolInvoker for PluginActionTools {
         let Some(action) = self.tools.get(&invocation.call.name) else {
             return self.inner.invoke(invocation, cancellation).await;
         };
-        if self.plan.binding(&invocation.call.name) != Some(&invocation.binding) {
+        if !matches!(self.plan.binding(&invocation.call.name),
+            Some(frozen) if same_binding_except_presentation(frozen, &invocation.binding)) {
             return Err(EngineToolError::ToolInvocation(
                 "Unified Plugin Action differs from its frozen Agent mapping".into(),
             ));
@@ -1068,5 +1097,95 @@ mod tests {
         assert!(frozen.contexts.is_empty());
         assert!(frozen.before_model.is_empty());
         assert!(frozen.before_tool.is_empty());
+    }
+
+    #[test]
+    fn frozen_binding_identity_ignores_only_the_deferred_presentation_flag() {
+        let (_runtime, _registry, frozen) = fixture();
+        let definition = frozen.tool_plan().model_definitions().pop().unwrap();
+        let frozen_binding = frozen
+            .tool_plan()
+            .binding(&definition.name)
+            .unwrap()
+            .clone();
+        assert!(!frozen_binding.definition.deferred);
+
+        let mut deferred = frozen_binding.clone();
+        deferred.definition.deferred = true;
+        assert!(frozen.contains_tool_binding(&deferred));
+
+        let tamperings: Vec<fn(&mut EngineToolBinding)> = vec![
+            |binding| binding.definition.name = "tampered_tool_name".into(),
+            |binding| binding.action_id = ActionId::from("plugin:/other"),
+            |binding| {
+                binding.definition.input_schema = StrictJsonValue(json!({"type": "string"}))
+            },
+            |binding| binding.effect_class = EngineEffectClass::ManagedEffect,
+        ];
+        for tamper in tamperings {
+            let mut tampered = frozen_binding.clone();
+            tamper(&mut tampered);
+            assert!(!frozen.contains_tool_binding(&tampered));
+        }
+    }
+
+    #[test]
+    fn tool_plan_presented_as_returns_the_full_frozen_surface_with_plan_deferral() {
+        let (_runtime, _registry, frozen) = fixture();
+        let definition = frozen.tool_plan().model_definitions().pop().unwrap();
+        let mut presented = frozen
+            .tool_plan()
+            .binding(&definition.name)
+            .unwrap()
+            .clone();
+        presented.definition.deferred = true;
+        let plan = EngineToolPlan::new([presented]).unwrap();
+        let result = frozen.tool_plan_presented_as(&plan).unwrap();
+        assert_eq!(result.model_definitions().len(), frozen.tool_plan().model_definitions().len(),
+            "every frozen binding is present, not only the ones the plan named");
+        let deferred = result.binding(&definition.name).unwrap();
+        assert!(deferred.definition.deferred);
+        let mut expected = deferred.clone();
+        expected.definition.deferred = false;
+        assert_eq!(expected, *frozen.tool_plan().binding(&definition.name).unwrap());
+        assert_eq!(frozen.tool_plan_presented_as(&EngineToolPlan::default()).unwrap(),
+            frozen.tool_plan());
+    }
+
+    #[tokio::test]
+    async fn deferred_presentation_copy_invokes_the_frozen_mapping() {
+        let (_runtime, _registry, frozen) = fixture();
+        let definition = frozen.tool_plan().model_definitions().pop().unwrap();
+        let mut binding = frozen
+            .tool_plan()
+            .binding(&definition.name)
+            .unwrap()
+            .clone();
+        binding.definition.deferred = true;
+        let result = frozen
+            .wrap_tools(Arc::new(NeverTool))
+            .invoke(invocation(binding), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.output_text().contains("42"));
+    }
+
+    #[tokio::test]
+    async fn a_binding_differing_beyond_presentation_is_rejected() {
+        let (_runtime, _registry, frozen) = fixture();
+        let definition = frozen.tool_plan().model_definitions().pop().unwrap();
+        let mut binding = frozen
+            .tool_plan()
+            .binding(&definition.name)
+            .unwrap()
+            .clone();
+        binding.definition.description = "tampered".into();
+        let error = frozen
+            .wrap_tools(Arc::new(NeverTool))
+            .invoke(invocation(binding), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EngineToolError::ToolInvocation(_)));
     }
 }

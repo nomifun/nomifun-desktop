@@ -5,7 +5,6 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { launchPluginConversation } from '../plugins/pluginConversationLaunch';
 import { isDesktopShell } from '@/renderer/utils/platform';
-import { PLUGIN_FEATURE_VISIBLE } from '@/renderer/utils/plugins/pluginFeatureAvailability';
 import styles from './AgentContextOrder.module.css';
 
 type Props = {
@@ -38,7 +37,7 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
   const explicit = document[field] ?? [];
   const ids = [...explicit, ...[...contexts.keys()].filter(id => !explicit.includes(id)).sort()];
   const createBeforeTool = async () => {
-    if (!PLUGIN_FEATURE_VISIBLE || !desktopShell || disabled || pending.current) return;
+    if (!desktopShell || disabled || pending.current) return;
     pending.current = true; setCreating(true); setCreateError(false);
     try {
       if (mounted.current) {
@@ -69,15 +68,13 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
     <p>{t(`agentSettings.${labels}.hint`)}</p>
     {kind === 'middleware' && <>
       <p>{t('agentSettings.middlewareOrder.toolAccess')}</p>
-      {PLUGIN_FEATURE_VISIBLE && <>
-        <div className={styles.authoring}>
-          <Button size='small' loading={creating} disabled={!desktopShell || disabled || creating} onClick={() => void createBeforeTool()}>
-            {t('agentSettings.middlewareOrder.createBeforeTool')}
-          </Button>
-          <p>{t('agentSettings.middlewareOrder.createHint')}</p>
-        </div>
-        {createError && <Alert type='warning' content={t('agentSettings.middlewareOrder.createFailed')} />}
-      </>}
+      <div className={styles.authoring}>
+        <Button size='small' loading={creating} disabled={!desktopShell || disabled || creating} onClick={() => void createBeforeTool()}>
+          {t('agentSettings.middlewareOrder.createBeforeTool')}
+        </Button>
+        <p>{t('agentSettings.middlewareOrder.createHint')}</p>
+      </div>
+      {createError && <Alert type='warning' content={t('agentSettings.middlewareOrder.createFailed')} />}
     </>}
     {!ids.length && <p>{t(`agentSettings.${labels}.empty`)}</p>}
     <ol className={styles.list}>

@@ -37,6 +37,7 @@ pub(super) async fn load(
 ) -> Result<AgentHistory, AppError> {
     let conversation = admitted.session().session().conversation_id.as_str();
     let snapshot = &admitted.session().snapshot().snapshot_ref;
+    let runtime_binding = format!("conversation-runtime:{conversation}");
     let fail = |message: String| AppError::Conflict(format!("Nomi history: {message}"));
     let replay_budget = window.turns.first().map_or(0,|turn|turn.serialized_bytes.saturating_add(8 * 1024 * 1024))
         .max(32 * 1024 * 1024).min(MAX_NATIVE_HISTORY_WINDOW_BYTES);
@@ -119,8 +120,14 @@ pub(super) async fn load(
         }
         bytes = bytes.saturating_add(extra_bytes);
         if closed_turns.is_empty() {
-            // Latest only. An unstarted failure cannot revive an older task.
-            prior_task = events.as_ref().map(|events| AgentPriorTask::from_closed_turn(&turn.operation_id, events))
+            // Latest only. Read-only history may cross an explicitly verified
+            // model/Agent transition; importing its task ledger still requires
+            // the exact current Snapshot/runtime. Never search older turns for
+            // a matching ledger after a transition or an unstarted failure.
+            prior_task = events.as_ref().map(|events| latest_prior_task(
+                &turn.operation_id, events, conversation, &runtime_binding, snapshot,
+                admitted.operation_id(),
+            ))
                 .transpose().map_err(|error| fail(error.to_string()))?.flatten();
         }
         closed_turns.push((
@@ -200,6 +207,29 @@ pub(super) fn decode_turn_events(
     }
     project_interrupted_terminal(&mut events, receipt_status);
     Ok(Some(events))
+}
+
+fn latest_prior_task(
+    operation: &str,
+    events: &[AgentEngineEvent],
+    conversation: &str,
+    runtime_binding: &str,
+    snapshot: &nomifun_agent_contracts::ResolvedSnapshotRef,
+    current_operation: &str,
+) -> Result<Option<AgentPriorTask>, nomifun_agent_runtime::AgentEngineError> {
+    // Validate the canonical closed ledger even when it cannot be imported.
+    // Its events remain in ordinary typed history; this only selects the
+    // optional resume_task candidate, never a checkpoint or permission.
+    let candidate = AgentPriorTask::from_closed_turn(operation, events)?;
+    let Some(AgentEngineEvent::TurnStarted { binding, .. }) = events.first() else {
+        unreachable!("from_closed_turn already validated TurnStarted")
+    };
+    binding.validate()?;
+    Ok(if binding.agent_session_id().as_ref() == conversation
+        && binding.runtime_binding_id().as_ref() == runtime_binding
+        && binding.resolved_snapshot_ref() == snapshot
+        && operation != current_operation
+    { candidate } else { None })
 }
 
 fn history_source_matches(
@@ -379,5 +409,60 @@ mod tests {
             "old-turn",
             false,
         ));
+    }
+
+    fn planned_closed_turn(snapshot: &str, runtime: &str) -> Vec<AgentEngineEvent> {
+        let binding = EngineBinding::new(
+            AgentSessionId::from("session"), RuntimeBindingId::from(runtime),
+            EngineBuildId::from("previous-build"), DigestHex::from("b".repeat(64)),
+            ResolvedSnapshotRef { snapshot_id: snapshot.into(), snapshot_digest: "a".repeat(64).into() },
+        ).unwrap();
+        let mut plan = nomifun_agent_runtime::AgentPlan { revision: 1, ..Default::default() };
+        plan.requirements.push(nomifun_agent_runtime::AgentTaskRequirement {
+            id: "create-app".into(), description: "Create the small app".into(),
+            source: nomifun_agent_runtime::AgentInputCitation { input: 0, quote: "Create the small app".into() },
+            origin: None,
+        });
+        vec![
+            AgentEngineEvent::TurnStarted { binding, turn_operation_id: "previous-turn".into() },
+            AgentEngineEvent::PlanUpdated { plan },
+            AgentEngineEvent::ModelStepStarted { step: 1, operation_id: "previous-model-step".into() },
+            AgentEngineEvent::OutputTextDelta { step: 1, text: "The draft still needs repair.".into() },
+            AgentEngineEvent::TurnFailed { model_steps: 1, message: "Verification failed".into(), failure: None },
+        ]
+    }
+
+    #[test]
+    fn model_and_agent_transitions_preserve_history_without_importing_prior_ledger() {
+        let current = ResolvedSnapshotRef { snapshot_id: "current-snapshot".into(), snapshot_digest: "a".repeat(64).into() };
+        for previous_snapshot in ["previous-model-snapshot", "previous-agent-snapshot"] {
+            let events = planned_closed_turn(previous_snapshot, "conversation-runtime:session");
+            let original = serde_json::to_value(&events).unwrap();
+            assert!(latest_prior_task("previous-turn", &events, "session", "conversation-runtime:session",
+                &current, "current-turn").unwrap().is_none());
+            let mut history = Vec::new();
+            replay_closed_history(&mut history, [(ChatMessage {
+                role: ChatRole::User, content: vec![ChatContentPart::Text { text: "Create the small app".into() }],
+                provider_round_id: None,
+            }, events.clone(), Vec::new())]).unwrap();
+            assert!(serde_json::to_string(&history).unwrap().contains("The draft still needs repair."),
+                "closed canonical output remains historical context across the transition");
+            assert_eq!(serde_json::to_value(&events).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn prior_ledger_requires_exact_runtime_snapshot_and_a_different_turn() {
+        let current = ResolvedSnapshotRef { snapshot_id: "current-snapshot".into(), snapshot_digest: "a".repeat(64).into() };
+        let events = planned_closed_turn("current-snapshot", "conversation-runtime:session");
+        assert!(latest_prior_task("previous-turn", &events, "session", "conversation-runtime:session",
+            &current, "current-turn").unwrap().is_some(), "a validated newer build may continue the exact-bound ledger");
+        for (session, runtime, operation) in [
+            ("other-session", "conversation-runtime:session", "current-turn"),
+            ("session", "other-runtime", "current-turn"),
+            ("session", "conversation-runtime:session", "previous-turn"),
+        ] {
+            assert!(latest_prior_task("previous-turn", &events, session, runtime, &current, operation).unwrap().is_none());
+        }
     }
 }

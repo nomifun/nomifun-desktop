@@ -168,6 +168,14 @@ pub enum AgentEngineEvent {
     CompletionReview {
         status: crate::AgentWorkStatus,
     },
+    /// A host settlement check kept the turn open: durable host facts showed
+    /// the accepted task's checked result was still missing. The relayed
+    /// feedback is protocol correction, not a new accepted input, a tool
+    /// result or a success receipt.
+    CompletionCheckRejected {
+        step: u16,
+        feedback: String,
+    },
     CompletionObservation {
         observation: crate::AgentCompletionObservation,
     },

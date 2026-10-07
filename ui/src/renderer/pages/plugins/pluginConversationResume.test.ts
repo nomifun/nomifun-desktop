@@ -12,7 +12,7 @@ const message = {
 const paused = {
   state: 'paused', operation_id: 'original-turn', checkpoint_revision: 7,
   checkpoint_digest: 'a'.repeat(64), checkpoint_retained: true,
-  pause: { revision: 2, reason: 'OWNER_REQUESTED', cleanup_proven: true },
+  pause: { revision: 2, reason: 'EXECUTION_USER_REQUESTED', cleanup_proven: true },
 };
 type Call = { path: string; method: string; body: unknown };
 const calls: Call[] = [];
@@ -33,15 +33,18 @@ function fixture(responses: Array<{ data: unknown; status?: number }>) {
 
 afterEach(() => { globalThis.fetch = realFetch; calls.length = 0; });
 
-test('approval resumes the exact paused turn without starting or steering another turn', async () => {
+test('approval resumes the exact paused turn with its input, without starting or steering another turn', async () => {
   fixture([{ data: paused }, { data: { duplicate: false } }]);
   await continuePluginConversation(message);
   expect(calls).toEqual([
     { method: 'GET', path: `/api/agent-sessions/${id}/execution`, body: undefined },
-    { method: 'POST', path: `/api/agent-sessions/${id}/execution/resume`, body: {
-      operation_id: 'original-turn', idempotency_key: message.idempotency_key,
-      expected_pause_revision: 2, expected_checkpoint_revision: 7,
-      expected_checkpoint_digest: 'a'.repeat(64), budget: {},
+    { method: 'POST', path: `/api/agent-sessions/${id}/plugin-continuation`, body: {
+      request: {
+        operation_id: 'original-turn', idempotency_key: message.idempotency_key,
+        expected_pause_revision: 2, expected_checkpoint_revision: 7,
+        expected_checkpoint_digest: 'a'.repeat(64), budget: {},
+      },
+      input: { content: 'Approved; continue this existing plugin.' },
     } },
   ]);
 });
@@ -63,7 +66,7 @@ test('a pause committed during send uses its fresh checkpoint instead of the ste
   await continuePluginConversation(message);
   expect(calls.map(call => call.path)).toEqual([
     `/api/agent-sessions/${id}/execution`, `/api/agent-sessions/${id}/turns`,
-    `/api/agent-sessions/${id}/execution`, `/api/agent-sessions/${id}/execution/resume`,
+    `/api/agent-sessions/${id}/execution`, `/api/agent-sessions/${id}/plugin-continuation`,
   ]);
 });
 
