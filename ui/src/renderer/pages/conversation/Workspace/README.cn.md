@@ -12,7 +12,9 @@ Workspace/
 ├── types.ts                  # WorkspaceSource、SelectedFile、tab/source 类型
 ├── components/               # toolbar、tab bar、context menu、dialogs
 ├── hooks/                    # tree、file ops、paste/drag、search、changes
+├── KnowledgePanel/           # session 知识库挂载 tab 与绑定目标
 ├── utils/                    # preview 与 tree helper
+├── workspaceRefresh.ts       # 工作区文件树刷新事件 helper
 └── workspace.css
 ```
 
@@ -34,7 +36,8 @@ source 并复用同一个 body。
 - `WorkspaceTreeSource`：`useWorkspaceTree` 使用的 lazy root/child loader。
 - `SelectedFile`：与来源无关的文件 / 文件夹选择结构。
 - `WorkspaceUploadConfig`：存在即启用 upload、drag、paste UI。
-- `eventPrefix`：只能是 `'acp' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote'`。
+- `eventPrefix`：会话的 agent 类型。`AgentType` 当前只有 `Nomi` 一个变体，
+  因此值始终是 `'nomi'`。
 
 ## 持久化与设置
 

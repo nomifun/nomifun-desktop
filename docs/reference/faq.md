@@ -85,18 +85,23 @@ gateway processes those requests under its own data and billing policies.
 What NomiFun itself does over the network:
 
 - Optional update checks (system info / check-update endpoint).
-- Extension marketplace (`/api/hub/*`) — only if you actively use it.
 - Requests to your configured model services, including model invocation,
   model catalogs, and quota queries. Gateway metadata is fetched during the
   setup flow; account queries use that gateway's key.
+- The Creation prompt catalog syncs from a fixed allow-list of upstream prompt
+  repositories when you trigger it.
 
 There is no telemetry pipeline, no analytics SDK, no `SENTRY_DSN` integration in the binary. The backend does not phone home on its own.
 
-## What about extensions and skills — what runs them?
+## What about plugins and skills — what runs them?
 
-Extensions (themes, presets, channel plugins, settings tabs) are loaded by `nomifun-extension` from the data directory. Skills are bundles of prompts/instructions resolved into the agent's context per-conversation. Both are local files under your data dir; the marketplace flow simply downloads them into that directory.
+Unified Plugins are local packages you import and enable yourself; they run
+under the Unified Plugin Core with their own credentials and lifecycle. Skills
+are bundles of prompts/instructions resolved into the agent's context
+per-conversation. Both live as local data under your data dir; there is no
+extension marketplace that downloads them automatically.
 
-Agent CLI binaries are not extensions either — they are third-party CLIs you install yourself and run in an [in-app terminal](../guides/terminal.md).
+Agent CLI binaries are not plugins either — they are third-party CLIs you install yourself and run in an [in-app terminal](../guides/terminal.md).
 
 ## Can I run agents on a different machine from the UI?
 

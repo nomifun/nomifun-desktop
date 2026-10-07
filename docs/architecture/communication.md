@@ -122,7 +122,7 @@ transport session remains connection lifecycle only.
 | Operation | Transport |
 | --- | --- |
 | Login/setup | HTTP `/api/auth/*` |
-| Conversation send | HTTP `/api/conversations/*` plus streamed `/ws` events |
+| Agent session send | HTTP `POST /api/agent-sessions/{id}/turns` plus streamed `/ws` events |
 | Persistent Agent collaboration | HTTP `/api/agent-executions/*`; invalidation/thinking over `/ws` |
 | Terminal input | HTTP terminal route; output over `/ws` |
 | Desktop keep-awake | Tauri command |

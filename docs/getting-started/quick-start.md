@@ -58,7 +58,7 @@ Claude Code, Codex, or Gemini CLI, install it on the host and run it in an
 Back on `/guid`:
 
 1. Choose a model if required.
-2. Optionally choose a preset.
+2. Optionally choose an Agent authored in the Agent workbench (`/agent`).
 3. Type a prompt.
 4. Send with the button or `Ctrl/Cmd+Enter`.
 
@@ -73,7 +73,7 @@ Useful next pages:
 
 - [Terminal](../guides/terminal.md)
 - [MCP & Skills](../guides/mcp-and-skills.md)
-- [Presets](../guides/presets.md)
+- [Agent Workbench](../guides/presets.md)
 - [AutoWork & Requirements](../guides/autowork-requirements.md)
 - [Scheduled Tasks](../guides/scheduled-tasks.md)
 - [Web Server Deployment](../guides/web-server-deployment.md)

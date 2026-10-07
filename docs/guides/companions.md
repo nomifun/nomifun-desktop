@@ -322,7 +322,7 @@ To verify a multi-companion setup end to end, walk through in order:
 | Suspected-duplicate groups for one companion | `POST /api/companion/memories/merge-suggestions` (`{companion_id}` — the scan and the response are scoped to that companion) |
 | Per-companion companion threads | `GET /api/companion/companions/{companionId}/companion/threads`, `…/companion/active` |
 | A companion's chat-history day index | `GET /api/companion/companions/{companionId}/history/days` → `[{day, message_count, has_digest}]`, newest first (local days; read-only, never mints a session) |
-| One day of a conversation | `GET /api/conversations/{conversationId}/messages?day=YYYYMMDD` (oldest-first, server-bounded) |
+| One day of a session | `GET /api/agent-sessions/{agentSessionId}/messages?day=YYYYMMDD` (oldest-first, server-bounded) |
 | Export memory bundle | `POST /api/companion/export/memory` (`{dest_path, include_events}`) |
 | Export companion bundle | `POST /api/companion/export/companions/{companionId}` (`{dest_path, knowledge_names, include_memories = true, include_skills = false}`) |
 | Import memory / companion bundle | `POST /api/companion/import` (dispatched by manifest.kind) |
