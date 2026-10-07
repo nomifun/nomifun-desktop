@@ -58,6 +58,8 @@ type MarkdownViewProps = {
   lineHeight?: string;
   /** Use denser article typography in constrained workspace panels. */
   compact?: boolean;
+  /** Process prose shares the conversation journal's compact block spacing. */
+  variant?: 'article' | 'process';
   /** Enable raw HTML rendering in markdown content. Use with caution — only for trusted sources. */
   allowHtml?: boolean;
   /** Model/tool Markdown is not a verified artifact-delivery receipt. */
@@ -73,6 +75,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     fontSize,
     lineHeight,
     compact,
+    variant = 'article',
     allowHtml,
     allowUnverifiedImages = true,
     children: childrenProp,
@@ -192,6 +195,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
             className={classNames('markdown-shadow-body markdown-article', {
               'markdown-article--explicit': Boolean(fontSize || lineHeight),
               'markdown-article--compact': compact,
+              'markdown-article--process': variant === 'process',
             })}
           >
             <ReactMarkdown

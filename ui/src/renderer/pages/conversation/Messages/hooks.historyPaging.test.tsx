@@ -8,7 +8,7 @@ import { parseConversationId, parseMessageId, type ConversationId } from '@/comm
 import { emitter } from '@/renderer/utils/emitter';
 import {
   MessageListProvider, MessageListLoadingProvider, useMessageList,
-  useMessageListLoading, useMessageLstCache,
+  useAddOrUpdateMessage, useMessageListLoading, useMessageLstCache,
 } from './hooks';
 
 type HistoryPage = Awaited<ReturnType<typeof ipcBridge.database.getConversationMessages.invoke>>;
@@ -261,6 +261,72 @@ test('unmounting a history reader fences its pending page from a surviving messa
   expect(current.map((m) => m.created_at)).toEqual([20]);
   h.refresh();
   expect(h.requests).toHaveLength(2);
+});
+
+test('leaving and remounting a conversation restores canonical thinking from fresh history', async () => {
+  const h = mockHistoryTransport();
+  let current: TMessage[] = [];
+  const storedThought = (id: number, status: 'thinking' | 'done'): TMessage => ({
+    ...message(id), turn_id: message(10).msg_id, type: 'thinking',
+    content: { content: `Reasoning step ${id}`, status },
+  });
+  const Loader = () => { useMessageLstCache(a); current = useMessageList(); return null; };
+  const View = ({ active }: { active: boolean }) => active ? (
+    <MessageListProvider><MessageListLoadingProvider><Loader /></MessageListLoadingProvider></MessageListProvider>
+  ) : <span>Another page</span>;
+  const view = render(<View active />);
+  await h.reply(0, [storedThought(20, 'done'), message(10)], false);
+  expect(current.find(row => row.type === 'thinking')?.content).toMatchObject({ status: 'done' });
+  h.refresh();
+  view.rerender(<View active={false} />);
+  view.rerender(<View active />);
+  expect(current).toEqual([]);
+  await h.reply(2, [storedThought(30, 'thinking'), storedThought(20, 'done'), message(10)], false);
+  expect(current.filter(row => row.type === 'thinking').map(row => row.content.status)).toEqual(['done', 'thinking']);
+  await h.reply(1, [storedThought(30, 'done'), storedThought(20, 'done'), message(10)], false);
+  expect(current.filter(row => row.type === 'thinking').map(row => row.content.status)).toEqual(['done', 'thinking']);
+});
+
+test('remounted history cannot close a newer live phase or reopen its later handoff', async () => {
+  const h = mockHistoryTransport();
+  let current: TMessage[] = [];
+  let publish: ReturnType<typeof useAddOrUpdateMessage> = () => {};
+  const request = { ...message(10), position: 'right' as const };
+  const thought = (status: 'thinking' | 'done', content: string): TMessage => ({
+    ...message(20), turn_id: request.msg_id, type: 'thinking', content: { content, status },
+  });
+  const Loader = () => {
+    useMessageLstCache(a);
+    current = useMessageList();
+    publish = useAddOrUpdateMessage();
+    return null;
+  };
+  const View = ({ active }: { active: boolean }) => active ? (
+    <MessageListProvider><MessageListLoadingProvider><Loader /></MessageListLoadingProvider></MessageListProvider>
+  ) : <span>Another page</span>;
+  const view = render(<View active />);
+  await h.reply(0, [thought('done', 'A recorded phase'), request], false);
+  view.rerender(<View active={false} />);
+  view.rerender(<View active />);
+  await act(async () => {
+    publish(thought('thinking', 'Live resumed reasoning.'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+  await h.reply(1, [thought('done', 'A recorded phase'), request], false);
+  expect(current.find(row => row.type === 'thinking')?.content).toMatchObject({ status: 'thinking' });
+  h.refresh();
+  await act(async () => {
+    publish(thought('done', ''));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+  await h.reply(2, [thought('thinking', 'History before the typed handoff'), request], false);
+  expect(current.find(row => row.type === 'thinking')?.content).toMatchObject({ status: 'done' });
+  // Another actual remount reads the current phase, independent of the former
+  // provider's stream objects and completion preference.
+  view.rerender(<View active={false} />);
+  view.rerender(<View active />);
+  await h.reply(3, [thought('thinking', 'Current canonical reasoning'), request], false);
+  expect(current.find(row => row.type === 'thinking')?.content).toMatchObject({ status: 'thinking' });
 });
 
 test('terminal events refresh only this conversation with an explicitly idle runtime', async () => {

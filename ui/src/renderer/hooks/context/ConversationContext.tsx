@@ -56,8 +56,14 @@ export interface ConversationContextValue {
    */
   isProcessing?: boolean;
 
+  /** False while the platform is still verifying the current Turn after mount. */
+  isTurnStateHydrated?: boolean;
+
   /** Authoritative root id of the active turn when the platform exposes it. */
   activeTurnId?: MessageId;
+
+  /** Canonical wall-clock start of `activeTurnId`, including after navigation. */
+  activeTurnStartedAt?: number;
 
   /** User message that initiated `activeTurnId`, when this was a visible request. */
   activeRequestMessageId?: MessageId;

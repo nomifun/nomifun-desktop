@@ -5,7 +5,6 @@
 > 状态：已实施；本地/协议验收完成，真实 live-provider 因缺少隔离凭据未运行
 >
 > 范围：普通本地 Nomi AgentSession、Agent binding 切换、跨 Agent 上下文分段、任务交接、AgentExecution 交付质量
-> 启动入口：[纯净会话实施启动 Prompt](2026-09-22-agent-session-switch-and-handoff-start-prompt.zh.md)
 
 ## 1. 决策摘要
 

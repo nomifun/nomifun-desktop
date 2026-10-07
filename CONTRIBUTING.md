@@ -94,8 +94,8 @@ Prerequisites:
 Install and smoke-check:
 
 ```bash
-git clone <repo-url> nomifun-tauri
-cd nomifun-tauri
+git clone <repo-url> nomifun-desktop
+cd nomifun-desktop
 bun install
 cargo check --workspace
 ```

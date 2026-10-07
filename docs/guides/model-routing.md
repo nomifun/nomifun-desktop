@@ -134,8 +134,8 @@ The managed model catalog can represent these task families:
 | Vision | Image-aware chat and analysis |
 | Speech recognition (ASR) | Voice input and companion/device speech |
 | Speech synthesis (TTS) | Companions, devices, and Canvas audio nodes |
-| Image generation / editing | Creation Canvas and Image Workbench |
-| Video generation | Creation Canvas and Video Workbench |
+| Image generation / editing | Creation Canvas nodes |
+| Video generation | Creation Canvas nodes |
 | Music generation | Conversation creation and Creation |
 | Embedding / reranking | Retrieval and knowledge workflows |
 
@@ -259,7 +259,7 @@ their provider calls happen inside their own runtime.
   `crates/backend/nomifun-conversation/src/model_failover.rs`
 - Failover API:
   `crates/backend/nomifun-app/src/router/model_failover.rs`
-- IDMM policy:
-  `crates/backend/nomifun-idmm/src/policy.rs`
+- IDMM supervision service:
+  `crates/backend/nomifun-idmm/src/service.rs`
 - Creation model catalog:
   `ui/src/renderer/pages/creativeStudio/models/catalog.ts`

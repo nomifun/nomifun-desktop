@@ -198,6 +198,9 @@ test('a live journal only animates its current thought and preserves completed t
   expect(firstHeader.textContent).toContain('Thought complete');
   expect(secondHeader.textContent).toContain('Thinking...');
   expect(thoughts[0].querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('First reasoning is complete.');
+  expect(firstHeader.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(firstHeader);
+  expect(firstHeader.getAttribute('aria-expanded')).toBe('true');
   fireEvent.click(firstHeader);
   expect(firstHeader.getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(firstHeader);
@@ -374,7 +377,7 @@ test('a completed journal defaults closed and expands its full reasoning and cal
   expect(page.container.querySelector('.turn-process-disclosure__body')).not.toBeNull();
   const thoughtHeaders = page.container.querySelectorAll('[data-thinking-process-header]');
   expect(thoughtHeaders).toHaveLength(2);
-  thoughtHeaders.forEach((header) => expect(header.getAttribute('aria-expanded')).toBe('true'));
+  thoughtHeaders.forEach((header) => expect(header.getAttribute('aria-expanded')).toBe('false'));
   page.rerender(view(false));
   expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
   expect(Array.from(page.container.querySelectorAll('.markdown-shadow'), (node) => node.shadowRoot?.textContent ?? '')

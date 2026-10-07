@@ -94,7 +94,7 @@ Desktop 会话是讨论、生成、修改和继续创作的统一入口。保留
 - 会话接纳与下一轮预设：`crates/backend/nomifun-conversation/src/conversation_creation.rs`。
 - 唯一生成服务：`crates/backend/nomifun-creation/src/service.rs`。
 - 普通 Agent 生图工具：`crates/backend/nomifun-ai-agent/src/image_generation.rs`；公共工具 Host：`nomifun-app/src/router/agent_wave3_creation_host.rs`。
-- 官方预设：`nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json`。
+- 官方预设：`nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json`。
 - 音乐适配及按任务默认模型：`nomifun-model-invoke/src/adapters/minimax_music.rs`、`default_model.rs`。
 - 导航与页面边界：`Sider`、`Router`、`creativeStudio/app/resourceRoutes.ts`、`ResourcePageBoundary.tsx`。
 

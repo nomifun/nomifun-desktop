@@ -24,23 +24,22 @@
 .companionName { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 1px 6px; font-size: 13px; line-height: 20px; border-bottom: 2px solid transparent; }
 .companion[aria-pressed='true'] .companionName { border-color: rgb(var(--primary-6)); color: rgb(var(--primary-6)); }
 .compactStage { display: grid; align-items: center; gap: 8px; padding: 12px 0 2px; }
-.compactTile { display: flex; align-items: center; justify-self: center; gap: 4px; width: min(100%, 224px); min-width: 0; padding: 4px 8px 4px 4px; box-sizing: border-box; border: 1px solid transparent; border-radius: 12px; background: transparent; transition: background-color 160ms ease, border-color 160ms ease; }
+.compactTile { display: flex; align-items: center; justify-self: center; gap: 4px; width: min(100%, 224px); min-width: 0; padding: 4px; box-sizing: border-box; border: 1px solid transparent; border-radius: 12px; background: transparent; transition: background-color 160ms ease, border-color 160ms ease; }
 .compactTile:hover, .compactTile:focus-within { background: var(--color-fill-2); }
 .compactTile[data-selected='true'] { border-color: color-mix(in srgb, rgb(var(--primary-6)) 18%, transparent); background: color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent); }
 .compactCompanion { display: flex; flex: 1 1 0; align-items: center; gap: 8px; width: 0; min-width: 0; max-width: none; padding: 4px; border: 0; border-radius: 8px; background: transparent; color: var(--text-primary); cursor: pointer; font: inherit; }
 .compactCompanion:hover, .compactCompanion[aria-pressed='true'] { background: transparent; }
 .compactCompanion .companionName { flex: 1 1 auto; min-width: 0; max-width: none; padding: 0; border: 0; text-align: left; }
-.compactTile .floatingControl { flex: 0 0 auto; }
-.floatingControl { display: inline-flex; align-items: center; justify-content: center; gap: 6px; color: var(--text-secondary); font-size: 11px; line-height: 20px; white-space: nowrap; }
-.floatingSwitch { position: relative; display: inline-flex; align-items: center; flex: 0 0 30px; width: 30px; height: 18px; padding: 2px; border: 0; border-radius: 999px; background: var(--color-border-3); cursor: pointer; transition: background-color 160ms ease; }
-.floatingSwitch[aria-checked='true'] { background: rgb(var(--primary-6)); }
-.floatingSwitch span { width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 16%); transition: transform 160ms ease; }
-.floatingSwitch[aria-checked='true'] span { transform: translateX(12px); }
-.floatingSwitch:disabled { cursor: wait; opacity: .65; }
 .smallAvatar { display: flex; flex: 0 0 40px; height: 40px; align-items: center; justify-content: center; overflow: hidden; border-radius: 10px; }
 .popover { z-index: 1300; width: 300px; max-width: calc(100vw - 24px); overflow-y: auto; border: 1px solid var(--color-border-2); border-radius: 14px; background: var(--bg-base); color: var(--text-primary); box-shadow: 0 8px 28px rgb(0 0 0 / 12%); font-family: inherit; padding: 8px; box-sizing: border-box; }
-.detail { width: 184px; display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 14px; }
-.detailName { font-size: 14px; line-height: 22px; overflow-wrap: anywhere; }
+.pointedPopover { display: flex; flex-direction: column; overflow: visible; }
+.popoverContent { display: flex; flex-direction: column; gap: inherit; min-height: 0; overflow-y: auto; }
+.actionPanel { display: flex; flex-direction: column; gap: 2px; width: max-content; min-width: 144px; padding: 4px; border-radius: 10px; }
+.actionButton { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 30px; padding: 5px 8px; box-sizing: border-box; border: 0; border-radius: 6px; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 20px; text-align: left; white-space: nowrap; cursor: pointer; transition: background-color 140ms ease; }
+.actionButton:hover:not(:disabled), .actionButton:focus-visible { background: var(--color-fill-2); }
+.actionButton:disabled { opacity: .55; cursor: wait; }
+.popover .actionButton:focus-visible { outline-offset: -2px; }
+.actionIndicator { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 14px; width: 14px; height: 14px; color: rgb(var(--primary-6)); }
 .primaryButton { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 999px; padding: 8px 14px; background: rgb(var(--primary-6)); color: var(--button-primary-text, #fff); font: inherit; font-size: 13px; line-height: 20px; cursor: pointer; }
 .primaryButton:hover { background: rgb(var(--primary-7)); }
 .primaryButton:disabled { opacity: .55; cursor: wait; }
@@ -60,17 +59,11 @@
 .rosterRow { display: flex; align-items: center; min-width: 0; border-radius: 7px; padding-right: 3px; transition: background-color 140ms ease; }
 .rosterRow:hover { background: var(--color-fill-2); }
 .rosterRow[data-selected='true'] { background: color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent); }
-.rosterRow > .floatingSwitch { margin-right: 4px; }
 .rosterChoice { display: flex; align-items: center; flex: 1; min-width: 0; height: 36px; gap: 7px; padding: 3px 4px; border: 0; border-radius: 7px; background: transparent; color: var(--text-primary); cursor: pointer; font: inherit; font-size: 12px; line-height: 20px; text-align: left; }
 .rosterAvatar { display: flex; align-items: center; justify-content: center; flex: 0 0 28px; height: 28px; border-radius: 7px; overflow: hidden; background: var(--color-fill-2); }
 .rosterAvatar * { animation: none !important; }
 .rosterName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rosterFooter { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 2px 0; margin-top: 8px; border-top: 1px solid var(--color-border-2); }
-.rosterActions { width: 168px; display: flex; flex-direction: column; padding: 6px; border-radius: 10px; }
-.rosterActions strong { font-size: 12px; line-height: 18px; padding: 6px 8px; overflow-wrap: anywhere; }
-.rosterActions button { border: 0; border-radius: 6px; background: transparent; color: var(--text-primary); font: inherit; font-size: 12px; line-height: 20px; text-align: left; padding: 6px 8px; cursor: pointer; }
-.rosterActions button:hover { background: var(--color-fill-2); }
-.rosterActions button:disabled { opacity: .5; cursor: wait; }
 .empty { min-height: 230px; display: flex; align-items: center; justify-content: center; gap: 28px; color: var(--text-secondary); }
 .createFigure { position: relative; display: flex; align-items: center; justify-content: center; width: 124px; height: 110px; padding-bottom: 22px; border: 1px dashed var(--color-border-3); border-radius: 18px; background: transparent; color: rgb(var(--primary-6)); cursor: pointer; }
 .emptyPodium { position: absolute; bottom: -12px; width: 140px; height: 38px; }

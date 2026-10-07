@@ -1868,6 +1868,7 @@ impl NomiCoreSessionOwner {
     fn canonical_turn_started_wire_event(
         session_id: &AgentSessionId,
         root_message_id: &str,
+        processing_started_at: i64,
     ) -> WebSocketMessage<Value> {
         WebSocketMessage::new(
             "turn.started",
@@ -1886,7 +1887,7 @@ impl NomiCoreSessionOwner {
                     "runtime_status": "running",
                     "is_processing": true,
                     "active_turn_id": root_message_id,
-                    "processing_started_at": now_ms(),
+                    "processing_started_at": processing_started_at,
                 },
             }),
         )
@@ -2110,6 +2111,14 @@ impl NomiCoreSessionOwner {
                 "AgentSession {} not found",
                 session_id.as_ref(),
             )))?;
+        let processing_started_at = projection
+            .runtime
+            .as_ref()
+            .filter(|runtime| runtime.active_turn_id.as_deref() == Some(root_message_id.as_str()))
+            .and_then(|runtime| runtime.processing_started_at)
+            .ok_or_else(|| {
+                AppError::Conflict("accepted canonical Turn has no authoritative start time".into())
+            })?;
         let options = self.runtime_options_for_projection(owner_id, session_id, projection).await?;
         let cancellation = tokio_util::sync::CancellationToken::new();
         let relay_cancellation = cancellation.clone();
@@ -2151,7 +2160,11 @@ impl NomiCoreSessionOwner {
             Self::canonical_assistant_stream_message_id(&root_message_id)?;
         self.user_events.send_to_user(
             owner_id,
-            Self::canonical_turn_started_wire_event(session_id, &root_message_id),
+            Self::canonical_turn_started_wire_event(
+                session_id,
+                &root_message_id,
+                processing_started_at,
+            ),
         );
         self.spawn_canonical_stream_relay(
             owner_id.to_owned(),
@@ -4878,6 +4891,7 @@ fn canonical_conversation_response(
     execution_link: Option<ConversationExecutionLinkProjection>,
     companion_id: Option<String>,
 ) -> Result<ConversationResponse, AppError> {
+    let active_turn = canonical_active_turn_runtime(&observed.head, &observed.events)?;
     let SessionObservation { session, head, events, .. } = observed;
     let super::agent_binding_projection::SavedAgentBindingProjection {
         binding,
@@ -4948,22 +4962,6 @@ fn canonical_conversation_response(
         "opening" => ConversationStatus::Pending,
         _ => ConversationStatus::Finished,
     };
-    let active_turn = head.active_turn_id.as_deref().and_then(|operation| {
-        events
-            .iter()
-            .rev()
-            .find(|event| {
-                event.kind.0 == "turn/started" && event.correlation_id.as_ref() == operation
-            })
-            .and_then(|event| match &event.payload {
-                nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) => payload
-                    .0
-                    .get("source_message_id")
-                    .and_then(Value::as_str)
-                    .map(|source| (source.to_owned(), event.seq)),
-                _ => None,
-            })
-    });
     let runtime = Some(ConversationRuntimeSummary {
         state: if head.status == "running" {
             ConversationRuntimeStateKind::Running
@@ -4975,10 +4973,7 @@ fn canonical_conversation_response(
         runtime_status: Some(status),
         is_processing: head.status == "running",
         active_turn_id: active_turn.as_ref().map(|(message_id, _)| message_id.clone()),
-        processing_started_at: active_turn
-            .as_ref()
-            .and_then(|(_, seq)| i64::try_from(*seq).ok())
-            .map(|seq| created_at.saturating_add(seq)),
+        processing_started_at: active_turn.as_ref().map(|(_, started_at)| *started_at),
     });
     let name = session
         .metadata
@@ -5018,6 +5013,145 @@ fn canonical_conversation_response(
         modified_at: created_at,
         extra: request.extra,
     })
+}
+
+fn canonical_active_turn_runtime(
+    head: &nomifun_agent_session::SessionHeadProjection,
+    events: &[nomifun_agent_contracts::SessionEventRecord],
+) -> Result<Option<(String, i64)>, AppError> {
+    let Some(operation) = head.active_turn_id.as_deref() else {
+        return Ok(None);
+    };
+    // The caller hydrates this exact owning Turn's receipt when its start is
+    // outside the bounded event page. A Session cursor is ordering, never time.
+    let started = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.agent_session_id == head.session_id
+                && event.seq <= head.last_seq
+                && event.kind.0 == "turn/started"
+                && event.correlation_id.as_ref() == operation
+        })
+        .ok_or_else(|| AppError::Conflict("active canonical Turn has no started event".into()))?;
+    let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = &started.payload else {
+        return Err(AppError::Conflict(
+            "canonical Turn start requires its inline admission".into(),
+        ));
+    };
+    let source = payload
+        .0
+        .get("source_message_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .filter(|uuid| uuid.get_version_num() == 7)
+        .ok_or_else(|| AppError::Conflict("canonical Turn start has no source UUIDv7".into()))?;
+    let started_uuid = Uuid::parse_str(started.event_id.as_ref())
+        .ok()
+        .filter(|uuid| uuid.get_version_num() == 7)
+        .ok_or_else(|| AppError::Conflict("canonical Turn start event is not UUIDv7".into()))?;
+    // Match the owning Turn's history projection: the first six UUIDv7 bytes
+    // contain its committed wall-clock start, including after re-entry.
+    let bytes = started_uuid.as_bytes();
+    let started_at =
+        u64::from_be_bytes([0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]]) as i64;
+    Ok(Some((source.to_string(), started_at)))
+}
+
+#[cfg(test)]
+mod active_turn_runtime_tests {
+    use super::*;
+    use nomifun_agent_contracts::{SessionEventKind, SessionEventPayloadRef, SessionEventRecord};
+    use nomifun_agent_session::SessionHeadProjection;
+
+    fn fixture() -> (SessionHeadProjection, SessionEventRecord) {
+        let session = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let head = SessionHeadProjection {
+            session_id: session.clone(),
+            status: "running".into(),
+            active_turn_id: Some("turn:current".into()),
+            active_set_generation: 1,
+            last_seq: 901,
+            unread_count: 0,
+        };
+        let started = SessionEventRecord {
+            agent_session_id: session,
+            seq: 801,
+            event_id: "01a11692-0c44-7db1-a359-09a4c9bf125e".into(),
+            producer_id: "session_owner".into(),
+            idempotency_key: "started".into(),
+            kind: SessionEventKind("turn/started".into()),
+            kind_version: 1,
+            correlation_id: "turn:current".into(),
+            causation_event_id: None,
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "source_message_id": "0190f5fe-7c00-7a00-8000-000000000003"
+            }))),
+        };
+        (head, started)
+    }
+
+    #[test]
+    fn active_turn_runtime_uses_its_committed_uuid_clock_after_a_bounded_page() {
+        let (head, started) = fixture();
+        // The readonly projection appends the exact receipt's start even when
+        // it is outside the first 500 events. Later foreign starts cannot win.
+        let mut foreign = started.clone();
+        foreign.seq = 900;
+        foreign.correlation_id = "turn:foreign".into();
+        let runtime = canonical_active_turn_runtime(&head, &[started, foreign])
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.0, "0190f5fe-7c00-7a00-8000-000000000003");
+        assert_eq!(runtime.1, 1_791_380_032_580);
+        assert_ne!(runtime.1, 1_700_000_000_000 + 801);
+    }
+
+    #[test]
+    fn active_turn_runtime_requires_the_owning_started_fact_and_uuid_clock() {
+        let (mut head, mut started) = fixture();
+        assert!(canonical_active_turn_runtime(&head, &[]).is_err());
+        started.event_id = "cursor-is-not-time".into();
+        assert!(canonical_active_turn_runtime(&head, &[started]).is_err());
+        head.active_turn_id = None;
+        assert_eq!(canonical_active_turn_runtime(&head, &[]).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn active_turn_runtime_and_cold_history_share_the_owning_turn_clock() {
+        let (_journal, pool) = super::super::engine_journal::test_fixture().await;
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(pool)
+            .await
+            .unwrap();
+        let session = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let before = store.current_cursor(&session).await.unwrap();
+        let mut observed = store.observe(&session, None, 1).await.unwrap();
+        assert!(canonical_active_turn_runtime(&observed.head, &observed.events).is_err());
+        let operation = OperationId::from(observed.head.active_turn_id.clone().unwrap());
+        observed.events.push(
+            store
+                .read_turn_receipt(&session, &operation)
+                .await
+                .unwrap()
+                .started_event
+                .unwrap(),
+        );
+        let (source, started_at) = canonical_active_turn_runtime(&observed.head, &observed.events)
+            .unwrap()
+            .unwrap();
+        let (history, _, _) = store
+            .message_history_before(&session, None, 50)
+            .await
+            .unwrap();
+        let summary = history
+            .iter()
+            .find(|row| row.presentation_intent == "turn_summary")
+            .unwrap();
+        assert_eq!(summary.projection["source_message_id"], source);
+        assert_eq!(summary.projection["started_at_ms"], started_at);
+        assert!(summary.projection["finished_at_ms"].is_null());
+        assert_eq!(store.current_cursor(&session).await.unwrap(), before);
+    }
 }
 
 fn cron_session_projection_from_response(
@@ -5823,6 +5957,7 @@ mod session_boundary_tests {
         let wire = NomiCoreSessionOwner::canonical_turn_started_wire_event(
             &session_id,
             root_message_id,
+            1_791_380_032_580,
         );
 
         assert_eq!(wire.name, "turn.started");
@@ -5831,6 +5966,7 @@ mod session_boundary_tests {
         assert_eq!(wire.data["runtime"]["state"], "running");
         assert_eq!(wire.data["runtime"]["is_processing"], true);
         assert_eq!(wire.data["runtime"]["active_turn_id"], root_message_id);
+        assert_eq!(wire.data["runtime"]["processing_started_at"], 1_791_380_032_580_i64);
     }
 
     fn frozen_binding(workspace_root: &str, owner_id: &str) -> AgentBindingValue {

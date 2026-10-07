@@ -90,6 +90,20 @@
   --markdown-code-margin: 6px;
 }
 
+/* Progress and thinking keep message-sized headings and a shared journal rhythm.
+ * This runs inside Shadow DOM; outer message selectors cannot style its blocks. */
+.markdown-article--process {
+  --markdown-paragraph-margin: var(--conversation-process-gap, 6px);
+  --markdown-list-margin: var(--conversation-process-gap, 6px);
+  --markdown-list-item-margin: 2px;
+  --markdown-h2-margin: 8px 0 4px;
+  --markdown-h3-margin: 8px 0 4px;
+  --markdown-minor-heading-margin: 8px 0 4px;
+  --markdown-rule-margin: 8px 0;
+  --markdown-quote-margin: var(--conversation-process-gap, 6px) 0;
+  --markdown-code-margin: var(--conversation-process-detail-gap, 4px);
+}
+
 .markdown-article > :first-child {
   margin-top: 0;
 }

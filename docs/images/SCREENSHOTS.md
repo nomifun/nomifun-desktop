@@ -4,18 +4,16 @@ This manifest records the repository-local screenshots used by the Desktop
 README and technical guides. The current set was captured on **August 25, 2026**
 from the 0.7.2 codebase with an isolated data root.
 
-The Creation set covers Canvas Library, Image Workbench, Video Workbench,
-Prompt Center, My Assets, Template Studio, Template Editor, and a visible native
-desktop companion. These are current running-app captures, not legacy mockups.
+The Creation set covers Canvas Library, the retired Image and Video
+Workbenches (kept as historical captures), Prompt Center, My Assets, Template
+Studio, Template Editor, and a visible native desktop companion.
 Do not restore retired screenshots or introduce temporary aliases into the
 numbered gallery.
 
 ## Ownership and storage
 
-- Product-use documentation and its canonical screenshot library are owned by
-  [NomiFun Portal](https://www.nomifun.com/docs/).
-- Desktop keeps technical contracts and a small offline README showcase. Portal
-  owns the end-user walkthroughs and production gallery.
+- Product-use guides and their screenshots are self-contained in this
+  repository (`docs/guides/` + `docs/images/`).
 - Repository-local images are intentional so README pages remain readable
   offline. Do not replace them with external image URLs.
 
@@ -35,12 +33,12 @@ under `creative-studio/zh-CN/`. Both locale sets use the same route order:
 
 | File | Route / subject |
 | --- | --- |
-| `01-canvas-library.png` | `#/workshop/canvases` · Canvas Library |
-| `03-image-workbench.png` | `#/workshop/image` · standalone T2I/I2I workbench |
-| `04-video-workbench.png` | `#/workshop/video` · standalone T2V/I2V workbench |
-| `05-prompt-center.png` | `#/workshop/prompts` · searchable Prompt Center |
-| `06-asset-library.png` | `#/workshop/assets` · My Assets and reusable inputs |
-| `07-template-studio.png` | `#/workshop/templates` · private Template Studio, including multi-image series setup |
+| `01-canvas-library.png` | `#/nomi/canvases` · Canvas Library |
+| `03-image-workbench.png` | retired standalone Image Workbench (historical capture; the route no longer exists) |
+| `04-video-workbench.png` | retired standalone Video Workbench (historical capture; the route no longer exists) |
+| `05-prompt-center.png` | `#/asset-library/prompts` · searchable Prompt Center |
+| `06-asset-library.png` | `#/asset-library/materials` · My Assets and reusable inputs |
+| `07-template-studio.png` | `#/asset-library/templates` · private Template Studio, including multi-image series setup |
 | `08-template-editor.png` | Template Editor and bounded AI Create review flow |
 | `11-companion-settings.png` | Companion workspace with figure, persona, model, memory, Skills, and desktop visibility control |
 | `12-companion-workspace.png` | Companion surface kept visible beside the creative workspace |
@@ -81,6 +79,6 @@ gallery asset.
 
 The existing `autowork-*`, `channels-*`, `cron-*`, `gs-*`, `mcp-*`, `terminal-*`,
 and `webui-*` files remain only where a technical guide still references them.
-They are not part of the Creation gallery. When a Portal walkthrough
-supersedes one, remove the old file and update its references instead of
-keeping duplicate aliases.
+They are not part of the Creation gallery. When a guide stops needing one,
+remove the old file and update its references instead of keeping duplicate
+aliases.
