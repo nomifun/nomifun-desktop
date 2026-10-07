@@ -121,6 +121,30 @@ function asSchema(value: unknown): Record<string, unknown> {
     : { type: 'object' };
 }
 
+/**
+ * Drafts that still represent unfinished creation work in the library. A
+ * draft already delivered as the active artifact of a non-trashed installed
+ * plugin is hidden: apply/check/preview clear the delivery digest, so an
+ * edited draft reappears. Conversation surfaces keep showing their own draft.
+ */
+export function libraryDrafts(
+  plugins: readonly PluginSummary[],
+  drafts: readonly PluginDraftSummary[],
+): PluginDraftSummary[] {
+  const installed = new Map<string, string>();
+  for (const plugin of plugins) {
+    if (plugin.trashed_at_ms === undefined) {
+      installed.set(plugin.plugin_id, plugin.active.artifact_digest);
+    }
+  }
+  return drafts.filter((draft) => {
+    const active = draft.plugin_id === undefined
+      ? undefined
+      : installed.get(draft.plugin_id);
+    return active === undefined || active !== draft.delivered_artifact_digest;
+  });
+}
+
 export function pluginLibraryEntries(
   plugins: readonly PluginSummary[],
   drafts: readonly PluginDraftSummary[],
@@ -128,7 +152,7 @@ export function pluginLibraryEntries(
   const entries: PluginLibraryEntry[] = plugins.map((plugin) => ({
     kind: 'plugin', key: `plugin:${plugin.plugin_id}`, plugin,
   }));
-  for (const draft of drafts) {
+  for (const draft of libraryDrafts(plugins, drafts)) {
     entries.push({ kind: 'draft', key: `draft:${draft.draft_id}`, draft });
   }
   return entries.sort((left, right) => {
@@ -151,12 +175,13 @@ export function pluginLibraryCounts(
   drafts: readonly PluginDraftSummary[],
 ): PluginLibraryCounts {
   const active = plugins.filter((plugin) => plugin.trashed_at_ms === undefined);
+  const pending = libraryDrafts(plugins, drafts);
   return {
-    all: active.length + drafts.length,
+    all: active.length + pending.length,
     enabled: active.filter((plugin) => plugin.enabled).length,
     disabled: active.filter((plugin) => !plugin.enabled).length,
-    drafts: drafts.length,
-    attention: active.filter(pluginNeedsAttention).length + drafts.filter(draftNeedsAttention).length,
+    drafts: pending.length,
+    attention: active.filter(pluginNeedsAttention).length + pending.filter(draftNeedsAttention).length,
     trash: plugins.length - active.length,
     ui_only: active.filter((plugin) => pluginShape(plugin) === 'ui_only').length,
     headless: active.filter((plugin) => pluginShape(plugin) === 'headless').length,

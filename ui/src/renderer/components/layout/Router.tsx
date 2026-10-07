@@ -5,7 +5,6 @@ import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
-import { PLUGIN_FEATURE_VISIBLE } from '@renderer/utils/plugins/pluginFeatureAvailability';
 import { CANVASES_PATH, CANVAS_PATTERN, ASSET_LIBRARY_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, resourceSectionForPath } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 import {
   loadCreativeStudioAssetsRoute,
@@ -155,7 +154,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
-            <Route path='/plugins' element={PLUGIN_FEATURE_VISIBLE ? withRouteFallback(PluginLibraryPage) : <Navigate to='/guid' replace />} />
+            <Route path='/plugins' element={withRouteFallback(PluginLibraryPage)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
@@ -205,7 +204,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
             {/* One Plugin library, creator, and App/detail surface. */}
-            <Route path='/plugins/run/:id' element={PLUGIN_FEATURE_VISIBLE ? withRouteFallback(PluginRunPage) : <Navigate to='/guid' replace />} />
+            <Route path='/plugins/run/:id' element={withRouteFallback(PluginRunPage)} />
           </Route>
         </Route>
         <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />

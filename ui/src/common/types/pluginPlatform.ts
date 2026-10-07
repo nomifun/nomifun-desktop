@@ -213,6 +213,11 @@ export interface PluginDraftSummary {
   plugin_id?: PluginId;
   base_plugin_revision?: number;
   package_id?: string;
+  /**
+   * Artifact digest of the installed plugin this draft was delivered as;
+   * cleared by any post-delivery edit.
+   */
+  delivered_artifact_digest?: string;
   display_name: string;
   description: string;
   status: PluginDraftStatus;
