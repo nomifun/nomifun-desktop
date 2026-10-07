@@ -7,7 +7,7 @@
 import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import type { IConversationMcpStatus, IProvider, TChatConversation } from '@/common/config/storage';
+import type { IProvider, TChatConversation } from '@/common/config/storage';
 import { parseError } from '@/common/utils';
 import { uuidv7 } from '@/common/utils';
 import type {
@@ -58,12 +58,6 @@ import {
   reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
-
-/** Check whether a specific skill is mounted on the conversation. */
-const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: string): boolean => {
-  const skills = (conversation?.extra as { skills?: string[] } | undefined)?.skills;
-  return skills?.includes(skillName) ?? false;
-};
 
 /** Host id of an SSH-bound session, or undefined for every other conversation. */
 const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | undefined =>
@@ -143,10 +137,6 @@ const NomiConversationLayout: React.FC<{
         modelSelection={modelSelection}
         agentSelectorNode={agentSelectorNode}
         cron_job_id={conversation.cron_job_id}
-        loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-        loadedMcpStatuses={
-          (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
-        }
         agent_name={currentAgentLabel}
         currentAgent={conversation.preset_id
           ? { presetId: conversation.preset_id, label: currentAgentLabel }
@@ -452,7 +442,7 @@ const NomiConversationPanel: React.FC<{
         {!hideAdvancedControls && <CronJobManager
           conversation_id={conversation.id}
           cron_job_id={conversation.cron_job_id}
-          hasCronSkill={hasLoadedSkill(conversation, 'cron')}
+          hasCronSkill={conversation.agent_snapshot?.enabled_capabilities.includes('automation.schedule') === true}
         />}
       </div>
     ),

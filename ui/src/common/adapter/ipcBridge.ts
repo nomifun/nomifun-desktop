@@ -63,7 +63,6 @@ import {
 } from './tauriUpdater';
 import type {
   IMcpServer,
-  ISessionMcpServer,
   TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
@@ -150,6 +149,8 @@ import type {
   AgentSessionId,
   ApplyAgentSessionSwitchRequest,
   ApplyAgentSessionSwitchResponse,
+  AgentSessionCapabilitySelection,
+  AgentSessionCapabilitySelectionState,
   CapabilityCatalogItem,
   CreateAgentPresetFromTemplateRequest,
   CreateAgentPresetRequest,
@@ -707,6 +708,17 @@ export const agentPlatform = {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
     ),
+    getCapabilitySelection: httpGet<AgentSessionCapabilitySelectionState, { agent_session_id: string }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capability-selection`
+    ),
+    putCapabilitySelection: httpPut<AgentSessionCapabilitySelectionState, {
+      agent_session_id: string;
+      selection: AgentSessionCapabilitySelection;
+      expected_binding_version: number;
+    }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capability-selection`,
+      (params) => ({ selection: params.selection, expected_binding_version: params.expected_binding_version })
+    ),
     updateReasoning: httpPut<
       UpdateAgentSessionReasoningResponse,
       { agent_session_id: string; reasoning_effort?: SessionReasoningEffort }
@@ -754,13 +766,6 @@ export const agentPlatform = {
           `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capabilities`
       ),
       fromApiAgentSessionCapabilities
-    ),
-    getSlashCommands: httpGet<
-      Array<{ command: string; description: string }>,
-      { agent_session_id: string }
-    >(
-      (params) =>
-        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/slash-commands`
     ),
     createTurn: httpPost<
       CreateAgentSessionTurnResponse,
@@ -848,6 +853,15 @@ export const agentPlatform = {
       binding_version: number;
       effective_from: 'next_turn';
     }>('agentSession.agentChanged', (value) => ({
+      ...value,
+      agent_session_id: value.agent_session_id as AgentSessionId,
+    })),
+    onCapabilitiesChanged: wsMappedEmitter<{
+      agent_session_id: AgentSessionId;
+      selection: AgentSessionCapabilitySelection;
+      binding_version: number;
+      editable?: boolean;
+    }>('agentSession.capabilitiesChanged', (value) => ({
       ...value,
       agent_session_id: value.agent_session_id as AgentSessionId,
     })),
@@ -1108,9 +1122,6 @@ export const conversation = {
       });
     },
   },
-  getSlashCommands: httpGet<Array<{ command: string; description: string }>, { conversation_id: ConversationId }>(
-    (p) => `/api/agent-sessions/${p.conversation_id}/slash-commands`
-  ),
   askSideQuestion: httpPost<ConversationSideQuestionResult, { conversation_id: ConversationId; question: string }>(
     (p) => `/api/agent-sessions/${p.conversation_id}/side-question`,
     (p) => ({ question: p.question })
@@ -1476,17 +1487,15 @@ export const fs = {
       source: 'builtin' | 'custom' | 'extension';
       audience_tags?: string[];
       scenario_tags?: string[];
+      session_available?: boolean;
+      session_error?: string | null;
     }>,
     void
   >('/api/skills'),
   listBuiltinAutoSkills: httpGet<
-    Array<{ name: string; description: string; name_i18n?: Record<string, string>; description_i18n?: Record<string, string>; location: string }>,
+    Array<{ name: string; description: string; name_i18n?: Record<string, string>; description_i18n?: Record<string, string>; location: string; session_available?: boolean; session_error?: string | null }>,
     void
   >('/api/skills/builtin-auto'),
-  materializeSkillsForAgent: httpPost<
-    { skills: Array<{ name: string; source_path: string }> },
-    { conversation_id: ConversationId; skills: string[] }
-  >('/api/skills/materialize-for-agent'),
   readSkillInfo: httpPost<{ name: string; description: string }, { skill_path: string }>('/api/skills/info'),
   importSkill: httpPost<{ skill_name: string }, { skill_path: string }>('/api/skills/import'),
   scanForSkills: httpPost<Array<{ name: string; description: string; path: string }>, { folder_path: string }>(
@@ -3185,18 +3194,6 @@ export interface ICreateConversationParams {
     agent_id?: string;
     context?: string;
     context_file_name?: string;
-    /** Transient: preset opt-in skills. Consumed by backend create handler
-     *  and stripped before persistence. */
-    agent_enabled_skills?: string[];
-    /** Transient: auto-inject skills the user opted out of on the Guid page.
-     *  Consumed by backend create handler and stripped before persistence. */
-    exclude_auto_inject_skills?: string[];
-    /** Transient: MCP server ids selected on the Guid page. Consumed by the
-     *  backend create handler and snapshotted into conversation.extra. */
-    selected_mcp_server_ids?: McpServerId[];
-    /** Transient: session-scoped MCP server configs that are not stored in the
-     *  backend catalog (currently built-in MCP servers). */
-    selected_session_mcp_servers?: ISessionMcpServer[];
     codex_model?: string;
     current_model_id?: string;
     pending_config_options?: Record<string, string>;
@@ -3214,7 +3211,6 @@ export interface ICreateConversationParams {
      *  starting directory (defaults to the remote $HOME). */
     ssh_host_id?: import('../types/ids').SshHostId;
     ssh_remote_cwd?: string;
-    extra_skill_paths?: string[];
   };
 }
 

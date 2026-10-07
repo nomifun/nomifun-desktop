@@ -79,16 +79,27 @@ agent 配置。
 
 这只是配置管理。某次会话最终能看到哪些 MCP server，仍由该会话的选择决定。
 
-## 每会话选择
+## 全局能力与会话选择
 
-全局启用 MCP server 只是让它可用，不会自动注入每个 agent。会话启动时最终 MCP 列表来自：
+所有 Agent 预设共享已安装的技能库和全局 MCP 目录，Agent 工作台不提供技能、MCP 或工具搜索的总开关。
+输入框旁的技能与 MCP 图标用于选择本会话使用哪些项目，不改变全局安装、启停状态，也不修改 Agent 预设。
 
-- 全局 enabled server；
-- 该会话选择的 server；
-- 当前能力集需要的 builtin bridge server。
+新会话默认选中自动注入技能，以及已启用、连接测试成功且有工具的 MCP 服务器。用户可以取消默认选择，
+或增加其它已安装技能和可用服务器。所有全局技能的正文与资源都冻结为会话可用的参考库存；选中的技能
+随正式输入提供正文，较长的正文和辅助资源通过同一个原生上下文资源读取接口按需读取。
+技能中的脚本、hooks 和工具声明不会增加 Agent 权限。
 
-最终列表会进入 Agent 工作台生成的 Revision/Snapshot 主链，或进入明确的非 Agent
-consumer resolver；MCP 管理页不会直接改写既有 Session 的 Snapshot。
+创建请求使用顶层 `session_capabilities`（`skill_names`、`mcp_server_ids`）；省略使用全局默认，
+显式空数组表示不选。已有会话通过 `GET` / `PUT /api/agent-sessions/{id}/capability-selection`
+读取和更新选择，更新必须携带 `expected_binding_version`。输入框在下次发送前等待配置保存成功；
+失败时保留输入与选择并显示重试入口。
+
+服务端把选择编译到同一不可变 Revision/Snapshot，并通过 canonical binding transition 应用。
+运行中、暂停恢复、效果待核对、远程绑定和只读 Attempt 不能修改选择。切换 Agent 时保留会话选择；
+工作区和其它已有资源授权不因扩展选择而改变。已有 accepted input 和 native checkpoint 不原地改写。
+
+MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身份按实际 transport 配置计算，
+相同配置的重复测试、状态或描述修改不会使绑定变旧；配置、凭据或 schema 的实际变化仍需重新应用选择。
 
 ## MCP API
 
@@ -114,10 +125,8 @@ consumer resolver；MCP 管理页不会直接改写既有 Session 的 Snapshot�
 | --- | --- |
 | Builtin | 随应用发布；部分会自动注入。 |
 | Custom | 用户导入或放入配置目录。 |
-| Extension | 已安装扩展提供。 |
 
-技能可打标签、导入、导出/符号链接、扫描外部目录，也可按某个 agent 后端进行
-materialize。
+技能可打标签、导入、导出/符号链接和扫描外部目录。自定义技能与内置技能使用同一会话冻结和读取路径。
 
 ## 技能 API
 
@@ -129,7 +138,6 @@ materialize。
 | 信息 / 路径 | `POST /api/skills/info`, `GET /api/skills/paths` |
 | 导入 / 导出 / 删除 | `POST /api/skills/import`, `POST /api/skills/import-symlink`, `POST /api/skills/export-symlink`, `DELETE /api/skills/{name}` |
 | 扫描 / 探测路径 | `POST /api/skills/scan`, `GET /api/skills/detect-paths`, `GET /api/skills/detect-external` |
-| 为 agent materialize | `POST /api/skills/materialize-for-agent` |
 | 外部路径 | `GET`, `POST`, `DELETE /api/skills/external-paths` |
 | 技能市场 | `POST /api/skills/market/enable`, `POST /api/skills/market/disable` |
 

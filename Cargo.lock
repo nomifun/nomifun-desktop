@@ -5773,29 +5773,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nomi-skills"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "dirs 6.0.0",
- "futures",
- "nomi-config",
- "nomi-mcp",
- "nomi-types",
- "regex",
- "rstest",
- "serde",
- "serde_json",
- "serde_yaml",
- "serial_test",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "unicode-width",
-]
-
-[[package]]
 name = "nomi-ssh"
 version = "0.7.6"
 dependencies = [
@@ -6061,7 +6038,6 @@ dependencies = [
  "nomi-protocol",
  "nomi-providers",
  "nomi-redact",
- "nomi-skills",
  "nomi-tools",
  "nomi-types",
  "nomifun-agent-contracts",
@@ -7076,10 +7052,13 @@ version = "0.7.6"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "dirs 6.0.0",
  "fs2",
+ "image",
  "include_dir",
  "junction",
+ "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",

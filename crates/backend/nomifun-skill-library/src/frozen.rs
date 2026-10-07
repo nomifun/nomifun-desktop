@@ -1,79 +1,125 @@
-//! Explicit, bounded capture for publication. Runtime consumers must use the
-//! resulting immutable artifact, never these mutable library source paths.
+//! Bounded library capture for the canonical Revision/Snapshot. Runtime
+//! consumers read its immutable content, never mutable library source paths.
 use crate::{SkillPaths, constants::BUILTIN_AUTO_SKILLS_SUBDIR};
 use nomifun_common::AppError;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LibrarySkillSource {
-    Custom,
-    Builtin,
-    BuiltinAuto,
-    Cron,
-}
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use nomifun_agent_contracts::{FrozenLibrarySkill, FrozenSkillContent, FrozenSkillResource, LibrarySkillSource};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LibrarySkillSelection {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnavailableLibrarySkill {
     pub name: String,
-    pub source: LibrarySkillSource,
+    pub reason: String,
 }
 
-pub struct FrozenLibrarySkill {
-    pub selection: LibrarySkillSelection,
-    pub source_digest: String,
-    /// Relative source names and captured bytes. SKILL.md remains the body;
-    /// all other ordinary files are included, never executed on publication.
-    pub files: BTreeMap<String, Vec<u8>>,
+#[derive(Default)]
+pub struct SkillInventory {
+    pub skills: Vec<FrozenLibrarySkill>,
+    pub unavailable: Vec<UnavailableLibrarySkill>,
+}
+
+/// Discover each package independently. A broken unselected package remains a
+/// management item with diagnostics; it cannot poison unrelated Sessions and
+/// never receives a mutable-path runtime fallback.
+pub async fn capture_inventory(paths: &SkillPaths) -> Result<SkillInventory, AppError> {
+    capture_listed_inventory(paths, crate::list_available_skills(paths).await?).await
+}
+
+/// Inspection can decode bounded pixels and read an entire local package. Run
+/// that pure work off the async request executor, using the same listed rows.
+pub(crate) async fn capture_listed_inventory(paths: &SkillPaths, items: Vec<crate::SkillListItem>) -> Result<SkillInventory, AppError> {
+    let paths = paths.clone();
+    tokio::task::spawn_blocking(move || capture_inventory_items(&paths, items)).await
+        .map_err(|_| fail("library inspection task failed"))?
+}
+
+fn capture_inventory_items(paths: &SkillPaths, mut items: Vec<crate::SkillListItem>) -> Result<SkillInventory, AppError> {
+    items.sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.location.cmp(&right.location)));
+    let mut counts = BTreeMap::new();
+    for item in &items { *counts.entry(item.name.clone()).or_insert(0usize) += 1; }
+    let mut inventory = SkillInventory::default();
+    let mut diagnosed = BTreeSet::new();
+    for item in items {
+        if counts[&item.name] != 1 {
+            if diagnosed.insert(item.name.clone()) { inventory.unavailable.push(UnavailableLibrarySkill {
+                name:item.name, reason:"multiple library folders use the same Skill name".into() }); }
+            continue;
+        }
+        match capture_item(paths, &item).and_then(|skill| {
+            nomifun_agent_contracts::validate_library_skill_inventory(inventory.skills.iter().chain(std::iter::once(&skill)))
+                .map_err(|error| fail(error.message))?;
+            Ok(skill)
+        }) {
+            Ok(skill) => inventory.skills.push(skill),
+            Err(error) => inventory.unavailable.push(UnavailableLibrarySkill { name:item.name, reason:error.to_string() }),
+        }
+    }
+    Ok(inventory)
+}
+
+/// Strict explicit selection: unsupported selected content is an error, not an
+/// empty selection or a request to reread its source during runtime execution.
+pub async fn capture_selected(paths: &SkillPaths, names: &[String]) -> Result<Vec<FrozenLibrarySkill>, AppError> {
+    if names.len() > 128 { return Err(fail("at most 128 library Skills can be selected")); }
+    let available = crate::list_available_skills(paths).await?;
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::new();
+    for name in names {
+        if !seen.insert(name) { return Err(fail("duplicate selected Skill")); }
+        let mut matching = available.iter().filter(|item| &item.name == name);
+        let item = matching.next().ok_or_else(|| fail(format!("Skill {name} is not available in the current library")))?;
+        if matching.next().is_some() { return Err(fail(format!("Skill {name} has ambiguous library sources"))); }
+        selected.push(capture_item(paths, item)?);
+    }
+    nomifun_agent_contracts::validate_library_skill_inventory(&selected).map_err(|error| fail(error.message))?;
+    selected.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(selected)
+}
+
+fn capture_item(paths: &SkillPaths, item: &crate::SkillListItem) -> Result<FrozenLibrarySkill, AppError> {
+    let (source, parent) = match item.source {
+        crate::SkillSource::Custom => (LibrarySkillSource::Custom, paths.user_skills_dir.clone()),
+        crate::SkillSource::Builtin if item.relative_location.as_deref().is_some_and(|path| path.starts_with("auto-inject/")) =>
+            (LibrarySkillSource::BuiltinAuto, paths.builtin_skills_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR)),
+        crate::SkillSource::Builtin => (LibrarySkillSource::Builtin, paths.builtin_skills_dir.clone()),
+    };
+    let location = PathBuf::from(&item.location);
+    let root = if location.file_name().is_some_and(|name| name == "SKILL.md") {
+        location.parent().ok_or_else(|| fail("Skill has no source directory"))?.to_path_buf()
+    } else { location };
+    capture_root(&item.name, &item.description, source, &parent, &root)
+}
+
+/// Product defaults are the former auto-inject library entries. Selection is
+/// still written into the canonical Snapshot; this function grants no authority.
+pub async fn default_skill_names(paths: &SkillPaths) -> Result<Vec<String>, AppError> {
+    let mut names = crate::list_builtin_auto_skills(paths).await?.into_iter().map(|item| item.name).collect::<Vec<_>>();
+    names.sort(); names.dedup(); Ok(names)
 }
 
 fn fail(reason: impl std::fmt::Display) -> AppError {
     AppError::BadRequest(format!("Skill freeze: {reason}"))
 }
 
-pub fn capture(
-    paths: &SkillPaths,
-    selection: LibrarySkillSelection,
-) -> Result<FrozenLibrarySkill, AppError> {
-    // A logical library entry, never an arbitrary client-selected path.
-    let name = &selection.name;
-    if name.is_empty()
-        || name.len() > 128
-        || name.trim() != name
-        || name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
-        || name.ends_with(['.', ' '])
-        || name.chars().any(char::is_control)
-        || name == "."
-        || name.contains("..")
-    {
-        return Err(fail("invalid library Skill name"));
+fn capture_root(name: &str, description: &str, source: LibrarySkillSource, parent: &Path, root: &Path)
+    -> Result<FrozenLibrarySkill, AppError> {
+    if name.is_empty() || name.len() > 128 || name.trim() != name || name.contains(['/', '\\', ':'])
+        || name.contains("..") || name.chars().any(char::is_control) { return Err(fail("invalid library Skill name")); }
+    plain(parent, true)?;
+    // Directory imports explicitly register a link in this library. Follow
+    // that one selected root, while every child is still required to be plain.
+    let root_meta = fs::symlink_metadata(root).map_err(fail)?;
+    if (!root_meta.is_dir() && !is_link(&root_meta)) || root.parent() != Some(parent) {
+        return Err(fail("Skill root is not an entry of its selected library"));
     }
-    let parent = match selection.source {
-        LibrarySkillSource::Custom => paths.user_skills_dir.clone(),
-        LibrarySkillSource::Builtin => paths.builtin_skills_dir.clone(),
-        LibrarySkillSource::BuiltinAuto => {
-            paths.builtin_skills_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR)
-        }
-        LibrarySkillSource::Cron => paths.cron_skills_dir.clone(),
-    };
-    let root = parent.join(name);
-    // Do not silently dereference imported symlinks/junctions. The user must
-    // explicitly copy such a Skill into the library before freezing it.
-    plain(&parent, true)?;
-    plain(&root, true)?;
-    let parent = fs::canonicalize(parent).map_err(fail)?;
-    let canonical = fs::canonicalize(&root).map_err(fail)?;
-    if canonical.parent() != Some(parent.as_path()) {
-        return Err(fail("Skill root escapes its selected library"));
-    }
+    let canonical = fs::canonicalize(root).map_err(fail)?;
+    plain(&canonical, true)?;
     let mut files = BTreeMap::new();
     let mut collisions = BTreeSet::new();
     let mut entries = 0usize;
@@ -99,6 +145,9 @@ pub fn capture(
                 .file_name()
                 .into_string()
                 .map_err(|_| fail("non-UTF-8 resource path"))?;
+            // Repository metadata and interpreter caches are not Skill
+            // reference resources. Keep ordinary declared-looking files strict.
+            if matches!(name.as_str(), ".git" | ".DS_Store" | "__pycache__") || name.ends_with(".pyc") { continue; }
             if name.is_empty()
                 || name.len() > 255
                 || name.contains(['\\', ':', '<', '>', '"', '|', '?', '*'])
@@ -147,7 +196,7 @@ pub fn capture(
                 Some("png" | "jpg" | "jpeg" | "webp")
             );
             let limit = if relative == "SKILL.md" {
-                16 * 1024
+                128 * 1024
             } else if image {
                 4 * 1024 * 1024
             } else {
@@ -208,20 +257,19 @@ pub fn capture(
     if fs::canonicalize(&root).map_err(fail)? != canonical {
         return Err(fail("Skill root changed during capture"));
     }
-    let mut hash = Sha256::new();
-    hash.update(b"nomifun-library-skill-v1\0");
-    hash.update(serde_json::to_vec(&selection).map_err(fail)?);
-    for (path, bytes) in &files {
-        hash.update((path.len() as u64).to_be_bytes());
-        hash.update(path.as_bytes());
-        hash.update((bytes.len() as u64).to_be_bytes());
-        hash.update(bytes);
+    let body = std::str::from_utf8(body).map_err(fail)?.to_owned();
+    let mut resources = BTreeMap::new();
+    for (path, bytes) in files {
+        if path == "SKILL.md" { continue; }
+        let image = matches!(Path::new(&path).extension().and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase).as_deref(), Some("png" | "jpg" | "jpeg" | "webp"));
+        let content = if image { prepare_image(&path, &bytes)? }
+            else { FrozenSkillContent::Text { text: String::from_utf8(bytes).map_err(fail)? } };
+        resources.insert(path, FrozenSkillResource::new(content).map_err(fail)?);
     }
-    Ok(FrozenLibrarySkill {
-        selection,
-        source_digest: format!("{:x}", hash.finalize()),
-        files,
-    })
+    let skill = FrozenLibrarySkill::new(name.to_owned(), description.to_owned(), source, body, resources).map_err(fail)?;
+    skill.validate().map_err(|error| fail(error.message))?;
+    Ok(skill)
 }
 
 fn plain(path: &Path, directory: bool) -> Result<fs::Metadata, AppError> {
@@ -245,4 +293,34 @@ fn is_link(meta: &fs::Metadata) -> bool {
     }
     #[cfg(not(windows))]
     false
+}
+
+/// Decode and re-encode captured pixels before any runtime can observe them.
+fn prepare_image(path: &str, bytes: &[u8]) -> Result<FrozenSkillContent, AppError> {
+    use image::{ImageReader, ImageFormat};
+    use std::io::Cursor;
+    let expected = match Path::new(path).extension().and_then(|value| value.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("png") => ImageFormat::Png, Some("jpg" | "jpeg") => ImageFormat::Jpeg,
+        Some("webp") => ImageFormat::WebP, _ => return Err(fail("unsupported image format")),
+    };
+    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(fail)?;
+    if reader.format() != Some(expected) { return Err(fail("image bytes differ from their declared extension")); }
+    let (width, height) = reader.into_dimensions().map_err(fail)?;
+    if width == 0 || height == 0 || width > 16384 || height > 16384 || u64::from(width) * u64::from(height) > 40_000_000 {
+        return Err(fail("image dimensions exceed the source envelope"));
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), expected);
+    let mut limits = image::Limits::default(); limits.max_image_width = Some(16384); limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(192 * 1024 * 1024); reader.limits(limits);
+    let decoded = reader.decode().map_err(fail)?.thumbnail(1568, 1568);
+    let mut encoded = Cursor::new(Vec::new()); decoded.write_to(&mut encoded, ImageFormat::Png).map_err(fail)?;
+    let mut media_type = "image/png";
+    let mut encoded = encoded.into_inner();
+    if encoded.len() > 1500 * 1024 {
+        encoded.clear(); image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 80)
+            .encode_image(&decoded.to_rgb8()).map_err(fail)?; media_type = "image/jpeg";
+    }
+    let data_base64 = STANDARD.encode(encoded);
+    if data_base64.len() > 2 * 1024 * 1024 { return Err(fail("prepared image exceeds the runtime envelope")); }
+    Ok(FrozenSkillContent::Image { media_type: media_type.into(), data_base64 })
 }

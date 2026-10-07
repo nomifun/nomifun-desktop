@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { fromApiAgentSnapshot, fromApiConversation } from './apiModelMapper';
-import { parseMcpServerId, parseMessageId } from '../types/ids';
+import { parseMessageId } from '../types/ids';
 
 // 最小 ApiConversation 片段：只构造 mapper 关心的字段
 const apiConv = (o: Record<string, unknown>) => ({
@@ -243,98 +243,5 @@ describe('fromApiConversation 协作方案顶层契约', () => {
       apiConv({ extra: { execution_template_id: 'template-stale' } }),
     ) as { execution_template_id?: string };
     expect(extraOnly.execution_template_id).toBeUndefined();
-  });
-});
-
-describe('fromApiConversation MCP id boundaries', () => {
-  test('keeps canonical UUIDv7 MCP identities across snapshots', () => {
-    const mcpServerId = parseMcpServerId('0190f5fe-7c00-7a00-8000-000000000123');
-    const mapped = fromApiConversation(
-      apiConv({
-        extra: {
-          mcp_server_ids: [mcpServerId],
-          mcp_statuses: [
-            { mcp_server_id: mcpServerId, name: 'everything', status: 'loaded' },
-          ],
-          session_mcp_servers: [
-            {
-              mcp_server_id: mcpServerId,
-              name: 'everything',
-              transport: { type: 'stdio', command: 'npx' },
-            },
-          ],
-        },
-      }),
-    ) as unknown as {
-      extra: {
-        mcp_server_ids: ReturnType<typeof parseMcpServerId>[];
-        mcp_statuses: Array<{ mcp_server_id: ReturnType<typeof parseMcpServerId> }>;
-        session_mcp_servers: Array<{ mcp_server_id: ReturnType<typeof parseMcpServerId> }>;
-      };
-    };
-
-    expect(mapped.extra.mcp_server_ids).toEqual([mcpServerId]);
-    expect(mapped.extra.mcp_statuses[0]?.mcp_server_id).toBe(mcpServerId);
-    expect(mapped.extra.session_mcp_servers[0]?.mcp_server_id).toBe(mcpServerId);
-  });
-
-  test('rejects integer, numeric string, UUIDv4, uppercase, and prefixed MCP ids', () => {
-    const invalidIds = [
-      3,
-      '3',
-      '550e8400-e29b-41d4-a716-446655440000',
-      '0190F5FE-7C00-7A00-8000-000000000123',
-      'mcp_0190f5fe-7c00-7a00-8000-000000000123',
-    ];
-    for (const invalidId of invalidIds) {
-      for (const extra of [
-        { mcp_server_ids: [invalidId] },
-        {
-          mcp_statuses: [
-            { mcp_server_id: invalidId, name: 'everything', status: 'loaded' },
-          ],
-        },
-        {
-          session_mcp_servers: [
-            {
-              mcp_server_id: invalidId,
-              name: 'everything',
-              transport: { type: 'stdio', command: 'npx' },
-            },
-          ],
-        },
-      ]) {
-        let rejected = false;
-        try {
-          fromApiConversation(apiConv({ extra }));
-        } catch {
-          rejected = true;
-        }
-        expect(rejected).toBe(true);
-      }
-    }
-  });
-
-  test('rejects removed generic id fields for MCP status and session snapshots', () => {
-    for (const extra of [
-      { mcp_statuses: [{ id: 3, name: 'everything', status: 'loaded' }] },
-      {
-        session_mcp_servers: [
-          {
-            id: 3,
-            name: 'everything',
-            transport: { type: 'stdio', command: 'npx' },
-          },
-        ],
-      },
-    ]) {
-      let rejected = false;
-      try {
-        fromApiConversation(apiConv({ extra }));
-      } catch {
-        rejected = true;
-      }
-      expect(rejected).toBe(true);
-    }
   });
 });

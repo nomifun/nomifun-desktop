@@ -160,14 +160,6 @@
           },
           {
             "capability": {
-              "id": "agent.tool-discovery"
-            },
-            "action_allowlist": [
-              "tool.discovery.rank"
-            ]
-          },
-          {
-            "capability": {
               "id": "plugin.development"
             },
             "action_allowlist": [
@@ -272,14 +264,6 @@
               "agent/fork",
               "agent/request_user_decision"
             ]
-          },
-          {
-            "capability": {
-              "id": "agent.tool-discovery"
-            },
-            "action_allowlist": [
-              "tool.discovery.rank"
-            ]
           }
         ],
         "skill_bindings": [],
@@ -367,14 +351,6 @@
               "automation.schedule/delete",
               "automation.schedule/list",
               "automation.schedule/update"
-            ]
-          },
-          {
-            "capability": {
-              "id": "agent.tool-discovery"
-            },
-            "action_allowlist": [
-              "tool.discovery.rank"
             ]
           }
         ],
@@ -515,14 +491,6 @@
               "web.research/fetch",
               "web.research/search"
             ]
-          },
-          {
-            "capability": {
-              "id": "agent.tool-discovery"
-            },
-            "action_allowlist": [
-              "tool.discovery.rank"
-            ]
           }
         ],
         "skill_bindings": [
@@ -568,14 +536,12 @@
           "project_memory",
           "requirements",
           "shell_process_pty",
-          "tool_discovery",
           "vcs_review",
           "web_research",
           "workspace_repository"
         ],
         "required_capability_ids": [
           "agent.collaboration",
-          "agent.tool-discovery",
           "automation.schedule",
           "browser",
           "computer",
@@ -608,14 +574,12 @@
           "project_memory",
           "shell_process_pty",
           "skills_plugins",
-          "tool_discovery",
           "vcs_review",
           "web_research",
           "workspace_repository"
         ],
         "required_capability_ids": [
           "agent.collaboration",
-          "agent.tool-discovery",
           "project.memory",
           "web.research",
           "workspace.artifacts",
@@ -660,11 +624,9 @@
           "im_channel",
           "knowledge",
           "learning_evolution",
-          "persona",
-          "tool_discovery"
+          "persona"
         ],
         "required_capability_ids": [
-          "agent.tool-discovery",
           "automation.schedule",
           "channel.messaging",
           "companion",
@@ -710,12 +672,10 @@
           "generation",
           "project_memory",
           "shell_process_pty",
-          "tool_discovery",
           "web_research",
           "workspace_repository"
         ],
         "required_capability_ids": [
-          "agent.tool-discovery",
           "creation.media",
           "creative.workshop",
           "office",
@@ -745,5 +705,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "efc0b11b67187f53c6091080554607d897762ef364fef1336368827a08008b1d"
+  "payload_digest": "7c8cc22d62bb60483dbbe7f3d05348244cdfcb7b06717f1666441daab3730afb"
 }

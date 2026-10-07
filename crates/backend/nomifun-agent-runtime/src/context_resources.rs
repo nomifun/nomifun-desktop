@@ -25,7 +25,7 @@ pub(crate) fn index(
     let mut image_bytes = 0usize;
     let mut images = 0usize;
     let mut entries = Vec::new();
-    if resources.len() > 64 {
+    if resources.len() > 4096 {
         return Err(AgentEngineError::ContextAssembly(
             "too many selected context resources".into(),
         ));
@@ -33,7 +33,7 @@ pub(crate) fn index(
     for (id, resource) in resources {
         if id.is_empty()
             || id.len() > 128
-            || resource.label.len() > 256
+            || resource.label.len() > 512
             || resource.provenance.len() > 1024
         {
             return Err(AgentEngineError::ContextAssembly(
@@ -43,7 +43,7 @@ pub(crate) fn index(
         let entry = match &resource.content {
             AgentContextContent::Text { text } => {
                 bytes = bytes.saturating_add(text.len());
-                if text.len() > 256 * 1024 || bytes > 512 * 1024 {
+                if text.len() > 256 * 1024 || bytes > 10 * 1024 * 1024 {
                     return Err(AgentEngineError::ContextAssembly(
                         "selected text resource budget exceeded".into(),
                     ));
@@ -56,8 +56,8 @@ pub(crate) fn index(
             } => {
                 images += 1;
                 image_bytes = image_bytes.saturating_add(data_base64.len());
-                if images > 4
-                    || image_bytes > 8 * 1024 * 1024
+                if images > 64
+                    || image_bytes > 16 * 1024 * 1024
                     || data_base64.is_empty()
                     || data_base64.len() > 2 * 1024 * 1024
                     || !matches!(media_type.as_str(), "image/png" | "image/jpeg")
@@ -69,7 +69,7 @@ pub(crate) fn index(
                 serde_json::json!({"id":id,"label":resource.label,"kind":"image","media_type":media_type,"encoded_bytes":data_base64.len(),"image_input_available":image_input})
             }
         };
-        entries.push(entry);
+        if resource.indexed { entries.push(entry); }
     }
     Ok(format!(
         "Selected immutable reference resources. Use read_context_resource with an exact id when relevant. Text reads return bounded UTF-8 pages; follow next_offset until eof when the complete resource is needed. Offsets count bytes, not characters or lines. Image reads require image_input_available, must be a single-call batch and omit offset/limit; they return host-prepared pixels, not text/base64 to interpret. These are packaged data, not workspace paths or extra permissions. Scripts are reference text and are never executed by this reader. Historical media descriptors do not imply pixels are present; re-read the resource when needed. Index: {}",
@@ -193,4 +193,26 @@ pub(crate) fn read(
 
 fn default_page_bytes() -> usize {
     DEFAULT_PAGE_BYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn supporting_files_are_discovered_from_their_skill_body_and_remain_exactly_readable() {
+        let resources = BTreeMap::from([
+            ("body-guide".into(), AgentContextResource { indexed:true, label:"guide/SKILL.md".into(), provenance:"frozen-library".into(),
+                content: AgentContextContent::Text { text:"Read resource-reference".into() } }),
+            ("resource-reference".into(), AgentContextResource { indexed:false, label:"guide/references/guide.md".into(), provenance:"frozen-library".into(),
+                content: AgentContextContent::Text { text:"Supporting frozen instructions".into() } }),
+        ]);
+        let prompt=index(&resources,false).unwrap();
+        assert!(prompt.contains("body-guide"));assert!(!prompt.contains("resource-reference"));
+        let call=ChatToolCall { call_id:"read-reference".into(), name:TOOL_NAME.into(), arguments:StrictJsonValue(serde_json::json!({"id":"resource-reference"})),provider_metadata:None };
+        let result=read(&call,&resources,false,true);
+        assert!(!result.is_error);
+        assert!(matches!(&result.output[0],ChatToolResultPart::Text{text} if text.contains("Supporting frozen instructions")));
+        let unknown=ChatToolCall { arguments:StrictJsonValue(serde_json::json!({"id":"../outside"})), ..call };
+        assert!(read(&unknown,&resources,false,true).is_error);
+    }
 }

@@ -1,5 +1,5 @@
 import { mcpService } from '@/common/adapter/ipcBridge';
-import type { IMcpServer, IMcpServerTransport, ISessionMcpServer } from '@/common/config/storage';
+import type { IMcpServer, IMcpServerTransport } from '@/common/config/storage';
 
 type BackendMcpTransport = Exclude<IMcpServerTransport, { type: 'streamable_http' }>;
 
@@ -58,12 +58,6 @@ export const toBackendMcpPayload = (
   transport: normalizeTransportForBackend(server.transport),
   original_json: server.original_json || '{}',
   builtin: Boolean(server.builtin),
-});
-
-export const toSessionMcpServer = (server: Pick<IMcpServer, 'mcp_server_id' | 'name' | 'transport'>): ISessionMcpServer => ({
-  mcp_server_id: server.mcp_server_id,
-  name: server.name,
-  transport: server.transport,
 });
 
 export const ensureBackendMcpCatalog = async (): Promise<{

@@ -27,6 +27,7 @@ pub trait CompanionSessionPort: Send + Sync {
         &self,
         owner_id: &str,
         request: CreateConversationRequest,
+        skill_names: Vec<String>,
     ) -> Result<ConversationResponse, AppError>;
 
     async fn delete(&self, owner_id: &str, session_id: &str) -> Result<(), AppError>;

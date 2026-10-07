@@ -105,7 +105,7 @@ pub struct SkillPaths {
 /// determines where user skills and the built-in skills tree
 /// (`{data_dir}/builtin-skills/`) live. Per-conversation
 /// agent skills are no longer materialized on disk — see
-/// [`materialize_skills_for_agent`] for the symlink contract.
+/// [`resolve_skill_sources`] for current library source lookup.
 pub fn resolve_skill_paths(app_resource_dir: &Path, data_dir: &Path) -> SkillPaths {
     let builtin_override = std::env::var(BUILTIN_SKILLS_ENV_VAR)
         .ok()
@@ -683,9 +683,7 @@ pub async fn import_skill_with_symlink(
     // Materialize the link, degrading to a recursive copy when the platform
     // symlink/junction primitive fails (non-NTFS removable media, UNC/network
     // source, path-too-long, locked target, or Windows symlink privilege).
-    // Mirrors the resilience the per-agent path already has via
-    // `link_workspace_skills`; without it these failures surfaced as an opaque
-    // 500 "导入技能出错".
+    // This preserves folder imports on filesystems without directory-link support.
     link_skill_or_fallback_copy(&skill_path, &target_link).await?;
 
     debug!(skill = %name, link = %target_link.display(), "skill imported (symlink)");
@@ -1013,46 +1011,23 @@ fn builtin_skill_exists(paths: &SkillPaths, skill_name: &str) -> bool {
 // D2. Per-agent skill resolution
 // ---------------------------------------------------------------------------
 
-/// A resolved skill reference returned by [`materialize_skills_for_agent`].
-///
-/// `name` is the skill's requested name; `source_path` is the absolute
-/// on-disk directory containing its `SKILL.md`. The caller is expected
-/// to symlink that directory into the agent CLI's native skills dir
-/// rather than copy it — backend no longer owns per-conversation files.
+/// Current library source facts used by non-Agent configuration validation.
+/// Runtime Skill content is captured separately into the canonical Snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedAgentSkill {
+pub struct ResolvedSkillSource {
     pub name: String,
     pub source_path: PathBuf,
 }
 
-/// Resolve each requested skill name to its on-disk source directory.
-///
-/// Search order per name (first match wins):
-/// 1. `{user_skills_dir}/{name}/` — user-created custom skill.
-/// 2. `{builtin_skills_dir}/{name}/` — top-level opt-in builtin.
-/// 3. `{builtin_skills_dir}/auto-inject/{name}/` — auto-inject builtin.
-/// 4. `{cron_skills_dir}/{name}/` — per-job cron skill.
-///
-/// No files are copied and no per-conversation directory is created —
-/// the backend just hands the absolute source paths back to the caller,
-/// which is responsible for symlinking them where the CLI expects. This
-/// replaces the older "copy into `{data_dir}/agent-skills/{conv_id}/`"
-/// behavior once the frontend moved to a symlink-only contract.
-///
-/// Unknown names are silently skipped (a warning is emitted). Names
-/// containing path separators or `..` are rejected with a warn and
-/// skipped, matching the legacy behavior. Empty names are ignored.
-///
-/// The returned list is sorted by `name` for determinism. The
-/// `conversation_id` is still validated (rejects path-traversal values)
-/// so downstream callers can safely use it in log lines or paths even
-/// though this function no longer touches disk per-conversation.
-pub async fn materialize_skills_for_agent(
+/// Resolve logical names for product configuration validation. User entries
+/// override builtins, auto entries and Cron sources. This does not materialize
+/// workspace links or provide runtime content/authority.
+pub async fn resolve_skill_sources(
     paths: &SkillPaths,
-    conversation_id: &str,
+    scope_id: &str,
     skills: &[String],
-) -> Result<Vec<ResolvedAgentSkill>, SkillError> {
-    validate_filename(conversation_id)?;
+) -> Result<Vec<ResolvedSkillSource>, SkillError> {
+    validate_filename(scope_id)?;
 
     let mut resolved = Vec::with_capacity(skills.len());
     for name in skills {
@@ -1064,7 +1039,7 @@ pub async fn materialize_skills_for_agent(
             continue;
         }
         match resolve_skill_source_path(paths, name) {
-            Some(source_path) => resolved.push(ResolvedAgentSkill {
+            Some(source_path) => resolved.push(ResolvedSkillSource {
                 name: name.clone(),
                 source_path,
             }),
@@ -1074,139 +1049,6 @@ pub async fn materialize_skills_for_agent(
 
     resolved.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(resolved)
-}
-
-/// Create symlinks from a set of resolved skills into the agent CLI's
-/// native skills directories inside `workspace`.
-///
-/// For each relative `skills_rel_dir` (e.g. `.claude/skills`):
-/// 1. Ensure `{workspace}/{skills_rel_dir}/` exists.
-/// 2. For each `{ name, source_path }` in `skills`, create a symlink
-///    `{workspace}/{skills_rel_dir}/{name} -> {source_path}`.
-///
-/// Existing symlinks/files at the target name are left untouched
-/// (first-write-wins, matches the frontend's lstat-then-skip behavior
-/// before symlink creation). Individual symlink failures are logged and
-/// skipped — skill discovery degrades gracefully, it is not fatal.
-///
-/// Returns the number of symlinks successfully created across all
-/// target dirs.
-pub async fn link_workspace_skills(
-    workspace: &Path,
-    skills_rel_dirs: &[&str],
-    skills: &[ResolvedAgentSkill],
-) -> Result<usize, SkillError> {
-    validate_workspace_skill_targets(skills_rel_dirs, skills)?;
-    let mut created = 0usize;
-    for rel in skills_rel_dirs {
-        let target_skills_dir = workspace.join(rel);
-        tokio::fs::create_dir_all(&target_skills_dir).await?;
-
-        for skill in skills {
-            let target = target_skills_dir.join(&skill.name);
-            match tokio::fs::symlink_metadata(&target).await {
-                // Target already exists — leave it alone.
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    warn!(
-                        target = %target.display(),
-                        error = %e,
-                        "skipping skill link: failed to stat target"
-                    );
-                    continue;
-                }
-            }
-            match link_skill_or_fallback_copy(&skill.source_path, &target).await {
-                Ok(()) => {
-                    debug!(
-                        skill = %skill.name,
-                        target = %target.display(),
-                        "linked workspace skill"
-                    );
-                    created += 1;
-                }
-                Err(e) => {
-                    warn!(
-                        skill = %skill.name,
-                        target = %target.display(),
-                        error = %e,
-                        "failed to link workspace skill"
-                    );
-                }
-            }
-        }
-    }
-    Ok(created)
-}
-
-/// Make the native Skill directories in a backend-managed workspace match an
-/// exact resolved selection. Stale entries are removed before missing links
-/// are created, so a Skill deselected between turns cannot remain discoverable
-/// through an older workspace link.
-///
-/// Every traversed directory must be a plain directory. In particular, this
-/// rejects symlinks, junctions and other Windows reparse points before pruning
-/// children, preventing a replaced `.nomi/skills` directory from redirecting
-/// deletion outside the managed workspace.
-pub async fn sync_workspace_skills(
-    workspace: &Path,
-    skills_rel_dirs: &[&str],
-    skills: &[ResolvedAgentSkill],
-) -> Result<usize, SkillError> {
-    validate_workspace_skill_targets(skills_rel_dirs, skills)?;
-    ensure_plain_skill_directory(workspace).await?;
-
-    for rel in skills_rel_dirs {
-        let mut target_skills_dir = workspace.to_path_buf();
-        for component in Path::new(rel).components() {
-            target_skills_dir.push(component.as_os_str());
-            ensure_plain_skill_directory(&target_skills_dir).await?;
-        }
-
-        let mut entries = tokio::fs::read_dir(&target_skills_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            entry.file_name().into_string().map_err(|_| {
-                SkillError::InvalidSkillPath(entry.path().display().to_string())
-            })?;
-            // Replace even still-selected entries. This prevents a workspace
-            // process from retargeting a retained name and also picks up a
-            // Skill that was reinstalled at a new source path.
-            remove_path_entry(&entry.path()).await?;
-        }
-    }
-
-    link_workspace_skills(workspace, skills_rel_dirs, skills).await
-}
-
-fn validate_workspace_skill_targets(rel_dirs: &[&str], skills: &[ResolvedAgentSkill]) -> Result<(), SkillError> {
-    // Validate every target before creating or pruning any directory. An
-    // empty relative path otherwise makes sync prune the workspace itself.
-    for rel in rel_dirs {
-        if rel.is_empty() || Path::new(rel).components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
-            return Err(SkillError::InvalidSkillPath((*rel).to_owned()));
-        }
-    }
-    for skill in skills {
-        validate_filename(&skill.name)?;
-    }
-    Ok(())
-}
-
-async fn ensure_plain_skill_directory(path: &Path) -> Result<(), SkillError> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) => {
-            if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
-                return Err(SkillError::InvalidSkillPath(path.display().to_string()));
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tokio::fs::create_dir(path).await?;
-            Ok(())
-        }
-        Err(error) => Err(SkillError::Io(error)),
-    }
 }
 
 fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
@@ -1224,7 +1066,7 @@ fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
 }
 
 /// Resolve a skill name to its on-disk source directory using the same
-/// search order as [`materialize_skills_for_agent`]. Returns `None` if
+/// search order as [`resolve_skill_sources`]. Returns `None` if
 /// no matching directory exists in any known source.
 fn resolve_skill_source_path(paths: &SkillPaths, name: &str) -> Option<PathBuf> {
     // Keep execution precedence aligned with `list_available_skills`: a
@@ -2946,11 +2788,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn materialize_empty_list_returns_empty() {
+    async fn source_resolution_empty_list_returns_empty() {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let list = materialize_skills_for_agent(&paths, "conv-empty", &[])
+        let list = resolve_skill_sources(&paths, "conv-empty", &[])
             .await
             .unwrap();
         assert!(list.is_empty());
@@ -2960,13 +2802,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_resolves_auto_inject_skill_by_name() {
+    async fn source_resolution_resolves_auto_inject_skill_by_name() {
         // Auto-inject skills are resolved only when the caller names
         // them explicitly (see canonical Agent snapshot materialization).
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let resolved = materialize_skills_for_agent(&paths, "conv-named", &["cron".to_owned()])
+        let resolved = resolve_skill_sources(&paths, "conv-named", &["cron".to_owned()])
             .await
             .unwrap();
         assert_eq!(resolved.len(), 1);
@@ -2982,11 +2824,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_resolves_opt_in_top_level_skill() {
+    async fn source_resolution_resolves_opt_in_top_level_skill() {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let resolved = materialize_skills_for_agent(
+        let resolved = resolve_skill_sources(
             &paths,
             "conv-opt",
             &["planning-with-files".to_owned()],
@@ -3000,12 +2842,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_resolves_user_skill() {
+    async fn source_resolution_resolves_user_skill() {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
         create_skill_in_dir(&paths.user_skills_dir, "my-custom", "A user skill");
 
-        let resolved = materialize_skills_for_agent(&paths, "conv-user", &["my-custom".to_owned()])
+        let resolved = resolve_skill_sources(&paths, "conv-user", &["my-custom".to_owned()])
             .await
             .unwrap();
         assert_eq!(resolved.len(), 1);
@@ -3016,7 +2858,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_user_skill_overrides_same_name_builtin() {
+    async fn source_resolution_user_skill_overrides_same_name_builtin() {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
         create_skill_in_dir(
@@ -3025,7 +2867,7 @@ mod tests {
             "User override",
         );
 
-        let resolved = materialize_skills_for_agent(
+        let resolved = resolve_skill_sources(
             &paths,
             "conv-user-override",
             &["planning-with-files".to_owned()],
@@ -3041,23 +2883,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_silently_skips_unknown_skill() {
+    async fn source_resolution_silently_skips_unknown_skill() {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
         let resolved =
-            materialize_skills_for_agent(&paths, "conv-missing", &["no-such-skill".to_owned()])
+            resolve_skill_sources(&paths, "conv-missing", &["no-such-skill".to_owned()])
                 .await
                 .unwrap();
         assert!(resolved.is_empty());
     }
 
     #[tokio::test]
-    async fn materialize_skips_invalid_names_but_keeps_valid_ones() {
+    async fn source_resolution_skips_invalid_names_but_keeps_valid_ones() {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let resolved = materialize_skills_for_agent(
+        let resolved = resolve_skill_sources(
             &paths,
             "conv-mixed",
             &[
@@ -3074,13 +2916,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_returns_sorted_list_with_source_paths() {
+    async fn source_resolution_returns_sorted_list_with_source_paths() {
         // Deterministic ordering — callers rely on it for stable symlink
         // layouts and for easier debugging / snapshot tests.
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let resolved = materialize_skills_for_agent(
+        let resolved = resolve_skill_sources(
             &paths,
             "conv-sorted",
             &["planning-with-files".to_owned(), "cron".to_owned()],
@@ -3097,25 +2939,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_rejects_bad_conversation_id() {
+    async fn source_resolution_rejects_bad_conversation_id() {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let err = materialize_skills_for_agent(&paths, "../evil", &[])
+        let err = resolve_skill_sources(&paths, "../evil", &[])
             .await
             .unwrap_err();
         assert!(matches!(err, SkillError::PathTraversal(_)));
     }
 
     #[tokio::test]
-    async fn materialize_does_not_touch_disk_beyond_reads() {
+    async fn source_resolution_does_not_touch_disk_beyond_reads() {
         // Guardrail: the symlink contract forbids any per-conversation
         // directory on disk. Verify the function only reads the sources
         // and never writes.
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let _ = materialize_skills_for_agent(&paths, "conv-pure", &["cron".to_owned()])
+        let _ = resolve_skill_sources(&paths, "conv-pure", &["cron".to_owned()])
             .await
             .unwrap();
         assert!(!paths.data_dir.join("agent-skills").exists());
@@ -3170,60 +3012,6 @@ mod tests {
         assert!(target.is_dir(), "target must be a directory");
 
         // Verify the contents were copied recursively.
-        let manifest = std::fs::read_to_string(target.join(SKILL_MANIFEST_FILE)).unwrap();
-        assert!(manifest.contains("name: my-skill"));
-        let nested = std::fs::read_to_string(target.join("nested").join("data.txt")).unwrap();
-        assert_eq!(nested, "payload");
-    }
-
-    /// Windows-only: directory linking must go through an NTFS junction
-    /// (created by the `junction` crate) rather than `symlink_dir`, so
-    /// the link works for users without Developer Mode. We assert the
-    /// resulting path is a reparse point (junction is reported as a
-    /// symlink by `symlink_metadata().file_type().is_symlink()`) and
-    /// that the source contents are reachable through the link.
-    ///
-    /// The test is skipped on non-Windows platforms.
-    #[cfg(target_os = "windows")]
-    #[tokio::test]
-    async fn link_workspace_skills_uses_junction_on_windows() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = tmp.path().join("workspace");
-        let source_root = tmp.path().join("sources");
-
-        let skill_source = source_root.join("my-skill");
-        std::fs::create_dir_all(skill_source.join("nested")).unwrap();
-        std::fs::write(
-            skill_source.join(SKILL_MANIFEST_FILE),
-            "---\nname: my-skill\ndescription: test\n---\nbody",
-        )
-        .unwrap();
-        std::fs::write(skill_source.join("nested").join("data.txt"), "payload").unwrap();
-
-        let resolved = vec![ResolvedAgentSkill {
-            name: "my-skill".to_owned(),
-            source_path: skill_source.clone(),
-        }];
-
-        let created = link_workspace_skills(&workspace, &[".claude/skills"], &resolved)
-            .await
-            .expect("link_workspace_skills should succeed via junction");
-        assert_eq!(created, 1, "exactly one skill should be materialized");
-
-        let target = workspace.join(".claude/skills").join("my-skill");
-        assert!(target.exists(), "target path must exist");
-
-        // Junctions are reparse points; `symlink_metadata` reports them
-        // as symlinks on Windows. The directory copy fallback would
-        // produce a real directory (is_symlink() == false).
-        let meta = std::fs::symlink_metadata(&target).unwrap();
-        assert!(
-            meta.file_type().is_symlink(),
-            "Windows directory link must be a junction (reparse point), \
-             not a copied directory"
-        );
-
-        // Reading through the link must surface the source contents.
         let manifest = std::fs::read_to_string(target.join(SKILL_MANIFEST_FILE)).unwrap();
         assert!(manifest.contains("name: my-skill"));
         let nested = std::fs::read_to_string(target.join("nested").join("data.txt")).unwrap();

@@ -557,7 +557,6 @@ mod tests {
             model: None,
             conversation_id: SESSION.to_owned(),
             delegation_policy: Default::default(),
-            device_mcp_servers: Vec::new(),
             extra: serde_json::json!({}),
             conversation_created_at: None,
             workspace_binding_lease: Some(

@@ -62,15 +62,13 @@ describe('Agent Settings locale contract', () => {
     }
   });
 
-  test('distinguishes zero-tool chat, mutable workspace I/O and published deliverables', () => {
-    expect(zh.template.chat.minimal.description).toContain('不绑定能力模块、Skill、MCP');
-    expect(en.template.chat.minimal.description).toContain('no capability module, Skill, MCP tool');
+  test('distinguishes global session extensions, mutable workspace I/O and published deliverables', () => {
+    expect(zh.template.chat.minimal.description).toContain('全局技能与 MCP');
+    expect(en.template.chat.minimal.description).toContain('global Skills and MCP');
     expect(zh.modules.workspaceFiles.name).toBe('工作区读写');
     expect(zh.modules.workspaceArtifacts.name).toBe('交付产物');
     expect(en.modules.workspaceFiles.name).toBe('Workspace I/O');
     expect(en.modules.workspaceArtifacts.name).toBe('Deliverables');
-    expect(zh.modules.toolDiscovery.description).toContain('不会增加权限');
-    expect(en.modules.toolDiscovery.description).toContain('grants no new authority');
     expect(zh.workbench.moduleGuide).toContain('只读依赖');
     expect(en.workbench.moduleGuide).toContain('read-only dependencies');
     expect(zh.workbench.dependencyHint).toContain('一起冻结');
@@ -115,7 +113,7 @@ describe('Agent Settings locale contract', () => {
       expect(Object.hasOwn(locale.workbench, 'moveOut')).toBe(false);
       expect(Object.hasOwn(locale.workbench, 'enabledCapabilities')).toBe(false);
       expect(locale.modules.browser.name.length).toBeGreaterThan(0);
-      expect(locale.modules.toolDiscovery.name.length).toBeGreaterThan(0);
+      expect(Object.hasOwn(locale.modules, 'toolDiscovery')).toBe(false);
       expect(locale.effects.destructive.length).toBeGreaterThan(0);
     }
   });

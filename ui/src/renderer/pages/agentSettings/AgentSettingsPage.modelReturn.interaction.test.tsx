@@ -247,7 +247,7 @@ test('opening before-tool authoring in a conversation returns to the same unsave
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
   fireEvent.input(v.getByRole('textbox', { name: en.fields.name }), { target: { value: 'Unsaved Agent' } });
   await v.findByRole('heading', { name: 'Unsaved Agent' });
-  fireEvent.click(v.getByRole('tab', { name: en.workbench.skillsTab }));
+  fireEvent.click(v.getByRole('tab', { name: en.workbench.extensionsTab }));
   fireEvent.click(v.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   await waitFor(() => expect(preflight).toHaveBeenCalledTimes(1));
   await act(async () => { finish({ status: 'ready', owner_user_id: 'owner', reason: '', selection: { kind: 'template', templateKey: 'assistant.general' } }); });
@@ -283,7 +283,7 @@ test('a changed saved revision cannot receive an older navigation snapshot', asy
   const v = await mount(undefined, original);
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
   fireEvent.change(v.getByRole('textbox', { name: en.fields.name }), { target: { value: 'Old unsaved name' } });
-  fireEvent.click(v.getByRole('tab', { name: en.workbench.skillsTab }));
+  fireEvent.click(v.getByRole('tab', { name: en.workbench.extensionsTab }));
   fireEvent.click(v.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   await v.findByRole('heading', { name: 'Check authoring' });
   const newer = { ...revision, revision: 2 };

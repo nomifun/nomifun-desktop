@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+nomifun-agent-contracts.workspace = true
+base64.workspace = true
+image = { workspace = true, features = ["jpeg", "webp"] }
 nomifun-common.workspace = true
 nomifun-api-types.workspace = true
 nomifun-db.workspace = true

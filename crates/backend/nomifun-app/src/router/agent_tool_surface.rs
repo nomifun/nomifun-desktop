@@ -392,9 +392,8 @@ fn concrete_object_schema(schema: &serde_json::Value, allow_empty: bool) -> bool
 pub(super) fn validate_session_mcp(
     snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
     resources: &[nomifun_agent_contracts::TypedResourceBinding],
-    extra: &serde_json::Value,
 ) -> Result<(), AppError> {
-    super::nomi_core_mcp_catalog::validate_session_selection(snapshot, resources, extra)
+    super::nomi_core_mcp_catalog::validate_session_selection(snapshot, resources)
 }
 
 #[cfg(test)]

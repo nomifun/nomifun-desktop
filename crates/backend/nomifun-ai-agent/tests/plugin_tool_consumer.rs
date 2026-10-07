@@ -61,9 +61,6 @@ const UI_ONLY_TOOL: &str = "example.dynamic.ui-only";
 const UI_ONLY_ACTION: &str = "example.dynamic.ui-only.invoke";
 const CONTEXT_CAPABILITY: &str = "example.dynamic.context";
 
-#[path = "plugin_tool_consumer/skills.rs"]
-mod skill_consumer;
-
 #[path = "plugin_tool_consumer/dependencies.rs"]
 mod dependency_consumer;
 

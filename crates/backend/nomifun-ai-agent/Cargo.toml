@@ -44,7 +44,6 @@ nomi-types.workspace = true
 nomi-protocol.workspace = true
 nomi-config.workspace = true
 nomi-mcp.workspace = true
-nomi-skills.workspace = true
 nomi-providers.workspace = true
 nomi-redact.workspace = true
 crossterm.workspace = true

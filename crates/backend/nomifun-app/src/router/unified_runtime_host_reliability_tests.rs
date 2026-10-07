@@ -125,7 +125,7 @@ impl Fixture {
             user_id: services.authoritative_user_id.to_string(), agent_type: projection.r#type,
             workspace: workspace.clone(), model: projection.model, conversation_id: id.into(),
             delegation_policy: projection.delegation_policy, extra: projection.extra,
-            conversation_created_at: Some(projection.created_at), device_mcp_servers: vec![],
+            conversation_created_at: Some(projection.created_at),
             workspace_binding_lease: Some(nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(
                 std::path::Path::new(&workspace), id.to_owned()).unwrap()),
         };

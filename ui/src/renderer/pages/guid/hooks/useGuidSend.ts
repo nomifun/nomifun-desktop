@@ -70,6 +70,7 @@ export type GuidSendDeps = {
   resourceSelections: AgentResourceSelection[];
   /** Session-scoped behavior for the exact selected Knowledge resources. */
   knowledgePolicy?: NonNullable<CreateAgentSessionRequest['knowledge_policy']>;
+  sessionCapabilities?: CreateAgentSessionRequest['session_capabilities'];
   collaboration?: GuidCollaborationConfig;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
@@ -174,6 +175,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     knowledgePolicy,
+    sessionCapabilities,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -237,6 +239,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
       ...(knowledgePolicy ? { knowledge_policy: knowledgePolicy } : {}),
+      ...(sessionCapabilities ? { session_capabilities: sessionCapabilities } : {}),
       ...(canonicalWorkspace ? { workspace: canonicalWorkspace } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
@@ -317,6 +320,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     knowledgePolicy,
+    sessionCapabilities,
     workspaceEnabled,
     t,
     requiredModules,

@@ -3,7 +3,6 @@
 //! A driver composes an engine with admitted platform ports; the runtime owns
 //! task lifetime, UI generation fencing and cleanup-before-terminal ordering.
 
-pub use crate::engine_effect_scope::{EngineEffectScope, EngineEffectSettlement};
 pub use crate::engine_tasks::{EngineOwnedTask, EngineTaskGroup};
 pub use nomifun_engine_core::{
     EngineResourcePort, EngineResourceRead, EngineResourceImageRead, EngineResourceQuery,

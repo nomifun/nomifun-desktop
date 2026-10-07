@@ -17,4 +17,7 @@ export type SkillInfo = {
   source: SkillSource;
   audience_tags?: string[];
   scenario_tags?: string[];
+  /** Library content may remain manageable even when it cannot enter a Session. */
+  session_available?: boolean;
+  session_error?: string | null;
 };

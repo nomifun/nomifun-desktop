@@ -70,6 +70,19 @@ Runtime SDK 对同一已发表终态的重试，只能在原 root、delivery、S
 
 Session 只持久化一个 native `reasoning_effort`，取值由共享 `ReasoningEffort` 合同定义。写入与读取使用同一字段，不维护有损镜像，不从旧字段回退。数据库 schema 更新不得从已退役的 Agent 字段重建会话内容。
 
+### 全局扩展与输入框选择
+
+MCP 与 Skill 是所有 Agent 共用的全局能力，预设不持有扩展总开关。创建或空闲时明确更新会话选择，
+host 捕获全局技能库，并把选中的 MCP 工具编译到同一 Session-only Revision/Snapshot；变体只使用
+现有 Agent Store，不创建另一份绑定或权限台账。Library Skill 冻结正文、辅助资源、来源与摘要，
+`selected` 控制默认输入注入；Package Skill 保留现役精确锁与原 JSON 合同。
+
+输入框使用 typed `session_capabilities` 和带版本 CAS 的 capability-selection API，不读写 `extra.skills`
+或 MCP 镜像。空闲更新复用 canonical binding transition，保留非 MCP 资源，完成 Runtime teardown
+与效果结算后原子提交 binding、资源定义与 active set。活动或暂停 Turn、Remote 和 Attempt 禁止更新。
+技能正文只从 Session 冻结内容读取，大正文和辅助资源由同一个 native context reader 按需读取，
+不执行 Skill hooks、shell 或 fork，不增加工具权限。工具搜索由 Runtime 自动提供。
+
 ## 消费端边界
 
 ### 智能决策的消息来源与依据

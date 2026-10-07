@@ -13,10 +13,11 @@ import contentStyles from '../../components/ConversationContentColumn.module.css
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
+import SessionCapabilityPicker, { useSessionCapabilityCatalog } from '@/renderer/components/chat/SessionCapabilityPicker';
+import { useSessionCapabilitySelection } from '@/renderer/components/chat/SessionCapabilityPicker/useSessionCapabilitySelection';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
 import { createSetUploadFile, useSendBoxFiles } from '@/renderer/hooks/chat/useSendBoxFiles';
-import { useSlashCommands } from '@/renderer/hooks/chat/useSlashCommands';
 import { useOpenFileSelector } from '@/renderer/hooks/file/useOpenFileSelector';
 import { useLatestRef } from '@/renderer/hooks/ui/useLatestRef';
 import {
@@ -124,8 +125,6 @@ const NomiSendBox: React.FC<{
   agentSelectorNode?: React.ReactNode;
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
-  /** Product-owned controls may occupy the rail; Agent/resource authority stays frozen. */
-  capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;
   reasoningEffort?: SessionReasoningEffort;
@@ -146,7 +145,6 @@ const NomiSendBox: React.FC<{
   agentSelectorNode,
   agent_name,
   turnActivity,
-  capabilityControls,
   modelSelectionHint,
   modelSelectionDisabled,
   reasoningEffort,
@@ -157,6 +155,8 @@ const NomiSendBox: React.FC<{
   compactProductComposer = false,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
+  const capabilityCatalog = useSessionCapabilityCatalog();
+  const sessionCapabilities = useSessionCapabilitySelection(conversation_id);
   const taskPlan = useConversationTaskPlan(conversation_id, turnActivity.running);
   const { t } = useTranslation();
   const { checkAndUpdateTitle } = useAutoTitle();
@@ -250,7 +250,6 @@ const NomiSendBox: React.FC<{
     [setContent]
   );
 
-  const [agentWarmed, setAgentWarmed] = useState(false);
   const [initialDeliveryReady, setInitialDeliveryReady] = useState(false);
   useEffect(() => {
     void getConversationOrNull(conversation_id).then((res) => {
@@ -262,14 +261,11 @@ const NomiSendBox: React.FC<{
   useEffect(() => {
     if (!conversation_id || isCreating) return;
     let cancelled = false;
-    setAgentWarmed(false);
     setInitialDeliveryReady(false);
     void warmupConversationForPassiveMount(conversation_id)
-      .then((warmed) => {
-        // Finished sessions hydrate without creating a runtime. Do not query
-        // runtime-only slash commands merely because hydration completed.
+      .then(() => {
+        // Hydration completes before the guarded initial message handoff.
         if (!cancelled) {
-          setAgentWarmed(warmed);
           // `false` means an already-Ready canonical Session needed no passive
           // warmup, not that its guarded initial handoff must stay blocked.
           setInitialDeliveryReady(true);
@@ -281,11 +277,6 @@ const NomiSendBox: React.FC<{
     return () => { cancelled = true; };
   }, [conversation_id, isCreating, t]);
 
-  const slash_commands = useSlashCommands(conversation_id, {
-    conversation_type: 'nomi',
-    agentStatus: agentWarmed ? 'active' : null,
-  });
-
   const addOrUpdateMessage = useAddOrUpdateMessage();
   const removeMessageByMsgId = useRemoveMessageByMsgId();
   const messageList = useMessageList();
@@ -293,6 +284,12 @@ const NomiSendBox: React.FC<{
   const { setSendBoxHandler } = usePreviewContext();
   const [isStopping, setIsStopping] = useState(false);
   const isBusy = running || isStopping;
+  const capabilitiesWereBlocked = useRef(Boolean(isBusy || pauseNotice));
+  useEffect(() => {
+    const blocked = Boolean(isBusy || pauseNotice);
+    if (capabilitiesWereBlocked.current && !blocked) sessionCapabilities.retry();
+    capabilitiesWereBlocked.current = blocked;
+  }, [isBusy, pauseNotice, sessionCapabilities.retry]);
   const { beginStopAttempt, getStopAttemptStatus } = useConversationStopAttemptGuard(
     conversation_id,
     getTurnStartGeneration,
@@ -358,13 +355,12 @@ const NomiSendBox: React.FC<{
         throw new Error('Image send blocked by the selected chat capability');
       }
 
-      // Persisted queue/recovery deliveries start behind an idle fence. Only
-      // the atomic first-delivery winner may open a new local turn.
-      if (!deferLocalTurnUntilFresh) setWaitingResponse(true);
-
+      // Persisted deliveries open local turn UI only after a fresh receipt.
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
       let msg_id: MessageId | null = null;
       try {
+        const selection = await sessionCapabilities.applyBeforeSend();
+        if (!deferLocalTurnUntilFresh) setWaitingResponse(true);
         if (!deferLocalTurnUntilFresh) {
           void checkAndUpdateTitle(conversation_id, input);
         }
@@ -379,6 +375,7 @@ const NomiSendBox: React.FC<{
           idempotency_key: id,
           initial_only: initialOnly,
           plugin_delivery: pluginDelivery,
+          inject_skills: selection.skill_names,
         });
         if (execution && !execution.isCurrent()) return;
         msg_id = res.msg_id;
@@ -435,6 +432,7 @@ const NomiSendBox: React.FC<{
       setWaitingResponse,
       t,
       workspacePath,
+      sessionCapabilities.applyBeforeSend,
     ]
   );
 
@@ -463,7 +461,7 @@ const NomiSendBox: React.FC<{
   // Handle the Guid handoff only after passive warmup has settled.
   // This sequences the UI requests; runtime admission remains backend-owned.
   useEffect(() => {
-    if (!conversation_id || !current_model?.use_model || !initialDeliveryReady) return;
+    if (!conversation_id || !current_model?.use_model || !initialDeliveryReady || sessionCapabilities.loading || !sessionCapabilities.state) return;
 
     const target = conversationTarget(conversation_id);
     const draftStorageKey = sessionStorageKey('draft', target);
@@ -524,7 +522,7 @@ const NomiSendBox: React.FC<{
     };
 
     void processInitialMessage();
-  }, [conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, setContent]);
+  }, [conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, sessionCapabilities.loading, sessionCapabilities.state, setContent]);
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
@@ -557,9 +555,6 @@ const NomiSendBox: React.FC<{
       return;
     }
     if (!canSendFiles(filesToSend)) return;
-    clearFiles();
-    emitter.emit('nomi.selected.file.clear');
-
     if (
       shouldEnqueueConversationCommand({
         enabled: true,
@@ -568,6 +563,8 @@ const NomiSendBox: React.FC<{
       })
     ) {
       enqueue({ input: message, files: filesToSend });
+      clearFiles();
+      emitter.emit('nomi.selected.file.clear');
       return;
     }
 
@@ -575,6 +572,9 @@ const NomiSendBox: React.FC<{
       input: message,
       files: filesToSend,
     });
+    setUploadFile(previous => previous.filter(file => !filesToSend.includes(file)));
+    setAtPath(atPathRef.current.filter(item => !filesToSend.includes(typeof item === 'string' ? item : item.path)));
+    emitter.emit('nomi.selected.file.clear');
   };
 
   // Canonical history is immutable. Editing a previous prompt explicitly
@@ -826,6 +826,10 @@ const NomiSendBox: React.FC<{
 
   return (
     <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto ${compactProductComposer ? 'mb-12px' : 'mb-16px'}`}>
+      {sessionCapabilities.error && <div role='alert' className='text-12px text-t-secondary mb-8px'>
+        {sessionCapabilities.error.message}
+        <Button type='text' size='mini' onClick={sessionCapabilities.retry}>{t('common.retry')}</Button>
+      </div>}
       {pauseNotice && (
         <div className='mb-8px flex justify-end'>
           <Button size='small' loading={isStopping} onClick={() => { void handleStop(); }}>
@@ -848,7 +852,17 @@ const NomiSendBox: React.FC<{
       />
       <SendBox
         key={conversation_id}
-        sideTools={compactProductComposer ? undefined : capabilityControls}
+        sideTools={compactProductComposer ? undefined : <SessionCapabilityPicker
+          catalog={capabilityCatalog.catalog}
+          draft={sessionCapabilities.draft}
+          onChange={sessionCapabilities.setDraft}
+          loading={capabilityCatalog.loading || sessionCapabilities.loading}
+          loadFailed={Boolean(capabilityCatalog.error || sessionCapabilities.error)}
+          errorMessage={(sessionCapabilities.error || capabilityCatalog.error)?.message}
+          onRetry={() => { capabilityCatalog.retry(); sessionCapabilities.retry(); }}
+          disabled={isBusy || Boolean(pauseNotice) || modelSelectionDisabled || sessionCapabilities.saving || sessionCapabilities.state?.editable !== true}
+          applyMode='next-send'
+        />}
         prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
         data-testid='nomi-sendbox'
         taskPlan={taskPlan}
@@ -860,8 +874,8 @@ const NomiSendBox: React.FC<{
           setAtPath(items);
         }}
         loading={isCreating ? creationSubmitting : isBusy}
-        disabled={Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing)}
-        preserveDraftUntilAccepted={Boolean(creation)}
+        disabled={Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || sessionCapabilities.loading || !sessionCapabilities.state || sessionCapabilities.saving)}
+        preserveDraftUntilAccepted
         skipChatWarmup={isCreating}
         placeholder={
           compactProductComposer
@@ -890,7 +904,6 @@ const NomiSendBox: React.FC<{
           <FileAttachButton
             openFileSelector={openFileSelector}
             onLocalFilesAdded={handleFilesAdded}
-            showLoadedCapabilities={false}
           />
         }
         creationTools={creation ? <CreationControls prompt={content} onPromptChange={setContent} files={collectSelectedFiles(uploadFile, atPath)} /> : undefined}
@@ -939,7 +952,6 @@ const NomiSendBox: React.FC<{
         onSteer={onSteerHandler}
         steerAvailable={!isCreating}
         onEditResubmit={isCreating ? undefined : handleEditResubmit}
-        slash_commands={slash_commands}
         onSlashBuiltinCommand={onSlashBuiltinCommand}
         allowSendWhileLoading={!isCreating}
       />

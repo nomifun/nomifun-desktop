@@ -77,27 +77,10 @@ impl RuntimeAdmission for RuntimeSupport {
     }
 
     fn validate_session_extra(&self, extra: &Value) -> Result<(), AppError> {
-        for (allowed, keys, feature) in [
-            (
-                self.skills,
-                &["skills", "session_enabled_skills"][..],
-                "session Skills",
-            ),
-            (
-                self.mcp,
-                &["mcp_server_ids", "mcp_servers", "selected_mcp_server_ids"][..],
-                "session MCP",
-            ),
-        ] {
-            if !allowed
-                && keys.iter().any(|key| {
-                    extra
-                        .get(*key)
-                        .is_some_and(|value| !value.as_array().is_some_and(Vec::is_empty))
-                })
-            {
-                return Err(unsupported(feature));
-            }
+        // Extension selections are canonical Snapshot facts. Historical extra
+        // aliases cannot create or mirror Skill/MCP authority, even when empty.
+        for key in ["skills", "session_enabled_skills", "mcp_server_ids", "mcp_servers", "selected_mcp_server_ids"] {
+            if extra.get(key).is_some() { return Err(unsupported("retired extension selection fields in Session extra")); }
         }
         Ok(())
     }
@@ -121,9 +104,8 @@ mod tests {
                 let extra = serde_json::json!({key: value});
                 assert!(policy.validate_session_extra(&extra).is_err(), "{extra}");
             }
-            policy
-                .validate_session_extra(&serde_json::json!({key: []}))
-                .unwrap();
+            assert!(policy.validate_session_extra(&serde_json::json!({key: []})).is_err());
+            assert!(RuntimeSupport::platform().validate_session_extra(&serde_json::json!({key: []})).is_err());
         }
     }
 }

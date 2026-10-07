@@ -44,7 +44,7 @@ impl AgentSteeringInput {
                 .files
                 .iter()
                 .any(|file| file.is_empty() || file.len() > 4096 || file.contains('\0'))
-            || self.inject_skills.len() > 16
+            || self.inject_skills.len() > 128
             || self
                 .inject_skills
                 .iter()

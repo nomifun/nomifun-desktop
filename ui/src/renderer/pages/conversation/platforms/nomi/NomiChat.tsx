@@ -5,7 +5,6 @@
  */
 import type { ConversationId, CronJobId } from '@/common/types/ids';
 
-import type { IConversationMcpStatus } from '@/common/config/storage';
 import type { ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import FlexFullContainer from '@renderer/components/layout/FlexFullContainer';
@@ -36,13 +35,9 @@ const NomiChat: React.FC<{
   hideSendBox?: boolean;
   readOnly?: boolean;
   emptySlot?: React.ReactNode;
-  loadedSkills?: string[];
-  loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
   currentAgent?: ConversationContextValue['currentAgent'];
   isProcessing?: boolean;
-  /** Product-owned controls may occupy the rail; Agent/resource authority stays frozen. */
-  capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;
   reasoningEffort?: SessionReasoningEffort;
@@ -65,12 +60,9 @@ const NomiChat: React.FC<{
   hideSendBox,
   readOnly,
   emptySlot,
-  loadedSkills,
-  loadedMcpStatuses,
   agent_name,
   currentAgent,
   isProcessing,
-  capabilityControls,
   modelSelectionHint,
   modelSelectionDisabled,
   reasoningEffort,
@@ -104,8 +96,6 @@ const NomiChat: React.FC<{
       readOnly,
       isProcessing: resolvedIsProcessing,
       stopNotice: turnActivity.stopNotice,
-      loadedSkills,
-      loadedMcpStatuses,
       currentAgent,
     };
   }, [
@@ -116,8 +106,6 @@ const NomiChat: React.FC<{
     readOnly,
     resolvedIsProcessing,
     turnActivity.stopNotice,
-    loadedSkills,
-    loadedMcpStatuses,
     currentAgent,
   ]);
 
@@ -142,7 +130,6 @@ const NomiChat: React.FC<{
               modelSelection={modelSelection}
               agentSelectorNode={agentSelectorNode}
               agent_name={agent_name}
-              capabilityControls={capabilityControls}
               modelSelectionHint={modelSelectionHint}
               modelSelectionDisabled={modelSelectionDisabled}
               reasoningEffort={reasoningEffort}

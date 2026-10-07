@@ -241,6 +241,8 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     }
     return direct.filter((entry) =>
       isVisibleAgentModule(String((entry.missing ? entry.module : entry.module.module).id))
+      && String((entry.missing ? entry.module : entry.module.module).id) !== 'agent.tool-discovery'
+      && !String((entry.missing ? entry.module : entry.module.module).id).startsWith('nomi.mcp.v1.')
     ).sort((left, right) => {
       const leftRef = left.missing ? left.module : left.module.module;
       const rightRef = right.missing ? right.module : right.module.module;
