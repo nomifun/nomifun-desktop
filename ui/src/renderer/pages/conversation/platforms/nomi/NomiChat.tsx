@@ -9,7 +9,6 @@ import type { ConversationContextValue } from '@/renderer/hooks/context/Conversa
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import FlexFullContainer from '@renderer/components/layout/FlexFullContainer';
 import MessageList from '@renderer/pages/conversation/Messages/MessageList';
-import ConversationPluginArtifacts from '@/renderer/pages/plugins/ConversationPluginArtifacts';
 import {
   MessageListLoadingProvider,
   MessageListProvider,
@@ -133,7 +132,6 @@ const NomiChat: React.FC<{
               loadingOlder={historyPaging.loadingOlder}
             />
           </FlexFullContainer>
-          {!readOnly && <ConversationPluginArtifacts conversationId={conversation_id} />}
           {!readOnly && !hideSendBox && (
             <NomiSendBox
               conversation_id={conversation_id}

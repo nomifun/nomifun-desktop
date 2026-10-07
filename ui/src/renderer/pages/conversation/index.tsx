@@ -2,7 +2,7 @@ import { ipcBridge } from '@/common';
 import { Message } from '@arco-design/web-react';
 import React, { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import useSWR from 'swr';
 import ChatConversation from './components/ChatConversation';
 import MessageListSkeleton from './Messages/components/MessageListSkeleton';
@@ -81,6 +81,9 @@ const ChatConversationIndex: React.FC = () => {
   }, [id, isLoading, data, navigate, t]);
 
   if (isLoading) return <MessageListSkeleton />;
+  if (data?.session_purpose === 'plugin_authoring') {
+    return <Navigate replace to={`/plugins/authoring/${encodeURIComponent(data.id)}`} />;
+  }
   return <ChatConversation conversation={data ?? undefined}></ChatConversation>;
 };
 

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Alert, Checkbox, Input, Modal, Select } from '@arco-design/web-react';
+import { useEffect, useState } from 'react';
+import { Alert, Checkbox, Modal, Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import type {
@@ -8,7 +8,9 @@ import type {
   PluginDetail,
 } from '@/common/types/pluginPlatform';
 import { isDesktopShell } from '@/renderer/utils/platform';
-import styles from './PluginPlatform.module.css';
+import PluginParameterFields from './PluginParameterFields';
+import { pluginParameterDefaults } from './pluginParameterModel';
+import styles from './PluginDialogs.module.css';
 
 interface PluginConfigurationDialogProps {
   detail: PluginDetail | null;
@@ -35,7 +37,7 @@ export default function PluginConfigurationDialog({
 
   useEffect(() => {
     if (!visible || !detail) return;
-    setConfig(JSON.stringify(detail.config.values, null, 2));
+    setConfig(JSON.stringify({ ...pluginParameterDefaults(detail.manifest.config_schema), ...detail.config.values }, null, 2));
     setCredentials(Object.fromEntries(detail.manifest.secret_slots.map((slot) => [
       slot,
       detail.credential_bindings.find((binding) => binding.slot === slot)?.credential_id ?? '',
@@ -57,11 +59,6 @@ export default function PluginConfigurationDialog({
     });
     return () => { active = false; };
   }, [desktopShell, visible]);
-
-  const schema = useMemo(
-    () => JSON.stringify(detail?.manifest.config_schema ?? { type: 'object' }, null, 2),
-    [detail?.manifest.config_schema],
-  );
 
   const submit = async () => {
     if (!desktopShell || !detail) return;
@@ -104,56 +101,48 @@ export default function PluginConfigurationDialog({
       return;
     }
     setError('');
-    await onSubmit({
-      expected_revision: detail.summary.revision,
-      config: parsed as Record<string, unknown>,
-      credential_bindings,
-      grants,
-    });
+    try {
+      await onSubmit({
+        expected_revision: detail.summary.revision,
+        config: parsed as Record<string, unknown>,
+        credential_bindings,
+        grants,
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t('pluginPlatform.detail.operationFailed'));
+    }
   };
 
   return (
     <Modal
       visible={visible}
       title={t('pluginPlatform.config.title')}
+      style={{ width: 580 }}
       okText={t('pluginPlatform.actions.save')}
       cancelText={t('pluginPlatform.actions.cancel')}
       confirmLoading={loading}
-      okButtonProps={{ disabled: !desktopShell }}
+      okButtonProps={{ disabled: !desktopShell || !detail }}
       onCancel={loading ? undefined : onCancel}
       onOk={() => void submit()}
       unmountOnExit
     >
-      <div className={styles.modalBody}>
+      <div className={styles.body}>
+        <p className={styles.intro}>{t('pluginPlatform.config.body', { name: detail?.summary.display_name ?? '' })}</p>
         {!desktopShell && <Alert type='info' content={t('pluginPlatform.readOnly.body')} />}
-        <Alert type='info' content={t('pluginPlatform.config.secretBoundary')} />
         {error && <Alert type='error' content={error} />}
         {!detail?.config.valid && detail?.config.validation_errors.length ? (
           <Alert type='warning' content={detail.config.validation_errors.join('\n')} />
         ) : null}
-        <label>
-          <strong>{t('pluginPlatform.config.values')}</strong>
-          <Input.TextArea
-            className={styles.jsonEditor}
-            value={config}
-            onChange={setConfig}
-            disabled={!desktopShell}
-            spellCheck={false}
-            aria-label={t('pluginPlatform.config.values')}
-          />
-        </label>
-        <details>
-          <summary>{t('pluginPlatform.config.schema')}</summary>
-          <pre>{schema}</pre>
-        </details>
-        {detail?.manifest.secret_slots.map((slot) => {
+        {detail?.manifest.secret_slots.length ? <section className={styles.fields}>
+          <div className={styles.sectionHeading}><strong>{t('pluginPlatform.config.credentials')}</strong><p>{t('pluginPlatform.config.credentialsHint')}</p></div>
+        {detail.manifest.secret_slots.map((slot) => {
           const binding = detail.credential_bindings.find((value) => value.slot === slot);
           const selected = credentials[slot]?.trim() ?? '';
           const options = credentialOptions.map((reference) => ({
             value: reference.credential_id,
             label: reference.enabled
-              ? `${reference.label} · ${reference.kind}`
-              : `${reference.label} · ${reference.kind} (${t('pluginPlatform.config.credentialUnavailable')})`,
+              ? reference.label
+              : `${reference.label} (${t('pluginPlatform.config.credentialUnavailable')})`,
             disabled: !reference.enabled,
           }));
           if (selected && !options.some((option) => option.value === selected)) {
@@ -164,13 +153,13 @@ export default function PluginConfigurationDialog({
             });
           }
           return (
-            <label key={slot}>
-              <strong>{slot}{binding?.required ? ' *' : ''}</strong>
+            <label key={slot} className={styles.field}>
+              <span>{slot}{binding?.required ? ' *' : ''}</span>
               <Select
                 allowClear
                 showSearch
-                disabled={!desktopShell}
-                value={credentials[slot] ?? ''}
+                disabled={!desktopShell || loading}
+                value={selected || undefined}
                 onChange={(value) => setCredentials((current) => ({
                   ...current,
                   [slot]: typeof value === 'string' ? value : '',
@@ -181,17 +170,22 @@ export default function PluginConfigurationDialog({
               />
             </label>
           );
-        })}
+        })}</section> : null}
+        <PluginParameterFields schema={detail?.manifest.config_schema ?? { type: 'object' }} value={config} onChange={setConfig}
+          disabled={!desktopShell || loading} jsonLabel={t('pluginPlatform.config.values')} />
+        {Boolean(detail?.manifest.permissions.length) && <details className={styles.advanced}>
+          <summary>{t('pluginPlatform.config.advanced')}</summary>
         {detail?.manifest.permissions.map((permission) => (
           <Checkbox
             key={permission}
-            disabled={!desktopShell}
+            disabled={!desktopShell || loading}
             checked={grants[permission] ?? false}
             onChange={(checked) => setGrants((current) => ({ ...current, [permission]: checked }))}
           >
             {t('pluginPlatform.config.grantPermission', { permission })}
           </Checkbox>
         ))}
+        </details>}
       </div>
     </Modal>
   );

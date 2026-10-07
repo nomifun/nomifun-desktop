@@ -207,8 +207,6 @@ pub struct PluginSummaryDto {
     pub trashed_at_ms: Option<u64>,
     pub revision: u64,
     pub active: PluginArtifactDataPointerDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous: Option<PluginArtifactDataPointerDto>,
     pub has_ui: bool,
     pub has_service: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,8 +383,6 @@ pub struct PluginDraftFileDto {
 pub struct PluginDraftDetailDto {
     pub summary: PluginDraftSummaryDto,
     #[serde(default)]
-    pub imported_context: serde_json::Value,
-    #[serde(default)]
     pub files: Vec<PluginDraftFileDto>,
 }
 
@@ -439,7 +435,7 @@ pub struct PreviewPluginDraftRequest {
     pub expected_revision: u64,
     pub config: Value,
     #[serde(default)]
-    pub access: PluginPreviewAccessRequest,
+    pub access: Option<PluginPreviewAccessRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -448,9 +444,6 @@ pub struct SavePluginDraftRequest {
     pub expected_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_plugin_revision: Option<u64>,
-    /// Opaque, Host-issued confirmation bound to the staged bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_confirmation_id: Option<String>,
     pub config: Value,
     #[serde(default)]
     pub credential_bindings: BTreeMap<String, String>,
@@ -463,7 +456,7 @@ pub struct DeletePluginDraftRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Import, install and permission confirmation
+// Import and use
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,9 +483,6 @@ pub struct InstallPluginImportRequest {
     pub expected_plugin_revision: Option<u64>,
     #[serde(default)]
     pub create_copy: bool,
-    /// Opaque, Host-issued confirmation bound to the freshly staged bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_confirmation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -511,17 +501,6 @@ pub struct PluginBackupDataSummaryDto {
     pub credential_slots_to_rebind: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginPermissionExpansionDto {
-    pub confirmation_id: String,
-    #[serde(default)]
-    pub added_permissions: BTreeSet<String>,
-    #[serde(default)]
-    pub added_secret_slots: BTreeSet<String>,
-    pub trusted_local_service: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginImportInspectionDto {
@@ -529,24 +508,18 @@ pub struct PluginImportInspectionDto {
     /// Computed by the Host from staged bytes; never supplied by the caller.
     pub artifact_digest: String,
     pub manifest: PluginManifestSummaryDto,
-    pub trusted_local_service: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_plugin_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_plugin_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<PluginBackupDataSummaryDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_expansion: Option<PluginPermissionExpansionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginInstallOutcomeDto {
     Installed { plugin: Box<PluginDetailDto> },
-    ConfirmationRequired {
-        confirmation: PluginPermissionExpansionDto,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -585,21 +558,10 @@ pub struct ConfigurePluginRequest {
     pub grants: BTreeMap<String, bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginRestoreModeDto {
-    PreviousCode,
-    PreviousCodeAndData,
-    FromTrash,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestorePluginRequest {
     pub expected_revision: u64,
-    pub mode: PluginRestoreModeDto,
-    #[serde(default)]
-    pub acknowledge_data_loss: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1082,11 +1044,10 @@ mod tests {
     }
 
     #[test]
-    fn permission_expansion_uses_an_opaque_host_confirmation() {
+    fn saving_a_local_draft_needs_only_content_and_setup() {
         let value = serde_json::to_value(SavePluginDraftRequest {
             expected_revision: 9,
             expected_plugin_revision: Some(4),
-            permission_confirmation_id: Some("confirmation-0190".into()),
             config: json!({"theme":"dark"}),
             credential_bindings: BTreeMap::from([(
                 "api_key".into(),
@@ -1094,7 +1055,7 @@ mod tests {
             )]),
         })
         .unwrap();
-        assert_eq!(value["permission_confirmation_id"], "confirmation-0190");
+        assert!(value.get("permission_confirmation_id").is_none());
         assert!(value.get("approved_permissions").is_none());
         assert!(value.get("artifact_digest").is_none());
     }

@@ -1,6 +1,6 @@
 //! Real-provider acceptance for in-conversation Plugin creation with the
 //! official General Agent. The run uses only the product HTTP surface: the
-//! same turn request, owner approval and conversation-card continuation calls
+//! same turn request and workbench continuation calls
 //! the desktop renderer makes. A headless Agent tool is requested because this
 //! acceptance has no renderer to execute UI verification steps.
 
@@ -27,13 +27,11 @@ const REQUEST: &str = "请创建一个插件：它只有后台服务、没有界
 const EXPECTED_INPUT: &str = "hello nomi fun";
 const EXPECTED_RESULT: &str = "Hello Nomi Fun";
 // Conversation-card prompts, verbatim from the zh-CN renderer locale.
-const RESUME_PROMPT: &str = "已授权草稿 {{id}} 的实际权限。请继续这个已有草稿，完成试运行、业务验证、安装与交付检查，不要新建草稿。";
 const CONTINUE_TASK_PROMPT: &str = "请继续原插件任务，完成尚未通过的必需功能、验证、安装和交付检查，保留已有成果。";
 const CONTINUE_CURRENT_PROMPT: &str = "插件工具已接入当前会话。请直接调用计划中当前会话用例对应的插件工具（使用计划中的输入）并核对输出，然后给出结果；不要重新创建或安装插件。";
 const RUN_DEADLINE: Duration = Duration::from_secs(50 * 60);
 const PAUSE_PROOF_DEADLINE: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_secs(2);
-const MAX_APPROVALS: u32 = 3;
 const MAX_TASK_CONTINUES: u32 = 2;
 const MAX_CURRENT_CONTINUES: u32 = 2;
 
@@ -52,7 +50,6 @@ impl BrowserRuntimeFactory for UnavailableBrowser {
 /// Owner interventions the run needed; each mirrors one conversation-card click.
 #[derive(Default)]
 struct Interventions {
-    approvals: u32,
     task_continues: u32,
     current_continues: u32,
 }
@@ -209,33 +206,6 @@ async fn resumable_pause(
     }
 }
 
-/// Approve the pending code/permission confirmation like the conversation
-/// card's checkbox and button, returning the approved draft and confirmation.
-async fn approve_pending(
-    client: &Client,
-    server: &DesktopServer,
-    session_id: &str,
-) -> Result<(String, String), SmokeFailure> {
-    for draft in conversation_drafts(client, server, session_id).await? {
-        let draft_id = text("plugin.approve", &draft, "/draft_id", "PLUGIN_DRAFT_ID_MISSING")?.to_owned();
-        let detail = authoring(client, server, &draft_id).await?;
-        let Some(confirmation_id) = detail.pointer("/confirmation/confirmation_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let revision = detail.pointer("/draft/summary/revision").and_then(Value::as_u64)
-            .ok_or_else(|| SmokeFailure::new("plugin.approve", "PLUGIN_DRAFT_REVISION_MISSING", 502))?;
-        let approved = request(client, server, "plugin.approve", Method::POST,
-            &format!("/api/plugin-drafts/{draft_id}/approve"),
-            Some(json!({"expected_revision": revision, "confirmation_id": confirmation_id, "approved": true})),
-            LOCAL_API_DEADLINE).await?;
-        if approved.get("approved").and_then(Value::as_bool) != Some(true) {
-            return Err(SmokeFailure::new("plugin.approve", "PLUGIN_APPROVAL_NOT_RECORDED", 409));
-        }
-        return Ok((draft_id, confirmation_id.to_owned()));
-    }
-    Err(SmokeFailure::new("plugin.approve", "PLUGIN_PAUSE_WITHOUT_CONFIRMATION", 409))
-}
-
 /// Resume the exact paused Turn with the card's input, never a second Turn.
 async fn continue_paused(
     client: &Client,
@@ -271,15 +241,6 @@ async fn handle_pause(
 ) -> Result<(), SmokeFailure> {
     let reason = execution.pointer("/pause/reason").and_then(Value::as_str).unwrap_or_default();
     let (key, prompt) = match reason {
-        // The approval pause is a native owner-requested suspension.
-        "EXECUTION_USER_REQUESTED" | "PLUGIN_AUTHORIZATION_REQUIRED" => {
-            interventions.approvals += 1;
-            if interventions.approvals > MAX_APPROVALS {
-                return Err(SmokeFailure::new("plugin.approve", "PLUGIN_APPROVAL_LIMIT_EXCEEDED", 409));
-            }
-            let (draft_id, confirmation_id) = approve_pending(client, server, session_id).await?;
-            (format!("plugin-approval:{confirmation_id}"), RESUME_PROMPT.replace("{{id}}", &draft_id))
-        }
         "PLUGIN_CURRENT_CONVERSATION_PENDING" => {
             interventions.current_continues += 1;
             if interventions.current_continues > MAX_CURRENT_CONTINUES {
@@ -470,24 +431,15 @@ async fn run_chain(
     let preset_id = text("plugin.preset", &preset, "/preset/preset_id", "PLUGIN_PRESET_ID_MISSING")?.to_owned();
     // The library's create entry runs this readiness check before launching.
     let preflight = request(client, server, "plugin.preflight", Method::POST,
-        "/api/conversations/plugin-preflight",
+        "/api/plugins/authoring/preflight",
         Some(json!({"selection": {"kind": "preset", "presetId": preset_id}})), LOCAL_API_DEADLINE).await?;
     if preflight.get("status").and_then(Value::as_str) != Some("ready") {
         return Err(SmokeFailure::new("plugin.preflight", "PLUGIN_PREFLIGHT_NOT_READY", 409));
     }
-    let session = request(client, server, "plugin.session", Method::POST, "/api/agent-sessions", Some(json!({
-        "preset_id": preset_id,
-        "title": "Live General plugin smoke",
-        "required_modules": ["plugin.development"],
+    let session = request(client, server, "plugin.session", Method::POST, "/api/plugins/authoring/sessions", Some(json!({
+        "selection": {"kind":"preset", "presetId": preset_id},
+        "idempotency_key": uuid::Uuid::now_v7().to_string(),
         "model": {"provider_id": provider_id, "model": model},
-        "resource_selections": [
-            {"resource_kind": "workspace", "resource_id": "default-workspace"},
-            {"resource_kind": "process_session", "resource_id": "managed-process-session"},
-            {"resource_kind": "project_memory", "resource_id": "default-project-memory"},
-            {"resource_kind": "browser", "resource_id": "managed-browser"},
-            {"resource_kind": "computer", "resource_id": "local-desktop"},
-            {"resource_kind": "scheduler", "resource_id": "installation-scheduler"}
-        ]
     })), LOCAL_API_DEADLINE).await?;
     let session_id = text("plugin.session", &session, "/agent_session_id", "PLUGIN_SESSION_ID_MISSING")?.to_owned();
     request(client, server, "plugin.turn", Method::POST,
@@ -540,8 +492,8 @@ async fn emit_plugin_summary(root: &Path, interventions: &Interventions) {
     let calls = ACTIONS.iter()
         .map(|name| format!("{name}={}", development.get(name).copied().unwrap_or(0)))
         .collect::<Vec<_>>().join(" ");
-    eprintln!("NOMIFUN_LIVE_PLUGIN_SUMMARY steps={steps} relays={relays} protocol_rejections={rejected} tool_errors={tool_errors} pauses={pauses} approvals={} task_continues={} current_continues={} plugin_tool_calls={plugin_tool_calls} {calls}",
-        interventions.approvals, interventions.task_continues, interventions.current_continues);
+    eprintln!("NOMIFUN_LIVE_PLUGIN_SUMMARY steps={steps} relays={relays} protocol_rejections={rejected} tool_errors={tool_errors} pauses={pauses} task_continues={} current_continues={} plugin_tool_calls={plugin_tool_calls} {calls}",
+        interventions.task_continues, interventions.current_continues);
     eprintln!("NOMIFUN_LIVE_PLUGIN_FLOW flow={}", plugin_flow(&flow_rows));
 }
 

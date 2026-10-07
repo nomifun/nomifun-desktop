@@ -192,6 +192,7 @@ async fn seed_canonical_agent_session(
             principal_id: services.authoritative_user_id.to_string(),
         },
         metadata: AgentSessionMetadata {
+            purpose: Default::default(),
             title: Some("AutoWork AgentSession".to_owned()),
             archived: false,
             pinned: false,

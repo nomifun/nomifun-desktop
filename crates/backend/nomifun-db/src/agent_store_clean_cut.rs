@@ -72,8 +72,14 @@ pub(crate) async fn clean_cut_agent_store(conn: &mut SqliteConnection, migrator:
     let current = migrator.iter().next().ok_or_else(|| DbError::Init("canonical baseline is missing".into()))?;
     let rows = sqlx::query("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
         .fetch_all(&mut *conn).await?;
-    if rows.len() == 1 && rows[0].try_get::<i64,_>("version")? == current.version
-        && rows[0].try_get::<bool,_>("success")? && rows[0].try_get::<Vec<u8>,_>("checksum")?.as_slice() == current.checksum.as_ref() {
+    let known = migrator.iter().collect::<Vec<_>>();
+    if !rows.is_empty() && rows.len() <= known.len() && rows.iter().enumerate().all(|(index,row)| {
+        let migration = known[index];
+        row.try_get::<i64,_>("version").ok() == Some(migration.version)
+            && row.try_get::<bool,_>("success").ok() == Some(true)
+            && row.try_get::<Vec<u8>,_>("checksum").ok()
+                .is_some_and(|checksum| checksum.as_slice() == migration.checksum.as_ref())
+    }) {
         return Ok(());
     }
     let generation: Option<i64> = sqlx::query_scalar("SELECT data_generation FROM schema_metadata WHERE singleton_key='canonical'")
@@ -128,14 +134,29 @@ async fn verify_preserved_schema(tx: &mut Transaction<'_,sqlx::Sqlite>, expected
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Database, init_database_memory};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    struct TestDatabase { pool: SqlitePool }
+    impl TestDatabase { fn pool(&self) -> &SqlitePool { &self.pool } }
 
     static MIGRATOR: Migrator = sqlx::migrate!();
     const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000211";
 
-    async fn retired_generation_fixture() -> Database {
-        let database = init_database_memory().await.unwrap();
+    async fn retired_generation_fixture() -> TestDatabase {
+        // The retired lineage predates forward product migrations. Build its
+        // exact preserved baseline rather than downgrading a current database.
+        let database = TestDatabase { pool: SqlitePoolOptions::new().max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true)
+                .pragma("secure_delete", "ON")).await.unwrap() };
         let pool = database.pool();
+        sqlx::raw_sql(AGENT_STORE_BASELINE_SQL).execute(pool).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        ensure_schema_metadata(&mut conn).await.unwrap();
+        drop(conn);
+        sqlx::raw_sql("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL);
+            INSERT INTO users(user_id,username,password_hash,created_at,updated_at) VALUES ('0190f5fe-7c00-7a00-8000-000000000214','admin','',1,1);
+            INSERT INTO installation_identity(singleton_key,owner_user_id) VALUES ('installation','0190f5fe-7c00-7a00-8000-000000000214');")
+            .execute(pool).await.unwrap();
         let row: (String,String,String,i64) = sqlx::query_as("SELECT root_instance_id,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version FROM schema_metadata")
             .fetch_one(pool).await.unwrap();
         let ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE name='schema_metadata'")
@@ -177,6 +198,11 @@ mod tests {
         assert!(requires_agent_store_clean_cut(pool).await.unwrap());
         let mut conn = pool.acquire().await.unwrap();
         clean_cut_agent_store(&mut conn, &MIGRATOR).await.unwrap();
+        drop(conn);
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await.unwrap();
+        MIGRATOR.run(&mut *conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await.unwrap();
         drop(conn);
         assert!(!requires_agent_store_clean_cut(pool).await.unwrap());
         crate::validate_current_migration_lineage(pool).await.unwrap();
@@ -230,6 +256,26 @@ mod tests {
             assert!(clean_cut_agent_store(&mut conn, &MIGRATOR).await.is_err());
             drop(conn);
             assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_sessions").fetch_one(pool).await.unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn current_forward_receipts_reject_unknown_changed_and_gapped_lineage_without_deletion() {
+        for tampering in [
+            "UPDATE _sqlx_migrations SET checksum=X'00' WHERE version=2",
+            "DELETE FROM _sqlx_migrations WHERE version=1",
+            "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES (3,'unknown',1,X'00',0)",
+        ] {
+            let database = crate::init_database_memory().await.unwrap();
+            let pool = database.pool();
+            sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,archived,pinned,agent_binding_json,next_seq,created_at) VALUES (?,'{}','live',0,0,'{}',1,1)")
+                .bind(SESSION).execute(pool).await.unwrap();
+            sqlx::query(tampering).execute(pool).await.unwrap();
+            let mut conn = pool.acquire().await.unwrap();
+            assert!(clean_cut_agent_store(&mut conn, &MIGRATOR).await.is_err(), "{tampering}");
+            drop(conn);
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_sessions")
+                .fetch_one(pool).await.unwrap(), 1);
         }
     }
 

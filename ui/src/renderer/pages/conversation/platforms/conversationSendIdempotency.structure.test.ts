@@ -117,7 +117,6 @@ describe('conversation send idempotency wiring', () => {
     expect(nomiDeferredDispatch > nomiInitial).toBe(true);
     expect(command.includes('id: idempotency_key')).toBe(true);
     expect(command.includes('initialOnly: true')).toBe(true);
-    expect(command.includes('pluginDelivery: plugin_delivery')).toBe(true);
   });
 
   test('keeps direct-send replays behind authoritative reconciliation', () => {

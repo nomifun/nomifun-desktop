@@ -53,6 +53,8 @@ type TConversationRuntimeSummary = {
 };
 
 interface IChatConversation<T, Extra> {
+  /** Canonical opening purpose determines the owning product surface. */
+  session_purpose?: 'conversation' | 'plugin_authoring';
   created_at: number;
   modified_at: number;
   name: string;

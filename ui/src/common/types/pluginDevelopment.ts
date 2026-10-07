@@ -18,6 +18,15 @@ export interface PluginDevelopmentPreflight {
   required_actions?: string[];
 }
 
+/** Narrow view of canonical product sessions; no parallel task history. */
+export interface PluginAuthoringSessionSummary {
+  conversation_id: string;
+  name: string;
+  created_at: number;
+  modified_at: number;
+  runtime?: import('../config/storage').TChatConversation['runtime'];
+}
+
 export interface PluginUiStep {
   operation: 'click' | 'fill' | 'text' | 'count' | 'reopen' | 'ready';
   selector?: string;

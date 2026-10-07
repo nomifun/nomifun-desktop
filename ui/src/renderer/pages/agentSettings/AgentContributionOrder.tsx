@@ -3,7 +3,7 @@ import { Alert, Button, Tag } from '@arco-design/web-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { launchPluginConversation } from '../plugins/pluginConversationLaunch';
+import { launchPluginAuthoring } from '../plugins/pluginAuthoringLaunch';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import styles from './AgentContextOrder.module.css';
 
@@ -41,7 +41,7 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
     pending.current = true; setCreating(true); setCreateError(false);
     try {
       if (mounted.current) {
-        await launchPluginConversation(async destination => {
+        await launchPluginAuthoring(async destination => {
           if (!mounted.current) return;
           if (typeof destination === 'number') return;
           if (currentOpenAuthor.current && typeof destination === 'string') await currentOpenAuthor.current(destination);

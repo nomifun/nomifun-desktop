@@ -195,9 +195,6 @@ impl Fixture {
                         "api_token".into(),
                         "credential-initial".into(),
                     )]),
-                    confirmed_permissions: BTreeSet::from(["network".into()]),
-                    confirmed_secret_slots: BTreeSet::from(["api_token".into()]),
-                    trusted_local_service_confirmed: false,
                 },
                 &package(version),
                 None,
@@ -214,7 +211,7 @@ impl Fixture {
             base_revision: plugin.map(|plugin| plugin.revision), name: "Working copy".into(),
             workspace_path: self._temp.path().join("draft").to_string_lossy().into_owned(),
             source_conversation_id: None, source_message_id: None, source_operation_key: None,
-            source_request_digest: None, verification: json!({}), imported_context: json!({}),
+            source_request_digest: None, verification: json!({}),
             status: PluginDraftStatus::Ready, last_error: None, created_at_ms: 1, updated_at_ms: 1,
         };
         self.repository.create_draft(&draft).await.unwrap();
@@ -226,9 +223,6 @@ impl Fixture {
         self.service.install_draft_files(InstallArtifactRequest {
             owner_user_id: self.owner.clone(), target, local_package_id: None,
             config: json!({}), credential_bindings: BTreeMap::new(),
-            confirmed_permissions: BTreeSet::from(["network".into()]),
-            confirmed_secret_slots: BTreeSet::from(["api_token".into()]),
-            trusted_local_service_confirmed: false,
         }, &package(version), DraftInstallAssociation {
             draft_id: draft.draft_id.clone(), expected_revision: draft.revision,
         }, None).await
@@ -465,14 +459,6 @@ async fn committed_update_recovery_converges_to_complete_new_or_complete_old_sta
     assert_eq!(rolled_back.name, recovered.name);
     assert_eq!(rolled_back.description, recovered.description);
     assert_eq!(rolled_back.config, recovered.config);
-    assert_eq!(
-        rolled_back.previous_artifact_digest,
-        recovered.previous_artifact_digest
-    );
-    assert_eq!(
-        rolled_back.previous_data_generation,
-        recovered.previous_data_generation
-    );
     assert_ne!(rolled_back.active_artifact_digest, committed_again.active_artifact_digest);
     let rolled_back_inventory = fixture
         .repository
@@ -528,49 +514,6 @@ async fn configure_activation_failure_rolls_back_durable_state_and_readmits_prev
         .unwrap();
     assert_eq!(inventory.plugin.config, json!({"theme":"old"}));
     assert_eq!(inventory.plugin.revision, 3, "commit and rollback are both evidenced");
-    assert!(fixture.runtime.active.lock().unwrap().contains(&plugin_id));
-}
-
-#[tokio::test]
-async fn restore_activation_failure_rolls_back_the_journaled_pointer() {
-    let fixture = Fixture::new().await;
-    let plugin_id = PluginId::from(Uuid::now_v7().to_string());
-    fixture
-        .install(
-            "1.0.0",
-            InstallTarget::New {
-                plugin_id: plugin_id.clone(),
-            },
-        )
-        .await;
-    let updated = fixture
-        .install(
-            "2.0.0",
-            InstallTarget::Existing {
-                plugin_id: plugin_id.clone(),
-                expected_revision: 1,
-            },
-        )
-        .await;
-    let active_before_restore = updated.active_artifact_digest.clone();
-    fixture.runtime.fail_next_activation();
-
-    let error = fixture
-        .service
-        .restore_previous(&fixture.owner, &plugin_id, 2, false)
-        .await
-        .unwrap_err();
-    assert!(matches!(error, PluginInstallError::Activation(_)));
-    let restored = fixture
-        .repository
-        .get_plugin(&fixture.owner, &plugin_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(restored.active_artifact_digest, active_before_restore);
-    assert_eq!(restored.revision, 4);
-    assert!(restored.last_error.is_some());
-    assert!(fixture.repository.list_mutations().await.unwrap().is_empty());
     assert!(fixture.runtime.active.lock().unwrap().contains(&plugin_id));
 }
 
@@ -657,7 +600,6 @@ async fn committed_permanent_delete_recovery_cleans_every_owned_root_and_cache()
         source_operation_key: None,
         source_request_digest: None,
         verification: serde_json::json!({}),
-            imported_context: json!({}),
             status: PluginDraftStatus::Ready,
             last_error: None,
             created_at_ms: 1,

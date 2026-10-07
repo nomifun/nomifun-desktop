@@ -3112,6 +3112,7 @@ mod tests {
             agent_session_id: context.agent_session_id.clone(),
             owner_ref: context.principal.clone(),
             metadata: AgentSessionMetadata {
+            purpose: Default::default(),
                 title: Some("Wave 2 workspace test".to_owned()),
                 archived: false,
                 pinned: false,

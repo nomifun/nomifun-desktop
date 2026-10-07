@@ -32,6 +32,7 @@ use crate::store::{
 use crate::wire::{document_payload, payload_document, wire_cast};
 
 const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
+const PLUGIN_AUTHORING_MODULE_ID: &str = "plugin.development";
 
 fn required_chat_features<'a>(
     capability_ids: impl IntoIterator<Item = &'a str>,
@@ -562,6 +563,84 @@ impl AgentControlPlane {
     ) -> Result<AgentBindingValueDto, ControlPlaneError> {
         let binding = self.resolve_base_agent_session_binding_with_model(owner, preset_id, model).await?;
         self.resolve_agent_session_capabilities_binding(owner, &binding, selection).await
+    }
+
+    /// Plugin authoring uses the selected Agent's normal Session compilation.
+    /// Only the required development actions are checked here; the Agent's
+    /// other modules, resources and global extensions remain available.
+    pub async fn resolve_plugin_authoring_session_binding(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let source = self.owned_preset(owner, preset_id).await?;
+        let revision = self.current_revision(&source).await?
+            .ok_or_else(|| not_found("AgentPresetRevision"))?;
+        let binding = session_binding_from_stable_artifacts(
+            revision.reference.clone(), Some(revision.clone()),
+            self.current_snapshot(Some(&revision)).await?,
+        )?;
+        // Check the selected Agent before resolving a model variant or global
+        // defaults, so an explicitly disabled module cannot be re-enabled.
+        self.ensure_plugin_authoring_actions(owner, &wire_cast(&binding)?).await?;
+        let binding = self.resolve_agent_session_binding_with_model(owner, preset_id, model).await?;
+        self.ensure_plugin_authoring_actions(owner, &binding).await?;
+        Ok(binding)
+    }
+
+    pub async fn resolve_plugin_authoring_template_binding(
+        &self,
+        owner: &UserId,
+        template_key: &str,
+        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let key = parse_official_key(template_key).ok_or_else(|| not_found("OfficialPresetTemplate"))?;
+        let seed = self.templates.seed(key).ok_or_else(|| not_found("OfficialPresetTemplate"))?;
+        let required = self.plugin_authoring_selection()?;
+        if seed.enabled_capabilities.iter().find(|selection| selection.capability == required.capability)
+            .is_none_or(|selection| !required.action_allowlist.is_subset(&selection.action_allowlist))
+        {
+            return Err(ControlPlaneError::canonical("AGENT_LAUNCH_MODULE_REQUIRED",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "The selected Agent must enable every plugin.development creation action"));
+        }
+        let prepared = self.create_from_template(owner, template_key, CreateAgentPresetFromTemplateRequest {
+            model: model.cloned(), reuse_existing: true, display_name: key.as_str().to_owned(),
+            description: None, model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+        }).await?;
+        let binding = self.resolve_agent_session_binding_with_model(owner, &prepared.preset.preset_id, None).await?;
+        self.ensure_plugin_authoring_actions(owner, &binding).await?;
+        Ok(binding)
+    }
+
+    fn plugin_authoring_selection(&self) -> Result<CapabilitySelection, ControlPlaneError> {
+        self.templates.seed(OfficialPresetKey::AssistantGeneral)
+            .and_then(|seed| seed.enabled_capabilities.iter().find(|selection|
+                selection.capability.id.as_ref() == PLUGIN_AUTHORING_MODULE_ID))
+            .cloned().ok_or_else(|| not_found("OfficialPresetTemplate"))
+    }
+
+    async fn ensure_plugin_authoring_actions(
+        &self,
+        owner: &UserId,
+        binding: &AgentBindingValueDto,
+    ) -> Result<(), ControlPlaneError> {
+        let binding: AgentBindingValue = wire_cast(binding)?;
+        let (revision, snapshot) = self.load_binding_artifacts(owner, &binding).await?;
+        let required = self.plugin_authoring_selection()?;
+        let configured = revision.payload.enabled_capabilities.iter()
+            .find(|selection| selection.capability == required.capability);
+        let compiled = snapshot.content.contributions()
+            .find(|selection| selection.capability == required.capability);
+        if configured.is_none_or(|selection| !required.action_allowlist.is_subset(&selection.action_allowlist))
+            || compiled.is_none_or(|selection| !required.action_allowlist.is_subset(&selection.action_allowlist))
+        {
+            return Err(ControlPlaneError::canonical("AGENT_LAUNCH_MODULE_REQUIRED",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "The selected Agent must enable every plugin.development creation action"));
+        }
+        Ok(())
     }
 
     /// Global extensions belong to the Session, independent of the Agent's
@@ -3223,7 +3302,256 @@ mod tests {
         template_control_plane(store, OfficialPresetKey::AssistantGeneral, updated_schema)
     }
 
+    const AUTHORING_TEST_MIDDLEWARE_ID: &str = "fixture.plugin-authoring.guard";
+
+    fn republish_catalog_capability(capability: &mut MaterializedCapability) -> CapabilityCatalogEntry {
+        let contract_digest = digest_payload(&capability.manifest).unwrap();
+        capability.schema_digest = contract_digest.clone();
+        capability.contribution_lock.contract_digest = contract_digest;
+        CapabilityCatalogMaterializer::materialize(CapabilityCatalogMaterialization {
+            manifest: capability.manifest.clone(),
+            provenance: CapabilityProvenance {
+                owner: CapabilityOwner::Package { package: capability.manifest.package.clone() },
+                source_kind: capability.contribution_lock.source_kind,
+                source_identity: capability.contribution_lock.source_identity.clone(),
+                mount_id: capability.contribution_lock.mount_id.clone(),
+                mcp_binding_id: capability.contribution_lock.mcp_binding_id.clone(),
+                artifact_digest: Some(capability.target_artifact_digest.clone()),
+            },
+            publication_state: CapabilityPublicationState::Active,
+            availability: capability.manifest.supported_consumers().unwrap().into_iter()
+                .map(|consumer| (consumer, CatalogAvailability::Active)).collect(),
+        }).unwrap()
+    }
+
+    fn plugin_authoring_control_plane(store: Arc<InMemoryControlPlaneStore>) -> AgentControlPlane {
+        struct Routes;
+        #[async_trait::async_trait]
+        impl DefaultChatRouteResolver for Routes {
+            async fn resolve_default_chat_route(&self, _: &UserId)
+                -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError>
+            {
+                Ok(Some(chat_route_with(ChatRouteProtocol::OpenaiChat,
+                    [ChatRouteFeature::TextInput, ChatRouteFeature::TextOutput])))
+            }
+
+            async fn resolve_selected_chat_route(&self, _: &UserId, model: &nomifun_api_types::AgentChatModelSelectionDto)
+                -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError>
+            {
+                let mut route = chat_route_with(ChatRouteProtocol::OpenaiChat,
+                    [ChatRouteFeature::TextInput, ChatRouteFeature::TextOutput]);
+                // The host can allocate a fresh route alias on every resolve.
+                route.primary.model_route_id = Uuid::now_v7().to_string().into();
+                route.primary.provider_id = model.provider_id.clone();
+                route.primary.model = model.model.clone();
+                Ok(Some(route))
+            }
+        }
+        struct GlobalExtensions;
+        #[async_trait::async_trait]
+        impl SessionCapabilitiesResolver for GlobalExtensions {
+            async fn resolve(&self, _: &UserId, selection: Option<&nomifun_api_types::SessionCapabilitySelectionDto>)
+                -> Result<ResolvedSessionCapabilities, ControlPlaneError>
+            {
+                assert!(selection.is_none(), "authoring captures the user's normal global defaults");
+                Ok(ResolvedSessionCapabilities {
+                    skills: vec![nomifun_agent_contracts::FrozenLibrarySkill::new(
+                        "authoring-guide".into(), "My reusable creation guide".into(),
+                        nomifun_agent_contracts::LibrarySkillSource::Custom,
+                        "Keep the user's preferred app design and file organization.".into(), BTreeMap::new(),
+                    ).unwrap()],
+                    selected_skill_names: BTreeSet::from(["authoring-guide".into()]),
+                    mcp_server_ids: BTreeSet::from(["fixture.authoring-server".into()]),
+                })
+            }
+        }
+        let mut control = template_control_plane_with_order_contributions(store, OfficialPresetKey::AssistantGeneral, false, true)
+            .with_default_chat_route_resolver(Arc::new(Routes))
+            .with_session_capabilities_resolver(Arc::new(GlobalExtensions));
+        let mut catalog = (*control.catalog.snapshot().unwrap()).clone();
+        let (mut capability, _) = catalog_capability_with_actions_schema(
+            "nomi.mcp.v1.authoring-helper", [CapabilityConsumer::Agent],
+            [ActionId::from("nomi.mcp.v1.authoring-helper/read")], json!({"type":"object", "additionalProperties":false}),
+        );
+        let binding_id = nomifun_agent_contracts::McpBindingId::from("fixture.authoring-server:read");
+        capability.contribution_lock.source_kind = ContributionSourceKind::McpBinding;
+        capability.contribution_lock.source_identity = "mcp:fixture.authoring-server".into();
+        capability.contribution_lock.mount_id = Some(capability.mount_id.clone());
+        capability.contribution_lock.mcp_binding_id = Some(binding_id.clone());
+        capability.source.source_kind = PluginSourceKind::ManagedLocal;
+        capability.source.source_identity = capability.mount_id.as_ref().to_owned();
+        let entry = republish_catalog_capability(&mut capability);
+        let mapping = nomifun_agent_contracts::McpToolCapabilityMapping {
+            package: capability.manifest.package.clone(), server_id: "fixture.authoring-server".into(),
+            canonical_tool_key: "read".into(), schema_digest: "b".repeat(64).into(),
+            capability: CapabilityRef { id: capability.manifest.id.clone() }, materialization_version: "1.0.0".into(),
+        };
+        catalog.mcp_tools.push(nomifun_agent_kernel::MaterializedMcpTool {
+            mapping, binding_id, contribution_lock: capability.contribution_lock.clone(),
+            target_artifact_digest: capability.target_artifact_digest.clone(), mount_id: capability.mount_id.clone(),
+            source: capability.source.clone(),
+        });
+        catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+        catalog.capabilities.push(capability);
+        let mut registry = MaterializedRegistry::empty();
+        for item in &catalog.capabilities { registry.capabilities.insert(item.manifest.id.clone(), item.clone()); }
+        for item in &catalog.skills { registry.skills.insert(item.definition.id.clone(), item.clone()); }
+        for item in &catalog.mcp_tools {
+            let key = (item.mapping.server_id.clone(), item.mapping.canonical_tool_key.clone());
+            registry.mcp_by_capability.insert(item.mapping.capability.id.clone(), key.clone());
+            registry.mcp_tools.insert(key, item.clone());
+        }
+        control.catalog = Arc::new(StaticCatalogProvider::new(catalog));
+        control.compiler = test_compiler().with_materialized_registry(Arc::new(registry), CompilerEnvironment {
+            resolver_version: VersionString::from("1.0.0"), required_runtime_protocol_version: VersionString::from("1.0.0"),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: DigestHex::from("runtime-features"), available_runtime_features: BTreeSet::new(),
+            installation_role_bindings: BTreeMap::new(), canonical_schema_manifest_digest: DigestHex::from("schema"),
+            target_contribution_manifest_digest: DigestHex::from("contributions"), host_target: RuntimeTarget::from("test"),
+            host_surface: "desktop".into(), availability_evidence_revision: "fixture".into(),
+        });
+        control
+    }
+
+    #[tokio::test]
+    async fn plugin_authoring_template_uses_the_complete_template_and_normal_global_extensions() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = plugin_authoring_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let original_seed = control.templates.seed(OfficialPresetKey::AssistantGeneral).unwrap().clone();
+        let disabled = control.resolve_plugin_authoring_template_binding(&owner, "chat.minimal", None).await.unwrap_err();
+        assert_eq!(disabled.code().as_ref(), "AGENT_LAUNCH_MODULE_REQUIRED");
+        assert!(store.list_presets(&owner).await.unwrap().is_empty());
+        let model = nomifun_api_types::AgentChatModelSelectionDto { provider_id: "provider-selected".into(), model: "selected-model".into() };
+        let first = control.resolve_plugin_authoring_template_binding(&owner, "assistant.general", Some(&model)).await.unwrap();
+        let repeated = control.resolve_plugin_authoring_template_binding(&owner, "assistant.general", Some(&model)).await.unwrap();
+        assert_eq!(first, repeated, "normal immutable configuration reuse handles repeated launches");
+        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &first).await.unwrap();
+        for selection in &original_seed.enabled_capabilities {
+            assert!(revision.payload.enabled_capabilities.contains(selection));
+            assert!(snapshot.content.contributions().any(|compiled| compiled.capability == selection.capability
+                && compiled.action_allowlist == selection.action_allowlist));
+        }
+        assert!(snapshot.content.mcp_tool_locks.iter().any(|lock| lock.server_id.as_ref() == "fixture.authoring-server"));
+        assert!(snapshot.content.skill_locks.iter().any(|lock| matches!(lock,
+            nomifun_agent_contracts::ResolvedSkillLock::Library { skill, selected: true, .. } if skill.name == "authoring-guide")));
+        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK].primary.model, model.model);
+        assert!(control.library(&owner).await.unwrap().user_presets.is_empty(), "shared Session configurations remain internal");
+        assert_eq!(serde_json::to_value(control.templates.seed(OfficialPresetKey::AssistantGeneral).unwrap()).unwrap(),
+            serde_json::to_value(original_seed).unwrap());
+    }
+
+    #[tokio::test]
+    async fn plugin_authoring_preserves_the_user_agent_and_captures_global_skills_and_mcp() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = plugin_authoring_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
+        let mut draft = created.draft.clone();
+        draft.document.persona = "User-authored persona".into();
+        draft.document.instructions = "Keep this user-authored instruction".into();
+        draft.document.context_order = vec!["project.memory".into()];
+        draft.document.enabled_capabilities.push(wire_cast(&CapabilitySelection {
+            capability: CapabilityRef { id: AUTHORING_TEST_MIDDLEWARE_ID.into() },
+            action_allowlist: BTreeSet::from([nomifun_agent_contracts::tool_middleware::BEFORE_ACTION_ID.into()]),
+        }).unwrap());
+        draft.document.middleware_order = vec![AUTHORING_TEST_MIDDLEWARE_ID.into()];
+        control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(), draft, reason: None,
+        }).await.unwrap();
+        let source = control.owned_preset(&owner, &created.preset.preset_id).await.unwrap();
+        let source_revision = control.current_revision(&source).await.unwrap().unwrap();
+        let source_snapshot = control.current_snapshot(Some(&source_revision)).await.unwrap().unwrap();
+        assert!(source_revision.payload.enabled_capabilities.iter().any(|item| item.capability.id.as_ref() == "workspace.process"));
+        let selected_model = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: "provider-selected".into(), model: "selected-model".into(),
+        };
+        let (first, repeated) = tokio::join!(
+            control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, Some(&selected_model)),
+            control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, Some(&selected_model)),
+        );
+        let first = first.unwrap();
+        assert_eq!(first, repeated.unwrap(), "the shared configuration cache also handles concurrent authoring opens");
+        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &first).await.unwrap();
+        for selection in &source_revision.payload.enabled_capabilities {
+            assert!(revision.payload.enabled_capabilities.contains(selection));
+            assert!(snapshot.content.contributions().any(|compiled| compiled.capability == selection.capability
+                && compiled.action_allowlist == selection.action_allowlist));
+        }
+        assert_eq!(revision.payload.context_order, source_revision.payload.context_order);
+        assert_eq!(revision.payload.middleware_order, source_revision.payload.middleware_order);
+        assert_eq!(revision.payload.system_role_provider_overrides, source_revision.payload.system_role_provider_overrides);
+        assert_eq!(snapshot.content.required_resource_kinds, source_snapshot.content.required_resource_kinds);
+        assert_eq!(snapshot.content.context_order, source_snapshot.content.context_order);
+        assert_eq!(snapshot.content.middleware_order, source_snapshot.content.middleware_order);
+        assert!(snapshot.content.mcp_tool_locks.iter().any(|lock| lock.server_id.as_ref() == "fixture.authoring-server"));
+        assert!(snapshot.content.skill_locks.iter().any(|lock| matches!(lock,
+            nomifun_agent_contracts::ResolvedSkillLock::Library { skill, selected: true, .. } if skill.name == "authoring-guide")));
+        assert_eq!(revision.payload.persona, source_revision.payload.persona);
+        assert_eq!(revision.payload.instructions, source_revision.payload.instructions);
+        assert_eq!(revision.payload.runtime_policy, source_revision.payload.runtime_policy);
+        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK].primary.model, selected_model.model);
+        let after = control.owned_preset(&owner, &created.preset.preset_id).await.unwrap();
+        assert_eq!(after.preset, source.preset);
+        assert_eq!(control.current_revision(&after).await.unwrap().unwrap(), source_revision);
+        assert_eq!(control.current_snapshot(Some(&source_revision)).await.unwrap().unwrap(), source_snapshot);
+        assert_eq!(control.library(&owner).await.unwrap().user_presets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_authoring_rejects_disabled_or_partial_creation_authority_before_creating_a_variant() {
+        for disabled in [true, false] {
+            let store = Arc::new(InMemoryControlPlaneStore::new());
+            let control = plugin_authoring_control_plane(store.clone());
+            let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+            let created = control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
+            let mut draft = created.draft.clone();
+            if disabled {
+                draft.document.enabled_capabilities.retain(|item| item.capability.id != PLUGIN_AUTHORING_MODULE_ID);
+            } else {
+                draft.document.enabled_capabilities.iter_mut().find(|item|
+                    item.capability.id == PLUGIN_AUTHORING_MODULE_ID).unwrap().action_allowlist
+                    .retain(|action| action != "plugin.development/install");
+            }
+            control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+                expected_current_revision: draft.current_revision.clone(), draft, reason: None,
+            }).await.unwrap();
+            let error = control.resolve_plugin_authoring_session_binding(
+                &owner, &created.preset.preset_id, None,
+            ).await.unwrap_err();
+            assert_eq!(error.code().as_ref(), "AGENT_LAUNCH_MODULE_REQUIRED");
+            assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1,
+                "denial may not create a model/configuration variant or re-enable the module");
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_authoring_preserves_the_saved_chat_route_without_an_override_and_enforces_ownership() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = plugin_authoring_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let created = control.create_from_template(&owner, "assistant.general", official_launch_request(false)).await.unwrap();
+        let source = control.owned_preset(&owner, &created.preset.preset_id).await.unwrap();
+        let original = control.current_revision(&source).await.unwrap().unwrap();
+        let binding = control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, None).await.unwrap();
+        let (_, resolved, _) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+        assert_eq!(resolved.payload.chat_route_records, original.payload.chat_route_records);
+        assert_eq!(resolved.payload.model_route_refs, original.payload.model_route_refs);
+        assert_eq!(control.resolve_plugin_authoring_session_binding(&owner, &created.preset.preset_id, None).await.unwrap(), binding);
+        assert_eq!(control.resolve_plugin_authoring_session_binding(&other, &created.preset.preset_id, None)
+            .await.unwrap_err().code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+        assert!(store.list_presets(&other).await.unwrap().is_empty());
+    }
+
     fn template_control_plane(store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey, updated_schema: bool) -> AgentControlPlane {
+        template_control_plane_with_order_contributions(store, key, updated_schema, false)
+    }
+
+    fn template_control_plane_with_order_contributions(
+        store: Arc<InMemoryControlPlaneStore>, key: OfficialPresetKey,
+        updated_schema: bool, order_contributions: bool,
+    ) -> AgentControlPlane {
         let templates = OfficialTemplateCatalog::load().unwrap();
         let mut registry = MaterializedRegistry::empty();
         let mut catalog = CatalogSnapshot::default();
@@ -3231,14 +3559,32 @@ mod tests {
             let schema = if matches!(selected.capability.id.as_ref(), "creation.media" | "knowledge") && updated_schema {
                 json!({"type":"object", "additionalProperties":false, "properties":{"model_selection":{"type":"object"}}})
             } else { json!({"type":"object", "additionalProperties":false}) };
-            let (capability, entry) = catalog_capability_with_actions_schema(
+            let (mut capability, mut entry) = catalog_capability_with_actions_schema(
                 selected.capability.id.as_ref(),
                 [CapabilityConsumer::Agent],
                 selected.action_allowlist.iter().cloned(),
                 schema,
             );
+            if order_contributions && selected.capability.id.as_ref() == "project.memory" {
+                capability.manifest.contributions.context_schema_refs = vec!["schema://fixture/project-memory/context@1".into()];
+                entry = republish_catalog_capability(&mut capability);
+            }
             registry.capabilities.insert(selected.capability.id.clone(), capability.clone());
             catalog.capabilities.push(capability);
+            catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+        }
+        if order_contributions {
+            let (mut middleware, _) = catalog_capability(AUTHORING_TEST_MIDDLEWARE_ID,
+                [CapabilityConsumer::Agent, CapabilityConsumer::PluginService]);
+            middleware.manifest.kind = CapabilityKind::TurnMiddleware;
+            middleware.manifest.supported_surfaces = nomifun_agent_contracts::capability_module_surface_declarations(
+                ["desktop"], [CapabilityConsumer::Agent, CapabilityConsumer::PluginService],
+                nomifun_agent_contracts::CapabilityAuthoringPolicy::Direct,
+            );
+            middleware.manifest.contributions.actions = vec![nomifun_agent_contracts::tool_middleware::before_action()];
+            let entry = republish_catalog_capability(&mut middleware);
+            registry.capabilities.insert(middleware.manifest.id.clone(), middleware.clone());
+            catalog.capabilities.push(middleware);
             catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
         }
         // Keep the fixture complete when an official seed binds bundled Skills.

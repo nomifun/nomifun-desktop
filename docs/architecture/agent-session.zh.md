@@ -6,6 +6,8 @@ AgentSession 是 NomiFun 会话、回合、内容、效果和取消的唯一事�
 
 ## 事实与派生数据
 
+插件工作台复用同一 canonical Session owner 与 Nomi Runtime。不可变 SessionPurpose 保存在已有 `session/opening.metadata`，新创作取 PluginAuthoring，普通创建取 Conversation；没有增加表列或产品绑定账本。读取与分页只从 typed opening 事实派生归属，合法当前代旧 opening 缺省为 Conversation，缺失或非法事实拒绝读取。普通 metadata 更新不能改变归属，fork 必须保持父会话归属。产品 projection 仅展示该事实，不授予工具权限。
+
 | 数据 | 所有者与用途 |
 | --- | --- |
 | `agent_sessions` 和 binding transitions | Session 身份、冻结的 Agent Revision 与 Snapshot、资源及明确的 Agent 切换边界 |
@@ -33,7 +35,7 @@ flowchart LR
 
 `engine_history.rs` 从 canonical events 及已解析 payload 构建 typed history，不读取 `agent_messages` 来决定模型消息角色。Runtime 回合通过有序的 native journal 重建；缺失结构化日志不能降级成聊天文本继续执行。
 
-插件创作的停滞检查只从已结算的 typed 工具事件、计划用例结果和 accepted steering input 回放派生，复用原生 execution pressure、安全暂停和 checkpoint。恢复本身不重置修复次数或增加预算；新的用户输入可开启新的修复段，累计执行预算保持原合同。不持久化第二份进度账本或插件专用 checkpoint。
+插件创作继承用户所选 Agent 的现有能力、Skill、MCP 和 typed resources，不增加插件工具专属能力上限，也不设置三次失败或 64 步的插件专属暂停计数。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。自动结构检查、预览和交互用例作为创作工具保留，结算读取真实 typed 工具与产物事实，不持久化第二份进度账本或插件专用 checkpoint。恢复使用原生 Session 的执行预算与安全机制，不增加预算。
 
 准入后、Runtime 启动前就失败或取消的输入仍是有效 accepted input。读取时保留这个输入和明确的终态事实，不伪造 Runtime 启动、工具结果或完成证明。
 

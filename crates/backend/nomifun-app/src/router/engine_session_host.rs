@@ -203,6 +203,9 @@ impl EngineSessionHost {
         if !receipt.belongs_to(&self.source) {
             return Err(AppError::Conflict("delivery receipt belongs to another Host".into()));
         }
+        if receipt.session().session().session_purpose != nomifun_agent_contracts::SessionPurpose::PluginAuthoring {
+            return Ok(PluginDeliveryState::Dormant);
+        }
         let requirement = receipt.request_payload().get("plugin_delivery").filter(|value| !value.is_null())
             .map(|value| serde_json::from_value::<nomifun_api_types::PluginDeliveryRequirement>(value.clone()))
             .transpose().map_err(|error| AppError::Conflict(error.to_string()))?;
@@ -251,11 +254,6 @@ impl EngineSessionHost {
                     detail: format!("draft {draft_id}: drafts for one request must declare the same outputs and each draft must use a distinct output_key."), current_conversation: None })));
             }
             declared_outputs=Some(report["plan"]["outputs"].clone());
-            if report["approval"]["approved"] == serde_json::json!(false)
-                && !report["approval"]["confirmation"].is_null() {
-                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_AUTHORIZATION_REQUIRED",
-                    detail: format!("draft {draft_id} requires the user's approval for additional privileges before it can install."), current_conversation: None })));
-            }
             let Some(cases) = report["cases"].as_object() else {
                 return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_VERIFICATION_REQUIRED",
                     detail: format!("draft {draft_id} has no recorded case results; run every planned case."), current_conversation: None })));

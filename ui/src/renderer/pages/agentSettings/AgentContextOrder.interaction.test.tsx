@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
-import * as pluginLaunch from '../plugins/pluginConversationLaunch';
+import * as pluginLaunch from '../plugins/pluginAuthoringLaunch';
 import { ipcBridge } from '@/common';
 import { SWRConfig } from 'swr';
 import { asCapabilityId, asPackageId, createEmptyAgentPresetDocument, placeCapability, type AgentPresetDocument, type CapabilityCatalogItem, type CapabilityModuleCatalogItem } from '@/common/types/agentPlatform';
@@ -39,9 +39,9 @@ function mount(document = initial(), currentCatalog = catalog, disabled = false,
     const [value, setValue] = useState(document);
     return <AgentContextOrder document={value} catalog={currentCatalog} disabled={disabled} kind={kind} onOpenAuthor={onOpenAuthor} onChange={next => { current = next; setValue(next); }} />;
   };
-  const Creator = () => <div>Authoring {new URLSearchParams(useLocation().search).get('pluginIntent')}</div>;
+  const Creator = () => <div>Authoring {new URLSearchParams(useLocation().search).get('template')}</div>;
   return { ...render(<I18nextProvider i18n={i18n}><MemoryRouter><Routes>
-    <Route path='/' element={<Harness />} /><Route path='/guid' element={<Creator />} />
+    <Route path='/' element={<Harness />} /><Route path='/plugins/create' element={<Creator />} />
   </Routes></MemoryRouter></I18nextProvider>), state: () => current };
 }
 beforeEach(() => {
@@ -172,9 +172,9 @@ test('execution stages come from the host and unknown selected extensions remain
 
 test('ordinary user launches one check authoring conversation without saving or changing selection', async () => {
   let finish!: () => void;
-  const create = spyOn(pluginLaunch, 'launchPluginConversation').mockImplementation(async navigate => {
+  const create = spyOn(pluginLaunch, 'launchPluginAuthoring').mockImplementation(async navigate => {
     await new Promise<void>(resolve => { finish = resolve; });
-    await navigate('/guid?pluginIntent=check');
+    await navigate('/plugins/create?template=check');
   });
   const save = spyOn(pluginPlatform.drafts.save, 'invoke');
   const document = createEmptyAgentPresetDocument();
@@ -192,7 +192,7 @@ test('ordinary user launches one check authoring conversation without saving or 
 });
 
 test('failed authoring launch is visible and retries only on another explicit click', async () => {
-  const create = spyOn(pluginLaunch, 'launchPluginConversation').mockRejectedValue(new Error('offline'));
+  const create = spyOn(pluginLaunch, 'launchPluginAuthoring').mockRejectedValue(new Error('offline'));
   const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware'), view = within(result.container);
   fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   await waitFor(() => expect(view.getByText(en.middlewareOrder.createFailed)).toBeTruthy());
@@ -203,7 +203,7 @@ test('failed authoring launch is visible and retries only on another explicit cl
 });
 
 test('disabled editor cannot create a check and Context does not offer the execution template', () => {
-  const create = spyOn(pluginLaunch, 'launchPluginConversation');
+  const create = spyOn(pluginLaunch, 'launchPluginAuthoring');
   const result = mount(createEmptyAgentPresetDocument(), [], true, 'middleware'), view = within(result.container);
   const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
   expect((button as HTMLButtonElement).disabled).toBe(true);
@@ -216,7 +216,7 @@ test('disabled editor cannot create a check and Context does not offer the execu
 
 test('remote WebUI cannot launch Plugin authoring from Agent settings', () => {
   delete (window as typeof window & { __backendPort?: number }).__backendPort;
-  const create = spyOn(pluginLaunch, 'launchPluginConversation');
+  const create = spyOn(pluginLaunch, 'launchPluginAuthoring');
   const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
   const button = within(result.container).getByRole('button', {
     name: en.middlewareOrder.createBeforeTool,
@@ -228,9 +228,9 @@ test('remote WebUI cannot launch Plugin authoring from Agent settings', () => {
 
 test('a late authoring launch cannot navigate after the editor unmounts', async () => {
   let finish!: () => void;
-  const create = spyOn(pluginLaunch, 'launchPluginConversation').mockImplementation(async navigate => {
+  const create = spyOn(pluginLaunch, 'launchPluginAuthoring').mockImplementation(async navigate => {
     await new Promise<void>(resolve => { finish = resolve; });
-    await navigate('/guid?pluginIntent=late');
+    await navigate('/plugins/create?template=late');
   });
   const open = mock(() => {});
   const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware', open);

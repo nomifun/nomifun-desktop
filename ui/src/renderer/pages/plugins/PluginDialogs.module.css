@@ -1,0 +1,142 @@
+.body {
+  display: flex;
+  min-width: 0;
+  max-height: calc(100vh - 192px);
+  flex-direction: column;
+  gap: 20px;
+  overflow: auto;
+  color: var(--color-text-1);
+}
+
+.intro,
+.note,
+.sectionHeading p {
+  margin: 0;
+  color: var(--color-text-3);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.sources {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.source {
+  display: flex;
+  min-width: 0;
+  min-height: 130px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 18px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms;
+}
+
+.source:hover,
+.source[data-selected] {
+  border-color: rgba(var(--primary-6), 0.45);
+  background: rgba(var(--primary-6), 0.04);
+}
+
+.source:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 3px;
+}
+
+.source:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.source strong { font-size: 14px; font-weight: 600; }
+.source small { color: var(--color-text-3); font-size: 12px; line-height: 1.5; }
+.sourceIcon { margin-bottom: 5px; color: rgb(var(--primary-6)); font-size: 22px; }
+
+.empty {
+  display: flex;
+  min-height: 130px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 20px;
+  border: 1px dashed var(--color-border-2);
+  border-radius: 14px;
+  color: var(--color-text-3);
+  text-align: center;
+}
+
+.empty > :global(.i-icon) { margin-bottom: 4px; font-size: 24px; color: var(--color-text-4); }
+.empty strong { color: var(--color-text-2); font-size: 14px; font-weight: 500; }
+.empty > span { font-size: 12px; line-height: 1.7; }
+
+.reading,
+.footer { display: flex; align-items: center; gap: 10px; }
+.reading { color: var(--color-text-3); font-size: 13px; }
+.footer { justify-content: flex-end; }
+
+.summary {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 18px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  background: var(--color-fill-1);
+}
+
+.appIcon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 12px;
+  background: rgba(var(--primary-6), 0.08);
+  color: rgb(var(--primary-6));
+  font-size: 22px;
+}
+
+.summaryCopy { min-width: 0; flex: 1; }
+.summaryCopy > strong { font-size: 15px; font-weight: 600; }
+.summaryCopy p { margin: 6px 0 8px; color: var(--color-text-2); font-size: 12px; line-height: 1.6; }
+.path { display: block; overflow: hidden; color: var(--color-text-3); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.kind { padding: 4px 8px; border-radius: 7px; background: var(--color-fill-2); color: var(--color-text-3); font-size: 11px; white-space: nowrap; }
+
+.copyOption { display: flex; flex-direction: column; gap: 6px; }
+.copyOption > span { padding-left: 24px; color: var(--color-text-3); font-size: 12px; line-height: 1.6; }
+.fields { display: flex; flex-direction: column; gap: 15px; }
+.sectionHeading strong { font-size: 14px; font-weight: 600; }
+.sectionHeading p { margin-top: 5px; }
+.field { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.field > span { color: var(--color-text-2); font-size: 13px; }
+
+.advanced { padding-top: 16px; border-top: 1px solid var(--color-border-2); }
+.advanced > summary,
+.schema > summary { color: var(--color-text-3); font-size: 12px; cursor: pointer; }
+.advanced[open] > summary { margin-bottom: 16px; }
+.advanced > :not(summary) { margin-top: 14px; }
+.advanced > :global(.arco-checkbox) { display: flex; }
+.body:has(.advanced[open]) > .empty { display: none; }
+.schema pre { padding: 12px; border-radius: 9px; background: var(--color-fill-1); }
+.jsonEditor,
+.schema pre { font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; line-height: 1.7; }
+.schema pre { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.facts { display: grid; gap: 10px; margin: 0; font-size: 12px; }
+.facts > div { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px; }
+.facts dt { color: var(--color-text-3); }
+.facts dd { margin: 0; color: var(--color-text-2); line-height: 1.6; overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: reduce) {
+  .source { transition: none; }
+}

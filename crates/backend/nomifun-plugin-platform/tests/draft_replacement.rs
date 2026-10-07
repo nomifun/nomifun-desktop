@@ -181,8 +181,7 @@ async fn losing_edit_cas_rolls_back_to_the_winning_files_and_database_record() {
         workspace_path: fixture.store.open(&fixture.owner, &fixture.draft_id)
             .unwrap().to_string_lossy().into_owned(),
         source_conversation_id: None, source_message_id: None, source_operation_key: None,
-        source_request_digest: None, verification: json!({"edit_revision": 1}),
-        imported_context: json!({}), status: PluginDraftStatus::Ready, last_error: None,
+        source_request_digest: None, verification: json!({"edit_revision": 1}), status: PluginDraftStatus::Ready, last_error: None,
         created_at_ms: 1, updated_at_ms: 1,
     };
     repository.create_draft(&draft).await.unwrap();

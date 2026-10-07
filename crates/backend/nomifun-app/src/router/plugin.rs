@@ -11,7 +11,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
 use nomifun_agent_contracts::{
-    DigestHex, PluginActionEffect, PluginArtifact, PluginBindingPoint, PluginDraftId,
+    PluginActionEffect, PluginArtifact, PluginBindingPoint, PluginDraftId,
     PluginId, PluginManifest, PLUGIN_MANIFEST_SCHEMA,
     plugin_action_id,
 };
@@ -32,14 +32,13 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 pub(super) use super::plugin_authoring::{
-    has_authoring_approval, request_authoring_approval, run_authoring_ui_test,
+    run_authoring_ui_test,
     save_authoring_draft,
 };
 
 pub(super) const PLUGIN_SDK: &str = include_str!(
     "../../../nomifun-plugin-platform/src/assets/plugin-sdk.js"
 );
-const MAX_PERMISSION_CONFIRMATIONS: usize = 128;
 const MAX_SURFACE_CALLS: usize = 256;
 const PLUGIN_STARTUP_ACTIVATION_FAILED: &str = "PLUGIN_STARTUP_ACTIVATION_FAILED";
 const PLUGIN_BINDING_RECOVERY_FAILED: &str = "PLUGIN_BINDING_RECOVERY_FAILED";
@@ -53,7 +52,6 @@ pub struct PluginRouterState {
     pub(super) data_roots: Arc<nomifun_plugin_platform::PluginDataRootManager>,
     pub(super) drafts: Arc<PluginDraftStore>,
     pub(super) transfers: Arc<nomifun_plugin_platform::PluginBackupFilesystem>,
-    pub(super) confirmations: Arc<Mutex<HashMap<String, PermissionConfirmation>>>,
     pub(super) surfaces: Arc<Mutex<HashMap<String, SurfaceSession>>>,
     pub(crate) registry: nomifun_plugin_platform::InMemoryPluginBindingRegistry,
     pub(crate) agent: nomifun_plugin_platform::AgentPluginBindings,
@@ -87,7 +85,6 @@ impl PluginRouterState {
             data_roots: services.plugin_data_roots.clone(),
             drafts: services.plugin_drafts.clone(),
             transfers: services.plugin_transfers.clone(),
-            confirmations: Arc::new(Mutex::new(HashMap::new())),
             surfaces: Arc::new(Mutex::new(HashMap::new())),
             registry: bindings.registry,
             agent: bindings.agent,
@@ -170,16 +167,6 @@ impl PluginRouterState {
         }
         Ok(())
     }
-}
-
-#[derive(Clone)]
-pub(super) struct PermissionConfirmation {
-    pub(super) owner_user_id: String,
-    pub(super) artifact_digest: DigestHex,
-    pub(super) permissions: BTreeSet<String>,
-    pub(super) secret_slots: BTreeSet<String>,
-    pub(super) trusted_local_service: bool,
-    pub(super) expires_at_ms: i64,
 }
 
 enum SurfaceDataRoot {
@@ -272,7 +259,6 @@ pub fn write_routes(state: PluginRouterState) -> Router {
         .route("/api/plugin-drafts/{draft_id}/files", put(replace_draft_file).delete(delete_draft_file))
         .route("/api/plugin-drafts/{draft_id}/preview", post(preview_draft))
         .route("/api/plugin-drafts/{draft_id}/save", post(save_draft))
-        .route("/api/plugin-drafts/{draft_id}/approve", post(super::plugin_authoring::approve))
         .route("/api/plugin-drafts/{draft_id}/ui-results", post(super::plugin_authoring::ui_results))
         .route("/api/plugin-drafts/{draft_id}", delete(delete_draft))
         .route("/api/plugin-drafts/{draft_id}/surface/bridge", post(dispatch_bridge))
@@ -629,19 +615,6 @@ async fn install_import(
             &credential_bindings,
         )
         .await?;
-        let confirmation = consume_confirmation(
-            &state,
-            &owner,
-            &artifact,
-            request.permission_confirmation_id.as_deref(),
-            None,
-        )
-        .await?;
-        if let Some(confirmation) = confirmation.required {
-            return Ok(Json(ApiResponse::ok(InstallPluginImportResponseDto {
-                result: PluginInstallOutcomeDto::ConfirmationRequired { confirmation },
-            })));
-        }
         let package_identity_in_use =
             package_identity_in_use(&state, &owner, &artifact.manifest.id).await?;
         let outcome = state
@@ -654,9 +627,6 @@ async fn install_import(
                         .then(|| copy_package_id(&artifact.manifest.id)),
                     config: json!({}),
                     credential_bindings,
-                    confirmed_permissions: confirmation.permissions,
-                    confirmed_secret_slots: confirmation.secret_slots,
-                    trusted_local_service_confirmed: confirmation.trusted_local_service,
                 },
                 backup,
                 None,
@@ -719,24 +689,6 @@ async fn install_import(
         &credential_bindings,
     )
     .await?;
-    let confirmation_existing = if request.create_copy {
-        None
-    } else {
-        existing.as_ref()
-    };
-    let confirmation = consume_confirmation(
-        &state,
-        &owner,
-        &artifact,
-        request.permission_confirmation_id.as_deref(),
-        confirmation_existing,
-    )
-    .await?;
-    if let Some(confirmation) = confirmation.required {
-        return Ok(Json(ApiResponse::ok(InstallPluginImportResponseDto {
-            result: PluginInstallOutcomeDto::ConfirmationRequired { confirmation },
-        })));
-    }
     let (target, local_package_id) = if request.create_copy {
         (
             InstallTarget::new(),
@@ -771,9 +723,6 @@ async fn install_import(
         local_package_id,
         config: install_config,
         credential_bindings,
-        confirmed_permissions: confirmation.permissions,
-        confirmed_secret_slots: confirmation.secret_slots,
-        trusted_local_service_confirmed: confirmation.trusted_local_service,
     };
     let outcome = match request.kind {
         PluginImportKindDto::Directory => state
@@ -952,7 +901,6 @@ pub(super) async fn create_draft_with_source(
         source_operation_key: source.as_ref().map(|value| value.operation_key.clone()),
         source_request_digest: source.as_ref().map(|_| request_digest.clone()),
         verification: serde_json::json!({"edit_revision": 1}),
-        imported_context: json!({}),
         status: PluginDraftStatus::Ready,
         last_error: None,
         created_at_ms: now,
@@ -1095,13 +1043,28 @@ pub(super) async fn preview_draft_owned(state: &PluginRouterState, owner: &str, 
     let imported = state.artifacts.import_files(&files, &NeverCancel)?;
     let artifact = imported.stored.artifact.clone();
     validate_config_value(&artifact.manifest, &request.config)?;
+    let access = match request.access {
+        Some(access) => access,
+        None => {
+            let bindings = match &draft.plugin_id {
+                Some(id) => state.repository.inventory(owner, id).await?
+                    .ok_or(PluginRepositoryError::NotFound)?.credential_bindings,
+                None => BTreeMap::new(),
+            };
+            PluginPreviewAccessRequest {
+                permissions: artifact.manifest.permissions.clone(),
+                credential_bindings: bindings.into_iter().filter(|(slot, _)|
+                    artifact.manifest.secrets.contains(slot)).collect(),
+            }
+        }
+    };
     validate_requested_credential_bindings(
         &state,
         &artifact.manifest,
-        &request.access.credential_bindings,
+        &access.credential_bindings,
     )
     .await?;
-    if !request.access.permissions.is_subset(&artifact.manifest.permissions) {
+    if !access.permissions.is_subset(&artifact.manifest.permissions) {
         return Err(PluginHttpError::bad_request("Preview requested undeclared permissions"));
     }
     let runtime_plugin_id = PluginId::from(draft.draft_id.as_ref().to_owned());
@@ -1166,9 +1129,7 @@ pub(super) async fn preview_draft_owned(state: &PluginRouterState, owner: &str, 
         enabled: true,
         trashed_at_ms: None,
         active_artifact_digest: artifact.artifact_digest.clone(),
-        previous_artifact_digest: None,
         data_generation: runtime_root.generation().as_str().to_owned(),
-        previous_data_generation: None,
         revision: draft.revision,
         config: preview_config.clone(),
         last_error: None,
@@ -1187,7 +1148,7 @@ pub(super) async fn preview_draft_owned(state: &PluginRouterState, owner: &str, 
         generation,
         is_preview: true,
         config: preview_config,
-        granted_permissions: request.access.permissions.clone(),
+        granted_permissions: access.permissions.clone(),
         completed_calls: HashMap::new(),
     };
     sessions.insert(session_id.clone(), session);
@@ -1199,8 +1160,8 @@ pub(super) async fn preview_draft_owned(state: &PluginRouterState, owner: &str, 
             plugin: preview_plugin.clone(),
             artifact: artifact.clone(),
             data_root: runtime_root,
-            credential_bindings: request.access.credential_bindings,
-            granted_permissions: request.access.permissions,
+            credential_bindings: access.credential_bindings,
+            granted_permissions: access.permissions,
         })
         .await
     {
@@ -1287,20 +1248,6 @@ pub(super) async fn save_draft_owned(state: &PluginRouterState, owner: &str, dra
             });
         }
     }
-    let confirmation = consume_confirmation(
-        &state,
-        &draft.owner_user_id,
-        &artifact,
-        request.permission_confirmation_id.as_deref(),
-        existing.as_ref(),
-    )
-    .await?;
-    if let Some(confirmation) = confirmation.required {
-        return Ok(SavePluginDraftResponseDto {
-            draft: draft_summary(&state, &draft)?,
-            result: PluginInstallOutcomeDto::ConfirmationRequired { confirmation },
-        });
-    }
     let target = match (&draft.plugin_id, draft.base_revision) {
         (Some(plugin_id), Some(expected_revision)) => InstallTarget::Existing {
             plugin_id: plugin_id.clone(),
@@ -1322,9 +1269,6 @@ pub(super) async fn save_draft_owned(state: &PluginRouterState, owner: &str, dra
                 local_package_id: None,
                 config: request.config,
                 credential_bindings: request.credential_bindings,
-                confirmed_permissions: confirmation.permissions,
-                confirmed_secret_slots: confirmation.secret_slots,
-                trusted_local_service_confirmed: confirmation.trusted_local_service,
             },
             &files,
             nomifun_plugin_platform::DraftInstallAssociation {
@@ -1551,6 +1495,7 @@ async fn configure(
 pub(super) async fn configure_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: ConfigurePluginRequest) -> Result<PluginDetailDto, PluginHttpError> {
     let owner = owner.to_owned();
     let plugin_id = parse_plugin_id(&plugin_id)?;
+    revoke_plugin_surfaces(state, &plugin_id).await?;
     let inventory = state
         .repository
         .inventory(&owner, &plugin_id)
@@ -1624,29 +1569,8 @@ async fn restore(
 pub(super) async fn restore_owned(state: &PluginRouterState, owner: &str, plugin_id: &str, request: RestorePluginRequest) -> Result<PluginDetailDto, PluginHttpError> {
     let owner = owner.to_owned();
     let plugin_id = parse_plugin_id(&plugin_id)?;
-    let restore_data = request.mode == PluginRestoreModeDto::PreviousCodeAndData;
-    if restore_data && !request.acknowledge_data_loss {
-        return Err(PluginHttpError::bad_request(
-            "full Previous restore requires data-loss acknowledgement",
-        ));
-    }
-    revoke_plugin_surfaces(&state, &plugin_id).await?;
-    if request.mode == PluginRestoreModeDto::FromTrash {
-        state
-            .install
-            .restore_from_trash(&owner, &plugin_id, request.expected_revision)
-            .await?;
-    } else {
-        state
-            .install
-            .restore_previous(
-                &owner,
-                &plugin_id,
-                request.expected_revision,
-                restore_data,
-            )
-            .await?;
-    }
+    revoke_plugin_surfaces(state, &plugin_id).await?;
+    state.install.restore_from_trash(&owner, &plugin_id, request.expected_revision).await?;
     let inventory = state
         .repository
         .inventory(&owner, &plugin_id)
@@ -2292,19 +2216,6 @@ async fn summary_dto(
     inventory: &PluginInventory,
 ) -> Result<PluginSummaryDto, PluginHttpError> {
     let manifest = &inventory.artifact.artifact.manifest;
-    let previous = inventory
-        .previous_artifact
-        .as_ref()
-        .map(|artifact| PluginArtifactDataPointerDto {
-            artifact_digest: artifact.artifact.artifact_digest.as_ref().to_owned(),
-            package_version: artifact.artifact.manifest.version.clone(),
-            data_generation: inventory
-                .plugin
-                .previous_data_generation
-                .clone()
-                .unwrap_or_else(|| inventory.plugin.data_generation.clone()),
-            data_version: artifact.artifact.manifest.data_version,
-        });
     Ok(PluginSummaryDto {
         plugin_id: inventory.plugin.plugin_id.as_ref().to_owned(),
         package_id: inventory.plugin.package_id.clone(),
@@ -2319,7 +2230,6 @@ async fn summary_dto(
             data_generation: inventory.plugin.data_generation.clone(),
             data_version: manifest.data_version,
         },
-        previous,
         has_ui: manifest.has_ui(),
         has_service: manifest.has_service(),
         service_mode: manifest.entrypoints.service.as_ref().map(|_| match manifest.service_mode() {
@@ -2572,7 +2482,6 @@ pub(super) fn draft_detail(
         .collect();
     Ok(PluginDraftDetailDto {
         summary: draft_summary(state, draft)?,
-        imported_context: draft.imported_context.clone(),
         files,
     })
 }
@@ -2604,192 +2513,19 @@ async fn package_identity_in_use(
 }
 
 async fn inspection_dto(
-    state: &PluginRouterState,
-    owner: &str,
+    _state: &PluginRouterState,
+    _owner: &str,
     kind: PluginImportKindDto,
     artifact: PluginArtifact,
     existing: Option<&PluginRecord>,
 ) -> Result<PluginImportInspectionDto, PluginHttpError> {
-    let existing_inventory = match existing {
-        Some(plugin) => state.repository.inventory(owner, &plugin.plugin_id).await?,
-        None => None,
-    };
-    let existing_permissions = existing_inventory
-        .as_ref()
-        .map(|inventory| inventory.grants.keys().cloned().collect::<BTreeSet<_>>())
-        .unwrap_or_default();
-    let existing_secret_slots = existing_inventory
-        .as_ref()
-        .map(|inventory| {
-            inventory
-                .artifact
-                .artifact
-                .manifest
-                .secrets
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let added_permissions = artifact
-        .manifest
-        .permissions
-        .difference(&existing_permissions)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let secret_slots = artifact
-        .manifest
-        .secrets
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let added_secret_slots = secret_slots
-        .difference(&existing_secret_slots)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let trusted_local_service = artifact.manifest.has_service()
-        && existing_inventory
-            .as_ref()
-            .is_none_or(|inventory| !inventory.artifact.artifact.manifest.has_service());
-    let needs_confirmation = trusted_local_service
-        || !added_permissions.is_empty()
-        || !added_secret_slots.is_empty();
-    let permission_expansion = if needs_confirmation {
-        let confirmation_id = Uuid::now_v7().to_string();
-        let confirmation = PluginPermissionExpansionDto {
-            confirmation_id: confirmation_id.clone(),
-            added_permissions: added_permissions.clone(),
-            added_secret_slots,
-            trusted_local_service,
-        };
-        let mut confirmations = state.confirmations.lock().await;
-        if confirmations.len() >= MAX_PERMISSION_CONFIRMATIONS {
-            let now = now_ms();
-            confirmations.retain(|_, value| value.expires_at_ms > now);
-        }
-        confirmations.insert(
-            confirmation_id,
-            PermissionConfirmation {
-                owner_user_id: owner.to_owned(),
-                artifact_digest: artifact.artifact_digest.clone(),
-                permissions: artifact.manifest.permissions.clone(),
-                secret_slots,
-                trusted_local_service,
-                expires_at_ms: now_ms() + 10 * 60 * 1000,
-            },
-        );
-        Some(confirmation)
-    } else {
-        None
-    };
     Ok(PluginImportInspectionDto {
         kind,
         artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
         manifest: manifest_dto(&artifact.manifest, existing.map(|plugin| &plugin.plugin_id)),
-        trusted_local_service: artifact.manifest.has_service(),
         target_plugin_id: existing.map(|plugin| plugin.plugin_id.as_ref().to_owned()),
         target_plugin_revision: existing.map(|plugin| plugin.revision),
         backup: None,
-        permission_expansion,
-    })
-}
-
-pub(super) struct ConfirmationDecision {
-    pub(super) required: Option<PluginPermissionExpansionDto>,
-    pub(super) permissions: BTreeSet<String>,
-    pub(super) secret_slots: BTreeSet<String>,
-    pub(super) trusted_local_service: bool,
-}
-
-pub(super) async fn consume_confirmation(
-    state: &PluginRouterState,
-    owner: &str,
-    artifact: &PluginArtifact,
-    confirmation_id: Option<&str>,
-    existing: Option<&PluginRecord>,
-) -> Result<ConfirmationDecision, PluginHttpError> {
-    let existing_inventory = match existing {
-        Some(plugin) => state.repository.inventory(owner, &plugin.plugin_id).await?,
-        None => None,
-    };
-    let existing_permissions = existing_inventory
-        .as_ref()
-        .map(|inventory| inventory.grants.keys().cloned().collect::<BTreeSet<_>>())
-        .unwrap_or_default();
-    let existing_secret_slots = existing_inventory
-        .as_ref()
-        .map(|inventory| {
-            inventory
-                .artifact
-                .artifact
-                .manifest
-                .secrets
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let added = artifact
-        .manifest
-        .permissions
-        .difference(&existing_permissions)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let secret_slots = artifact
-        .manifest
-        .secrets
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let added_secret_slots = secret_slots
-        .difference(&existing_secret_slots)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let trusted_local_service = artifact.manifest.has_service()
-        && existing_inventory
-            .as_ref()
-            .is_none_or(|inventory| !inventory.artifact.artifact.manifest.has_service());
-    let needs = trusted_local_service || !added.is_empty() || !added_secret_slots.is_empty();
-    if !needs {
-        return Ok(ConfirmationDecision {
-            required: None,
-            permissions: artifact.manifest.permissions.clone(),
-            secret_slots: BTreeSet::new(),
-            trusted_local_service: false,
-        });
-    }
-    if let Some(id) = confirmation_id {
-        let confirmation = state.confirmations.lock().await.remove(id);
-        if let Some(confirmation) = confirmation
-            && confirmation.owner_user_id == owner
-            && confirmation.artifact_digest == artifact.artifact_digest
-            && confirmation.permissions == artifact.manifest.permissions
-            && confirmation.secret_slots == secret_slots
-            && confirmation.trusted_local_service == trusted_local_service
-            && confirmation.expires_at_ms >= now_ms()
-        {
-            return Ok(ConfirmationDecision {
-                required: None,
-                permissions: confirmation.permissions,
-                secret_slots: confirmation.secret_slots,
-                trusted_local_service: confirmation.trusted_local_service,
-            });
-        }
-        return Err(PluginHttpError::conflict("permission confirmation is stale"));
-    }
-    let inspection = inspection_dto(
-        state,
-        owner,
-        PluginImportKindDto::Directory,
-        artifact.clone(),
-        existing,
-    )
-    .await?;
-    Ok(ConfirmationDecision {
-        required: inspection.permission_expansion,
-        permissions: BTreeSet::new(),
-        secret_slots: BTreeSet::new(),
-        trusted_local_service: false,
     })
 }
 
@@ -3203,11 +2939,6 @@ impl From<nomifun_plugin_platform::PluginDataRootError> for PluginHttpError {
 impl From<PluginInstallError> for PluginHttpError {
     fn from(error: PluginInstallError) -> Self {
         match error {
-            PluginInstallError::PermissionConfirmationRequired(_)
-            | PluginInstallError::SecretConfirmationRequired(_)
-            | PluginInstallError::LocalServiceConfirmationRequired => {
-                Self::conflict(&error.to_string())
-            }
             PluginInstallError::InvalidConfig(_) => Self::bad_request(&error.to_string()),
             PluginInstallError::InvalidUpdate(_) => Self::conflict(&error.to_string()),
             PluginInstallError::Repository(error) => error.into(),
@@ -3306,7 +3037,7 @@ mod authoring_revision_tests {
             plugin_id: None, base_revision: None, name: "App".into(),
             workspace_path: "workspace".into(), source_conversation_id: None,
             source_message_id: None, source_operation_key: None, source_request_digest: None,
-            verification, imported_context: json!({}), status: PluginDraftStatus::Ready,
+            verification, status: PluginDraftStatus::Ready,
             last_error: None, created_at_ms: 1, updated_at_ms: 1,
         }
     }
@@ -3336,7 +3067,7 @@ mod authoring_revision_tests {
             "runtime_ready":true,"has_ui":true,"has_service":false,
             "cases":{"persist":{"passed":true,"persistence_checked":true}},
             "execution":{"config":{}},"context":{"verifier":"old"},
-            "approval":{"approved":true},"surface":{"surface_session_id":"old"},
+            "surface":{"surface_session_id":"old"},
             "installed_observation":{"artifact_digest":"old-artifact","ui_ready":true},
             "delivery":{"artifact_digest":"old-artifact","plugin_revision":1},
             "future_derived_evidence":true,
@@ -3369,5 +3100,76 @@ mod authoring_revision_tests {
             assert!(require_authoring_revision(&draft, 8).is_err());
             assert!(require_authoring_revision(&draft, 9).is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod preview_access_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct RecordingHost(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl nomifun_plugin_platform::PluginServiceHostPort for RecordingHost {
+        async fn invoke(
+            &self, _plugin_id: &PluginId, capability: &str, input: Value, preview: bool,
+            _cancellation: nomifun_plugin_platform::PluginServiceCancellation,
+        ) -> Result<Value, nomifun_plugin_platform::PluginServicePortError> {
+            assert_eq!(capability, "desktop.files.open");
+            assert_eq!(input, json!({"file_id":"local-document"}));
+            assert!(preview);
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"opened":true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn omitted_access_runs_declared_host_capability_and_explicit_access_can_narrow_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
+        let services = crate::services::AppServices::from_config(database, &crate::AppConfig {
+            data_dir: temp.path().join("data"), work_dir: temp.path().join("work"),
+            ..Default::default()
+        }).await.unwrap();
+        let (states, _) = super::super::state::build_module_states(&services).await;
+        let mut state = states.plugin;
+        let host = Arc::new(RecordingHost::default());
+        state.host = host.clone();
+        let created = create_draft_owned(&state, &owner, serde_json::from_value(json!({})).unwrap()).await.unwrap();
+        let id = created.summary.draft_id;
+        let manifest = created.files.iter().find(|file| file.path == "nomifun.plugin.json").unwrap();
+        let mut manifest: Value = serde_json::from_str(manifest.text.as_ref().unwrap()).unwrap();
+        manifest["permissions"] = json!(["desktop.files.open"]);
+        let user = CurrentUser { id: nomifun_common::UserId::parse(owner.clone()).unwrap(), username: "admin".into() };
+        let changed = replace_draft_file(State(state.clone()), Extension(user.clone()), AxumPath(id.clone()), Json(ReplacePluginDraftFileRequest {
+            expected_revision: created.summary.revision, path: "nomifun.plugin.json".into(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&manifest).unwrap()),
+        })).await.unwrap().0.data.unwrap();
+        for narrow in [false, true] {
+            let mut request = json!({"expected_revision":changed.summary.revision,"config":{}});
+            if narrow { request["access"] = json!({"permissions":[],"credential_bindings":{}}); }
+            let preview = preview_draft_owned(&state, &owner, &id, serde_json::from_value(request).unwrap()).await.unwrap();
+            let descriptor = preview.descriptor;
+            let response = dispatch_bridge(State(state.clone()), Extension(user.clone()), Json(DispatchPluginBridgeRequest {
+                plugin_id: None, draft_id: Some(id.clone()), artifact_digest: descriptor.artifact_digest,
+                surface_session_id: descriptor.surface_session_id, surface_generation: descriptor.surface_generation,
+                is_preview: true, request: PluginBridgeRequestDto {
+                    call_id: Uuid::now_v7().to_string(), target: PluginBridgeTargetDto::Host {
+                        capability: "desktop.files.open".into(), input: json!({"file_id":"local-document"}),
+                    },
+                },
+            })).await.unwrap().0.data.unwrap();
+            if narrow {
+                assert!(matches!(response, PluginBridgeResultDto::Failure { error, .. }
+                    if error.message.contains("Host capability is not granted")));
+            } else {
+                assert!(matches!(response, PluginBridgeResultDto::Success {
+                    result: PluginBridgeSuccessDto::Host { result }, .. } if result == json!({"opened":true})));
+            }
+        }
+        assert_eq!(host.0.load(Ordering::SeqCst), 1, "only the user's explicit narrowed access stops the host operation");
     }
 }

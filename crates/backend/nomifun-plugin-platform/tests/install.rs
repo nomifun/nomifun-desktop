@@ -124,7 +124,7 @@ fn service_package() -> BTreeMap<String, Vec<u8>> {
 }
 
 #[tokio::test]
-async fn local_service_trust_is_enforced_by_the_core_before_runtime_validation() {
+async fn local_service_creation_reaches_runtime_without_an_approval_step() {
     let temp = tempfile::tempdir().unwrap();
     let database = nomifun_db::init_database_memory().await.unwrap();
     let owner = nomifun_db::installation_owner_id(database.pool())
@@ -155,9 +155,6 @@ async fn local_service_trust_is_enforced_by_the_core_before_runtime_validation()
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &service_package(),
             None,
@@ -166,7 +163,7 @@ async fn local_service_trust_is_enforced_by_the_core_before_runtime_validation()
         .unwrap_err();
     assert!(matches!(
         error,
-        PluginInstallError::LocalServiceConfirmationRequired
+        PluginInstallError::Validation(_)
     ));
 }
 
@@ -207,9 +204,6 @@ async fn backup_restore_enters_the_same_artifact_journal_and_generation_pipeline
                 local_package_id: None,
                 config: json!({"theme": "dark"}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &package("fixture.backup"),
             None,
@@ -227,9 +221,6 @@ async fn backup_restore_enters_the_same_artifact_journal_and_generation_pipeline
                 local_package_id: None,
                 config: first.plugin.config.clone(),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &package("fixture.backup"),
             None,
@@ -290,9 +281,6 @@ async fn backup_restore_enters_the_same_artifact_journal_and_generation_pipeline
                 local_package_id: Some(format!("fixture.backup.copy.{}", uuid::Uuid::now_v7())),
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             imported,
             None,
@@ -347,7 +335,7 @@ async fn backup_restore_enters_the_same_artifact_journal_and_generation_pipeline
 }
 
 #[tokio::test]
-async fn unchanged_permissions_keep_revocation_while_expansion_requires_confirmation() {
+async fn local_capability_expansion_is_immediate_and_preserves_user_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let database = nomifun_db::init_database_memory().await.unwrap();
     let owner = nomifun_db::installation_owner_id(database.pool())
@@ -382,9 +370,6 @@ async fn unchanged_permissions_keep_revocation_while_expansion_requires_confirma
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::from(["desktop.files.open".into()]),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &permission_package("1.0.0", &["desktop.files.open"]),
             None,
@@ -413,9 +398,6 @@ async fn unchanged_permissions_keep_revocation_while_expansion_requires_confirma
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &permission_package("1.0.1", &["desktop.files.open"]),
             None,
@@ -434,17 +416,14 @@ async fn unchanged_permissions_keep_revocation_while_expansion_requires_confirma
     let expansion = install
         .install_files(
             InstallArtifactRequest {
-                owner_user_id: owner,
+                owner_user_id: owner.clone(),
                 target: InstallTarget::Existing {
-                    plugin_id,
+                    plugin_id: plugin_id.clone(),
                     expected_revision: 3,
                 },
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &permission_package(
                 "1.0.2",
@@ -453,12 +432,11 @@ async fn unchanged_permissions_keep_revocation_while_expansion_requires_confirma
             None,
         )
         .await
-        .unwrap_err();
-    assert!(matches!(
-        expansion,
-        PluginInstallError::PermissionConfirmationRequired(missing)
-            if missing == BTreeSet::from(["desktop.window.notify".into()])
-    ));
+        .unwrap();
+    assert_eq!(expansion.plugin.revision, 4);
+    let grants = repository.inventory(&owner, &plugin_id).await.unwrap().unwrap().grants;
+    assert!(!grants["desktop.files.open"].granted, "explicit configuration remains in effect");
+    assert!(grants["desktop.window.notify"].granted, "new local capabilities are available immediately");
 }
 
 #[tokio::test]
@@ -485,30 +463,6 @@ async fn removed_credential_slots_are_pruned_and_never_resurrect_on_readdition()
         Arc::new(NoopPluginBindings),
     );
     let plugin_id = PluginId::from(uuid::Uuid::now_v7().to_string());
-    let missing_confirmation = install
-        .install_files(
-            InstallArtifactRequest {
-                owner_user_id: owner.clone(),
-                target: InstallTarget::New {
-                    plugin_id: plugin_id.clone(),
-                },
-                local_package_id: None,
-                config: json!({}),
-                credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
-            },
-            &secret_package("1.0.0", &["api_key"]),
-            None,
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        missing_confirmation,
-        PluginInstallError::SecretConfirmationRequired(missing)
-            if missing == BTreeSet::from(["api_key".into()])
-    ));
     let installed = install
         .install_files(
             InstallArtifactRequest {
@@ -519,9 +473,6 @@ async fn removed_credential_slots_are_pruned_and_never_resurrect_on_readdition()
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::from(["api_key".into()]),
-                trusted_local_service_confirmed: false,
             },
             &secret_package("1.0.0", &["api_key"]),
             None,
@@ -561,9 +512,6 @@ async fn removed_credential_slots_are_pruned_and_never_resurrect_on_readdition()
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::new(),
-                trusted_local_service_confirmed: false,
             },
             &secret_package("1.1.0", &[]),
             None,
@@ -591,9 +539,6 @@ async fn removed_credential_slots_are_pruned_and_never_resurrect_on_readdition()
                 local_package_id: None,
                 config: json!({}),
                 credential_bindings: BTreeMap::new(),
-                confirmed_permissions: BTreeSet::new(),
-                confirmed_secret_slots: BTreeSet::from(["api_key".into()]),
-                trusted_local_service_confirmed: false,
             },
             &secret_package("1.2.0", &["api_key"]),
             None,

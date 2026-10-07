@@ -27,8 +27,9 @@ pub(super) enum AgentSelection {
 struct PreflightRequest { selection:AgentSelection }
 
 pub(super) fn preflight_routes(state:super::nomi_core_session::NomiCoreAgentApiState)->Router {
-    Router::new().route("/api/conversations/plugin-preflight",post(preflight))
-        .route("/api/agent-sessions/{id}/plugin-continuation",post(continue_with_input)).with_state(state)
+    Router::new().route("/api/plugins/authoring/preflight",post(preflight))
+        .route("/api/agent-sessions/{id}/plugin-continuation",post(continue_with_input))
+        .with_state(state.clone()).merge(super::plugin_authoring_sessions::routes(state))
 }
 
 #[derive(Deserialize)]
@@ -63,15 +64,19 @@ async fn continue_with_input(
     let store=state.session_owner.canonical().store();
     let live=store.get_live_session(&session).await.map_err(|error|AppError::Conflict(error.to_string()))?;
     if live.owner_ref != principal { return Err(AppError::Forbidden("Plugin task belongs to another owner".into()).into()); }
+    if live.metadata.purpose != nomifun_agent_contracts::SessionPurpose::PluginAuthoring {
+        return Err(AppError::Forbidden("Historical ordinary-session drafts are read-only in the plugin workbench".into()).into());
+    }
     let binding:AgentBindingValueDto=serde_json::from_value(serde_json::to_value(&live.agent_binding)?)?;
     let (_,_,snapshot)=state.control_plane.saved_binding_artifacts(&user.id.to_string().into(),&binding).await?;
+    super::plugin_authoring_sessions::validate_scope(&binding, &snapshot)?;
     if !plugin_development_enabled(&snapshot.content.enabled_capabilities) {
         return Err(AppError::UnprocessableEntity("Plugin development is not enabled for this conversation".into()).into());
     }
     let input=super::nomi_core_session::bounded_turn_input(json!({"content":body.input.content,"files":body.input.files}))?;
     store.append_paused_native_input(&principal,&session,&body.request,
         StrictJsonValue(super::nomi_core_session::canonical_turn_input(&input)),
-        &["PLUGIN_AUTHORIZATION_REQUIRED","PLUGIN_VERIFICATION_REQUIRED","PLUGIN_DELIVERY_REQUIRED","PLUGIN_CURRENT_CONVERSATION_PENDING","EXECUTION_USER_REQUESTED"],
+        &["PLUGIN_VERIFICATION_REQUIRED","PLUGIN_DELIVERY_REQUIRED","PLUGIN_CURRENT_CONVERSATION_PENDING","EXECUTION_USER_REQUESTED"],
     ).await.map_err(|error|AppError::Conflict(error.to_string()))?;
     super::nomi_core_session::native_execution_control::resume(State(state),
         Extension(nomifun_agent_control_plane::AuthenticatedOwner(user.id.to_string().into())),
@@ -329,7 +334,6 @@ impl Host {
             "cases":{},"runtime_ready":false,
             "source_message_id":draft.source_message_id,
             "task_message_id":draft.verification["task_message_id"],
-            "approval":draft.verification["approval"],
             "plan":draft.verification["plan"],
         });
         draft.updated_at_ms = nomifun_common::now_ms();
@@ -352,14 +356,23 @@ impl Host {
         fields["expected_revision"]=json!(revision);
         let files = self.state.drafts.freeze(owner, &draft.draft_id).map_err(|error| error.to_string())?;
         let artifact = self.state.artifacts.inspect_files(&files, &NeverCancel).map_err(|error| error.to_string())?;
-        let config = fields.get("config").cloned().unwrap_or_else(|| json!({}));
-        let permissions = fields.get("permissions").cloned().unwrap_or_else(|| json!([]));
-        let credentials = fields.get("credential_bindings").cloned().unwrap_or_else(|| json!({}));
+        let installed = match &draft.plugin_id {
+            Some(id) => self.state.repository.inventory(owner, id).await.map_err(|error| error.to_string())?,
+            None => None,
+        };
+        let config = fields.get("config").cloned()
+            .or_else(|| installed.as_ref().map(|inventory| inventory.plugin.config.clone()))
+            .unwrap_or_else(|| json!({}));
+        let permissions = fields.get("permissions").cloned()
+            .unwrap_or_else(|| json!(artifact.manifest.permissions));
+        let credentials = fields.get("credential_bindings").cloned().unwrap_or_else(|| json!(
+            installed.as_ref().map(|inventory| inventory.credential_bindings.iter()
+                .filter(|(slot, _)| artifact.manifest.secrets.contains(slot))
+                .map(|(slot, reference)| (slot.clone(), reference.clone())).collect::<BTreeMap<_, _>>())
+                .unwrap_or_default()
+        ));
         let execution = json!({"config":config,"permissions":permissions,"credential_bindings":credentials});
         let verification_context=super::plugin_authoring::verification_context(self.state.repository.pool(),&credentials).await.map_err(core_error)?;
-        if (artifact.manifest.has_service() || !artifact.manifest.permissions.is_empty() || !artifact.manifest.secrets.is_empty()) && !plugin::has_authoring_approval(&draft, &artifact.artifact_digest, &execution) {
-            return plugin::request_authoring_approval(&self.state, owner, &draft, &artifact, &execution).await.map_err(core_error);
-        }
         if draft.verification.get("artifact_digest").and_then(Value::as_str) != Some(artifact.artifact_digest.as_ref()) {
             return Err("PLUGIN_CHECK_REQUIRED: check this exact revision before preview".into());
         }
@@ -485,16 +498,12 @@ impl Host {
         request["config"]=config; request["credential_bindings"]=credentials.clone();
         let outcome=plugin::save_authoring_draft(&self.state,owner,&id,parse(request)?,&draft).await.map_err(core_error)?;
         let mut current=plugin::draft_owned(&self.state,owner,&id).await.map_err(core_error)?;
-        if let PluginInstallOutcomeDto::ConfirmationRequired { .. }=&outcome.result {
-            self.changed(conversation,&current,None);
-            return Ok(json!({"waiting_for_user":true,"draft_id":id,"revision":current.revision,
-                "message":"Review additional privileges in the conversation card, then continue."}));
-        }
-        if let PluginInstallOutcomeDto::Installed { plugin }=&outcome.result {
+        let PluginInstallOutcomeDto::Installed { plugin }=&outcome.result;
+        {
             if !plugin.summary.enabled
                 || plugin.summary.active.artifact_digest!=artifact.artifact_digest.as_ref()
                 || plugin.summary.last_error.is_some()
-            {return Err("PLUGIN_DELIVERY_FAILED: installed version is unavailable or differs from verified bytes".into());}
+            {return Err("PLUGIN_DELIVERY_FAILED: saved plugin is unavailable or differs from verified bytes".into());}
             if super::plugin_authoring::verification_context(self.state.repository.pool(),&credentials).await.ok()
                 .as_ref()!=Some(&current.verification["context"]) {
                 current.verification.as_object_mut().expect("verification").remove("delivery");
@@ -579,11 +588,18 @@ impl Host {
 #[async_trait]
 impl PluginDevelopmentHost for Host {
     async fn invoke(&self,context:CapabilityInvocationContext,input:Value)->Result<Value,String> {
+        if nomifun_plugin_development::CREATE_ACTIONS.contains(&context.action_id.as_ref()) {
+            let store = nomifun_agent_session::AgentSessionStore::from_pool(self.state.repository.pool().clone())
+                .await.map_err(|error| error.to_string())?;
+            let session = store.get_live_session(&context.agent_session_id).await.map_err(|error| error.to_string())?;
+            if session.metadata.purpose != nomifun_agent_contracts::SessionPurpose::PluginAuthoring {
+                return Err("PLUGIN_AUTHORING_WORKSPACE_REQUIRED: create or edit plugins in the Plugins & Small Apps workbench; this ordinary conversation cannot start plugin authoring".into());
+            }
+        }
         let source=self.source(&context).await?;
         let conversation=source.conversation_id.clone();
         let owner=self.owner.as_ref();
         let action=context.action_id.as_ref().strip_prefix("plugin.development/").ok_or("Unknown module action")?;
-        let pause_key = format!("plugin-await:{}", nomifun_agent_contracts::digest_bytes(source.operation_key.as_bytes()).as_ref());
         let result = match action {
             "list"=>{
                 // Drafts bound to another conversation cannot be continued
@@ -606,12 +622,12 @@ impl PluginDevelopmentHost for Host {
                     if existing.source_conversation_id.as_deref().is_some_and(|prior|prior!=conversation){
                         return Err("PLUGIN_DRAFT_SCOPE_MISMATCH: continue this working copy in its original conversation".into());
                     }
-                    if existing.source_conversation_id.is_none(){
+                    if existing.source_message_id.is_none(){
                         let request_digest=digest_payload(&input).map_err(|error|error.to_string())?;
                         nomifun_db::sqlx::query(
-                            "UPDATE plugin_drafts SET source_conversation_id=?,source_message_id=?,source_operation_key=?,source_request_digest=?,revision=revision+1 WHERE owner_user_id=? AND draft_id=? AND revision=? AND source_conversation_id IS NULL"
+                            "UPDATE plugin_drafts SET source_conversation_id=?,source_message_id=?,source_operation_key=?,source_request_digest=?,revision=revision+1 WHERE owner_user_id=? AND draft_id=? AND revision=? AND source_message_id IS NULL AND (source_conversation_id IS NULL OR source_conversation_id=?)"
                         ).bind(&conversation).bind(&source.message_id).bind(&source.operation_key)
-                            .bind(request_digest.as_ref()).bind(owner).bind(id).bind(existing.revision as i64)
+                            .bind(request_digest.as_ref()).bind(owner).bind(id).bind(existing.revision as i64).bind(&conversation)
                             .execute(self.state.repository.pool()).await.map_err(|error|error.to_string())?;
                     }
                     let current=self.draft(owner,&conversation,id).await?;
@@ -638,8 +654,7 @@ impl PluginDevelopmentHost for Host {
                 let id=string(&input,"draft_id")?;
                 let draft=self.draft(owner,&conversation,id).await?;
                 let mut detail=wire(plugin::draft_detail(&self.state,&draft).map_err(core_error)?)?;
-                let mut report=draft.verification.clone();
-                report.as_object_mut().expect("verification object").remove("approval");
+                let report=draft.verification.clone();
                 detail["verification"]=report;
                 detail["verification_digest"]=json!(digest_payload(&draft.verification).map_err(|error|error.to_string())?.as_ref());
                 Ok(detail)
@@ -668,15 +683,6 @@ impl PluginDevelopmentHost for Host {
             "close_preview"=>{let(id,request)=draft_request(input)?;self.draft(owner,&conversation,&id).await?;Ok(json!({"closed":plugin::close_surface_owned(&self.state,owner,parse(request)?).await.map_err(core_error)?}))},
             _=>Err("Unknown Plugin development action".into()),
         }?;
-        if result["waiting_for_user"] == json!(true) {
-            // Suspend at the next ordinary Runtime boundary. A model does not
-            // have to close its task ledger to ask for a human code decision.
-            let store = nomifun_agent_session::AgentSessionStore::from_pool(self.state.repository.pool().clone())
-                .await.map_err(|error| error.to_string())?;
-            store.request_native_pause(&context.principal, &context.agent_session_id, &context.turn_id,
-                &pause_key, "Plugin execution requires the user's code or permission approval")
-                .await.map_err(|error| error.to_string())?;
-        }
         Ok(result)
     }
 }
@@ -843,7 +849,7 @@ mod tests {
             source_conversation_id:Some("conversation".into()),source_message_id:Some("message".into()),
             source_operation_key:Some(operation_key.to_owned()),
             source_request_digest:Some(digest.to_owned()),
-            verification:json!({}),imported_context:json!({}),
+            verification:json!({}),
             status:nomifun_plugin_platform::PluginDraftStatus::Ready,last_error:None,
             created_at_ms:updated_at_ms,updated_at_ms,
         }

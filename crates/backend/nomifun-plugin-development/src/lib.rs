@@ -24,7 +24,7 @@ pub const ACTIONS: &[&str] = &[
     "inspect", "configure", "enable", "export", "trash", "restore", "delete", "discard",
     "close_preview",
 ];
-pub const DESCRIPTION: &str = "Plugin and small-app development / 插件与小程序。Create, edit, verify, install and manage one NomiFun Unified Plugin through this conversation. Start with list to obtain the authoritative SDK guide, then open a managed draft and plan every required output, feature and exact case before editing. Use read/apply for incremental files, check for actual diagnostics, preview for real UI or headless execution, and test_action for required business cases. Repair failures within this task. Install only the exact verified revision and inspect the installed result. A file tree, successful startup, or prose saying done is NOT a usable Plugin delivery. Missing configuration or execution trust requires user input; do not fabricate APIs, credentials, tests or successful results. User-installed instances remain independent of this development module.";
+pub const DESCRIPTION: &str = "Plugin and small-app development / 插件与小程序。Create, edit, verify and install NomiFun Unified Plugins only in the Plugins & Small Apps workbench Session. Ordinary conversations must direct the user to that workbench; installed Plugin tools remain available through their own bindings. Start with list to obtain the authoritative SDK guide, then open a managed draft and plan every required output, feature and exact case before editing. Use read/apply for incremental files, check for actual diagnostics, preview for real UI or headless execution, and test_action for required business cases. Repair failures within this task. Install only the exact verified revision and inspect the installed result. A file tree, successful startup, or prose saying done is NOT a usable Plugin delivery. Missing configuration requires user input; do not fabricate APIs, credentials, tests or successful results. User-installed instances remain independent of this development module.";
 
 #[async_trait]
 pub trait PluginDevelopmentHost: Send + Sync {
@@ -174,7 +174,7 @@ pub fn input_schema(action: &str) -> Value {
         "export" => json!({"plugin_id":string(),"expected_revision":revision(),"destination_path":string(),"include_source":{"type":"boolean"}}),
         "trash" => json!({"plugin_id":string(),"expected_revision":revision()}),
         "delete" => json!({"plugin_id":string(),"expected_revision":revision(),"acknowledge_permanent_delete":{"type":"boolean","const":true}}),
-        "restore" => json!({"plugin_id":string(),"expected_revision":revision(),"mode":{"type":"string","enum":["previous_code","previous_code_and_data","from_trash"]},"acknowledge_data_loss":{"type":"boolean"}}),
+        "restore" => json!({"plugin_id":string(),"expected_revision":revision()}),
         "close_preview" => json!({"draft_id":string(),"surface_session_id":string(),"surface_generation":revision()}),
         _ => return json!({"not":{}}),
     };
@@ -192,7 +192,7 @@ pub fn input_schema(action: &str) -> Value {
         "enable" => &["plugin_id","expected_revision","enabled"],
         "export" => &["plugin_id","expected_revision","destination_path"],
         "delete" => &["plugin_id","expected_revision","acknowledge_permanent_delete"],
-        "restore" => &["plugin_id","expected_revision","mode"],
+        "restore" => &["plugin_id","expected_revision"],
         "close_preview" => &["draft_id","surface_session_id","surface_generation"],
         _ => &["plugin_id","expected_revision"],
     };
@@ -201,7 +201,7 @@ pub fn input_schema(action: &str) -> Value {
         "check" => "Compile/inspect the exact draft. Returns actionable diagnostics, not self-reported success.",
         "plan" => "Before editing, record every requested output, this draft's output key, required features and exact business cases. Include restart/reopen assertions for persistence. The accepted plan cannot be weakened during repair.",
         "preview" => "Run the actual draft with temporary storage; UI handshake/business tests are required before UI delivery.",
-        "install" => "Save the exact verified draft. May return confirmation_required; the user must approve actual additional privileges.",
+        "install" => "Save and immediately use the exact verified draft. Local service and declared capabilities need no separate publication or approval step.",
         "test_action" => "Execute a business case on the real preview Service. Planned cases retain their exact oracle; extra named cases are diagnostic probes and do not add delivery requirements.",
         "test_ui" => "Run typed DOM interactions on the real conversation preview. Planned cases retain their exact steps; extra named cases are diagnostic probes. text/count assert the exact result; include reopen followed by an assertion to verify persistence. Failure diagnostics report the step, expected and actual values. No arbitrary JavaScript.",
         "open" => "Open a managed draft for this conversation. Replays use the same draft; editing requires the exact installed revision.",

@@ -9099,7 +9099,7 @@ mod tests {
             async fn execution_pressure(&self) -> Result<crate::AgentExecutionPressure, AgentEngineError> {
                 Ok(crate::AgentExecutionPressure { renew_window: false,
                     stop: (self.0.load(std::sync::atomic::Ordering::SeqCst) >= 3)
-                        .then_some(crate::AgentExecutionStopReason::PluginVerificationStalled) })
+                        .then_some(crate::AgentExecutionStopReason::UserRequested) })
             }
             async fn check(&self, _: &ChatCausality) -> Result<crate::AgentCompletionCheck, AgentEngineError> {
                 Ok(crate::AgentCompletionCheck::Reject("not delivered".into()))
@@ -9131,7 +9131,7 @@ mod tests {
                 .with_execution_segments(crate::AgentSegmentPolicy { max_segments: 1, max_no_progress_segments: 1 })
                 .with_completion_check_port(Arc::new(Port::default())),
             AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
-        assert!(matches!(result.terminal, AgentTurnTerminal::Paused { ref reason } if reason == "PLUGIN_VERIFICATION_REQUIRED"));
+        assert!(matches!(result.terminal, AgentTurnTerminal::Paused { ref reason } if reason == "EXECUTION_USER_REQUESTED"));
         assert_eq!(result.model_steps, 3, "the model never offered a final answer; the watchdog still pauses");
         assert_eq!(model.requests.lock().unwrap().len(), 3);
         assert_eq!(model.steps.lock().unwrap().len(), 1, "a fourth model request must not start");
@@ -9154,7 +9154,7 @@ mod tests {
             async fn execution_pressure(&self) -> Result<crate::AgentExecutionPressure, AgentEngineError> {
                 Ok(crate::AgentExecutionPressure { renew_window: false,
                     stop: self.0.load(std::sync::atomic::Ordering::SeqCst)
-                        .then_some(crate::AgentExecutionStopReason::PluginVerificationStalled) })
+                        .then_some(crate::AgentExecutionStopReason::UserRequested) })
             }
             async fn check(&self, _: &ChatCausality) -> Result<crate::AgentCompletionCheck, AgentEngineError> {
                 Ok(crate::AgentCompletionCheck::Delivered)

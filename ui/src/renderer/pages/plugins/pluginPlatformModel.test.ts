@@ -1,106 +1,31 @@
-import { describe, expect, test } from 'bun:test';
-import type { PluginDraftFile, PluginDraftSummary, PluginSummary, PluginSurfaceDescriptor } from '@/common/types/pluginPlatform';
-import {
-  draftManifest,
-  libraryDrafts,
-  pluginEntryMatchesView,
-  pluginLibraryCounts,
-  pluginLibraryEntries,
-  pluginShape,
-  pluginSurfaceAssetPath,
-  requiresDataLossWarning,
-} from './pluginPlatformModel';
-
+import { expect, test } from 'bun:test';
+import type { PluginSummary, PluginSurfaceDescriptor } from '@/common/types/pluginPlatform';
+import { isPluginLibraryView, pluginLibraryCounts, pluginShape, pluginSurfaceAssetPath } from './pluginPlatformModel';
 const plugin = (overrides: Partial<PluginSummary> = {}): PluginSummary => ({
   plugin_id: 'plugin-1', package_id: 'local.todo', display_name: 'Todo', description: '',
-  enabled: true, revision: 2,
-  active: { artifact_digest: 'a'.repeat(64), package_version: '1.0.0', data_generation: 'g2', data_version: 2 },
-  previous: { artifact_digest: 'b'.repeat(64), package_version: '0.9.0', data_generation: 'g1', data_version: 1 },
-  has_ui: true, has_service: false, action_count: 0, binding_count: 0,
-  runtime: { state: 'stopped' }, updated_at_ms: 20, ...overrides,
+  enabled: true, revision: 2, active: { artifact_digest: 'a'.repeat(64), package_version: '1.0.0', data_generation: 'g2', data_version: 2 },
+  has_ui: true, has_service: false, action_count: 0, binding_count: 0, runtime: { state: 'stopped' }, updated_at_ms: 20, ...overrides,
 });
-
-describe('Unified Plugin UI model', () => {
-  test('represents UI-only, headless and mixed packages without parallel identities', () => {
-    expect(pluginShape(plugin())).toBe('ui_only');
-    expect(pluginShape(plugin({ has_ui: false, has_service: true }))).toBe('headless');
-    expect(pluginShape(plugin({ has_service: true }))).toBe('mixed');
-    const entries = pluginLibraryEntries([plugin()], [
-      { draft_id: 'draft-ready', revision: 1, display_name: 'Ready', description: '', status: 'ready', updated_at_ms: 30 },
-      { draft_id: 'draft-failed', revision: 3, display_name: 'Failed', description: '', status: 'failed', updated_at_ms: 50 },
-    ]);
-    expect(entries.map((entry) => entry.kind)).toEqual(['draft', 'draft', 'plugin']);
-    expect(entries.filter((entry) => entry.kind === 'draft').map((entry) => entry.draft.status))
-      .toEqual(['failed', 'ready']);
-  });
-
-  test('derives user-facing views from the existing lifecycle state only', () => {
-    const plugins = [
-      plugin({ plugin_id: 'enabled' }),
-      plugin({ plugin_id: 'disabled', enabled: false, has_ui: false, has_service: true }),
-      plugin({ plugin_id: 'failed', runtime: { state: 'failed' }, last_error: 'service exited' }),
-      plugin({ plugin_id: 'trashed', trashed_at_ms: 50 }),
-    ];
-    const drafts: PluginDraftSummary[] = [
-      { draft_id: 'ready', revision: 1, display_name: 'Ready', description: '', status: 'ready', updated_at_ms: 60 },
-      { draft_id: 'failed-draft', revision: 1, display_name: 'Failed', description: '', status: 'failed', updated_at_ms: 70 },
-    ];
-    expect(pluginLibraryCounts(plugins, drafts)).toEqual({
-      all: 5, enabled: 2, disabled: 1, drafts: 2, attention: 2, trash: 1,
-      ui_only: 2, headless: 1, mixed: 0,
-    });
-    const entries = pluginLibraryEntries(plugins, drafts);
-    expect(entries.filter((entry) => pluginEntryMatchesView(entry, 'attention')).map((entry) => entry.key))
-      .toEqual(['draft:failed-draft', 'plugin:failed']);
-    expect(entries.filter((entry) => pluginEntryMatchesView(entry, 'trash')).map((entry) => entry.key))
-      .toEqual(['plugin:trashed']);
-  });
-
-  test('hides drafts already delivered as the installed artifact', () => {
-    const draft = (overrides: Partial<PluginDraftSummary> = {}): PluginDraftSummary => ({
-      draft_id: 'draft-1', revision: 1, display_name: 'Draft', description: '',
-      status: 'ready', updated_at_ms: 40, ...overrides,
-    });
-    const digest = 'a'.repeat(64);
-    const plugins = [
-      plugin({ plugin_id: 'installed-1', active: { ...plugin().active, artifact_digest: digest } }),
-      plugin({ plugin_id: 'installed-trashed', trashed_at_ms: 10, active: { ...plugin().active, artifact_digest: digest } }),
-    ];
-    const drafts = [
-      draft({ draft_id: 'delivered', plugin_id: 'installed-1', delivered_artifact_digest: digest }),
-      draft({ draft_id: 'edited', plugin_id: 'installed-1' }),
-      draft({ draft_id: 'superseded', plugin_id: 'installed-1', delivered_artifact_digest: 'b'.repeat(64) }),
-      draft({ draft_id: 'trashed-plugin', plugin_id: 'installed-trashed', delivered_artifact_digest: digest }),
-      draft({ draft_id: 'standalone' }),
-    ];
-    expect(libraryDrafts(plugins, drafts).map((entry) => entry.draft_id))
-      .toEqual(['edited', 'superseded', 'trashed-plugin', 'standalone']);
-    expect(pluginLibraryEntries(plugins, drafts).filter((entry) => entry.kind === 'draft').length).toBe(4);
-    expect(pluginLibraryCounts(plugins, drafts).drafts).toBe(4);
-  });
-
-  test('reads the canonical package manifest directly from Draft files', () => {
-    const files: PluginDraftFile[] = [{
-      path: 'nomifun.plugin.json', media_type: 'application/json', digest: 'c'.repeat(64), size_bytes: 10,
-      text: JSON.stringify({ schema: 'nomifun.plugin/v1', id: 'local.todo', version: '1.0.0', name: 'Todo',
-        description: 'Tasks', hostApi: '>=1 <2', entrypoints: { ui: 'ui/index.html', service: 'service/main.mjs', serviceMode: 'onDemand' },
-        actions: { add: { name: 'Add', description: 'Add task', input: {type:'object'}, output: {type:'object'}, effect: 'write' } },
-        bindings: [{ point: 'agent.tool', action: 'add' }], dataVersion: 1, configSchema: {type:'object'},
-        secrets: ['api_key'], permissions: ['network'] }),
-    }];
-    expect(draftManifest(files)).toMatchObject({ package_id: 'local.todo', data_version: 1,
-      entrypoints: { ui: 'ui/index.html', service: 'service/main.mjs', service_mode: 'on_demand' },
-      actions: [{ action_id: 'add', effect: 'write' }], bindings: [{ point: 'agent.tool', action_id: 'add' }] });
-  });
-
-  test('uses one artifact-fenced asset route for installed and preview surfaces', () => {
-    const descriptor: PluginSurfaceDescriptor = { plugin_id: 'plugin-1', artifact_digest: 'a'.repeat(64),
-      surface_session_id: 'surface-1', surface_generation: 2, entrypoint: 'ui/index.html', is_preview: false };
-    expect(pluginSurfaceAssetPath(descriptor)).toBe(`/api/plugins/plugin-1/surface/assets/surface-1/2/${'a'.repeat(64)}/ui/index.html`);
-    expect(pluginSurfaceAssetPath({ ...descriptor, plugin_id: undefined, draft_id: 'draft-1', is_preview: true }))
-      .toBe(`/api/plugin-drafts/draft-1/surface/assets/surface-1/2/${'a'.repeat(64)}/ui/index.html`);
-    expect(pluginSurfaceAssetPath({ ...descriptor, entrypoint: '../secret' })).toBeNull();
-    expect(requiresDataLossWarning(plugin())).toBe(true);
-    expect(requiresDataLossWarning(plugin({ previous: { ...plugin().active } }))).toBe(false);
-  });
+test('library counts separate saved plugins, creation records and trash without duplicating states', () => {
+  expect(pluginShape(plugin())).toBe('ui_only');
+  expect(pluginShape(plugin({ has_ui: false, has_service: true }))).toBe('headless');
+  expect(pluginShape(plugin({ has_service: true }))).toBe('mixed');
+  expect(pluginLibraryCounts([
+    plugin(), plugin({ plugin_id: 'disabled', enabled: false, has_ui: false, has_service: true }),
+    plugin({ plugin_id: 'mixed', has_service: true, runtime: { state: 'failed' } }),
+    plugin({ plugin_id: 'trashed', trashed_at_ms: 50 }),
+  ], 2)).toEqual({ all: 3, drafts: 2, trash: 1, ui_only: 1, headless: 1, mixed: 1 });
+  expect(isPluginLibraryView('all')).toBe(true);
+  expect(isPluginLibraryView('attention')).toBe(false);
+  expect(isPluginLibraryView('enabled')).toBe(false);
+});
+test('installed and preview assets use the same fenced path and reject invalid descriptors', () => {
+  const descriptor: PluginSurfaceDescriptor = { plugin_id: 'plugin-1', artifact_digest: 'a'.repeat(64),
+    surface_session_id: 'surface-1', surface_generation: 2, entrypoint: 'ui/index.html', is_preview: false };
+  expect(pluginSurfaceAssetPath(descriptor)).toBe('/api/plugins/plugin-1/surface/assets/surface-1/2/' + 'a'.repeat(64) + '/ui/index.html');
+  expect(pluginSurfaceAssetPath({ ...descriptor, plugin_id: undefined, draft_id: 'draft-1', is_preview: true }))
+    .toBe('/api/plugin-drafts/draft-1/surface/assets/surface-1/2/' + 'a'.repeat(64) + '/ui/index.html');
+  for (const change of [{ entrypoint: '../secret' }, { entrypoint: '/secret' }, { entrypoint: 'ui/../secret' }, { artifact_digest: 'invalid' }, { surface_generation: 0 }, { plugin_id: undefined }]) {
+    expect(pluginSurfaceAssetPath({ ...descriptor, ...change })).toBeNull();
+  }
 });

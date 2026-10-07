@@ -326,9 +326,24 @@ pub enum AgentSessionDeletedState {
     Deleted,
 }
 
+/// Immutable product ownership established by the canonical opening event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPurpose {
+    #[default]
+    Conversation,
+    PluginAuthoring,
+}
+
+impl SessionPurpose {
+    pub fn is_conversation(&self) -> bool { *self == Self::Conversation }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionMetadata {
+    #[serde(default, skip_serializing_if = "SessionPurpose::is_conversation")]
+    pub purpose: SessionPurpose,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub archived: bool,
@@ -336,6 +351,27 @@ pub struct AgentSessionMetadata {
     /// Session-owned override. None inherits the selected model's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<crate::ReasoningEffort>,
+}
+
+#[cfg(test)]
+mod session_purpose_tests {
+    use super::*;
+
+    #[test]
+    fn current_generation_metadata_defaults_to_conversation_and_preserves_authoring_purpose() {
+        let ordinary = serde_json::json!({"title":"Chat","archived":false,"pinned":false});
+        let metadata: AgentSessionMetadata = serde_json::from_value(ordinary.clone()).unwrap();
+        assert_eq!(metadata.purpose, SessionPurpose::Conversation);
+        assert_eq!(serde_json::to_value(metadata).unwrap(), ordinary);
+        let authoring = serde_json::json!({"title":"App","archived":false,"pinned":false,"purpose":"plugin_authoring"});
+        let metadata: AgentSessionMetadata = serde_json::from_value(authoring.clone()).unwrap();
+        assert_eq!(metadata.purpose, SessionPurpose::PluginAuthoring);
+        assert_eq!(serde_json::to_value(metadata).unwrap(), authoring);
+        for purpose in [serde_json::json!("unknown"), serde_json::Value::Null] {
+            let mut invalid = ordinary.clone(); invalid["purpose"] = purpose;
+            assert!(serde_json::from_value::<AgentSessionMetadata>(invalid).is_err());
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

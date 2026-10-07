@@ -51,7 +51,18 @@ const surfaceOwnerPath = (
 /** The only frontend entry point for Unified Plugin Core. */
 export const pluginPlatform = {
   authoring: {
-    preflight: httpPost<PluginDevelopmentPreflight, { selection: PluginDevelopmentPreflight['selection'] }>('/api/conversations/plugin-preflight'),
+    listSessions: httpGet<{ sessions: import('../types/pluginDevelopment').PluginAuthoringSessionSummary[] }, void>('/api/plugins/authoring/sessions'),
+    createSession: httpPost<{ agent_session_id: string }, {
+      idempotency_key: string;
+      selection: PluginDevelopmentPreflight['selection'];
+      model: { provider_id: string; model: string };
+      plugin_id?: string; expected_plugin_revision?: number; draft_id?: string;
+      reasoning_effort?: import('../types/reasoningEffort').SessionReasoningEffort;
+    }>('/api/plugins/authoring/sessions'),
+    getSession: httpGet<{ agent_session_id: string }, { agent_session_id: string }>(
+      ({ agent_session_id }) => `/api/plugins/authoring/sessions/${encodeURIComponent(agent_session_id)}`,
+    ),
+    preflight: httpPost<PluginDevelopmentPreflight, { selection: PluginDevelopmentPreflight['selection'] }>('/api/plugins/authoring/preflight'),
     continueWithInput: httpPost<
       import('../types/agentPlatform').ResumeNativeAgentExecutionResponse,
       { agent_session_id: string; request: import('../types/agentPlatform').ResumeNativeAgentExecutionRequest; input: { content: string; files?: string[] } }
@@ -60,12 +71,8 @@ export const pluginPlatform = {
     details: httpGet<{
       draft: Contract.PluginDraftDetail;
       verification: Record<string, unknown>;
-      confirmation: Contract.PluginPermissionExpansion | null;
       commands: Array<{ test_token: string; draft_id: string; descriptor: Contract.PluginSurfaceDescriptor; steps: PluginUiStep[]; case_name: string }>;
     }, DraftIdentity>(({ draft_id }) => `${draftPath(draft_id)}/authoring`),
-    approve: httpPost<{ approved: boolean; revision: number }, DraftCommand<{ expected_revision: number; confirmation_id: string; approved: boolean }>>(
-      ({ draft_id }) => `${draftPath(draft_id)}/approve`, requestBody,
-    ),
     uiResults: httpPost<boolean, DraftCommand<{
       test_token: string; descriptor: Contract.PluginSurfaceDescriptor; observations: unknown[]; error?: string;
     }>>(({ draft_id }) => `${draftPath(draft_id)}/ui-results`, requestBody),

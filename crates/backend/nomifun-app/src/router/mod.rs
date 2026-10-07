@@ -31,6 +31,7 @@ mod mobile_voice_authority;
 mod mobile_voice_host;
 mod voice_work_host;
 mod plugin_development;
+mod plugin_authoring_sessions;
 mod plugin_authoring;
 pub(crate) mod nomi_core_tool_discovery;
 pub(crate) mod nomi_core_chat_route;

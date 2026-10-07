@@ -1,7 +1,7 @@
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentHandoffBindingRefV1, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId,
     CorrelationId, DeleteAgentSessionCommand, EventId, EventProducerId, IdempotencyKey,
-    OperationId, PrincipalRef, ReasoningEffort, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor,
+    OperationId, PrincipalRef, ReasoningEffort, SessionPurpose, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor,
     SessionEventKind, SessionEventPayloadRef, SessionPayloadBody, StrictJsonValue,
 };
 use nomifun_agent_session::{
@@ -97,6 +97,7 @@ impl CanonicalAgentSessionOwner {
             active_capability_ids,
             remote_binding_provenance,
             None,
+            SessionPurpose::Conversation,
             idempotency_key,
             created_at,
         )
@@ -120,10 +121,20 @@ impl CanonicalAgentSessionOwner {
             active_capability_ids,
             None,
             reasoning_effort,
+            SessionPurpose::Conversation,
             idempotency_key,
             created_at,
         )
         .await
+    }
+
+    pub async fn open_with_purpose(
+        &self, owner: PrincipalRef, binding: AgentBindingValue, title: Option<String>,
+        active_capability_ids: Vec<String>, reasoning_effort: Option<ReasoningEffort>,
+        purpose: SessionPurpose, idempotency_key: &str, created_at: i64,
+    ) -> Result<OpenAgentSession, AppError> {
+        self.open_with_options(owner, binding, title, active_capability_ids, None,
+            reasoning_effort, purpose, idempotency_key, created_at).await
     }
 
     async fn open_with_options(
@@ -134,6 +145,7 @@ impl CanonicalAgentSessionOwner {
         active_capability_ids: Vec<String>,
         remote_binding_provenance: Option<nomifun_agent_contracts::RemoteBindingProvenance>,
         reasoning_effort: Option<ReasoningEffort>,
+        purpose: SessionPurpose,
         idempotency_key: &str,
         created_at: i64,
     ) -> Result<OpenAgentSession, AppError> {
@@ -144,6 +156,7 @@ impl CanonicalAgentSessionOwner {
             agent_session_id: session_id.clone(),
             owner_ref: owner.clone(),
             metadata: AgentSessionMetadata {
+                purpose,
                 title,
                 archived: false,
                 pinned: false,
@@ -507,6 +520,7 @@ impl CanonicalAgentSessionOwner {
             child_session_id: child_id,
             child_owner_ref: owner.clone(),
             child_metadata: AgentSessionMetadata {
+                purpose: parent.metadata.purpose,
                 title,
                 archived: false,
                 pinned: false,
@@ -713,6 +727,61 @@ mod tests {
             typed_resource_bindings: Vec::new(),
             binding_version: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn opening_purpose_is_atomic_idempotent_and_not_mutable_session_metadata() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let ordinary = service.open(owner(), binding(), None, Vec::new(), "ordinary-purpose", 1).await.unwrap();
+        assert_eq!(ordinary.session.metadata.purpose, SessionPurpose::Conversation);
+        let plugin = service.open_with_purpose(owner(), binding(), Some("App".into()), Vec::new(),
+            Some(ReasoningEffort::Low), SessionPurpose::PluginAuthoring, "plugin-purpose", 2).await.unwrap();
+        let id = &plugin.session.agent_session_id;
+        assert_eq!(plugin.session.metadata.purpose, SessionPurpose::PluginAuthoring);
+        let before: String = nomifun_db::sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND seq=1 AND kind='session/opening'")
+            .bind(id.as_ref()).fetch_one(database.pool()).await.unwrap();
+        let opening: Value = serde_json::from_str(&before).unwrap();
+        assert_eq!(opening["metadata"]["purpose"], "plugin_authoring");
+        let replay = service.open_with_purpose(owner(), binding(), Some("App".into()), Vec::new(),
+            Some(ReasoningEffort::Low), SessionPurpose::PluginAuthoring, "plugin-purpose", 20).await.unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.session.agent_session_id, *id);
+        assert!(matches!(service.open_with_purpose(owner(), binding(), Some("App".into()), Vec::new(),
+            Some(ReasoningEffort::Low), SessionPurpose::Conversation, "plugin-purpose", 20).await,
+            Err(AppError::Conflict(_))), "the same key cannot reopen under a different product purpose");
+        assert!(serde_json::from_value::<nomifun_agent_session::UpdateAgentSessionMetadata>(
+            json!({"title":"Moved","purpose":"conversation"})).is_err());
+        let updated = service.store.update_session_metadata(&owner(), id,
+            nomifun_agent_session::UpdateAgentSessionMetadata { title: Some("Renamed".into()), archived: Some(true), pinned: Some(true) })
+            .await.unwrap();
+        assert_eq!(updated.metadata.purpose, SessionPurpose::PluginAuthoring);
+        assert_eq!(updated.metadata.title.as_deref(), Some("Renamed"));
+        assert_eq!(service.store.get_live_session(id).await.unwrap().metadata.purpose, SessionPurpose::PluginAuthoring);
+        let listed = service.store.list_live_sessions(&owner(), None, 20).await.unwrap();
+        assert_eq!(listed.items.iter().find(|item| item.session.agent_session_id == *id).unwrap().session.metadata.purpose,
+            SessionPurpose::PluginAuthoring);
+        let after: String = nomifun_db::sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND seq=1")
+            .bind(id.as_ref()).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(before, after, "mutable metadata never rewrites the immutable creation fact");
+    }
+
+    #[tokio::test]
+    async fn plugin_authoring_fork_preserves_canonical_product_purpose() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let service = CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+        let parent = service.open_with_purpose(owner(), binding(), None, Vec::new(), None,
+            SessionPurpose::PluginAuthoring, "plugin-fork-parent", 1).await.unwrap();
+        service.start_turn(&owner(), &parent.session.agent_session_id, "plugin-fork-input", json!({"content":"Build the app"})).await.unwrap();
+        service.cancel(&owner(), &parent.session.agent_session_id, "plugin-fork-stop").await.unwrap();
+        let cursor = service.store.current_cursor(&parent.session.agent_session_id).await.unwrap();
+        let child = service.fork(&owner(), &parent.session.agent_session_id, cursor.seq, None, "plugin-fork-child", 2).await.unwrap();
+        assert_eq!(child.child_session.metadata.purpose, SessionPurpose::PluginAuthoring);
+        assert_eq!(service.store.get_live_session(&child.child_session.agent_session_id).await.unwrap().metadata.purpose,
+            SessionPurpose::PluginAuthoring);
+        let opening: String = nomifun_db::sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND seq=1")
+            .bind(child.child_session.agent_session_id.as_ref()).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&opening).unwrap()["metadata"]["purpose"], "plugin_authoring");
     }
 
     #[tokio::test]

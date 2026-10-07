@@ -123,13 +123,6 @@ pub trait PluginRepository: Send + Sync {
         trashed: bool,
         now_ms: i64,
     ) -> PluginRepositoryResult<PluginRecord>;
-    async fn restore_previous(
-        &self,
-        mutation: &PluginMutationRecord,
-        expected_revision: u64,
-        restore_data: bool,
-        now_ms: i64,
-    ) -> PluginRepositoryResult<PluginRecord>;
     async fn delete_plugin_rows(
         &self,
         mutation_id: &PluginMutationId,
@@ -174,8 +167,6 @@ impl SqlitePluginRepository {
 
 #[derive(Debug)]
 struct MutationRollbackSnapshot {
-    previous_artifact_digest: Option<String>,
-    previous_data_generation: Option<String>,
     config_json: String,
     credential_bindings_json: String,
     grants_json: String,
@@ -221,21 +212,12 @@ impl PluginRepository for SqlitePluginRepository {
             .get_artifact(&plugin.active_artifact_digest)
             .await?
             .ok_or_else(|| PluginRepositoryError::InvalidData("active Artifact is missing".into()))?;
-        let previous_artifact = match &plugin.previous_artifact_digest {
-            Some(digest) => Some(
-                self.get_artifact(digest)
-                    .await?
-                    .ok_or_else(|| PluginRepositoryError::InvalidData("previous Artifact is missing".into()))?,
-            ),
-            None => None,
-        };
         let credential_bindings = credential_bindings(self.pool(), owner_user_id, plugin_id).await?;
         let grants = grants(self.pool(), owner_user_id, plugin_id).await?;
         let library = library_state(self.pool(), owner_user_id, plugin_id).await?;
         Ok(Some(PluginInventory {
             plugin,
             artifact,
-            previous_artifact,
             credential_bindings,
             grants,
             library,
@@ -299,8 +281,8 @@ impl PluginRepository for SqlitePluginRepository {
         sqlx::query(
             "INSERT INTO plugin_drafts \
              (draft_id, owner_user_id, plugin_id, base_revision, revision, name, workspace_path, \
-              imported_context_json, status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(draft.draft_id.as_ref())
         .bind(&draft.owner_user_id)
@@ -309,7 +291,6 @@ impl PluginRepository for SqlitePluginRepository {
         .bind(u64_to_i64(draft.revision)?)
         .bind(&draft.name)
         .bind(&draft.workspace_path)
-        .bind(canonical_json(&draft.imported_context)?)
         .bind(draft.status.as_str())
         .bind(&draft.last_error)
         .bind(draft.created_at_ms)
@@ -330,7 +311,7 @@ impl PluginRepository for SqlitePluginRepository {
     ) -> PluginRepositoryResult<Vec<PluginDraftRecord>> {
         let rows = sqlx::query(
             "SELECT draft_id, owner_user_id, plugin_id, base_revision, revision, name, workspace_path, \
-                    imported_context_json, status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json \
+                    status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json \
              FROM plugin_drafts WHERE owner_user_id = ? ORDER BY updated_at_ms DESC, draft_id",
         )
         .bind(owner_user_id)
@@ -346,7 +327,7 @@ impl PluginRepository for SqlitePluginRepository {
     ) -> PluginRepositoryResult<Option<PluginDraftRecord>> {
         sqlx::query(
             "SELECT draft_id, owner_user_id, plugin_id, base_revision, revision, name, workspace_path, \
-                    imported_context_json, status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json \
+                    status, last_error, created_at_ms, updated_at_ms, source_conversation_id, source_message_id, source_operation_key, source_request_digest, verification_json \
              FROM plugin_drafts WHERE owner_user_id = ? AND draft_id = ?",
         )
         .bind(owner_user_id)
@@ -482,17 +463,15 @@ impl PluginRepository for SqlitePluginRepository {
                 let next_revision = expected.checked_add(1).ok_or_else(|| {
                     PluginRepositoryError::InvalidData("Plugin revision overflow".into())
                 })?;
-                let changed_generation = current.data_generation != commit.data_generation;
                 let result = sqlx::query(
-                    "UPDATE plugins SET name = ?, description = ?, previous_artifact_digest = active_artifact_digest, \
-                            active_artifact_digest = ?, previous_data_generation = ?, data_generation = ?, \
+                    "UPDATE plugins SET name = ?, description = ?, \
+                            active_artifact_digest = ?, data_generation = ?, \
                             revision = ?, config_json = ?, last_error = NULL, updated_at_ms = ? \
                      WHERE owner_user_id = ? AND plugin_id = ? AND revision = ? AND trashed_at_ms IS NULL",
                 )
                 .bind(&commit.artifact.artifact.manifest.name)
                 .bind(&commit.artifact.artifact.manifest.description)
                 .bind(commit.artifact.artifact.artifact_digest.as_ref())
-                .bind(changed_generation.then_some(current.data_generation.as_str()))
                 .bind(&commit.data_generation)
                 .bind(u64_to_i64(next_revision)?)
                 .bind(canonical_json(&commit.config)?)
@@ -513,9 +492,9 @@ impl PluginRepository for SqlitePluginRepository {
                 let result = sqlx::query(
                     "INSERT INTO plugins \
                      (plugin_id, owner_user_id, package_id, name, description, enabled, trashed_at_ms, \
-                      active_artifact_digest, previous_artifact_digest, data_generation, previous_data_generation, \
+                      active_artifact_digest, data_generation, \
                       revision, config_json, last_error, created_at_ms, updated_at_ms) \
-                     VALUES (?, ?, ?, ?, ?, 1, NULL, ?, NULL, ?, NULL, 1, ?, NULL, ?, ?)",
+                     VALUES (?, ?, ?, ?, ?, 1, NULL, ?, ?, 1, ?, NULL, ?, ?)",
                 )
                 .bind(commit.plugin_id.as_ref())
                 .bind(&commit.owner_user_id)
@@ -625,7 +604,7 @@ impl PluginRepository for SqlitePluginRepository {
         let mut transaction = self.pool().begin().await?;
         let mutation = sqlx::query(
             "SELECT phase, kind, old_artifact_digest, old_data_generation, expected_revision, \
-                    old_previous_artifact_digest, old_previous_data_generation, old_config_json, \
+                    old_config_json, \
                     old_credential_bindings_json, old_grants_json, draft_association_json \
              FROM plugin_mutations WHERE mutation_id = ? AND owner_user_id = ? AND plugin_id = ?",
         )
@@ -659,10 +638,6 @@ impl PluginRepository for SqlitePluginRepository {
         }
         let old_artifact: String = mutation.try_get("old_artifact_digest")?;
         let old_generation: String = mutation.try_get("old_data_generation")?;
-        let old_previous_artifact: Option<String> =
-            mutation.try_get("old_previous_artifact_digest")?;
-        let old_previous_generation: Option<String> =
-            mutation.try_get("old_previous_data_generation")?;
         let old_config_json: String = mutation.try_get("old_config_json")?;
         let old_credential_bindings_json: String =
             mutation.try_get("old_credential_bindings_json")?;
@@ -717,7 +692,7 @@ impl PluginRepository for SqlitePluginRepository {
         })?;
         let result = sqlx::query(
             "UPDATE plugins SET name = ?, description = ?, active_artifact_digest = ?, \
-                    data_generation = ?, previous_artifact_digest = ?, previous_data_generation = ?, \
+                    data_generation = ?, \
                     config_json = ?, revision = revision + 1, last_error = ?, updated_at_ms = ? \
              WHERE owner_user_id = ? AND plugin_id = ? AND revision = ?",
         )
@@ -725,8 +700,6 @@ impl PluginRepository for SqlitePluginRepository {
         .bind(&old_manifest.description)
         .bind(old_artifact)
         .bind(old_generation)
-        .bind(old_previous_artifact)
-        .bind(old_previous_generation)
         .bind(old_config_json)
         .bind("new Plugin runtime failed; restored previous Artifact and DataRoot")
         .bind(now_ms)
@@ -955,75 +928,6 @@ impl PluginRepository for SqlitePluginRepository {
             .ok_or(PluginRepositoryError::NotFound)
     }
 
-    async fn restore_previous(
-        &self,
-        mutation: &PluginMutationRecord,
-        expected_revision: u64,
-        restore_data: bool,
-        now_ms: i64,
-    ) -> PluginRepositoryResult<PluginRecord> {
-        let mut transaction = self.pool().begin().await?;
-        insert_mutation_tx(&mut transaction, mutation).await?;
-        let current = get_plugin_tx(&mut transaction, &mutation.owner_user_id, &mutation.plugin_id)
-            .await?
-            .ok_or(PluginRepositoryError::NotFound)?;
-        if current.revision != expected_revision || current.trashed_at_ms.is_some() {
-            return Err(PluginRepositoryError::Conflict);
-        }
-        let previous_artifact = current
-            .previous_artifact_digest
-            .clone()
-            .ok_or(PluginRepositoryError::Conflict)?;
-        let restored_generation = if restore_data {
-            current
-                .previous_data_generation
-                .clone()
-                .ok_or(PluginRepositoryError::Conflict)?
-        } else {
-            current.data_generation.clone()
-        };
-        if mutation.kind != PluginMutationKind::Restore
-            || mutation.phase != PluginMutationPhase::Prepared
-            || mutation.expected_revision != Some(expected_revision)
-            || mutation.old_artifact_digest.as_ref()
-                != Some(&current.active_artifact_digest)
-            || mutation.new_artifact_digest.as_ref() != Some(&previous_artifact)
-            || mutation.old_data_generation.as_deref()
-                != Some(current.data_generation.as_str())
-            || mutation.new_data_generation.as_deref()
-                != Some(restored_generation.as_str())
-        {
-            return Err(PluginRepositoryError::Conflict);
-        }
-        let result = sqlx::query(
-            "UPDATE plugins SET active_artifact_digest = ?, previous_artifact_digest = active_artifact_digest, \
-                    data_generation = ?, previous_data_generation = CASE WHEN ? = data_generation THEN NULL ELSE data_generation END, \
-                    revision = revision + 1, last_error = NULL, updated_at_ms = ? \
-             WHERE owner_user_id = ? AND plugin_id = ? AND revision = ?",
-        )
-        .bind(previous_artifact.as_ref())
-        .bind(&restored_generation)
-        .bind(&restored_generation)
-        .bind(now_ms)
-        .bind(&mutation.owner_user_id)
-        .bind(mutation.plugin_id.as_ref())
-        .bind(u64_to_i64(expected_revision)?)
-        .execute(&mut *transaction)
-        .await?;
-        if result.rows_affected() != 1 {
-            return Err(PluginRepositoryError::Conflict);
-        }
-        sqlx::query("UPDATE plugin_mutations SET phase = 'committed', updated_at_ms = ? WHERE mutation_id = ?")
-            .bind(now_ms)
-            .bind(mutation.mutation_id.as_ref())
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        self.get_plugin(&mutation.owner_user_id, &mutation.plugin_id)
-            .await?
-            .ok_or(PluginRepositoryError::NotFound)
-    }
-
     async fn delete_plugin_rows(
         &self,
         mutation_id: &PluginMutationId,
@@ -1187,7 +1091,7 @@ impl PluginRepository for SqlitePluginRepository {
 
 const PLUGIN_SELECT: &str =
     "SELECT owner_user_id, plugin_id, package_id, name, description, enabled, trashed_at_ms, \
-            active_artifact_digest, previous_artifact_digest, data_generation, previous_data_generation, \
+            active_artifact_digest, data_generation, \
             revision, config_json, last_error, created_at_ms, updated_at_ms FROM plugins";
 
 fn plugin_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<PluginRecord> {
@@ -1200,11 +1104,7 @@ fn plugin_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<Plugi
         enabled: row.try_get("enabled")?,
         trashed_at_ms: row.try_get("trashed_at_ms")?,
         active_artifact_digest: DigestHex::from(row.try_get::<String, _>("active_artifact_digest")?),
-        previous_artifact_digest: row
-            .try_get::<Option<String>, _>("previous_artifact_digest")?
-            .map(DigestHex::from),
         data_generation: row.try_get("data_generation")?,
-        previous_data_generation: row.try_get("previous_data_generation")?,
         revision: positive_u64(row.try_get("revision")?, "plugins.revision")?,
         config: parse_json(&row.try_get::<String, _>("config_json")?, "plugins.config_json")?,
         last_error: row.try_get("last_error")?,
@@ -1255,10 +1155,6 @@ fn draft_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<Plugin
         source_operation_key: row.try_get("source_operation_key")?,
         source_request_digest: row.try_get("source_request_digest")?,
         verification: serde_json::from_str(&row.try_get::<String, _>("verification_json")?).map_err(|error| PluginRepositoryError::InvalidData(error.to_string()))?,
-        imported_context: serde_json::from_str(
-            &row.try_get::<String, _>("imported_context_json")?,
-        )
-        .map_err(|error| PluginRepositoryError::InvalidData(error.to_string()))?,
         status,
         last_error: row.try_get("last_error")?,
         created_at_ms: row.try_get("created_at_ms")?,
@@ -1270,7 +1166,6 @@ fn mutation_from_row(row: sqlx::sqlite::SqliteRow) -> PluginRepositoryResult<Plu
     let kind = match row.try_get::<String, _>("kind")?.as_str() {
         "install" => PluginMutationKind::Install,
         "update" => PluginMutationKind::Update,
-        "restore" => PluginMutationKind::Restore,
         "permanent_delete" => PluginMutationKind::PermanentDelete,
         other => return Err(PluginRepositoryError::InvalidData(format!("invalid mutation kind {other}"))),
     };
@@ -1448,10 +1343,10 @@ async fn insert_mutation_tx(
     sqlx::query(
         "INSERT INTO plugin_mutations \
          (mutation_id, owner_user_id, plugin_id, kind, phase, old_artifact_digest, new_artifact_digest, \
-          old_data_generation, old_previous_artifact_digest, old_previous_data_generation, \
+          old_data_generation, \
           old_config_json, old_credential_bindings_json, old_grants_json, new_data_generation, \
           expected_revision, error, created_at_ms, updated_at_ms, draft_association_json) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(mutation.mutation_id.as_ref())
     .bind(&mutation.owner_user_id)
@@ -1461,16 +1356,6 @@ async fn insert_mutation_tx(
     .bind(mutation.old_artifact_digest.as_ref().map(AsRef::as_ref))
     .bind(mutation.new_artifact_digest.as_ref().map(AsRef::as_ref))
     .bind(&mutation.old_data_generation)
-    .bind(
-        rollback
-            .as_ref()
-            .and_then(|snapshot| snapshot.previous_artifact_digest.as_deref()),
-    )
-    .bind(
-        rollback
-            .as_ref()
-            .and_then(|snapshot| snapshot.previous_data_generation.as_deref()),
-    )
     .bind(rollback.as_ref().map(|snapshot| snapshot.config_json.as_str()))
     .bind(
         rollback
@@ -1501,7 +1386,7 @@ async fn mutation_rollback_snapshot_tx(
     plugin_id: &PluginId,
 ) -> PluginRepositoryResult<Option<MutationRollbackSnapshot>> {
     let plugin = sqlx::query(
-        "SELECT previous_artifact_digest, previous_data_generation, config_json \
+        "SELECT config_json \
          FROM plugins WHERE owner_user_id = ? AND plugin_id = ?",
     )
     .bind(owner_user_id)
@@ -1553,8 +1438,6 @@ async fn mutation_rollback_snapshot_tx(
     .collect::<PluginRepositoryResult<Vec<_>>>()?;
 
     Ok(Some(MutationRollbackSnapshot {
-        previous_artifact_digest: plugin.try_get("previous_artifact_digest")?,
-        previous_data_generation: plugin.try_get("previous_data_generation")?,
         config_json: plugin.try_get("config_json")?,
         credential_bindings_json: canonical_json(&credential_bindings)?,
         grants_json: canonical_json(&grants)?,

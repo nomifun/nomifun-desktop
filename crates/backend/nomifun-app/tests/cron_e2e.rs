@@ -224,6 +224,7 @@ async fn seed_conversation(
                     principal_id: services.authoritative_user_id.to_string(),
                 },
                 metadata: nomifun_agent_contracts::AgentSessionMetadata {
+            purpose: Default::default(),
                     title: Some("Seeded Cron Session".to_owned()),
                     archived: false,
                     pinned: false,

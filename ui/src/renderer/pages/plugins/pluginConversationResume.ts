@@ -4,10 +4,15 @@ import type { NativeAgentExecution } from '@/common/types/agentPlatform';
 
 type Message = Parameters<typeof conversation.sendMessage.invoke>[0] & { idempotency_key: string };
 const pluginPauses = new Set([
-  'PLUGIN_AUTHORIZATION_REQUIRED', 'PLUGIN_VERIFICATION_REQUIRED', 'PLUGIN_DELIVERY_REQUIRED',
+  'PLUGIN_VERIFICATION_REQUIRED', 'PLUGIN_DELIVERY_REQUIRED',
   'PLUGIN_CURRENT_CONVERSATION_PENDING',
   'EXECUTION_USER_REQUESTED',
 ]);
+
+/** Retain the exact checkpoint on user-stopped tasks as well as product pauses. */
+export function isPluginConversationPause(execution: NativeAgentExecution) {
+  return execution.state === 'paused' && Boolean(execution.pause && pluginPauses.has(execution.pause.reason));
+}
 
 function resumeRequest(execution: NativeAgentExecution, message: Message) {
   if (!execution.pause || !pluginPauses.has(execution.pause.reason)
@@ -36,7 +41,7 @@ function continuePaused(execution: NativeAgentExecution, message: Message) {
 
 /** The supplied pause is retained for same-key retry after an ambiguous response. */
 export async function replyToPluginConversation(message: Message, execution: NativeAgentExecution) {
-  if (!execution.pause?.reason.startsWith('PLUGIN_') || !pluginPauses.has(execution.pause.reason)) {
+  if (!isPluginConversationPause(execution)) {
     throw new Error('PLUGIN_CONTINUATION_NOT_AVAILABLE');
   }
   return continuePaused(execution, message);

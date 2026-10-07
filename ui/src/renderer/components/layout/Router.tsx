@@ -50,6 +50,7 @@ const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
 const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
 const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
 const PluginRunPage = React.lazy(() => import('@renderer/pages/plugins/PluginRunPage'));
+const PluginAuthoringPage = React.lazy(() => import('@renderer/pages/plugins/PluginAuthoringPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -155,6 +156,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
             <Route path='/plugins' element={withRouteFallback(PluginLibraryPage)} />
+            <Route path='/plugins/create' element={withRouteFallback(PluginAuthoringPage)} />
+            <Route path='/plugins/authoring/:sessionId' element={withRouteFallback(PluginAuthoringPage)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}

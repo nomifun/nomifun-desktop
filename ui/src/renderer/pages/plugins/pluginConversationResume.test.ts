@@ -6,8 +6,8 @@ import type { NativeAgentExecution } from '@/common/types/agentPlatform';
 const realFetch = globalThis.fetch;
 const id = '0190f5fe-7c00-7a00-8000-000000000202';
 const message = {
-  conversation_id: parseConversationId(id), input: 'Approved; continue this existing plugin.',
-  idempotency_key: 'plugin-approval:fixture', plugin_delivery: { draft_id: '0190f5fe-7c00-7a00-8000-000000000204' },
+  conversation_id: parseConversationId(id), input: 'Continue this existing plugin.',
+  idempotency_key: 'plugin-continuation:fixture', plugin_delivery: { draft_id: '0190f5fe-7c00-7a00-8000-000000000204' },
 };
 const paused = {
   state: 'paused', operation_id: 'original-turn', checkpoint_revision: 7,
@@ -33,7 +33,7 @@ function fixture(responses: Array<{ data: unknown; status?: number }>) {
 
 afterEach(() => { globalThis.fetch = realFetch; calls.length = 0; });
 
-test('approval resumes the exact paused turn with its input, without starting or steering another turn', async () => {
+test('continuation resumes the exact paused turn with its input, without starting or steering another turn', async () => {
   fixture([{ data: paused }, { data: { duplicate: false } }]);
   await continuePluginConversation(message);
   expect(calls).toEqual([
@@ -44,12 +44,12 @@ test('approval resumes the exact paused turn with its input, without starting or
         expected_pause_revision: 2, expected_checkpoint_revision: 7,
         expected_checkpoint_digest: 'a'.repeat(64), budget: {},
       },
-      input: { content: 'Approved; continue this existing plugin.' },
+      input: { content: 'Continue this existing plugin.' },
     } },
   ]);
 });
 
-test('approval never fabricates resource cleanup or authorizes an unrelated stalled pause', async () => {
+test('continuation never fabricates resource cleanup or resumes an unrelated stalled pause', async () => {
   for (const execution of [
     { ...paused, pause: { ...paused.pause, cleanup_proven: false } },
     { ...paused, pause: { ...paused.pause, reason: 'EXECUTION_NO_PROGRESS' } },
@@ -83,10 +83,20 @@ test('supplemental input and exact resume are submitted together without a new t
 });
 
 test('reply cannot resume an unrelated pause or claim unproven cleanup', async () => {
-  for (const execution of [paused,
+  for (const execution of [{ ...paused, pause: { ...paused.pause, reason: 'EXECUTION_NO_PROGRESS' } },
     { ...paused, pause: { ...paused.pause, reason: 'PLUGIN_DELIVERY_REQUIRED', cleanup_proven: false } },
   ]) {
     await expect(replyToPluginConversation(message, execution as NativeAgentExecution)).rejects.toThrow('PLUGIN_CONTINUATION_NOT_AVAILABLE');
   }
   expect(calls).toHaveLength(0);
+});
+
+test('user-stopped work resumes its retained exact checkpoint with supplemental input', async () => {
+  fixture([{ data: { duplicate: false } }]);
+  await replyToPluginConversation({ ...message, input: 'Continue the existing app' }, paused as NativeAgentExecution);
+  expect(calls).toEqual([{ method: 'POST', path: `/api/agent-sessions/${id}/plugin-continuation`, body: {
+    request: { operation_id: 'original-turn', idempotency_key: message.idempotency_key,
+      expected_pause_revision: 2, expected_checkpoint_revision: 7, expected_checkpoint_digest: 'a'.repeat(64), budget: {} },
+    input: { content: 'Continue the existing app' },
+  } }]);
 });
