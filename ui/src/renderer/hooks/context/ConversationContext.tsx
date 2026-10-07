@@ -5,6 +5,7 @@
  */
 import type { ConversationId, CronJobId, MessageId } from '@/common/types/ids';
 
+import type { TProviderWithModel } from '@/common/config/storage';
 import React, { createContext, useContext } from 'react';
 
 /**
@@ -69,6 +70,8 @@ export interface ConversationContextValue {
 
   /** Current binding identity for presentation of a durable Agent transition. */
   currentAgent?: { presetId: string; label: string };
+  /** Current renderer selection used only for account actions; never persisted as a Session fact. */
+  currentModel?: Pick<TProviderWithModel, 'id' | 'platform' | 'use_model'>;
 }
 
 /**

@@ -352,6 +352,7 @@ async fn resolve_provider_fields_at_revision(
     // Host-owned context accounting metadata stays in the saved capability,
     // but is never a provider request field.
     provider_body.remove("_nomifun_context_limit_kind");
+    provider_body.remove(nomifun_api_types::MODEL_GATEWAY_CATALOG_BASELINE_PARAM);
     let max_tokens_field = match provider_body.remove("max_tokens_field") {
         Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
             Some(value.trim().to_owned())
@@ -1005,7 +1006,7 @@ mod provider_resolution_tests {
                 endpoint: Some("/custom/chat"),
                 traits: "[]",
                 credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
-                provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"ultra","temperature":0.2,"_nomifun_context_limit_kind":"input_only","custom":{"values":[1,true,{"mode":"precise"}]}}"#,
+                provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"ultra","temperature":0.2,"_nomifun_context_limit_kind":"input_only","_nomifun_gateway_catalog_baseline":{"protocol":"openai.chat_text"},"custom":{"values":[1,true,{"mode":"precise"}]}}"#,
                 bedrock_config: None,
             },
             Some(100_000),
@@ -1031,6 +1032,11 @@ mod provider_resolution_tests {
             !fields.compat_overrides.extra_body.as_ref().unwrap()
                 .contains_key("_nomifun_context_limit_kind"),
             "host context metadata must never reach the provider request body"
+        );
+        assert!(
+            !fields.compat_overrides.extra_body.as_ref().unwrap()
+                .contains_key("_nomifun_gateway_catalog_baseline"),
+            "gateway catalog metadata must never reach the provider request body"
         );
         assert!(
             !fields

@@ -119,6 +119,20 @@ impl ModelFetchService {
         config: &FetchConfig,
         try_fix: bool,
     ) -> Result<FetchModelsResponse, AppError> {
+        if config.platform == crate::model_gateway::PLATFORM {
+            let catalog = crate::model_gateway::fetch_catalog(&config.base_url, &config.primary_secret()?).await?;
+            return Ok(FetchModelsResponse {
+                models: catalog.models.into_iter().map(|model| {
+                    let traits = catalog.imports.iter().find(|m| m.model == model.id).and_then(|m| m.capabilities.iter().find(|c| c.task == nomifun_api_types::ModelTask::Chat)).map(|c| c.traits.clone()).unwrap_or_default();
+                    ModelInfo { id: model.id, name: Some(model.display_name), tasks: model.tasks,
+                    tasks_source: Some(ModelTaskSource::ProviderDeclared),
+                    traits,
+                    context_limit: model.context_window, output_limit: model.max_output_tokens,
+                    token_limit_sources: None,
+                }}).collect(),
+                catalog_source: Some(ModelCatalogSource::Remote), fixed_base_url: None,
+            });
+        }
         let http_client = self.http_client();
         let catalog_platform = fetchers::catalog_platform(&config.platform, &config.base_url);
         match fetchers::fetch_for_platform(&http_client, &config).await {

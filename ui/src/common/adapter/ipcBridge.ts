@@ -99,6 +99,11 @@ import type {
   ProviderConnectionResponse,
   SaveProviderConnectionRequest,
 } from '../types/provider/providerConnection';
+import type {
+  ModelGatewayMetaResponse, ModelGatewayCatalogResponse, ModelGatewayAccountResponse,
+  ModelGatewaySyncResponse, ModelGatewayMetaRequest, ModelGatewayCatalogRequest,
+  ModelGatewayCreateRequest, ModelGatewayConnectionRequest,
+} from '../types/provider/modelGateway';
 import type { KnowledgeRetrievalConfig as ApiKnowledgeRetrievalConfig } from '../protocolBindings/KnowledgeRetrievalConfig';
 import type { RelocateKnowledgeEntryRequest as ApiRelocateKnowledgeEntryRequest } from '../protocolBindings/RelocateKnowledgeEntryRequest';
 import type { RelocateKnowledgeEntryResponse as ApiRelocateKnowledgeEntryResponse } from '../protocolBindings/RelocateKnowledgeEntryResponse';
@@ -1660,6 +1665,32 @@ export const mode = {
   /** The same test for a proposed connection, before the provider is saved. */
   probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
     '/api/providers/probe-connection'
+  ),
+};
+
+/** Optional, runtime-configured community model gateways. Credentials stay in request bodies. */
+export const modelGateway = {
+  meta: httpPost<ModelGatewayMetaResponse, ModelGatewayMetaRequest>('/api/providers/model-gateway/meta'),
+  catalog: httpPost<ModelGatewayCatalogResponse, ModelGatewayCatalogRequest>('/api/providers/model-gateway/catalog'),
+  create: withResponseMap(
+    httpPost<ProviderResponse, ModelGatewayCreateRequest>('/api/providers/model-gateway/create'),
+    fromProviderResponse
+  ),
+  providerMeta: httpGet<ModelGatewayMetaResponse, { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/model-gateway/meta`
+  ),
+  account: httpGet<ModelGatewayAccountResponse, { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/model-gateway/account`
+  ),
+  sync: httpPost<ModelGatewaySyncResponse, { provider_id: ProviderId }>(
+    (p) => `/api/providers/${p.provider_id}/model-gateway/sync`, () => ({})
+  ),
+  updateConnection: withResponseMap(
+    httpPut<ProviderResponse, { provider_id: ProviderId } & ModelGatewayConnectionRequest>(
+      (p) => `/api/providers/${p.provider_id}/model-gateway/connection`,
+      ({ base_url, api_key, name }) => ({ base_url, api_key, name })
+    ),
+    fromProviderResponse
   ),
 };
 

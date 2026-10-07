@@ -347,7 +347,7 @@ impl SingleAttemptHttpExecutor {
         .await
         .map_err(|_| deadline::elapsed("provider request setup timeout"))??;
         if !response.status().is_success() {
-            let error = error_from_response_with_timeout(response, request.idle_timeout).await;
+            let error = error_from_response_with_timeout(response, request.idle_timeout, &request.protocol).await;
             return Err(error.redacted(&material.secret_redactor()));
         }
         if let Some(content_type) =

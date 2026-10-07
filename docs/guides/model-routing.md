@@ -55,6 +55,56 @@ preserves the latest configuration for other tasks. Model aliases and
 descriptions are shared across tasks. Use **Providers & keys** to manage
 credentials or the model's complete set of invocation routes.
 
+## Connect an optional model gateway
+
+The **NomiFun Model Gateway** provider preset connects to gateway software you
+self-host or a service independently operated by a community member. The
+official NomiFun project provides the open-source software and protocol, does
+not conduct commercial operations, never charges for project features, and
+does not operate paid services. Any model-token costs are paid directly to the
+model service you choose. Existing providers and manual configuration remain
+available.
+
+Choose the gateway preset, enter its **runtime URL**, and check the operator
+using the anonymous `/nomifun/v1/meta` endpoint. Then enter your **API key** and
+read the authenticated `/nomifun/v1/catalog`. The flow lets you select the models to import,
+and saves the provider, selected models, invocation routes, and connections
+together. Catalog metadata describes the service's declared capabilities;
+importing it does not prove successful model invocation.
+
+Each imported model keeps its native protocol. The catalog protocol mapping is:
+
+| Gateway protocol | Desktop invocation protocol | Connection |
+| --- | --- | --- |
+| `openai` | `openai.chat_text` | `default` |
+| `openai-response` | `openai.responses` | `default` |
+| `anthropic` | `anthropic.messages` | `anthropic` |
+| `gemini` | `gemini.generate_text` | `gemini` |
+
+The provider stores three connections, all using the key you supplied:
+
+- `default`: Bearer authentication, with `/v1` appended to the runtime base URL;
+- `anthropic`: `x-api-key` header authentication at the runtime URL root;
+- `gemini`: `x-goog-api-key` header authentication at the runtime URL root.
+
+Other supported standard tasks use the `default` connection. The gateway's
+metadata, catalog, and account APIs are control endpoints, not extra invocation
+connections. Account information is fetched from `/nomifun/v1/account` on demand
+with the configured gateway key.
+
+Rotate the gateway key through the provider settings so all three connections
+are updated in one save. **Sync model catalog** adds new models and updates
+catalog metadata you have not edited. It preserves your edits and never deletes
+models. Neither action
+certifies model health; run the available invocation checks for the routes
+you intend to use.
+
+Gateway metadata can provide website, key-management, recharge, and billing
+links. Only HTTPS links open, and they open in your system browser. Desktop
+does not embed a provider login, accept a key through a deep link, or require
+a gateway account to use other providers. You enter or rotate your key in
+Desktop yourself.
+
 ## Model catalog and invocation routes
 
 The catalog supplies suggestions. It neither restricts which model ids can be
