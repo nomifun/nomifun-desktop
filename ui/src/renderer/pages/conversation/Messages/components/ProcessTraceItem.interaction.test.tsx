@@ -7,6 +7,7 @@ import type { IMessageText, IMessageThinking, IMessageToolCall, IMessageToolGrou
 import { parseConversationId } from '@/common/types/ids';
 import ProcessTraceItem from './ProcessTraceItem';
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
+import chineseMessages from '@/renderer/services/i18n/locales/zh-CN/messages.json';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale } } } });
@@ -15,6 +16,28 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000051
 afterEach(cleanup);
 
 describe('replayed process trace', () => {
+  test('renders canonical web actions consistently and reveals routing names only in details', async () => {
+    const locale = createInstance();
+    await locale.use(initReactI18next).init({ lng: 'zh-CN',
+      resources: { 'zh-CN': { translation: { messages: chineseMessages } } } });
+    const name = 'platform__web_research_web_research_fetch__30fb0227939eb7c80164';
+    const item = { id: 'web-fetch', type: 'tool_call', conversation_id: conversationId,
+      position: 'left', created_at: 1, content: { call_id: 'web-fetch', name,
+        capability_id: 'web.research', action_id: 'web.research/fetch', status: 'error',
+        args: { url: 'https://pvp.qq.com/ingame/kis/hero.shtml' }, output: 'INVALID_PAYLOAD' } } as IMessageToolCall;
+    const view = render(<I18nextProvider i18n={locale}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>);
+    const header = view.getByRole('button');
+    expect(header.textContent).toContain('读取网页 · pvp.qq.com');
+    expect(header.textContent).toContain(chineseMessages.toolState.failed);
+    expect(header.textContent).not.toContain('platform__');
+    expect(view.queryByText(name)).toBeNull();
+    fireEvent.click(header);
+    expect(view.getByText('调用标识')).toBeTruthy();
+    expect(view.container.textContent).toContain(name);
+    expect(view.container.textContent).toContain('web.research/fetch');
+    expect(view.container.textContent).toContain('/ingame/kis/hero.shtml');
+  });
+
   test('shows a clean timeout as a deadline outcome and retains its failed receipt details', () => {
     const output = JSON.stringify({ state: 'timed_out', success: false, process_id: 'owned', output: { text: '' },
       cleanup: { reaped: true, errors: [], interrupt_attempted: false, terminate_attempted: true, force_kill_attempted: false } });
@@ -144,8 +167,8 @@ describe('replayed process trace', () => {
     );
 
     expect(container.querySelectorAll('.turn-process-trace > .turn-process-trace-tool')).toHaveLength(3);
-    expect(container.textContent).toContain('Edited a.ts');
-    expect(container.textContent).toContain('Edited c.ts');
+    expect(container.textContent).toContain('Write file · a.ts');
+    expect(container.textContent).toContain('Write file · c.ts');
   });
 
   test('a single stage operation keeps raw tool output closed until that operation is opened', () => {
@@ -161,7 +184,7 @@ describe('replayed process trace', () => {
     const { container, getByRole } = render(
       <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
     );
-    expect(container.textContent).toContain('Edited snake_game.html');
+    expect(container.textContent).toContain('Write file · snake_game.html');
     expect(container.textContent).not.toContain('"written":true');
     fireEvent.click(getByRole('button'));
     expect(container.textContent).toContain('"written":true');
@@ -247,7 +270,7 @@ describe('replayed process trace', () => {
 
     expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
     expect(container.querySelector('.turn-process-trace__row--recovered')).not.toBeNull();
-    expect(container.textContent).toContain('Failed targeted test');
+    expect(container.textContent).toContain('Run command · targeted test');
     fireEvent.click(getByRole('button'));
     expect(container.textContent).toContain('targeted test');
   });

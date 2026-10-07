@@ -1032,6 +1032,7 @@ mod tests {
         };
 
         AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-1".to_owned(),
             name: "Browser".to_owned(),
             args: serde_json::json!({"action": "observe"}),

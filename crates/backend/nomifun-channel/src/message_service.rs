@@ -1654,6 +1654,7 @@ mod tests {
     #[test]
     fn tool_call_event_produces_tool_call() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "read_file".into(),
             args: serde_json::Value::Null,
@@ -1697,6 +1698,7 @@ mod tests {
     #[test]
     fn completed_creative_studio_tool_call_produces_media() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1730,6 +1732,7 @@ mod tests {
             sha256: "abc".into(),
         };
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1752,6 +1755,7 @@ mod tests {
     #[test]
     fn running_tool_call_still_produces_tool_call_status() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_creative_studio_generate".into(),
             args: serde_json::Value::Null,
@@ -1771,6 +1775,7 @@ mod tests {
     #[test]
     fn completed_tool_call_without_asset_ids_stays_tool_call() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "Read".into(),
             args: serde_json::Value::Null,
@@ -1797,6 +1802,7 @@ mod tests {
             "{\"error\":\"session_capability_denied\",\"tool\":\"nomi_stop_conversation\"}",
         ] {
             let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+                identity: Default::default(),
                 call_id: "c1".into(),
                 name: "mcp__nomi__nomi_stop_conversation".into(),
                 args: serde_json::json!({ "conversation_id": target }),
@@ -1820,6 +1826,7 @@ mod tests {
     fn denied_stop_target_falls_back_to_raw_input_json() {
         let target = "0190f5fe-7c00-7a00-8abc-012345678902";
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_stop_conversation".into(),
             args: serde_json::Value::Null,
@@ -1842,6 +1849,7 @@ mod tests {
     fn successful_or_unrelated_tool_calls_never_produce_stop_denied() {
         // A SUCCESSFUL stop (allowed surface) keeps the plain tool-call action.
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c1".into(),
             name: "nomi_stop_conversation".into(),
             args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
@@ -1859,6 +1867,7 @@ mod tests {
 
         // Another denied tool must not be misread as a stop confirmation.
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "c2".into(),
             name: "nomi_delete_conversation".into(),
             args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
