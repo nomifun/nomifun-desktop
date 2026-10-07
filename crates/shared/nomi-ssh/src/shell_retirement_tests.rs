@@ -78,3 +78,36 @@ async fn explicit_normal_close_records_exit_status_and_peer_close() {
     assert_eq!(proof.exit_status, Some(0));
     assert!(!reusable);
 }
+
+#[tokio::test]
+async fn terminal_run_receipt_is_retained_for_idempotent_close() {
+    let (connection, task) = super::protocol_tests::connect_peer(0).await;
+    let shell = connection.open_shell(".").await.unwrap();
+    let outcome = shell.run("fixture_terminal_exit", Duration::from_secs(1)).await.unwrap();
+    assert_eq!(outcome.exit_code, 7);
+    assert_eq!(outcome.output, "terminal_marker");
+    assert!(outcome.cwd.is_empty());
+    assert!(!shell.is_reusable().await);
+    let proof = shell.close(Duration::from_millis(200)).await;
+    let repeated = shell.close(Duration::from_millis(200)).await;
+    finish_peer(&connection, task).await;
+    assert!(proof.is_reaped(), "the terminal messages consumed by run are exact close evidence: {proof:?}");
+    assert_eq!(proof.exit_status, Some(7));
+    assert_eq!(repeated, proof);
+}
+
+#[tokio::test]
+async fn close_admission_timeout_cannot_downgrade_retained_terminal_proof() {
+    let (connection, task) = super::protocol_tests::connect_peer(0).await;
+    let shell = connection.open_shell(".").await.unwrap();
+    shell.run("fixture_terminal_exit", Duration::from_secs(1)).await.unwrap();
+    let locked = shell.operation.lock().await;
+    let timeout_proof = shell.close(Duration::from_millis(20)).await;
+    drop(locked);
+    let retained = shell.close(Duration::from_millis(200)).await;
+    finish_peer(&connection, task).await;
+    assert!(!timeout_proof.errors.is_empty());
+    assert!(retained.is_reaped(), "a non-admitted closer must not erase proof: {retained:?}");
+    assert_eq!(retained.exit_status, Some(7));
+    assert!(retained.errors.is_empty(), "admission errors do not belong to the proven close receipt");
+}

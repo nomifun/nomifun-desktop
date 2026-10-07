@@ -137,6 +137,9 @@ pub struct SshLink {
     /// Serializes dial / recycle / close for this link, so two of them cannot
     /// both decide what the `handle` slot should contain.
     transition: tokio::sync::Mutex<()>,
+    /// One command admission spans handle selection, execution and settlement,
+    /// so a later command cannot observe an old handle or overwrite newer cwd.
+    command: tokio::sync::Mutex<()>,
     /// Nudges the supervisor when a tool call notices the link died, so the ladder
     /// starts now rather than at the next liveness tick.
     wake: Notify,
@@ -162,6 +165,7 @@ impl SshLink {
             state_tx,
             changed_at: AtomicI64::new(nomifun_common::now_ms()),
             transition: tokio::sync::Mutex::new(()),
+            command: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
             actions: Arc::new(ActionAdmission::default()),
             close: Arc::new(LinkCloseCompletion::default()),
@@ -201,6 +205,15 @@ impl SshLink {
 
     pub(crate) async fn current_handle(&self) -> Option<Arc<SshConnectionHandle>> {
         self.handle.read().await.clone()
+    }
+
+    pub(crate) async fn command_slot(
+        &self,
+        deadline: Instant,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        tokio::time::timeout_at(deadline, self.command.lock())
+            .await
+            .map_err(|_| "SSH command timed out waiting for the session command slot; input was not submitted".into())
     }
 
     async fn has_live_transport(&self) -> bool {
@@ -695,6 +708,7 @@ impl SshConnectionPool {
         command: &str,
         timeout_ms: u64,
     ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let action_lease = self
             .action_lease(link)
             .map_err(SshActionDispatchError::Rejected)?;
@@ -703,6 +717,7 @@ impl SshConnectionPool {
                 "ssh_host resource is not owned by this principal".into(),
             ));
         }
+        let _command = link.command_slot(deadline).await.map_err(SshActionDispatchError::Rejected)?;
         let handle = link.current_handle().await.ok_or_else(|| {
             SshActionDispatchError::Rejected(format!(
                 "ssh link for this session is not connected ({:?})",
@@ -719,7 +734,7 @@ impl SshConnectionPool {
             .run_ephemeral_sudo(
                 &link.last_cwd(),
                 command,
-                timeout_ms,
+                remaining_command_budget(deadline)?,
                 &credential,
             )
             .await;
@@ -737,6 +752,7 @@ impl SshConnectionPool {
         command: &str,
         timeout_ms: u64,
     ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let action_lease = self
             .action_lease(link)
             .map_err(SshActionDispatchError::Rejected)?;
@@ -745,13 +761,43 @@ impl SshConnectionPool {
                 "ssh_host resource is not owned by this principal".into(),
             ));
         }
+        let _command = link.command_slot(deadline).await.map_err(SshActionDispatchError::Rejected)?;
         let handle = link.current_handle().await.ok_or_else(|| {
             SshActionDispatchError::Rejected(format!(
                 "ssh link for this session is not connected ({:?})",
                 link.state().phase()
             ))
         })?;
-        let result = handle.run_unprivileged(command, timeout_ms).await;
+        // Cancellation can retire the channel without returning through this
+        // function. Replace that channel before a later explicit submission;
+        // do not replay the cancelled command or infer its cwd.
+        if handle.shell().needs_recovery().await && !handle.is_transport_closed() {
+            self.recycle_shell(link, "remote shell channel was retired after cancellation or failed recovery")
+                .await;
+        }
+        let handle = link.current_handle().await.ok_or_else(|| {
+            SshActionDispatchError::Rejected("ssh link is unavailable after shell recovery".into())
+        })?;
+        let result = match handle.run_unprivileged(command, remaining_command_budget(deadline)?).await {
+            Ok(outcome) => {
+                if handle.shell().needs_recovery().await {
+                    self.recycle_shell(link, "remote shell ended or could not be resynchronized after a timeout")
+                        .await;
+                } else if !outcome.cwd.is_empty() {
+                    link.remember_cwd(&outcome.cwd);
+                }
+                Ok(crate::sink::remote_output(outcome))
+            }
+            Err(error) => {
+                if handle.is_transport_closed() {
+                    self.note_transport_loss(link, &error.to_string()).await;
+                } else if !handle.shell().is_reusable().await {
+                    self.recycle_shell(link, "remote shell channel was retired after cancellation or failed recovery")
+                        .await;
+                }
+                Err(error)
+            }
+        };
         drop(action_lease);
         result
     }
@@ -994,6 +1040,15 @@ impl SshConnectionPool {
     /// Report that a tool call found the transport gone.
     pub(crate) async fn note_transport_loss(&self, link: &Arc<SshLink>, detail: &str) {
         self.0.note_transport_loss(link, detail).await;
+    }
+}
+
+fn remaining_command_budget(deadline: Instant) -> Result<u64, SshActionDispatchError> {
+    let remaining = deadline.saturating_duration_since(Instant::now()).as_millis();
+    if remaining == 0 {
+        Err(SshActionDispatchError::Rejected("SSH command budget expired before input was submitted".into()))
+    } else {
+        Ok(remaining.min(u128::from(u64::MAX)) as u64)
     }
 }
 
@@ -1342,6 +1397,11 @@ impl PoolInner {
         let Some(stale) = link.current_handle().await else {
             return;
         };
+        if !stale.shell().needs_recovery().await {
+            // A previous recovery may already have installed a healthy shell
+            // while this caller waited for the transition lock.
+            return;
+        }
         if stale.is_transport_closed() {
             // Not a wedged shell after all — the socket is gone, and redialling is
             // the ladder's job, not ours.

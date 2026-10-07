@@ -54,8 +54,9 @@ pub struct AgentCompletionReport {
     pub workspace_epoch: u32,
     pub summary: String,
     pub criteria: Vec<AgentCompletionCriterion>,
-    /// Cumulative tool result errors observed in this turn. Later recovery
-    /// never erases an earlier user-visible failure.
+    /// Cumulative unsuccessful work/control attempts observed in this turn.
+    /// Host report-only phase corrections never attempted work and are excluded;
+    /// later recovery never erases an earlier counted failure.
     #[serde(default)]
     pub observed_tool_error_count: u32,
     /// Cumulative failed command observations in this turn. A later successful
@@ -156,7 +157,7 @@ fn omit_absent_metadata(mut value: serde_json::Value) -> serde_json::Value {
 
 #[derive(Default)]
 pub(crate) struct CompletionTracker {
-    pub(crate) delivery_review: crate::AgentDeliveryReviewState,
+    pub(crate) review: crate::AgentCompletionReviewState,
     revision: u32,
     observations: Vec<AgentCompletionObservation>,
     omitted: u32,
@@ -1100,7 +1101,7 @@ impl CompletionTracker {
         input_revision: usize,
     ) -> Option<&AgentCompletionReport> {
         self.report.as_ref().filter(|report| {
-            !self.delivery_review.pending &&
+            !self.review.delivery_pending &&
             report.plan_revision == plan.revision
                 && report.observation_revision == self.revision
                 && report.input_revision == input_revision
@@ -1165,6 +1166,7 @@ impl CompletionTracker {
             "available_evidence":self.observations.iter().filter(|item| self.is_usable(item, work.workspace_observation_epoch))
                 .map(|item| {
                     let mut evidence = serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
+                    "invocation_attempted":item.invocation_attempted,"successful_result":item.successful,
                     "scope":self.model_scope(&item.call_id),
                     "settled_process_poll":self.settled_process_poll(item),
                     "artifact_id":self.artifacts.get(&item.call_id).map(|artifact| &artifact.artifact_id),
@@ -1256,14 +1258,14 @@ impl CompletionTracker {
             sink.emit(AgentEngineEvent::PlanUpdated { plan: closing.clone() }).await?;
             *plan = closing;
         }
-        self.delivery_review.account_repair = false;
-        let candidate = report.delivery_items.is_empty() && report.historical_results.is_empty() && !report.is_blocked() && self.delivery_review.begin(inputs,
+        self.review.account_repair = false;
+        let candidate = report.delivery_items.is_empty() && report.historical_results.is_empty() && !report.is_blocked() && self.review.begin(inputs,
             self.observations.iter().filter(|item| item.invocation_attempted).count());
         if candidate {
             sink.emit(AgentEngineEvent::CompletionCandidateRecorded { report: report.clone() }).await?;
         } else {
             sink.emit(AgentEngineEvent::CompletionReported { report: report.clone() }).await?;
-            self.delivery_review.pending = false;
+            self.review.delivery_pending = false;
         }
         self.report = Some(report);
         if candidate {

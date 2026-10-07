@@ -418,7 +418,7 @@ const SshHostManagement: React.FC = () => {
     setModalVisible(true);
   };
 
-  // Create a nomi conversation bound to this host (extra.ssh_host_id) and jump
+  // Create a nomi conversation with this host's canonical resource binding and jump
   // to it — the factory connects the host and hands the agent the remote tools.
   // Shared with the sidebar's remote-session menu.
   const openSession = useOpenSshSession();
