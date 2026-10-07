@@ -1342,7 +1342,7 @@ mod history_display_tests {
             turn_operation_id: journal.0.operation.clone(), active_set_generation: 0,
             model_steps: 0, tool_call_count: 0, accepted_input_count: 1, applied_steering_receipts: vec![],
             plan: Default::default(), work: Default::default(), patch_recovery: Default::default(),
-            segments: None, control_rejections: Default::default(), delivery_review: Default::default(),
+            segments: None, control_rejections: Default::default(), completion_review: Default::default(),
         };
         let receipt = journal.save_execution_checkpoint(checkpoint.clone(), owner.clone()).await.unwrap().unwrap();
         assert_eq!(receipt.revision, 1);

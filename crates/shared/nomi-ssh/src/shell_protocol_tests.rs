@@ -13,6 +13,9 @@ struct Peer {
     stop_window_updates: bool,
     closed: Arc<tokio::sync::Notify>,
     exit_proof: bool,
+    fence_status: i32,
+    fence_runs: Arc<std::sync::atomic::AtomicUsize>,
+    received: Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 impl server::Handler for Peer {
@@ -90,6 +93,7 @@ impl server::Handler for Peer {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         self.input.extend_from_slice(data);
+        self.received.lock().unwrap().extend_from_slice(data);
         if self
             .input
             .windows(b"__NOMI_END_0__".len())
@@ -104,6 +108,19 @@ impl server::Handler for Peer {
                 channel,
                 format!("__NOMI_END_0__{}__{cwd}\n", self.init_status).into_bytes(),
             )?;
+            self.input.clear();
+        } else if self.input.windows(b"fixture_terminal_exit".len()).any(|s| s == b"fixture_terminal_exit") {
+            session.data(channel, b"terminal_marker".to_vec())?;
+            session.exit_status_request(channel, 7)?;
+            session.close(channel)?;
+            self.input.clear();
+        } else if self
+            .input
+            .windows(b"NoNewPrivs:".len())
+            .any(|s| s == b"NoNewPrivs:")
+        {
+            self.fence_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            session.data(channel, format!("__NOMI_END_1__{}__/requested-directory\n", self.fence_status).into_bytes())?;
             self.input.clear();
         } else if self
             .input
@@ -137,6 +154,9 @@ impl server::Handler for Peer {
         } else if self.exit_proof && data == b"exit\n" {
             session.exit_status_request(channel, 0)?;
             session.close(channel)?;
+        } else if self.input.windows(b"__NOMI_END_3__".len()).any(|s| s == b"__NOMI_END_3__") {
+            session.data(channel, b"__NOMI_END_3__0__/requested-directory\n".to_vec())?;
+            self.input.clear();
         }
         Ok(())
     }
@@ -182,8 +202,28 @@ pub(super) async fn connect_scripted_peer(
     tokio::task::JoinHandle<Result<(), russh::Error>>,
     Arc<tokio::sync::Notify>,
 ) {
+    let (connection, task, closed, _, _) = connect_fenced_peer(init_status, window_size, exit_proof, 0).await;
+    (connection, task, closed)
+}
+
+async fn connect_fenced_peer(
+    init_status: i32,
+    window_size: u32,
+    exit_proof: bool,
+    fence_status: i32,
+) -> (
+    SshConnection,
+    tokio::task::JoinHandle<Result<(), russh::Error>>,
+    Arc<tokio::sync::Notify>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<u8>>>,
+) {
     let closed = Arc::new(tokio::sync::Notify::new());
     let peer_closed = closed.clone();
+    let fence_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peer_fence_runs = fence_runs.clone();
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let peer_received = received.clone();
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
@@ -206,6 +246,9 @@ pub(super) async fn connect_scripted_peer(
                 stop_window_updates: window_size < 2 * 1024 * 1024,
                 closed: peer_closed,
                 exit_proof,
+                fence_status,
+                fence_runs: peer_fence_runs,
+                received: peer_received,
             },
         )
         .await?
@@ -226,7 +269,30 @@ pub(super) async fn connect_scripted_peer(
     )
     .await
     .unwrap();
-    (connection, task, closed)
+    (connection, task, closed, fence_runs, received)
+}
+
+#[tokio::test]
+async fn rejected_privilege_fence_never_submits_the_callers_command() {
+    let (connection, task, _, _, received) = connect_fenced_peer(0, 2 * 1024 * 1024, false, 125).await;
+    let shell = connection.open_shell(".").await.unwrap();
+    let result = shell.run_unprivileged("printf MUST_NOT_EXECUTE", Duration::from_secs(1)).await;
+    let reusable = shell.is_reusable().await;
+    finish_peer(&connection, task).await;
+    assert!(matches!(result, Err(UnprivilegedShellError::Rejected(SshError::InvalidInput(_)))), "{result:?}");
+    assert!(reusable, "a proven guard rejection keeps the safe probe channel usable");
+    assert!(!String::from_utf8_lossy(&received.lock().unwrap()).contains("MUST_NOT_EXECUTE"));
+}
+
+#[tokio::test]
+async fn privilege_fence_initializes_once_for_sequential_commands() {
+    let (connection, task, _, fence_runs, _) = connect_fenced_peer(0, 2 * 1024 * 1024, false, 0).await;
+    let shell = connection.open_shell(".").await.unwrap();
+    for command in ["export NOMI_TEST=one", "printf second_command"] {
+        assert_eq!(shell.run_unprivileged(command, Duration::from_secs(1)).await.unwrap().exit_code, 0);
+    }
+    finish_peer(&connection, task).await;
+    assert_eq!(fence_runs.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 pub(super) async fn finish_peer(

@@ -102,6 +102,8 @@ pub struct AgentWorkStatus {
     pub successful_workspace_mutations: u32,
     pub successful_commands: u32,
     pub failed_commands: u32,
+    /// Unsuccessful work/control attempts, excluding host report-only phase
+    /// corrections that cannot change the existing work or its observations.
     pub failed_tools: u32,
     pub command_observed_after_latest_mutation: bool,
     /// Conservative ordering of potential effects, not a filesystem revision.
