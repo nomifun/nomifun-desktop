@@ -67,3 +67,29 @@ async fn without_rules_prompt_is_not_answered() {
     let after = sh.run("echo recovered", T).await.expect("post");
     assert!(after.output.contains("recovered"), "got: {:?}", after.output);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unprivileged_execution_cannot_use_installed_credential_responders() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("SKIP: unprivileged execution requires Linux");
+        return;
+    }
+    let Some(sshd) = support::start_pubkey_sshd() else {
+        eprintln!("SKIP: no usable sshd");
+        return;
+    };
+    if sshd.username == "root" {
+        eprintln!("SKIP: run the unprivileged responder fixture as a non-root user");
+        return;
+    }
+    let shell = support::connect(&sshd)
+        .await
+        .open_shell_with_rules("/tmp", vec![AnswerRule::exact_once(PROMPT, Zeroizing::new("must_not_be_injected".into())).unwrap()])
+        .await
+        .unwrap();
+    let command = format!("printf '{PROMPT}'; read -r password; printf 'ANSWERED:%s' \"$password\"");
+    let output = shell.run_unprivileged(&command, Duration::from_millis(800)).await.unwrap();
+    assert!(output.timed_out, "ordinary execution must ignore even installed rules: {output:?}");
+    assert!(!output.output.contains("must_not_be_injected"));
+    assert_eq!(shell.run_unprivileged("printf recovered", T).await.unwrap().output, "recovered");
+}

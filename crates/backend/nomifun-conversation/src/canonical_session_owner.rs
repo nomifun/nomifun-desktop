@@ -293,6 +293,12 @@ impl CanonicalAgentSessionOwner {
             .await
     }
 
+    pub async fn start_voice_turn(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,input:Value,fence:&nomifun_agent_session::NativeInputContextFence)->Result<AgentTurnReceipt,AppError> {
+        self.require_owner(owner,session).await?;let key=scoped_key(owner,key,session.as_ref())?;let operation_id=OperationId::from(format!("turn:{key}"));
+        let (_,result)=self.store.start_voice_turn(session,"session_api".into(),key.into(),operation_id.clone(),StrictJsonValue(input),fence).await.map_err(store_error)?;
+        Ok(AgentTurnReceipt {operation_id,cursor:result.cursor,duplicate:result.duplicate})
+    }
+
     async fn start_turn_with_admission(
         &self,
         owner: &PrincipalRef,
@@ -430,6 +436,31 @@ impl CanonicalAgentSessionOwner {
         let event_id = result.record.as_ref().map(|record| record.event_id.clone())
             .ok_or_else(|| AppError::Conflict("canonical cancellation has no durable Turn receipt".into()))?;
         Ok(AgentMutationReceipt { target_operation_id, event_id, cursor: result.cursor, duplicate: result.duplicate })
+    }
+
+    /// Opt-in native proof over the same exact Turn cancellation writer.
+    pub async fn cancel_exact_native_turn(&self,owner:&PrincipalRef,session_id:&AgentSessionId,key:&str,target:&OperationId,
+        fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
+        self.require_owner(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
+        let (target_operation_id,result)=self.store.cancel_exact_native_turn(session_id,target,format!("{key}:cancel").into(),"session_api".into(),fence).await.map_err(store_error)?;
+        let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Conflict("canonical cancellation has no durable Turn receipt".into()))?;
+        Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
+    }
+
+    pub async fn steer_exact_native_turn(&self,owner:&PrincipalRef,session_id:&AgentSessionId,key:&str,target:&OperationId,input:Value,
+        fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
+        self.require_owner(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
+        let (target_operation_id,result)=self.store.steer_exact_native_turn(session_id,target,format!("{key}:steer").into(),"session_api".into(),StrictJsonValue(input),fence).await.map_err(store_error)?;
+        let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Conflict("canonical steering has no durable Turn receipt".into()))?;
+        Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
+    }
+
+    pub async fn steer_exact_native_immediate_turn(&self,owner:&PrincipalRef,session_id:&AgentSessionId,key:&str,target:&OperationId,input:Value,
+        fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
+        self.require_owner(owner,session_id).await?;let key=scoped_key(owner,key,session_id.as_ref())?;
+        let (target_operation_id,result)=self.store.steer_exact_native_immediate_turn(session_id,target,format!("{key}:steer").into(),"session_api".into(),StrictJsonValue(input),fence).await.map_err(store_error)?;
+        let event_id=result.record.as_ref().map(|record|record.event_id.clone()).ok_or_else(||AppError::Conflict("canonical voice steering has no durable Turn receipt".into()))?;
+        Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
     }
 
     pub async fn fork(

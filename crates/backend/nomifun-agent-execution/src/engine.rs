@@ -2555,6 +2555,43 @@ impl AgentExecutionEngine {
         attempt_id: &str,
         request: AnswerExecutionDecisionRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.answer_decision_inner(owner_id,actor,execution_id,step_id,attempt_id,request,None).await
+    }
+
+    /// Voice opt-in metadata around the original decision CAS. UI commands
+    /// continue through answer_decision without extra queries or event fields.
+    pub async fn lookup_voice_decision_answer(&self,owner:&str,execution:&str,key:&str)->Result<Option<AgentExecutionEvent>,AppError> {
+        let mut after=0;
+        loop {let page=self.events(owner,execution,Some(after),Some(MAX_LIST_LIMIT)).await?;
+            if let Some(event)=page.iter().find(|event|event.event_type==AgentExecutionEventKind::DecisionAnswered&&event.payload.get("voice_operation_key").and_then(serde_json::Value::as_str)==Some(key)){return Ok(Some(event.clone()));}
+            let next=page.last().map_or(after,|event|event.sequence);if next<=after{return Ok(None);}after=next;
+        }
+    }
+
+    pub async fn answer_voice_decision(&self,owner:&str,actor:&AgentExecutionActor,execution:&str,step:&str,attempt:&str,request:AnswerExecutionDecisionRequest,
+        key:&str,request_sequence:i64,question_digest:&str,presentation_digest:&str,
+        source_session:&nomifun_agent_contracts::AgentSessionId,source_operation:&nomifun_agent_contracts::OperationId,source_fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentExecutionDetail,AppError> {
+        if !matches!(actor,AgentExecutionActor::User {user_id} if user_id==owner)||key.is_empty()||key.len()>256||request_sequence<=0
+            ||[question_digest,presentation_digest].iter().any(|digest|digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte))) {
+            return Err(AppError::BadRequest("voice answer requires an exact authenticated decision presentation".into()));
+        }
+        let proof=json!({"voice_operation_key":key,"answer_request_digest":format!("{:x}",Sha256::digest(serde_json::to_vec(&request).map_err(|error|AppError::Internal(error.to_string()))?)),
+            "request_event_sequence":request_sequence,"question_digest":question_digest,"presentation_digest":presentation_digest,
+            "voice_source_target":{"agent_session_id":source_session,"turn_operation_id":source_operation,"binding_version":source_fence.binding_version,"execution_generation":source_fence.execution_generation}});
+        let matches=|event:&AgentExecutionEvent|event.step_id.as_deref()==Some(step)&&event.attempt_id.as_deref()==Some(attempt)
+            &&proof.as_object().is_some_and(|fields|fields.iter().all(|(key,value)|event.payload.get(key)==Some(value)));
+        if let Some(event)=self.lookup_voice_decision_answer(owner,execution,key).await? {
+            if !matches(&event){return Err(AppError::Conflict("voice answer replay differs from its original complete request".into()));}return self.detail(owner,execution).await;
+        }
+        let result=self.answer_decision_inner(owner,actor,execution,step,attempt,request,Some(proof.clone())).await;
+        if matches!(result,Err(AppError::Conflict(_))) {
+            if let Some(event)=self.lookup_voice_decision_answer(owner,execution,key).await? {if matches(&event){return self.detail(owner,execution).await;}}
+        }
+        result
+    }
+
+    async fn answer_decision_inner(&self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,step_id:&str,attempt_id:&str,
+        request:AnswerExecutionDecisionRequest,voice_proof:Option<serde_json::Value>)->Result<AgentExecutionDetail,AppError> {
         canonical_id::<AgentExecutionId>("execution_id", execution_id)?;
         canonical_uuidv7("step_id", step_id)?;
         canonical_uuidv7("attempt_id", attempt_id)?;
@@ -2570,6 +2607,17 @@ impl AgentExecutionEngine {
             return Err(AppError::Conflict(
                 "waiting attempt changed before the answer".to_owned(),
             ));
+        }
+        if let Some(proof)=&voice_proof {
+            let sequence=proof.get("request_event_sequence").and_then(serde_json::Value::as_i64).ok_or_else(||AppError::BadRequest("voice decision request identity missing".into()))?;
+            let requested=self.events(owner_id,execution_id,Some(sequence-1),Some(1)).await?.into_iter().next()
+                .filter(|event|event.sequence==sequence&&event.event_type==AgentExecutionEventKind::DecisionRequested&&event.step_id.as_deref()==Some(step_id)&&event.attempt_id.as_deref()==Some(attempt_id))
+                .ok_or_else(||AppError::Conflict("voice decision request changed".into()))?;
+            let question=requested.payload.get("question").and_then(serde_json::Value::as_str).ok_or_else(||AppError::Conflict("voice request has no question".into()))?;
+            if waiting.attempt.question.as_deref()!=Some(question)||proof.get("question_digest").and_then(serde_json::Value::as_str)!=Some(format!("{:x}",Sha256::digest(question.as_bytes())).as_str())
+                ||requested.payload.get("force_click").and_then(serde_json::Value::as_bool)==Some(true)||requested.payload.get("requires_explicit_click").and_then(serde_json::Value::as_bool)==Some(true) {
+                return Err(AppError::Conflict("voice answer does not match an eligible exact pending question".into()));
+            }
         }
         let mut effects = AttemptConversationEffects::decode(
             waiting.attempt.runtime_state.as_deref(),
@@ -2594,7 +2642,11 @@ impl AgentExecutionEngine {
                     AgentExecutionEventKind::DecisionAnswered,
                     Some(step_id),
                     Some(attempt_id),
-                    json!({"answered":true,"operation_id":operation_id}),
+                    {
+                        let mut payload=json!({"answered":true,"operation_id":operation_id});
+                        if let Some(proof)=voice_proof {payload.as_object_mut().expect("answer event object").extend(proof.as_object().expect("voice proof object").clone());}
+                        payload
+                    },
                 ),
             )
             .await?;

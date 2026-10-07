@@ -303,13 +303,14 @@ fn replay_into(
                         format!("Delivery observation (not a new instruction): the preceding queued inputs did not reach a model boundary before this turn ended: {reason}")));
                 }
             }
-            AgentEngineEvent::ModelStepStarted { step, .. } => {
+            AgentEngineEvent::ModelStepStarted { step, operation_id } => {
                 if model_steps.checked_add(1) != Some(*step) {
                     return Err(invalid("non-contiguous model steps in history"));
                 }
                 batch.flush(history, false)?;
                 model_steps = *step;
                 batch.step = Some(*step);
+                batch.model_operation_id = Some(operation_id.clone());
             }
             AgentEngineEvent::ToolStarted {
                 step,
@@ -365,6 +366,19 @@ fn replay_into(
                         "excessive tool proposals in history".into(),
                     ));
                 }
+            }
+            AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,steering_receipt_ids,discarded_tool_call_ids,cleanup} => {
+                crate::output_limit::validate_discarded(*step,discarded_tool_call_ids)?;
+                if batch.step!=Some(*step)||batch.model_operation_id.as_ref()!=Some(model_operation_id)||cleanup.operation_id!=*model_operation_id
+                    ||cleanup.task_id.is_empty()||steering_receipt_ids.is_empty()||steering_receipt_ids.len()>16
+                    ||steering_receipt_ids.iter().any(|id|id.is_empty()||id.len()>1024)
+                    ||steering_receipt_ids.iter().collect::<std::collections::BTreeSet<_>>().len()!=steering_receipt_ids.len()
+                    ||!batch.started.is_empty()||!batch.results.is_empty()||batch.discarded
+                    ||batch.proposed!=discarded_tool_call_ids.iter().cloned().collect() {
+                    return Err(invalid("voice supersede contradicts its exact closed unadmitted model attempt"));
+                }
+                batch.discarded=true;
+                batch.content.clear();batch.calls.clear();batch.order.clear();
             }
             AgentEngineEvent::ModelOutputTruncated {
                 step,
@@ -705,6 +719,7 @@ struct ReplayBatch {
     proposal_order: Vec<ToolCallId>,
     model_order: Option<Vec<ToolCallId>>,
     step: Option<u16>,
+    model_operation_id: Option<nomifun_agent_contracts::OperationId>,
     started: std::collections::BTreeSet<ToolCallId>,
     discarded: bool,
     notices: Vec<ChatMessage>,
@@ -862,6 +877,7 @@ impl ReplayBatch {
         self.process_actions.clear();
         history.append(&mut self.notices);
         self.step = None;
+        self.model_operation_id = None;
         self.started.clear();
         self.discarded = false;
         self.completion_report = None;
@@ -908,6 +924,27 @@ mod tests {
             }],
             provider_round_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn voice_immediate_history_withdraws_exact_unadmitted_step_and_rejects_effect_or_proof_tampering() {
+        let task=tokio::spawn(async{});let task_id=task.id().to_string();task.await.unwrap();
+        let cleanup=nomifun_chat_model_broker::OwnedModelCleanupReceipt {operation_id:"turn:model:1".into(),task_id,
+            stage:nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,outcome:nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined};
+        let input=crate::AgentSteeringInput {receipt_operation_id:"voice-receipt".into(),message_id:"voice-receipt".into(),text:"corrected complete task".into(),files:vec![],inject_skills:vec![],image_count:0,prepared_images:vec![],prepared_skill_instructions:vec![]};
+        let events=vec![AgentEngineEvent::TurnStarted {binding:binding(),turn_operation_id:"turn".into()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into()},AgentEngineEvent::OutputTextDelta {step:1,text:"OBSOLETE_PUBLIC_DRAFT".into()},
+            AgentEngineEvent::ToolCallDelta {step:1,call_id:"old-proposal".into(),name:"read_file".into(),arguments_delta:String::new()},
+            AgentEngineEvent::VoiceModelStepSuperseded {step:1,model_operation_id:"turn:model:1".into(),steering_receipt_ids:vec!["voice-receipt".into()],discarded_tool_call_ids:vec!["old-proposal".into()],cleanup},
+            AgentEngineEvent::SteeringInputs {inputs:vec![input]},AgentEngineEvent::ModelStepStarted {step:2,operation_id:"turn:model:2".into()},
+            AgentEngineEvent::OutputTextDelta {step:2,text:"current public answer".into()},AgentEngineEvent::TurnCompleted {model_steps:2,finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed}];
+        let mut history=vec![];replay_closed_turn(&mut history,requirement(),&events).unwrap();let encoded=serde_json::to_string(&history).unwrap();
+        assert!(!encoded.contains("OBSOLETE_PUBLIC_DRAFT"));assert!(!encoded.contains("old-proposal"));assert!(encoded.contains("corrected complete task"));assert!(encoded.contains("current public answer"));
+        let baseline=history.clone();let mut bad=events.clone();if let AgentEngineEvent::VoiceModelStepSuperseded {cleanup,..}=&mut bad[4]{cleanup.operation_id="a-different-attempt".into();}
+        assert!(replay_closed_turn(&mut history,requirement(),&bad).is_err());assert_eq!(history,baseline);
+        let mut admitted=events;admitted.insert(4,AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"old-proposal".into(),name:"read_file".into(),arguments:StrictJsonValue(serde_json::json!({"path":"README.md"})),provider_metadata:None}});
+        admitted.insert(5,AgentEngineEvent::ToolStarted {step:1,call_id:"old-proposal".into(),capability_id:"workspace.files".into(),action_id:"workspace.files/read".into()});
+        assert!(replay_closed_turn(&mut history,requirement(),&admitted).is_err());assert_eq!(history,baseline);
     }
 
     #[test]

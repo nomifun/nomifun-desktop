@@ -745,6 +745,8 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:nomi-core-live-provider` | Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan. |
 | `bun run demo:idmm` | 用 StepFun Coding Plan 验收智能决策后台触发、规则、旁路、安全停止和恢复，生成隔离 dev 报告 |
 | `bun run test:agent-reliability-report` | 验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查 |
+| `bun run test:voice-smoke-runner` | 测试有界Mobile语音无头观测脚本，不作为真机体验证据 |
+| `bun run test:mobile-voice-live` | 显式参数和凭据授权下观测Mobile语音relay媒体与原工作回执，不启动GUI |
 | **静态检查** | |
 | `bun run check:windows-installer` | 校验 Windows NSIS 程序/数据目录分离、锁定模板、第三方归属与安全卸载合同 |
 | `bun run check:creative-studio-retirement` | 扫描 tracked 源码，阻止旧创意工坊页面、路由、API、翻译与 Gateway 标记回流 |
@@ -765,8 +767,11 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run check:unified-plugin-boundary` | 校验 Unified Plugin 单合同、单 Router/Bridge、canonical DB 表与旧 N1/M1/发布聚合物理删除 |
 | `bun run gate:agent-v2` | 校验当前canonical Agent合同与生成物完整性 |
 | `bun run check:agent-session-boundary` | 校验canonical事件上下文、单native字段、单数据库基线及旧代码和文档物理删除 |
+| `bun run check:voice-boundary` | 校验可选Mobile语音的独立合同、核心port和供应商wire隔离 |
+| `bun run check:voice-contracts` | 校验独立Voice JSON schema与同级Mobile生成合同，不改主Agent合同 |
 | **代码生成** | |
 | `bun run gen:i18n` | 由 locale 重新生成 i18n 类型声明 |
+| `bun run gen:voice-contracts` | 生成独立Voice JSON schema与同级Mobile TypeScript合同 |
 | **维护 / 工具** | |
 | `bun run clean` | 深度回收构建空间（debug 产物 + flycheck + 旧安装包） |
 | `bun run bump` | 统一改版本号：根 Cargo.toml(真源) + package.json + ui + Cargo.lock，可选 --tag 提交并打 tag |
@@ -858,7 +863,7 @@ preferred channel.
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/nomifun-wecom-group.png" alt="NomiFun WeCom group QR" width="220"><br/><sub><b>NomiFun WeCom group / NomiFun 企业微信群</b></sub></td>
+    <td align="center"><img src="docs/images/contact/wechat-group-qr.png" alt="NomiFun WeChat group 0 QR code" width="220"><br/><sub><b>NomiFun WeChat group 0 / NomiFun 微信交流群 0</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ group QR" width="220"><br/><sub><b>QQ group / QQ 群</b></sub></td>
   </tr>
 </table>

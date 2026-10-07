@@ -24,7 +24,8 @@ pub use compacted_history::AgentCompactedItem;
 mod completion;
 pub use completion::{AgentCompletionCriterion, AgentCompletionObservation, AgentCompletionReport, AgentCriterionDisposition, AgentDeliveryItem, AgentDeliveryResult, AgentHistoricalDeliveryOrigin, AgentHistoricalDeliveryResult};
 mod delivery_review;
-pub use delivery_review::AgentDeliveryReviewState;
+mod completion_review;
+pub use completion_review::{AgentCompletionReviewState, AgentExecutionPhase};
 mod context;
 mod context_resources;
 mod remote_resources;
@@ -92,6 +93,8 @@ pub use kernel::{
     compile_agent_tool_plan, AgentToolExposure, KernelAgentToolInvoker,
 };
 pub use model::{BrokerAgentModelPort, AgentModelPort, AgentModelStream};
+mod immediate_correction;
+pub use immediate_correction::AgentImmediateCorrectionPort;
 pub use standard_tools::standard_agent_tool_exposures;
 pub use tool::{
     input_schema_digest, AgentEffectClass, AgentToolBinding, AgentToolInvocation,

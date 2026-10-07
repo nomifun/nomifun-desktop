@@ -23,6 +23,8 @@ use crate::provider_reasoning::ProviderReasoningRoute;
 
 const BROKER_STREAM_CAPACITY: usize = 64;
 const MAX_BUFFERED_PRE_SEMANTIC_EVENTS: usize = 32;
+#[path="owned_attempt.rs"]mod owned_attempt;
+pub use owned_attempt::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +96,11 @@ impl Stream for ChatModelStream {
 
 #[async_trait]
 pub trait ChatBrokerPort: Send + Sync {
+    /// Optional ownership evidence. Default callers and older ports do not
+    /// silently fall back to an unowned stream.
+    async fn open_owned_chat_attempt(&self,_request:ChatModelRequest,_cancellation:CancellationToken)->Result<OwnedChatAttempt,ChatModelError>{
+        Err(ChatModelError::new(ChatModelErrorCode::AdapterUnavailable,"chat broker has no owned attempt support",ChatRetryDirective::Never))
+    }
     async fn open_chat_stream(
         &self,
         request: crate::contracts::ChatModelRequest,
@@ -295,6 +302,9 @@ impl ChatModelBroker {
 
 #[async_trait]
 impl ChatBrokerPort for ChatModelBroker {
+    async fn open_owned_chat_attempt(&self,request:ChatModelRequest,cancellation:CancellationToken)->Result<OwnedChatAttempt,ChatModelError>{
+        ChatModelBroker::open_owned_chat_attempt(self,request,cancellation).await
+    }
     async fn open_chat_stream(
         &self,
         request: crate::contracts::ChatModelRequest,

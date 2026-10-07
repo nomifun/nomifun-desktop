@@ -21,9 +21,8 @@ import type { AgentPresetDraft } from '@/common/types/agentPlatform';
  *
  * One implementation for both entry points — the host book in settings and the
  * sidebar's remote-session popover — so a host always starts a session the same
- * way. The conversation only carries `extra.ssh_host_id`; the session factory is
- * what connects the host and hands the agent its remote tools, so nothing here
- * touches the transport.
+ * way. Creation selects an `ssh_host` resource; the canonical session binding
+ * records its identity and the session factory connects its remote tools.
  *
  * Resolves `true` once the conversation exists and navigation was issued, so a
  * caller can close its own surface only on success and leave it open (with the

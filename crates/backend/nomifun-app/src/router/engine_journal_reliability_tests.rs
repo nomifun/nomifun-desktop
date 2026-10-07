@@ -6,7 +6,7 @@ fn checkpoint(journal:&EngineTurnJournal, renewed:bool) -> AgentExecutionCheckpo
         binding:EngineBinding::new(journal.0.session.clone(),"native-binding".into(),"test".into(),"a".repeat(64).into(),journal.0.snapshot.clone()).unwrap(),
         turn_operation_id:journal.0.operation.clone(),active_set_generation:0,model_steps:u16::from(renewed),tool_call_count:0,
         accepted_input_count:1,applied_steering_receipts:vec![],plan:Default::default(),work:Default::default(),patch_recovery:Default::default(),
-        control_rejections:Default::default(),delivery_review:Default::default(),segments:Some(AgentExecutionSegmentState {
+        control_rejections:Default::default(),completion_review:Default::default(),segments:Some(AgentExecutionSegmentState {
             policy:AgentSegmentPolicy { max_segments:2,max_no_progress_segments:2 },model_steps_per_segment:1,
             segment:if renewed {2} else {1},segment_start_step:u16::from(renewed),no_progress_segments:0,
             progress_at_segment_start:0,progress_fingerprints:vec![],

@@ -1,0 +1,15 @@
+[package]
+name = "nomifun-voice-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomifun-voice-contracts.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

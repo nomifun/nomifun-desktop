@@ -3,7 +3,7 @@
 //! Run explicitly with the credential-isolating runner:
 //! `bun scripts/validation/run-nomi-core-live-provider-smoke.mjs`
 //! The default runner exercises the selected canonical Session → Runtime path.
-//! `NOMIFUN_LIVE_STEPFUN_MODEL` selects the confirmed model (step-3.7-flash),
+//! `NOMIFUN_LIVE_STEPFUN_MODEL` selects step-3.7-flash or step-5-preview,
 //! never an endpoint or fallback. Only the runner may read the credential env.
 
 use std::fmt;
@@ -25,6 +25,9 @@ use zeroize::Zeroizing;
 
 #[path = "support/live_idmm_demo.rs"]
 mod live_idmm_demo;
+
+#[path = "support/live_reasoning_lifecycle.rs"]
+mod live_reasoning_lifecycle;
 
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
@@ -67,6 +70,7 @@ struct LiveFixture {
 enum LiveCase {
     SelectedModel,
     WorkspaceFile,
+    ReasoningLifecycle,
     CodingPreset,
     SnakeGame,
     LongCoding,
@@ -206,7 +210,7 @@ fn required_secret_from_stdin() -> Result<Zeroizing<String>, SmokeFailure> {
 
 fn live_model() -> Result<String, SmokeFailure> {
     match std::env::var(LIVE_MODEL_ENVIRONMENT_NAME) {
-        Ok(model) if model == STEPFUN_PLAN_MODEL => Ok(model),
+        Ok(model) if matches!(model.as_str(), STEPFUN_PLAN_MODEL | "step-5-preview") => Ok(model),
         Err(std::env::VarError::NotPresent) => Ok(STEPFUN_PLAN_MODEL.to_owned()),
         _ => Err(SmokeFailure::new("provider.model", "LIVE_MODEL_INVALID", 400)),
     }
@@ -753,13 +757,16 @@ fn verify_resource_selections_in_workspace(binding: &Value, selections: &Value, 
                     std::fs::canonicalize(expected).ok().as_ref() != Some(&actual)) {
                     return false;
                 }
+                let Ok(definition) = serde_json::from_value::<nomifun_agent_contracts::TypedResourceBinding>((*resource).clone()) else { return false; };
+                if nomifun_agent_contracts::resource_definition_id(&definition).ok().as_ref() != Some(&definition.binding_id) {
+                    return false;
+                }
                 if kind == Some("workspace") {
                     // This is the public API's opaque identity for an explicitly
                     // selected root, not the managed default-workspace selector.
                     use sha2::{Digest, Sha256};
                     let id = format!("selected-workspace-{:x}", Sha256::digest(root.as_bytes()));
-                    return resource.get("resource_id").and_then(Value::as_str) == Some(id.as_str())
-                        && resource.get("binding_id").and_then(Value::as_str) == Some(format!("workspace:{id}").as_str());
+                    return resource.get("resource_id").and_then(Value::as_str) == Some(id.as_str());
                 }
             }
             resource.get("resource_id") == selection.get("resource_id")
@@ -2923,6 +2930,8 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
         LiveCase::LongCoding => run_live_long_coding_chain(
             &router, api_key.as_str(), &model, &root.path().join("work")).await,
         LiveCase::SelectedModel => run_selected_model_chain(&router, api_key.as_str(), &model).await,
+        LiveCase::ReasoningLifecycle => live_reasoning_lifecycle::run(
+            &router, api_key.as_str(), &model, &root.path().join("work")).await,
         LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
         LiveCase::CreativeStudio => run_live_creative_studio_chain(&router, api_key.as_str(), &model).await,
         LiveCase::Idmm => live_idmm_demo::run(&router, api_key.as_str(), &model).await,
@@ -2974,6 +2983,15 @@ async fn nomi_core_idmm_reaches_live_stepfun() {
     if let Err(error) = run_live_provider_smoke(LiveCase::Idmm).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
         panic!("live IDMM demo did not pass");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --reasoning-smoke"]
+async fn nomi_core_reasoning_lifecycle_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::ReasoningLifecycle).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }
 }
 
@@ -3171,13 +3189,21 @@ mod evidence_tests {
         let path = root.path().to_string_lossy().into_owned();
         let id = format!("selected-workspace-{:x}", Sha256::digest(path.as_bytes()));
         let mut binding = json!({"typed_resource_bindings":[
-            {"binding_id":format!("workspace:{id}"),"resource_kind":"workspace","resource_id":id,"typed_parameters":{"workspace_root":path}},
-            {"resource_kind":"process_session","resource_id":"managed-process-session","typed_parameters":{"workspace_root":path}},
+            {"binding_id":"pending","resource_kind":"workspace","resource_id":id,"owner_id":"live-smoke-owner","operations":["read"],"typed_parameters":{"workspace_root":path}},
+            {"binding_id":"pending","resource_kind":"process_session","resource_id":"managed-process-session","owner_id":"live-smoke-owner","operations":["exec"],"typed_parameters":{"workspace_root":path}},
             {"resource_kind":"project_memory","resource_id":"default-project-memory"}
         ]});
+        for index in 0..2 {
+            let definition = serde_json::from_value::<nomifun_agent_contracts::TypedResourceBinding>(binding["typed_resource_bindings"][index].clone()).unwrap();
+            binding["typed_resource_bindings"][index]["binding_id"] = json!(nomifun_agent_contracts::resource_definition_id(&definition).unwrap());
+        }
         let selections = coding_resource_selections();
         assert!(verify_resource_selections(&binding, &selections).is_err(), "a selected root is not the managed default identity");
         assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_ok());
+        let canonical_id = binding["typed_resource_bindings"][0]["binding_id"].clone();
+        binding["typed_resource_bindings"][0]["binding_id"] = json!(format!("workspace:{id}"));
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err(), "retired resource IDs must not be accepted by the live fixture");
+        binding["typed_resource_bindings"][0]["binding_id"] = canonical_id;
         binding["typed_resource_bindings"][1]["typed_parameters"]["workspace_root"] = json!("missing-root");
         assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err());
     }

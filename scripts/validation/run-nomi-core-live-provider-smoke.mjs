@@ -5,7 +5,7 @@
  * its credential to Cargo, build scripts, argv, files, logs, or tool children.
  *
  * The smoke is intentionally pinned to StepFun Coding Plan
- * (`stepfun-plan` / `step-3.7-flash`) in the Rust fixture.
+ * (`stepfun-plan` / `step-3.7-flash`, or explicit `step-5-preview`) in the Rust fixture.
  * NOMIFUN_LIVE_STEPFUN_MODEL is a non-secret, explicitly selected model;
  * it never enables fallback or changes the official endpoint. The only
  * secret input is NOMIFUN_LIVE_STEPFUN_API_KEY from the environment.
@@ -18,6 +18,7 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir C:/new-disposable-gui-data
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --file-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --reasoning-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
@@ -62,9 +63,10 @@ const RETAIN_FIXTURE_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_RETAIN_NATIVE_FIXTURE';
 const NATIVE_FIXTURE_MARKER = 'NOMIFUN_LIVE_SMOKE_NATIVE_FIXTURE ';
 const MODEL_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_STEPFUN_MODEL';
 const DEFAULT_MODEL = 'step-3.7-flash';
-const ALLOWED_MODELS = new Set([DEFAULT_MODEL]);
+const ALLOWED_MODELS = new Set([DEFAULT_MODEL, 'step-5-preview']);
 const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
 const FILE_TEST_NAME = 'nomi_core_workspace_file_reaches_live_stepfun';
+const REASONING_TEST_NAME = 'nomi_core_reasoning_lifecycle_reaches_live_stepfun';
 const CODING_TEST_NAME = 'nomi_core_official_coding_agent_reaches_live_stepfun';
 const LONG_CODING_TEST_NAME = 'nomi_core_long_coding_reaches_live_stepfun';
 const GAME_TEST_NAME = 'nomi_core_snake_game_reaches_live_stepfun';
@@ -83,6 +85,7 @@ const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
 const modelSmoke = process.argv.includes('--model-smoke');
 const fileSmoke = process.argv.includes('--file-smoke');
+const reasoningSmoke = process.argv.includes('--reasoning-smoke');
 const codingSmoke = process.argv.includes('--coding-smoke');
 const longCodingSmoke = process.argv.includes('--long-coding-smoke');
 const gameSmoke = process.argv.includes('--game-smoke');
@@ -93,8 +96,8 @@ const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
 const idmmSmoke = process.argv.includes('--idmm-smoke');
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
@@ -432,7 +435,7 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--report') return !idmmSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
@@ -445,7 +448,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -460,7 +463,9 @@ async function main() {
     }
   }
   const model = process.env[MODEL_ENVIRONMENT_NAME] ?? DEFAULT_MODEL;
-  if (!ALLOWED_MODELS.has(model)) {
+  // The separate native-browser fixture still pins its own provider model.
+  // Never label that existing acceptance path as a different selected model.
+  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL)) {
     emitFailure('live_smoke_status=not_run', 'LIVE_MODEL_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -655,6 +660,8 @@ async function main() {
   const stages = beforeToolSmoke ? beforeToolStagesFromOutput(test.stderr) : [];
   for (const phase of stages) console.log(`live_smoke_stage=${phase} status=pass`);
   for (const line of test.stderr.split(/\r?\n/)) {
+    const reasoning = line.match(/^NOMIFUN_LIVE_REASONING_EVIDENCE messages=([0-9]{1,5}) deltas=([0-9]{1,6}) done=([0-9]{1,5}) reopened=([0-9]{1,5}) tools_started=([0-9]{1,5}) tools_completed=([0-9]{1,5}) active_samples=([0-9]{1,5}) elapsed_ms=([0-9]{1,8}) all_closed=(true|false) terminal=(true|false)$/);
+    if (reasoning) console.log(`live_smoke_reasoning_evidence=${reasoning[0].slice('NOMIFUN_LIVE_REASONING_EVIDENCE '.length)}`);
     const build = line.match(/^NOMIFUN_LIVE_SMOKE_BUILD digest=([a-f0-9]{64})$/);
     if (build) console.log(`live_smoke_build_digest=${build[1]}`);
     const codingTrace = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_TRACE phase=(file|coding|snake_game|long_first|long_repair|long_second) read=([0-9]{1,4}) write=([0-9]{1,4}) patch=([0-9]{1,4}) exec=([0-9]{1,4}) plan=([0-9]{1,4}) completion=([0-9]{1,4}) tool_errors=([0-9]{1,4}) final_replies=([0-9]{1,4}) file_exists=(true|false) file_bytes=([0-9]{1,8}) html=(true|false) script=(true|false) canvas=(true|false) keydown=(true|false)$/);
@@ -720,7 +727,7 @@ async function main() {
         const evidence = parseIdmmDemoEvidence(test.stderr);
         console.log('idmm_demo_limitation=provider_pause_requires_explicit_native_resume');
         if (reportPath) {
-          writeFileSync(reportPath, JSON.stringify({...evidence, completed_at:new Date().toISOString()}, null, 2) + '\n', {mode:0o600});
+          writeFileSync(reportPath, JSON.stringify({...evidence, model, completed_at:new Date().toISOString()}, null, 2) + '\n', {mode:0o600});
           console.log(`idmm_demo_report=${JSON.stringify(reportPath)}`);
         }
       } catch {
@@ -840,8 +847,8 @@ function runSelfTest() {
       selectedTestPassed(`test ${BEFORE_TOOL_TEST_NAME} ... ok`, MODEL_TEST_NAME)) {
     throw new Error('exact test execution proof self-test failed');
   }
-  if (!ALLOWED_MODELS.has('step-3.7-flash') ||
-      ['step-3.77-flash', 'step-3.7-flash\n', 'step-3.7-flash ', '', 'https://example.invalid/v1', 'arbitrary-model'].some((model) => ALLOWED_MODELS.has(model))) {
+  if (!ALLOWED_MODELS.has('step-3.7-flash') || !ALLOWED_MODELS.has('step-5-preview') ||
+      ['step-3.77-flash', 'step-3.7-flash\n', 'step-3.7-flash ', 'step-5-preview\n', 'step-5-preview ', '', 'https://example.invalid/v1', 'arbitrary-model'].some((model) => ALLOWED_MODELS.has(model))) {
     throw new Error('model allowlist self-test failed');
   }
   const scrubbed = environmentWithoutCredential({

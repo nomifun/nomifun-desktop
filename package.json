@@ -59,7 +59,12 @@
     "clean": "bun scripts/prune-build.mjs --release",
     "bump": "bun scripts/bump-version.mjs",
     "help": "bun scripts/help.mjs",
-    "check:agent-session-boundary": "bun scripts/check-agent-session-boundary.mjs"
+    "check:agent-session-boundary": "bun scripts/check-agent-session-boundary.mjs",
+    "check:voice-boundary": "bun scripts/check-voice-boundary.mjs",
+    "check:voice-contracts": "cargo run -p nomifun-voice-contracts --bin voice-contract -- check && bun scripts/check-voice-contracts.mjs",
+    "gen:voice-contracts": "cargo run -p nomifun-voice-contracts --bin voice-contract -- write && bun scripts/check-voice-contracts.mjs --write",
+    "test:voice-smoke-runner": "bun test ./scripts/validation/run-agent-voice-smoke.test.mjs",
+    "test:mobile-voice-live": "bun scripts/validation/run-agent-voice-smoke.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.2",
