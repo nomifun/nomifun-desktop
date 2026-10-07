@@ -104,6 +104,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
       capabilityControls={compact ? undefined : <CompanionCapabilityControls companion={companion} conversation={conversation} />}
       agent_name={profile?.name}
       creationEnabled={false}
+      creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
       compactProductComposer={compact}
     />
   );

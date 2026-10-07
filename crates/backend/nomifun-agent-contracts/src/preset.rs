@@ -39,6 +39,8 @@ pub const PRESET_CONTRIBUTION_LOCK_INVALID: &str = "PRESET_CONTRIBUTION_LOCK_INV
 /// A task-only media Agent does not need a language-model route to submit
 /// explicit generation requests. Any conversational or other capability keeps
 /// the normal Chat-route requirement; this is never inferred from its name.
+/// This is a route-optional classification, not a prohibition against an
+/// explicitly selected Chat route or language-model-driven media Tools.
 pub fn is_direct_creation_agent<'a>(capabilities: impl IntoIterator<Item = &'a str>) -> bool {
     let mut has_generation = false;
     for capability in capabilities {

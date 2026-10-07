@@ -65,7 +65,7 @@ describe('McpServerToolsList', () => {
     expect(items.every((item) => !item.className.split(/\s+/).includes('border'))).toBe(true);
     expect(items.every((item) => item.className.includes('gap-6px') && item.className.includes('py-2px'))).toBe(true);
 
-    const title = view.getByText('browser_navigate');
+    const title = view.getByText('Browser navigate');
     expect(title.className).toContain('font-normal');
     expect(title.className).not.toContain('font-600');
   });

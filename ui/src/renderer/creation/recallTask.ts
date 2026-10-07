@@ -4,7 +4,7 @@ import { creationUserParameters } from './parameterPolicy';
 
 export function recallCreationTask(draft: CreationDraft, task: ConversationCreationTask, assets: CreativeAsset[], target: CreationMode, useResult = false): CreationDraft {
   const originalMode = creationModeFor(task.capability);
-  if (!originalMode) throw new Error('语音合成任务不属于音乐生成模式');
+  if (!originalMode) throw new Error('此任务不属于图片、视频或音乐生成模式');
   const selectedAssets = useResult && target === 'video' ? assets.slice(0, 1) : assets;
   return {
     ...draft,

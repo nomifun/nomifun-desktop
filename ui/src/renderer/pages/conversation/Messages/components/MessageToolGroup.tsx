@@ -6,6 +6,7 @@
 
 import type { IMessageToolGroup } from '@/common/chat/chatLib';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
+import { formatToolDiagnostics, formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
 import { iconColors } from '@/renderer/styles/colors';
 import { Alert, Tag } from '@arco-design/web-react';
 import { LoadingOne } from '@icon-park/react';
@@ -17,19 +18,21 @@ const ALERT_CLASSES =
   '!items-start !rd-8px !px-8px [&_.arco-alert-icon]:flex [&_.arco-alert-icon]:items-start [&_.arco-alert-content-wrapper]:flex [&_.arco-alert-content-wrapper]:items-start [&_.arco-alert-content-wrapper]:w-full [&_.arco-alert-content]:flex-1';
 
 const MessageToolGroup: React.FC<{ message: IMessageToolGroup }> = ({ message }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const tools = Array.isArray(message.content) ? message.content : [];
   return <div>{tools.map((content, index) => {
     const status = toDisplayText(content.status);
     const description = optionalDisplayText(content.description);
+    const presentation = resolveToolPresentation({ name: toDisplayText(content.name, 'Tool'),
+      description: content.description }, i18n.resolvedLanguage ?? i18n.language);
     const loading = status !== 'Success' && status !== 'Error' && status !== 'Canceled';
     return <div key={toDisplayText(content.call_id, `tool-${index}`)}>
       <Alert
         className={ALERT_CLASSES}
         type={status === 'Error' ? 'error' : status === 'Success' ? 'success' : status === 'Canceled' ? 'warning' : 'info'}
         icon={loading && <LoadingOne theme='outline' size='12' fill={iconColors.primary} className='loading lh-[1] flex' />}
-        content={<Tag className='mr-4px'>
-          {toDisplayText(content.name, 'Tool')}
+        content={<Tag className='mr-4px' title={formatToolDiagnostics(presentation)}>
+          {formatToolPresentationLabel(presentation)}
           {status === 'Canceled' ? `(${t('messages.canceledExecution')})` : ''}
         </Tag>}
       />

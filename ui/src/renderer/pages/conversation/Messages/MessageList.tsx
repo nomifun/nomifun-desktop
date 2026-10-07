@@ -473,11 +473,11 @@ const buildProcessReceiptSummary = (
   state: TurnDisclosureProcessState,
   t: TranslationFn,
   workspaceRoots: string[] = [],
-  options: { recovered?: boolean } = {}
+  options: { recovered?: boolean; language?: string } = {}
 ): ProcessReceiptSummary => {
   if ('type' in item && item.type === 'tool_summary') {
     const tools = normalizeToolMessages(item.messages);
-    const receiptParts = buildToolReceiptSummaryParts(tools, state);
+    const receiptParts = buildToolReceiptSummaryParts(tools, state, options.language);
     const summarySeparator = t('messages.processReceipt.summarySeparator', { defaultValue: ', ' });
     const boundedSearchCount = countBoundedSearchResults(tools);
     const recoveredFailureCount = options.recovered
@@ -748,8 +748,9 @@ const MessageList: React.FC<{
     () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
     [conversationContext?.workspace]
   );
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const location = useLocation();
+  const toolLanguage = i18n.resolvedLanguage ?? i18n.language;
   const locationState = (location.state || {}) as ConversationLocationState;
   const targetMessageId = locationState.targetMessageId;
   const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | undefined>();
@@ -908,7 +909,7 @@ const MessageList: React.FC<{
           const item = itemById.get(entry.itemId);
           if (!item) return undefined;
           const state = getProcessItemState(item);
-          const summary = buildProcessReceiptSummary(item, state, t, workspaceRoots);
+          const summary = buildProcessReceiptSummary(item, state, t, workspaceRoots, { language: toolLanguage });
           return {
             type: 'process_receipt',
             id: entry.id,
@@ -1001,16 +1002,25 @@ const MessageList: React.FC<{
       if (turnId && deliverablesByTurn.has(turnId)) lastIndexByTurn.set(turnId, index);
     });
 
-    let decoratedItems: IProcessedItem[] = disclosureItems;
-    if (deliverablesByTurn.size > 0) {
-      const withDeliverables: IProcessedItem[] = [];
-      disclosureItems.forEach((entry, index) => {
-        withDeliverables.push(entry);
-        const turnId = getDisplayItemTurnId(entry);
-        if (!turnId || lastIndexByTurn.get(turnId) !== index) return;
-        const items = deliverablesByTurn.get(turnId);
-        if (!items) return;
-        withDeliverables.push({
+    const creationTaskPlacements = creationTaskPlacementAfterIndices(
+      disclosureItems.map(getDisplayItemTurnId),
+      creationOwnerMessageIdByTurn
+    );
+    if (deliverablesByTurn.size === 0 && creationTaskPlacements.size === 0) return disclosureItems;
+
+    // A turn's products belong inside its response, before the shared copy /
+    // time footer. Decorate files and media together so neither can land after
+    // turn_actions, and keep the original user bubble's actions independent.
+    const withOutputs: IProcessedItem[] = [];
+    disclosureItems.forEach((entry, index) => {
+      withOutputs.push(entry);
+      const turnId = getDisplayItemTurnId(entry);
+      if (!turnId) return;
+      const items = lastIndexByTurn.get(turnId) === index ? deliverablesByTurn.get(turnId) : undefined;
+      const placement = creationTaskPlacements.get(index);
+      if (!items && !placement) return;
+      if (items) {
+        withOutputs.push({
           type: 'turn_deliverables',
           id: `turn-deliverables-${turnId}`,
           turn_id: turnId,
@@ -1020,43 +1030,31 @@ const MessageList: React.FC<{
           ),
           created_at: getProcessedItemCreatedAt(entry),
         });
-        const actionMessage = finalAssistantTextByTurn.get(turnId);
-        const actionMessageId = actionMessage ? getMessageBusinessIdentity(actionMessage) : undefined;
-        if (actionMessage) {
-          withDeliverables.push({
-            type: 'turn_actions',
-            id: `turn-actions-${turnId}`,
-            turn_id: turnId,
-            message: actionMessage,
-            sourceMessageIds: actionMessageId ? [actionMessageId] : [],
-            created_at: actionMessage.created_at ?? getProcessedItemCreatedAt(entry),
-          });
-        }
-      });
-      decoratedItems = withDeliverables;
-    }
-
-    const creationTaskPlacements = creationTaskPlacementAfterIndices(
-      decoratedItems.map(getDisplayItemTurnId),
-      creationOwnerMessageIdByTurn
-    );
-    if (creationTaskPlacements.size === 0) return decoratedItems;
-
-    const withCreationTasks: IProcessedItem[] = [];
-    decoratedItems.forEach((entry, index) => {
-      withCreationTasks.push(entry);
-      const placement = creationTaskPlacements.get(index);
-      if (!placement) return;
-      withCreationTasks.push({
-        type: 'turn_creation_tasks',
-        id: `turn-creation-tasks-${placement.turnId}`,
-        turn_id: placement.turnId,
-        message_id: placement.messageId,
-        sourceMessageIds: [placement.messageId],
-        created_at: getProcessedItemCreatedAt(entry),
-      });
+      }
+      if (placement) {
+        withOutputs.push({
+          type: 'turn_creation_tasks',
+          id: `turn-creation-tasks-${placement.turnId}`,
+          turn_id: placement.turnId,
+          message_id: placement.messageId,
+          sourceMessageIds: [placement.messageId],
+          created_at: getProcessedItemCreatedAt(entry),
+        });
+      }
+      const actionMessage = finalAssistantTextByTurn.get(turnId);
+      const actionMessageId = actionMessage ? getMessageBusinessIdentity(actionMessage) : undefined;
+      if (actionMessage && turnGates.get(turnId)?.running !== true) {
+        withOutputs.push({
+          type: 'turn_actions',
+          id: `turn-actions-${turnId}`,
+          turn_id: turnId,
+          message: actionMessage,
+          sourceMessageIds: actionMessageId ? [actionMessageId] : [],
+          created_at: actionMessage.created_at ?? getProcessedItemCreatedAt(entry),
+        });
+      }
     });
-    return withCreationTasks;
+    return withOutputs;
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
@@ -1065,6 +1063,7 @@ const MessageList: React.FC<{
     creationTaskOwnerMessageIds,
     processedList,
     t,
+    toolLanguage,
     workspaceRoots,
   ]);
 
@@ -1307,7 +1306,7 @@ const MessageList: React.FC<{
         processState,
         t,
         workspaceRoots,
-        { recovered: recoveredByTurn }
+        { recovered: recoveredByTurn, language: toolLanguage }
       );
       const recovered = recoveredByTurn || summary.recovered === true;
       return (

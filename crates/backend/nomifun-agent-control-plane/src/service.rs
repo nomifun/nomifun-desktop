@@ -424,7 +424,8 @@ impl AgentControlPlane {
                 "select a model or provide an explicit route, not both"));
         }
         if uses_default_route
-            && !nomifun_agent_contracts::is_direct_creation_agent(seed.enabled_capabilities.iter().map(|selection| selection.capability.id.as_ref()))
+            && (request.model.is_some()
+                || !nomifun_agent_contracts::is_direct_creation_agent(seed.enabled_capabilities.iter().map(|selection| selection.capability.id.as_ref())))
             && let Some(record) =
                 match request.model.as_ref() {
                     Some(model) => Some(
@@ -529,9 +530,8 @@ impl AgentControlPlane {
         let _guard = self.template_launch_lock.lock().await;
         let source = self.owned_preset(owner, preset_id).await?;
         let revision = self.current_revision(&source).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
-        if nomifun_agent_contracts::is_direct_creation_agent(revision.payload.enabled_capabilities.iter().map(|selection| selection.capability.id.as_ref())) {
-            return self.resolve_agent_session_binding_locked(owner, preset_id).await;
-        }
+        // A media-only configuration may omit Chat, but an explicit language
+        // model selection still creates a validated Session-local Chat route.
         let source_snapshot = self.current_snapshot(Some(&revision)).await?;
         if source_snapshot.is_none() {
             return Err(ControlPlaneError::canonical("CAPABILITY_NOT_MATERIALIZED",
@@ -636,13 +636,7 @@ impl AgentControlPlane {
         let (source_revision, source_snapshot) = self
             .load_binding_artifacts(owner, &current)
             .await?;
-        if nomifun_agent_contracts::is_direct_creation_agent(
-            source_revision
-                .payload
-                .enabled_capabilities
-                .iter()
-                .map(|selection| selection.capability.id.as_ref()),
-        ) || !source_revision
+        if !source_revision
             .payload
             .chat_route_records
             .contains_key(CHAT_MODEL_TASK)
@@ -2633,6 +2627,158 @@ mod tests {
             ]),
             "official template Action grants must survive creation and compilation exactly"
         );
+    }
+
+    struct MediaChatRoutes(Vec<nomifun_agent_contracts::ChatRouteRecord>);
+
+    #[async_trait::async_trait]
+    impl DefaultChatRouteResolver for MediaChatRoutes {
+        async fn resolve_default_chat_route(
+            &self,
+            _: &UserId,
+        ) -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError> {
+            Ok(self.0.first().cloned())
+        }
+
+        async fn resolve_selected_chat_route(
+            &self,
+            _: &UserId,
+            model: &nomifun_api_types::AgentChatModelSelectionDto,
+        ) -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError> {
+            Ok(self.0.iter().find(|route| {
+                route.primary.provider_id == model.provider_id
+                    && route.primary.model == model.model
+            }).cloned())
+        }
+    }
+
+    fn media_chat_route(model: &str) -> nomifun_agent_contracts::ChatRouteRecord {
+        let mut route = chat_route_with(
+            ChatRouteProtocol::OpenaiChat,
+            [ChatRouteFeature::TextInput, ChatRouteFeature::TextOutput, ChatRouteFeature::ToolCalls],
+        );
+        route.primary.provider_id = "0190f5fe-7c00-7a00-8000-000000000011".into();
+        route.primary.model = model.into();
+        route
+    }
+
+    fn image_only_document(control: &AgentControlPlane) -> nomifun_api_types::AgentPresetDocumentDto {
+        let catalog = control.catalog.snapshot().unwrap();
+        let mut media = control.templates.seed(OfficialPresetKey::CreativeStudioDefault).unwrap()
+            .enabled_capabilities.iter()
+            .find(|selection| selection.capability.id.as_ref() == "creation.media")
+            .unwrap().clone();
+        media.action_allowlist = BTreeSet::from([ActionId::from("creation.media/image")]);
+        let mut document = empty_document();
+        document.enabled_capabilities = vec![template_selection_api(&media, &catalog).unwrap()];
+        document
+    }
+
+    fn assert_image_only_snapshot(snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope) {
+        assert_eq!(snapshot.content.enabled_capabilities.len(), 1);
+        let media = &snapshot.content.enabled_capabilities[0];
+        assert_eq!(media.capability.id.as_ref(), "creation.media");
+        assert_eq!(media.action_allowlist, BTreeSet::from([ActionId::from("creation.media/image")]));
+        assert!(snapshot.content.required_resource_kinds.is_empty(),
+            "selecting a text model must not add Workshop or asset-library authority");
+    }
+
+    #[tokio::test]
+    async fn media_only_with_explicit_chat_route_supports_session_model_selection_and_switch() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let route_a = media_chat_route("text-a");
+        let mut route_b = media_chat_route("text-b");
+        route_b.primary.model_route_id = "0190f5fe-7c00-7a00-8000-000000000012".into();
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CreativeStudioDefault, false)
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route_a.clone(), route_b.clone()])));
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let mut document = image_only_document(&control);
+        document.model_route_refs.insert(CHAT_MODEL_TASK.into(), route_a.primary.model_route_id.as_ref().into());
+        document.chat_route_records.insert(CHAT_MODEL_TASK.into(), serde_json::to_value(&route_a).unwrap());
+        let created = control.create_with_initial_revision(
+            &owner, AgentPresetId::from(Uuid::now_v7().to_string()), "Image tool Agent".into(), None, document, None,
+        ).await.unwrap();
+        let source_revision = created.preset.current_stable_revision.clone();
+        let model_b = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: route_b.primary.provider_id.clone(), model: route_b.primary.model.clone(),
+        };
+        let selected = control.resolve_agent_session_binding_with_model(
+            &owner, &created.preset.preset_id, Some(&model_b),
+        ).await.unwrap();
+        let (_, selected_revision, selected_snapshot) = control.saved_binding_artifacts(&owner, &selected).await.unwrap();
+        assert_eq!(selected_revision.payload.chat_route_records[CHAT_MODEL_TASK], route_b);
+        assert_image_only_snapshot(&selected_snapshot);
+        assert!(selected.typed_resource_bindings.is_empty());
+        assert_eq!(control.resolve_agent_session_model_binding(&owner, &selected, &model_b).await.unwrap(), selected,
+            "selecting the same model is an exact no-op even for a media-only Agent");
+
+        let model_a = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: route_a.primary.provider_id.clone(), model: route_a.primary.model.clone(),
+        };
+        let switched = control.resolve_agent_session_model_binding(&owner, &selected, &model_a).await.unwrap();
+        assert_eq!(switched.binding_version, selected.binding_version + 1);
+        let (_, switched_revision, switched_snapshot) = control.saved_binding_artifacts(&owner, &switched).await.unwrap();
+        assert_eq!(switched_revision.payload.chat_route_records[CHAT_MODEL_TASK], route_a);
+        assert_image_only_snapshot(&switched_snapshot);
+        assert!(switched.typed_resource_bindings.is_empty());
+        let unchanged = control.editor(&owner, &created.preset.preset_id, None).await.unwrap();
+        assert_eq!(unchanged.preset.current_stable_revision, source_revision);
+        assert_eq!(unchanged.draft.document.chat_route_records[CHAT_MODEL_TASK], serde_json::to_value(route_a).unwrap());
+    }
+
+    #[tokio::test]
+    async fn route_optional_media_preset_gets_chat_only_in_the_explicit_new_session_binding() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let route = media_chat_route("text-model");
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CreativeStudioDefault, false)
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = control.create_with_initial_revision(
+            &owner, AgentPresetId::from(Uuid::now_v7().to_string()), "Image tool Agent".into(), None,
+            image_only_document(&control), None,
+        ).await.unwrap();
+        assert!(created.draft.document.chat_route_records.is_empty());
+        let model = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: route.primary.provider_id.clone(), model: route.primary.model.clone(),
+        };
+        let selected = control.resolve_agent_session_binding_with_model(
+            &owner, &created.preset.preset_id, Some(&model),
+        ).await.unwrap();
+        assert_ne!(selected.preset_revision_ref.preset_id, created.preset.preset_id);
+        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &selected).await.unwrap();
+        assert_eq!(revision.payload.chat_route_records[CHAT_MODEL_TASK], route);
+        assert_image_only_snapshot(&snapshot);
+        assert!(selected.typed_resource_bindings.is_empty());
+        let unchanged = control.editor(&owner, &created.preset.preset_id, None).await.unwrap();
+        assert_eq!(unchanged.preset.current_stable_revision, created.preset.current_stable_revision);
+        assert!(unchanged.draft.document.chat_route_records.is_empty());
+        assert!(unchanged.draft.document.model_route_refs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn historical_media_session_without_chat_still_rejects_a_model_switch() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let route = media_chat_route("text-model");
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CreativeStudioDefault, false)
+            .with_default_chat_route_resolver(Arc::new(MediaChatRoutes(vec![route.clone()])));
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = control.create_with_initial_revision(
+            &owner, AgentPresetId::from(Uuid::now_v7().to_string()), "Image tool Agent".into(), None,
+            image_only_document(&control), None,
+        ).await.unwrap();
+        let historical = control.resolve_agent_session_binding_with_model(&owner, &created.preset.preset_id, None).await.unwrap();
+        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &historical).await.unwrap();
+        assert!(revision.payload.chat_route_records.is_empty());
+        assert_image_only_snapshot(&snapshot);
+        let model = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: route.primary.provider_id, model: route.primary.model,
+        };
+        let error = control.resolve_agent_session_model_binding(&owner, &historical, &model).await.unwrap_err();
+        assert_eq!(error.code().as_ref(), "AGENT_SESSION_MODEL_NOT_SWITCHABLE");
+        assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1,
+            "rejecting an existing route-less Session must not create a model variant");
+        let (_, still_historical, _) = control.saved_binding_artifacts(&owner, &historical).await.unwrap();
+        assert_eq!(still_historical, revision);
     }
 
     #[tokio::test]
