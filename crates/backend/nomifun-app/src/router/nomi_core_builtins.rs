@@ -11,12 +11,9 @@ use std::sync::Arc;
 use nomifun_agent_contracts::{CapabilityId, CanonicalSchemaRef, ResolvedCapability, StrictJsonValue};
 use nomifun_agent_kernel::PluginRegistration;
 use nomifun_ai_agent::{
-    NomiPlatformBuiltinLifecycleInvocation,
-    NomiPlatformBuiltinLifecycleInvoker,
     NomiPlatformBuiltinToolSchemaResolver,
     NomiPlatformBuiltinToolSchemaRouter,
 };
-use nomifun_agent_domain_wave4::Wave4TurnMiddlewareHostPort;
 
 use crate::services::AppServices;
 
@@ -27,7 +24,6 @@ pub(crate) struct NomiCoreBuiltinPlan {
     pub context_capability_ids: BTreeSet<CapabilityId>,
     pub lifecycle_capability_ids: BTreeSet<CapabilityId>,
     pub schema_resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
-    pub lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker>,
     pub wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     pub wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
@@ -205,12 +201,6 @@ pub(crate) async fn build(
             ],
         );
     }
-    let lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker> =
-        Arc::new(NomiCoreLifecycleInvoker {
-            wave4: Arc::clone(&wave4),
-            customer_service: Arc::clone(&customer_service_owner),
-        });
-
     // Notification and Remote remain platform packages with zero Agent
     // capabilities. Installing their empty target manifests removes the old
     // EventConsumer/Transport authoring identities without deleting the real
@@ -297,7 +287,6 @@ pub(crate) async fn build(
         context_capability_ids,
         lifecycle_capability_ids,
         schema_resolver: Arc::new(schema_router),
-        lifecycle_invoker,
         wave4_owners: wave4,
         wave5_owner,
         wave2_owner,
@@ -374,83 +363,5 @@ impl NomiPlatformBuiltinToolSchemaResolver for NomiWave5SchemaResolver {
             capability.capability.id.as_ref(),
             reference,
         )
-    }
-}
-
-struct NomiCoreLifecycleInvoker {
-    wave4: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
-    customer_service:
-        Arc<nomifun_customer_service::CustomerServiceAgentCapabilityOwner>,
-}
-
-#[async_trait::async_trait]
-impl NomiPlatformBuiltinLifecycleInvoker for NomiCoreLifecycleInvoker {
-    async fn activate(
-        &self,
-        request: NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<StrictJsonValue, String> {
-        match request.capability.capability.id.as_ref() {
-            nomifun_agent_domain_wave4::CHANNEL_RECEIVE
-            | nomifun_agent_domain_wave4::CHANNEL_PAIRING
-            | nomifun_agent_domain_wave4::CHANNEL_GROUP_POLICY => {
-                self.wave4.activate(request).await
-            }
-            nomifun_agent_domain_wave4::CUSTOMER_SERVICE_DIALOGUE => {
-                let schema_ref = request.schema_ref.ok_or_else(|| {
-                    "customer.service/context.dialogue has no canonical middleware schema"
-                        .to_owned()
-                })?;
-                self.customer_service
-                    .apply(
-                        nomifun_agent_domain_wave4::Wave4TurnMiddlewareHostRequest {
-                            principal: request.principal,
-                            agent_session_id: request.agent_session_id,
-                            operation_id: request.operation_id,
-                            correlation_id: request.correlation_id,
-                            resolved_snapshot_ref: request.resolved_snapshot_ref,
-                            registry_generation: request.registry_generation,
-                            registry_digest: request.registry_digest,
-                            capability_id: request.capability.capability.id,
-                            state_scope_key: request.state_scope_key,
-                            resource_bindings: request.resource_bindings,
-                            schema_ref,
-                            turn_input: request.turn_input,
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())
-            }
-            "workspace.files" => Ok(StrictJsonValue(
-                serde_json::json!({
-                    "capability_id": "workspace.files",
-                    "state": "active"
-                }),
-            )),
-            other => Err(format!(
-                "no Nomi lifecycle owner is admitted for {other}"
-            )),
-        }
-    }
-
-    async fn context_contributor(
-        &self,
-        request: NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<Option<Arc<dyn nomifun_ai_agent::ContextContributor>>, String> {
-        if request.capability.capability.id.as_ref() != "workspace.files" {
-            return Ok(None);
-        }
-        let workspace = request
-            .resource_bindings
-            .iter()
-            .find(|binding| binding.resource_kind.as_ref() == "workspace")
-            .and_then(|binding| binding.typed_parameters.get("workspace_root"))
-            .ok_or_else(|| {
-                "workspace.files watch context has no server-resolved workspace root".to_owned()
-            })?;
-        super::nomi_core_wave2::NomiWorkspaceWatchContext::start(workspace)
-            .map(|contributor| {
-                Some(contributor as Arc<dyn nomifun_ai_agent::ContextContributor>)
-            })
-            .map_err(|error| error.to_string())
     }
 }

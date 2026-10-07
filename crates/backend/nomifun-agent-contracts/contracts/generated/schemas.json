@@ -277,7 +277,7 @@
           },
           "skill_bindings": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/AgentSkillBinding"
             },
             "type": "array"
           },
@@ -328,6 +328,34 @@
           }
         },
         "type": "object"
+      },
+      "AgentSkillBinding": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ExactVersionRef"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/LibrarySkillKind"
+              },
+              "selected": {
+                "default": false,
+                "type": "boolean"
+              },
+              "skill": {
+                "$ref": "#/$defs/FrozenLibrarySkill"
+              }
+            },
+            "required": [
+              "kind",
+              "skill"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "An exact package selection or host-captured current library content.\nLibrary data grants no executable capabilities and never impersonates a package."
       },
       "CapabilityRef": {
         "additionalProperties": false,
@@ -577,6 +605,123 @@
           "version"
         ],
         "type": "object"
+      },
+      "FrozenLibrarySkill": {
+        "additionalProperties": false,
+        "description": "Immutable data in the canonical Revision/Snapshot, never a mutable path.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "body_digest": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "resources": {
+            "additionalProperties": {
+              "$ref": "#/$defs/FrozenSkillResource"
+            },
+            "type": "object"
+          },
+          "source": {
+            "$ref": "#/$defs/LibrarySkillSource"
+          },
+          "source_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "source",
+          "body",
+          "body_digest",
+          "resources",
+          "source_digest"
+        ],
+        "type": "object"
+      },
+      "FrozenSkillContent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data_base64": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "image",
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "media_type",
+              "data_base64"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FrozenSkillResource": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$ref": "#/$defs/FrozenSkillContent"
+          },
+          "digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "content"
+        ],
+        "type": "object"
+      },
+      "LibrarySkillKind": {
+        "enum": [
+          "library"
+        ],
+        "type": "string"
+      },
+      "LibrarySkillSource": {
+        "enum": [
+          "custom",
+          "builtin",
+          "builtin_auto",
+          "cron"
+        ],
+        "type": "string"
       },
       "PresetRevisionRef": {
         "additionalProperties": false,
@@ -835,7 +980,7 @@
           },
           "skill_bindings": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/AgentSkillBinding"
             },
             "type": "array"
           },
@@ -886,6 +1031,34 @@
           }
         },
         "type": "object"
+      },
+      "AgentSkillBinding": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ExactVersionRef"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/LibrarySkillKind"
+              },
+              "selected": {
+                "default": false,
+                "type": "boolean"
+              },
+              "skill": {
+                "$ref": "#/$defs/FrozenLibrarySkill"
+              }
+            },
+            "required": [
+              "kind",
+              "skill"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "An exact package selection or host-captured current library content.\nLibrary data grants no executable capabilities and never impersonates a package."
       },
       "CapabilityRef": {
         "additionalProperties": false,
@@ -1136,6 +1309,123 @@
         ],
         "type": "object"
       },
+      "FrozenLibrarySkill": {
+        "additionalProperties": false,
+        "description": "Immutable data in the canonical Revision/Snapshot, never a mutable path.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "body_digest": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "resources": {
+            "additionalProperties": {
+              "$ref": "#/$defs/FrozenSkillResource"
+            },
+            "type": "object"
+          },
+          "source": {
+            "$ref": "#/$defs/LibrarySkillSource"
+          },
+          "source_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "source",
+          "body",
+          "body_digest",
+          "resources",
+          "source_digest"
+        ],
+        "type": "object"
+      },
+      "FrozenSkillContent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data_base64": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "image",
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "media_type",
+              "data_base64"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FrozenSkillResource": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$ref": "#/$defs/FrozenSkillContent"
+          },
+          "digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "content"
+        ],
+        "type": "object"
+      },
+      "LibrarySkillKind": {
+        "enum": [
+          "library"
+        ],
+        "type": "string"
+      },
+      "LibrarySkillSource": {
+        "enum": [
+          "custom",
+          "builtin",
+          "builtin_auto",
+          "cron"
+        ],
+        "type": "string"
+      },
       "RoleContractKey": {
         "additionalProperties": false,
         "properties": {
@@ -1325,6 +1615,34 @@
           }
         },
         "type": "object"
+      },
+      "AgentSkillBinding": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ExactVersionRef"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/LibrarySkillKind"
+              },
+              "selected": {
+                "default": false,
+                "type": "boolean"
+              },
+              "skill": {
+                "$ref": "#/$defs/FrozenLibrarySkill"
+              }
+            },
+            "required": [
+              "kind",
+              "skill"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "An exact package selection or host-captured current library content.\nLibrary data grants no executable capabilities and never impersonates a package."
       },
       "CapabilityRef": {
         "additionalProperties": false,
@@ -1531,6 +1849,123 @@
         ],
         "type": "object"
       },
+      "FrozenLibrarySkill": {
+        "additionalProperties": false,
+        "description": "Immutable data in the canonical Revision/Snapshot, never a mutable path.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "body_digest": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "resources": {
+            "additionalProperties": {
+              "$ref": "#/$defs/FrozenSkillResource"
+            },
+            "type": "object"
+          },
+          "source": {
+            "$ref": "#/$defs/LibrarySkillSource"
+          },
+          "source_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "source",
+          "body",
+          "body_digest",
+          "resources",
+          "source_digest"
+        ],
+        "type": "object"
+      },
+      "FrozenSkillContent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data_base64": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "image",
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "media_type",
+              "data_base64"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FrozenSkillResource": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$ref": "#/$defs/FrozenSkillContent"
+          },
+          "digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "content"
+        ],
+        "type": "object"
+      },
+      "LibrarySkillKind": {
+        "enum": [
+          "library"
+        ],
+        "type": "string"
+      },
+      "LibrarySkillSource": {
+        "enum": [
+          "custom",
+          "builtin",
+          "builtin_auto",
+          "cron"
+        ],
+        "type": "string"
+      },
       "RoleContractKey": {
         "additionalProperties": false,
         "properties": {
@@ -1615,7 +2050,7 @@
       },
       "skill_bindings": {
         "items": {
-          "$ref": "#/$defs/ExactVersionRef"
+          "$ref": "#/$defs/AgentSkillBinding"
         },
         "type": "array"
       },
@@ -2187,6 +2622,123 @@
         ],
         "type": "object"
       },
+      "FrozenLibrarySkill": {
+        "additionalProperties": false,
+        "description": "Immutable data in the canonical Revision/Snapshot, never a mutable path.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "body_digest": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "resources": {
+            "additionalProperties": {
+              "$ref": "#/$defs/FrozenSkillResource"
+            },
+            "type": "object"
+          },
+          "source": {
+            "$ref": "#/$defs/LibrarySkillSource"
+          },
+          "source_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "source",
+          "body",
+          "body_digest",
+          "resources",
+          "source_digest"
+        ],
+        "type": "object"
+      },
+      "FrozenSkillContent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data_base64": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "image",
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "media_type",
+              "data_base64"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FrozenSkillResource": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$ref": "#/$defs/FrozenSkillContent"
+          },
+          "digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "content"
+        ],
+        "type": "object"
+      },
+      "LibrarySkillKind": {
+        "enum": [
+          "library"
+        ],
+        "type": "string"
+      },
+      "LibrarySkillSource": {
+        "enum": [
+          "custom",
+          "builtin",
+          "builtin_auto",
+          "cron"
+        ],
+        "type": "string"
+      },
       "PluginSourceKind": {
         "enum": [
           "bundled",
@@ -2384,31 +2936,7 @@
         ],
         "type": "object"
       },
-      "ResolvedRoleProviderLock": {
-        "additionalProperties": false,
-        "properties": {
-          "provider": {
-            "$ref": "#/$defs/ExactRoleProviderRef"
-          },
-          "source": {
-            "$ref": "#/$defs/PluginSourceMetadata"
-          },
-          "supported_members": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          }
-        },
-        "required": [
-          "provider",
-          "source",
-          "supported_members"
-        ],
-        "type": "object"
-      },
-      "ResolvedSkillLock": {
+      "ResolvedPackageSkillLock": {
         "additionalProperties": false,
         "properties": {
           "body_digest": {
@@ -2447,6 +2975,57 @@
           "target_artifact_digest"
         ],
         "type": "object"
+      },
+      "ResolvedRoleProviderLock": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "$ref": "#/$defs/ExactRoleProviderRef"
+          },
+          "source": {
+            "$ref": "#/$defs/PluginSourceMetadata"
+          },
+          "supported_members": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "provider",
+          "source",
+          "supported_members"
+        ],
+        "type": "object"
+      },
+      "ResolvedSkillLock": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ResolvedPackageSkillLock"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/LibrarySkillKind"
+              },
+              "selected": {
+                "default": false,
+                "type": "boolean"
+              },
+              "skill": {
+                "$ref": "#/$defs/FrozenLibrarySkill"
+              }
+            },
+            "required": [
+              "kind",
+              "skill"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ResolvedSnapshotContent": {
         "additionalProperties": false,
@@ -3241,6 +3820,222 @@
       "contract_digest"
     ],
     "title": "ContributionLock",
+    "type": "object"
+  },
+  "idmm_decision_explanation": {
+    "$defs": {
+      "IdmmDecisionModel": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "type": "object"
+      },
+      "IdmmDecisionSource": {
+        "enum": [
+          "rule",
+          "bypass_model",
+          "recovery"
+        ],
+        "type": "string"
+      },
+      "IdmmQuestionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "sequence",
+          "fingerprint"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "intervention_id": {
+        "type": "string"
+      },
+      "model": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IdmmDecisionModel"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "question": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IdmmQuestionRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "rationale": {
+        "type": "string"
+      },
+      "reason_code": {
+        "type": "string"
+      },
+      "source": {
+        "$ref": "#/$defs/IdmmDecisionSource"
+      }
+    },
+    "required": [
+      "intervention_id",
+      "source",
+      "reason_code",
+      "rationale"
+    ],
+    "title": "IdmmDecisionExplanation",
+    "type": "object"
+  },
+  "idmm_decision_notice": {
+    "$defs": {
+      "IdmmDecisionExplanation": {
+        "additionalProperties": false,
+        "properties": {
+          "intervention_id": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IdmmDecisionModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "question": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IdmmQuestionRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/IdmmDecisionSource"
+          }
+        },
+        "required": [
+          "intervention_id",
+          "source",
+          "reason_code",
+          "rationale"
+        ],
+        "type": "object"
+      },
+      "IdmmDecisionModel": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "type": "object"
+      },
+      "IdmmDecisionNoticeStatus": {
+        "enum": [
+          "waiting_for_human",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "IdmmDecisionSource": {
+        "enum": [
+          "rule",
+          "bypass_model",
+          "recovery"
+        ],
+        "type": "string"
+      },
+      "IdmmQuestionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "sequence",
+          "fingerprint"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "created_at": {
+        "format": "int64",
+        "type": "integer"
+      },
+      "decision": {
+        "$ref": "#/$defs/IdmmDecisionExplanation"
+      },
+      "status": {
+        "$ref": "#/$defs/IdmmDecisionNoticeStatus"
+      }
+    },
+    "required": [
+      "decision",
+      "status",
+      "created_at"
+    ],
+    "title": "IdmmDecisionNotice",
     "type": "object"
   },
   "official_preset_seed": {

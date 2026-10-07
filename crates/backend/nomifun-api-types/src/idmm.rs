@@ -7,6 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use nomifun_agent_contracts::{
+    IdmmDecisionExplanation, IdmmDecisionModel, IdmmDecisionNotice, IdmmDecisionNoticeStatus,
+    IdmmDecisionSource, IdmmQuestionRef,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IdmmMode {

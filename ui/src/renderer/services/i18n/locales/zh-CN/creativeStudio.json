@@ -1,6 +1,6 @@
 {
-  "title": "创意工坊",
-  "siderTitle": "创意工坊",
+  "title": "$t(agentSettings.template.creativeStudio.default.name)",
+  "siderTitle": "$t(agentSettings.template.creativeStudio.default.name)",
   "workbenchSider": {
     "collapse": "收起生成设置",
     "expand": "展开生成设置",
@@ -13,7 +13,7 @@
     "backToWorkbench": "返回工作台"
   },
   "navigation": {
-    "label": "创意工坊",
+    "label": "$t(agentSettings.template.creativeStudio.default.name)",
     "canvases": "我的画布",
     "image": "生图工作台",
     "video": "视频创作台",
@@ -75,7 +75,7 @@
     "selectConversationModel": "选择对话模型",
     "selectModel": "选择模型",
     "send": "发送给 Agent",
-    "skillSelectionRequired": "请明确选择 1–3 个 Creative Studio 创作技能。",
+    "skillSelectionRequired": "请明确选择 1–3 个创作技能。",
     "skills": {
       "canvas": {
         "description": "理解当前选择并提出安全的文本与结构操作。",
@@ -483,7 +483,7 @@
       "fitContain": "完整显示",
       "fitCover": "填满裁切",
       "fitMode": "适配方式",
-      "label": "创意工坊无限画布",
+      "label": "$t(agentSettings.template.creativeStudio.default.name)无限画布",
       "loadFailed": "画布载入失败",
       "loading": "正在载入画布…",
       "loopPlayback": "循环播放",
@@ -1675,7 +1675,7 @@
       "generic": "模板操作失败，请重试。"
     },
     "agent": {
-      "agentName": "创意工坊 Agent",
+      "agentName": "$t(agentSettings.template.creativeStudio.default.name)",
       "appliedHint": "应用后仍需在编辑器中手动检查并保存。",
       "apply": "应用到编辑器",
       "cancel": "取消",

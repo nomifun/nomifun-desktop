@@ -14,10 +14,9 @@ const typeSource = readFileSync(
 );
 
 describe('agent metadata wire ID contract', () => {
-  test('routes slash discovery only through canonical AgentSession authority', () => {
-    expect(bridgeSource.includes('/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/slash-commands')).toBe(true);
-    expect(bridgeSource.includes('/api/conversations/${p.conversation_id}/slash-commands')).toBe(false);
-    expect(bridgeSource.includes('/api/agent-sessions/${p.conversation_id}/slash-commands')).toBe(true);
+  test('removes retired Skill command discovery while retaining system side questions', () => {
+    expect(bridgeSource.includes('/slash-commands')).toBe(false);
+    expect(bridgeSource.includes('/side-question')).toBe(true);
   });
 
   test('uses agent_id without a generic id compatibility path', () => {

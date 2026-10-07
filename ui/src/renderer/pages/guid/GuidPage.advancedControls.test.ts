@@ -27,8 +27,8 @@ describe('GuidPage advanced controls', () => {
     expect(send.includes("launch('browser')")).toBe(false);
     expect(send.includes('initial-browser-open')).toBe(false);
     expect(send.includes("'message' | 'browser'")).toBe(false);
-    expect(source.includes('<SessionCapabilityPicker')).toBe(false);
-    expect(source.includes('useSessionCapabilityCatalog')).toBe(false);
+    expect(source.includes('<SessionCapabilityPicker')).toBe(true);
+    expect(source.includes('useSessionCapabilityCatalog')).toBe(true);
     expect(send.includes('capability_selection')).toBe(false);
   });
 
@@ -48,7 +48,7 @@ describe('GuidPage advanced controls', () => {
 
     expect(source.includes("presetCapabilityIds.has('agent.collaboration')")).toBe(true);
     expect(source.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
-    expect(source.includes('collaborationEnabled && <ComposerToolRail')).toBe(true);
+    expect(source.includes('{collaborationEnabled &&')).toBe(true);
     expect(source.includes('disabled={advancedConfig.autoWork.enabled}')).toBe(true);
   });
 
@@ -62,7 +62,7 @@ describe('GuidPage advanced controls', () => {
     expect(page.includes('Boolean(guidInput.dir.trim()) ||')).toBe(true);
     expect(page.includes("presetResourceKinds.has('workspace')")).toBe(true);
     expect(page.includes("presetResourceKinds.has('knowledge_base')")).toBe(true);
-    expect(page.includes("filter((kind) => kind !== 'knowledge_base')")).toBe(true);
+    expect(page.includes("kind !== 'knowledge_base' && kind !== 'mcp_server'")).toBe(true);
     expect(
       page.includes('requiredKinds={resourcePickerKinds}')
     ).toBe(true);

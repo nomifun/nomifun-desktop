@@ -1207,6 +1207,7 @@ mod media_tests {
         // Two completed tool calls returning the SAME asset id → must dedupe to one send.
         for _ in 0..2 {
             tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+                identity: Default::default(),
                 call_id: "t".into(),
                 name: "nomi_creative_studio_get_task".into(),
                 args: serde_json::Value::Null,
@@ -1248,6 +1249,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "missing-workshop-asset".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1304,6 +1306,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "workshop-upload-fallback-ok".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1363,6 +1366,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "workshop-delivery-failed".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1414,6 +1418,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "workshop-no-resolver".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,
@@ -1486,6 +1491,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-1".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1543,6 +1549,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "artifact-fallback-ok".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1604,6 +1611,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "artifact-delivery-failed".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1661,6 +1669,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-1".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1730,6 +1739,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-failed".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1783,6 +1793,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "tool-partial".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1829,6 +1840,7 @@ mod media_tests {
         };
         let event = |status, artifacts| {
             AgentStreamEvent::ToolCall(ToolCallEventData {
+                identity: Default::default(),
                 call_id: "same-call".into(),
                 name: "mcp__reports__export".into(),
                 args: serde_json::Value::Null,
@@ -1880,6 +1892,7 @@ mod media_tests {
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "orphan-call".into(),
             name: "mcp__reports__export".into(),
             args: serde_json::Value::Null,
@@ -1928,6 +1941,7 @@ mod media_tests {
         }))
         .unwrap();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "failed-after-text".into(),
             name: "ImageGeneration".into(),
             args: serde_json::Value::Null,
@@ -2042,6 +2056,7 @@ mod media_tests {
 
         let (tx, rx) = tokio::sync::broadcast::channel(16);
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "t".into(),
             name: "nomi_creative_studio_get_task".into(),
             args: serde_json::Value::Null,

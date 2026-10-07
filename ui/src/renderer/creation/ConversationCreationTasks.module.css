@@ -4,6 +4,15 @@
 .header strong { align-self: center; font-size: 13px; }
 .headerActions { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
 .meta { margin-top: 2px; max-width: 240px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pending { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; width: 320px; max-width: 100%; min-height: 128px; box-sizing: border-box; margin-top: 8px; padding: 20px 16px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--bg-1); text-align: center; }
+.imagePending { width: 240px; aspect-ratio: 1; }
+.videoPending { aspect-ratio: 16 / 9; }
+.pendingIcon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 52px; height: 52px; border-radius: 50%; color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, var(--bg-2)); }
+.pendingLabel { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.pendingHint { max-width: 240px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.spin { display: inline-flex; animation: creation-task-spin 1.2s linear infinite; }
+@keyframes creation-task-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 .results { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .results:empty { display: none; }
 .result { min-width: 0; max-width: 100%; flex: 0 1 360px; }

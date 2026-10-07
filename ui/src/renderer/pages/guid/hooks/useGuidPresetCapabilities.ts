@@ -18,7 +18,6 @@ export type GuidPresetCapabilityState = {
   capabilityIds: ReadonlySet<string>;
   actionIds: ReadonlySet<string>;
   requiredResourceKinds: ReadonlySet<string>;
-  skillNames: ReadonlySet<string>;
   idmm: IIdmmConfig;
   isLoading: boolean;
   error: Error | undefined;
@@ -28,7 +27,6 @@ const emptyState = (): GuidPresetCapabilityState => ({
   capabilityIds: new Set<string>(),
   actionIds: new Set<string>(),
   requiredResourceKinds: new Set<string>(),
-  skillNames: new Set<string>(),
   idmm: createDefaultIdmmConfig(),
   isLoading: false,
   error: undefined,
@@ -50,7 +48,7 @@ export const requiredResourceKindsForDocument = (
     catalog
   );
 
-/** Load the stable capability, resource, and Skill defaults used by Guid. */
+/** Load the stable capability and resource defaults used by Guid. */
 export const useGuidPresetCapabilities = (
   presetId: AgentPresetId | undefined
 ): GuidPresetCapabilityState => {
@@ -67,7 +65,6 @@ export const useGuidPresetCapabilities = (
       capabilityIds: new Set<string>(),
       actionIds: new Set<string>(),
       requiredResourceKinds: new Set<string>(),
-      skillNames: new Set<string>(),
       idmm: createDefaultIdmmConfig(),
       isLoading: true,
       error: undefined,
@@ -82,10 +79,7 @@ export const useGuidPresetCapabilities = (
         // stable Revision over a transient editor draft whenever available.
         const document = editor.revision?.document ?? editor.draft.document;
         const capabilityIds = new Set(
-          [
-            ...document.enabled_capabilities,
-
-          ].map((selection) => selection.capability.id)
+          document.enabled_capabilities.map((selection) => selection.capability.id)
         );
         const actionIds = new Set(
           document.enabled_capabilities.flatMap(
@@ -96,7 +90,6 @@ export const useGuidPresetCapabilities = (
           capabilityIds,
           actionIds,
           requiredResourceKinds: requiredResourceKindsForDocument(document, catalog),
-          skillNames: new Set(document.skill_bindings.map((skill) => skill.id)),
           idmm: structuredClone(
             document.runtime_policy?.idmm ?? createDefaultIdmmConfig()
           ),
@@ -113,7 +106,6 @@ export const useGuidPresetCapabilities = (
           capabilityIds: new Set<string>(),
           actionIds: new Set<string>(),
           requiredResourceKinds: new Set<string>(),
-          skillNames: new Set<string>(),
           idmm: createDefaultIdmmConfig(),
           isLoading: false,
           error: normalizedError,

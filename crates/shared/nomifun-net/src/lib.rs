@@ -1,5 +1,6 @@
 pub mod api_response;
 pub mod provider_capability;
+pub mod provider_gateway_error;
 pub mod egress;
 pub mod proxy;
 pub mod secret_redaction;

@@ -1,9 +1,10 @@
 import type { ConversationId, MessageId, ProviderId } from '@/common/types/ids';
 import type { AgentPresetId } from '@/common/types/agentPlatform';
-import type { GuidAgentSelectionPreference } from '@/common/config/configKeys';
 
 export type CreationMode = 'image' | 'video' | 'music';
 export type CreationCapability = 't2i' | 'i2i' | 'inpaint' | 't2v' | 'i2v' | 'music' | 'tts';
+/** Agent tools also create text; the direct composer only submits media. */
+export type CreationTaskCapability = CreationCapability | 'text';
 export type CreationInput = { asset_id: string; kind: 'image' | 'video' | 'audio' | 'text'; role: 'reference' | 'mask' | 'first_frame' | 'last_frame' | 'video' | 'audio' };
 export type CreationParameters = Record<string, string | number | boolean | null>;
 interface CreationReference extends CreationInput { title: string; url?: string }
@@ -16,9 +17,6 @@ export interface CreationDraft {
   references: CreationReference[];
   pendingPrompt?: string;
   pendingFiles?: string[];
-  selectedAgent?: GuidAgentSelectionPreference;
-  presetId?: AgentPresetId;
-  agentLabel?: string;
 }
 export interface SubmitCreationRequest {
   provider_id: ProviderId;
@@ -34,7 +32,7 @@ export interface ConversationCreationTask {
   owner: { kind: 'conversation_turn'; conversation_id: ConversationId; message_id: MessageId };
   provider_id: ProviderId;
   model: string;
-  capability: CreationCapability;
+  capability: CreationTaskCapability;
   params: CreationParameters;
   inputs: CreationInput[] | null;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
@@ -46,8 +44,8 @@ export interface ConversationCreationTask {
 }
 export interface CreationReceipt { message_id: MessageId; tasks: ConversationCreationTask[] }
 
-export const creationModeFor = (capability: CreationCapability): CreationMode | null =>
-  capability === 'tts' ? null : capability === 'music' ? 'music' : capability === 't2v' || capability === 'i2v' ? 'video' : 'image';
+export const creationModeFor = (capability: CreationTaskCapability): CreationMode | null =>
+  capability === 'text' || capability === 'tts' ? null : capability === 'music' ? 'music' : capability === 't2v' || capability === 'i2v' ? 'video' : 'image';
 
 export const inputsForMode = (mode: CreationMode, references: readonly CreationInput[]): CreationInput[] =>
   mode === 'music' ? [] : references.filter(ref => ref.kind === 'image' && (mode !== 'video' || ref.role !== 'mask')).map(({ asset_id, kind, role }) => ({

@@ -129,7 +129,6 @@ mod tests {
             extra: serde_json::json!({}),
             conversation_created_at: None,
             workspace_binding_lease: None,
-            device_mcp_servers: Vec::new(),
         }
     }
 

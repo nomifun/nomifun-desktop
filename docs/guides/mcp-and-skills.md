@@ -95,17 +95,29 @@ list back to selected agent configs when an adapter supports writing.
 This sync is config management only. A conversation still decides which MCP
 servers are visible for that session.
 
-## Per-Conversation Selection
+## Global capabilities and Session selection
 
-Enabling an MCP server globally makes it available. It does not inject it into
-every agent automatically. Conversation/session setup builds the final MCP list
-from:
+Every Agent preset can use the same installed Skill Library and global MCP catalog. The Workbench has
+no Skill, MCP, or tool-search master switch. The two icons beside the composer select what this Session
+uses, without editing the Agent preset or global installation state.
 
-- globally enabled servers;
-- the servers selected for that conversation;
-- built-in bridge servers required by the active capability set.
+New Sessions select auto-injected Skills and enabled MCP servers with successful discovery and a
+nonempty tool catalog by default. Users can deselect defaults and choose other installed Skills or ready
+servers. Global Skill bodies and supporting text/images are captured as immutable reference data.
+Selected instructions accompany accepted input; long bodies and supporting resources use the native
+context reader. Skill scripts, hooks, and tool declarations grant no additional permissions.
 
-The resulting list is passed to the agent session start payload.
+Creation accepts top-level `session_capabilities` with `skill_names` and `mcp_server_ids`. Omission uses
+global defaults; explicit empty arrays select none. Existing Sessions use
+`GET` / `PUT /api/agent-sessions/{id}/capability-selection` with `expected_binding_version`.
+Sending waits for selection admission; failures preserve input and selection for an explicit retry.
+
+Selections compile into the existing immutable Revision/Snapshot and apply through canonical binding
+transitions. Running or paused Turns, unsettled effects, Remote bindings, and read-only Attempts cannot
+change selection. Agent switches retain selection; workspace and other resources remain intact.
+Accepted input and native checkpoints are not rewritten. An unchanged connection test or metadata
+update keeps the same MCP connection identity; actual configuration, credential, or schema changes
+require reapplying selection.
 
 ## MCP API
 
@@ -132,10 +144,9 @@ Sources:
 | --- | --- |
 | Builtin | Shipped with the app. Some are auto-injected. |
 | Custom | Imported by the user or placed in a configured skill directory. |
-| Extension | Provided by an installed extension. |
 
-Skills can be tagged, imported, exported/symlinked, scanned from external paths,
-or materialized for a specific agent backend.
+Skills can be tagged, imported, exported/symlinked, and scanned from external paths.
+Custom and bundled Skills use the same Session capture and native context reader.
 
 ## Skill API
 
@@ -147,8 +158,6 @@ or materialized for a specific agent backend.
 | Info / paths | `POST /api/skills/info`, `GET /api/skills/paths` |
 | Import / export / delete | `POST /api/skills/import`, `POST /api/skills/import-symlink`, `POST /api/skills/export-symlink`, `DELETE /api/skills/{name}` |
 | Scan / detect paths | `POST /api/skills/scan`, `GET /api/skills/detect-paths`, `GET /api/skills/detect-external` |
-| Materialize for agent | `POST /api/skills/materialize-for-agent` |
-| Preset instructions | `/api/skills/preset-rule/*` |
 | External paths | `GET`, `POST`, `DELETE /api/skills/external-paths` |
 | Skills market | `POST /api/skills/market/enable`, `POST /api/skills/market/disable` |
 

@@ -10,14 +10,16 @@ import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentL
 import { resolveAgentResourceSelections } from '@/renderer/hooks/agent/agentResourceSelection';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { emitter } from '@/renderer/utils/emitter';
-import { useCreationDraft, creationDraftStorageKey } from './useCreationDraft';
+import { useCreationDraft, writeCreationDraft } from './useCreationDraft';
 import { useGenerationModel } from './useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from './submission';
 import { submitCreation } from './client';
 import type { CreationMode } from './types';
 import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
+import { useTranslation } from 'react-i18next';
 
 export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>, input: string, files: string[], workspace: string, onAccepted?: () => void, sessionCollaboration?: { config?: GuidCollaborationConfig; model?: TProviderWithModel; ready: boolean }) {
+  const { t } = useTranslation();
   // Generation admission is fully frozen by the Creative Studio Agent and its
   // asset-library resource. Workspace/collaboration drafts belong to chat
   // Sessions and must never mutate this immutable Session after creation.
@@ -63,10 +65,10 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
     setLoading(true);
     try {
       const template = agent.officialTemplates.find(value => value.template_key === 'creative-studio.default');
-      if (!template) throw new Error('创意工坊 Agent 尚未加载，请重试');
+      if (!template) throw new Error(t('creation.agentUnavailable'));
       const resources = resolveAgentResourceSelections(template.seed.required_resource_kinds, {});
-      if (resources.missingKinds.length) throw new Error('创意工坊所需资源尚未就绪，请刷新后重试');
-      const preset = await prepareOfficialAgent(template, '创意工坊');
+      if (resources.missingKinds.length) throw new Error(t('creation.resourcesUnavailable'));
+      const preset = await prepareOfficialAgent(template);
       const request = buildCreationRequest(creation.draft, input, preset.preset_id, files, model.selected);
       const pendingSessionKey = agentBrowserStorageGenerationKey('creation-guid-pending-session');
       if (!pendingSession.current) {
@@ -83,7 +85,7 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       await submitCreation(id, request, key);
       acknowledgeCreationAttempt(id, key);
       try {
-        sessionStorage.setItem(creationDraftStorageKey(id), JSON.stringify({ ...creation.draft, references: creation.draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)), pendingFiles: files.filter(file => !request.files?.includes(file)), selectedAgent: { kind: 'template', templateKey: 'creative-studio.default' }, presetId: preset.preset_id, agentLabel: '创意工坊' }));
+        writeCreationDraft(id, { ...creation.draft, references: creation.draft.references.filter(ref => !request.inputs.some(input => input.asset_id === ref.asset_id)), pendingFiles: files.filter(file => !request.files?.includes(file)) });
         sessionStorage.removeItem(pendingSessionKey);
       } catch { /* An accepted task still opens its canonical conversation. */ }
       pendingSession.current = null;
@@ -95,6 +97,6 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       await navigate(`/conversation/${id}`);
     } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { sending.current = false; setLoading(false); }
-  }, [agent.officialTemplates, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted]);
+  }, [agent.officialTemplates, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted, t]);
   return { ...creation, selectMode, exit, send, loading, ready: model.ready };
 }

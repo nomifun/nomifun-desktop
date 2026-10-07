@@ -23,6 +23,7 @@ describe('CompanionConversation structure', () => {
 
     expect(conversation.includes('<CompanionAgentIndicator')).toBe(true);
     expect(conversation.includes('creationEnabled={false}')).toBe(true);
+    expect(conversation.includes("creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}")).toBe(true);
     expect(conversation.includes('ProductAgentBindingSelect')).toBe(false);
     expect(models.includes('<CompanionAgentIndicator')).toBe(true);
     expect(models.includes('ProductAgentBindingSelect')).toBe(false);

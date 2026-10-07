@@ -49,7 +49,7 @@ pub use session_ops::{
 };
 pub use agent_build_extra::{
     NomiBuildExtra, NomiGoalSpec, NomiMcpCapabilityPolicy, NomiRuntimeProfile,
-    SessionMcpServer, SessionMcpTransport, SlashCommandItem,
+    SlashCommandItem,
 };
 pub use agent_discovery::{
     AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,
@@ -120,6 +120,8 @@ pub use file::{
     WorkspaceOfficeWatchRequest, WriteFileRequest, ZipFileEntry, ZipRequest,
 };
 pub use idmm::{
+    IdmmDecisionExplanation, IdmmDecisionModel, IdmmDecisionNotice, IdmmDecisionNoticeStatus,
+    IdmmDecisionSource, IdmmQuestionRef,
     IdmmBypassModelRef, IdmmConfig, IdmmIntervention, IdmmInterventionKind,
     IdmmInterventionStatus, IdmmMode, IdmmRunState, IdmmScanScope, IdmmState,
 };
@@ -182,6 +184,8 @@ pub use provider::{
     ProbeProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
     ProviderHealthCheckResponse, ProviderReachability, ProviderResponse, UpdateProviderRequest,
 };
+pub mod model_gateway;
+pub use model_gateway::*;
 pub use provider_connection::{
     ProviderConnectionInput, ProviderConnectionResponse, SaveProviderConnectionRequest,
 };
@@ -205,8 +209,8 @@ pub use shell::{
 };
 pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, ExportSkillRequest,
-    ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest,
-    MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadBuiltinResourceRequest,
+    ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse,
+    NamedPathResponse, ReadBuiltinResourceRequest,
     ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse, SetSkillTagsRequest,
     SkillListItemResponse, SkillMarketItemResponse, SkillMarketMcpConfigRequest,

@@ -5,7 +5,7 @@
  */
 import type { ConversationId, CronJobId, MessageId } from '@/common/types/ids';
 
-import type { IConversationMcpStatus } from '@/common/config/storage';
+import type { TProviderWithModel } from '@/common/config/storage';
 import React, { createContext, useContext } from 'react';
 
 /**
@@ -68,20 +68,10 @@ export interface ConversationContextValue {
    */
   stopNotice?: { stoppedAt: number } | null;
 
-  /**
-   * Loaded skill names for this conversation (snapshot from conversation.extra.skills).
-   * Surfaced inside the SendBox `+` menu so users can review/jump to active skills.
-   */
-  loadedSkills?: string[];
-
-  /**
-   * Structured MCP status snapshot for this conversation (from
-   * conversation.extra.mcp_statuses).
-   */
-  loadedMcpStatuses?: IConversationMcpStatus[];
-
   /** Current binding identity for presentation of a durable Agent transition. */
   currentAgent?: { presetId: string; label: string };
+  /** Current renderer selection used only for account actions; never persisted as a Session fact. */
+  currentModel?: Pick<TProviderWithModel, 'id' | 'platform' | 'use_model'>;
 }
 
 /**

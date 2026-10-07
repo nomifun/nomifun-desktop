@@ -589,8 +589,8 @@ fn skill_artifact_drift_recompiles_clean_save_even_when_body_and_contract_are_un
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     assert_eq!(result.candidate_revision_ref.revision, saved.0.reference.revision + 1);
     let snapshot = result.snapshot.unwrap();
-    assert_eq!(snapshot.content.skill_locks[0].body_digest, saved.1.content.skill_locks[0].body_digest);
-    assert_ne!(snapshot.content.skill_locks[0].target_artifact_digest, saved.1.content.skill_locks[0].target_artifact_digest);
+    assert_eq!(snapshot.content.skill_locks[0].package_lock().unwrap().body_digest, saved.1.content.skill_locks[0].package_lock().unwrap().body_digest);
+    assert_ne!(snapshot.content.skill_locks[0].package_lock().unwrap().target_artifact_digest, saved.1.content.skill_locks[0].package_lock().unwrap().target_artifact_digest);
     fixture.registry.skills.clear();
     fixture.catalog.skills.clear();
     let withdrawn = fixture.compile(Some(&saved));

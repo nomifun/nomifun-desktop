@@ -1,4 +1,6 @@
 {
+  "agentUnavailable": "$t(agentSettings.template.creativeStudio.default.name) Agent has not loaded. Try again.",
+  "resourcesUnavailable": "$t(agentSettings.template.creativeStudio.default.name) resources are not ready. Refresh and try again.",
   "mode": { "chat": "Daily chat", "image": "Image creation", "video": "Video creation", "music": "Music creation" },
   "scene": {
     "trigger": "Use case: {{scene}}, show all use cases",

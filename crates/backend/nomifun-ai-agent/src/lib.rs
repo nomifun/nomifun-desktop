@@ -14,7 +14,6 @@ pub mod runtime_model_middleware_contract;
 pub mod runtime_tool_middleware_contract;
 pub mod companion_tools;
 pub mod cron_tools;
-pub mod host_skills;
 pub mod requirement_tools;
 pub mod runtime_output;
 pub mod session_control_tools;
@@ -23,8 +22,6 @@ pub mod engine_sdk;
 mod engine_tasks;
 pub mod engine_effect_scope;
 pub mod model_attachments;
-pub mod nomi_skills;
-pub mod nomi_resources;
 pub mod cc_switch;
 pub mod factory;
 pub mod image_generation;
@@ -32,7 +29,6 @@ pub mod knowledge_completer;
 pub mod one_shot;
 pub mod plugin_tools;
 pub mod tool_discovery;
-pub mod plugin_skills;
 mod plugin_tool_error_projection;
 pub mod protocol;
 pub mod registry;
@@ -109,8 +105,7 @@ pub use plugin_tools::{
     NomiPlatformBuiltinLifecycleAdmission,
     NomiPlatformBuiltinLifecycleInvocation,
     NomiPlatformBuiltinLifecycleInvoker,
-    NomiHostedSessionBindings, NomiPluginToolSession, NomiPluginToolSessionProvider,
-    NomiPluginToolSessionRequest,
+    NomiPluginToolSession,
 };
 pub use factory::build_agent_model_config_resolver;
 pub use knowledge_completer::LiveKnowledgeCompleter;

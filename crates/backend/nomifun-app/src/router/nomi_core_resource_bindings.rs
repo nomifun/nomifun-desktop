@@ -587,10 +587,14 @@ impl NomiCoreResourceBindingResolverRegistry {
                 }),
             ));
         }
+        let selections = selections_with_frozen_mcp_servers(
+            selections,
+            &snapshot.content.mcp_tool_locks,
+        );
         binding.typed_resource_bindings = self
             .resolve_selected(
                 owner.as_ref(),
-                selections,
+                &selections,
                 &capability_ids,
                 &action_allowlists,
                 &snapshot.content.mcp_tool_locks,
@@ -610,6 +614,63 @@ impl NomiCoreResourceBindingResolverRegistry {
             })
             .collect();
         Ok(binding)
+    }
+
+    /// Re-admit only the exact MCP tool servers in the saved Snapshot. The
+    /// caller retains every non-MCP resource definition unchanged when it
+    /// replaces this subset in the canonical Session binding.
+    pub(crate) async fn resolve_mcp_for_saved_binding(
+        &self,
+        control_plane: &AgentControlPlane,
+        owner: &nomifun_agent_contracts::UserId,
+        binding: &AgentBindingValueDto,
+    ) -> Result<Vec<TypedResourceBindingDto>, ResourceSelectionResolutionError> {
+        let (_, _revision, snapshot) = control_plane
+            .saved_binding_artifacts(owner, binding)
+            .await
+            .map_err(|error| {
+                ResourceSelectionResolutionError::new(
+                    "RESOURCE_BINDING_ARTIFACT_INVALID",
+                    "the saved Agent binding cannot be resolved",
+                    json!({ "control_plane_code": error.code().as_ref() }),
+                )
+            })?;
+        let capability_ids = snapshot
+            .content
+            .enabled_capabilities
+            .iter()
+            .filter(|capability| super::nomi_core_mcp_catalog::is_product_tool(capability.capability.id.as_ref()))
+            .map(|capability| capability.capability.id.as_ref().to_owned())
+            .collect::<BTreeSet<_>>();
+        let action_allowlists = snapshot
+            .content
+            .enabled_capabilities
+            .iter()
+            .filter(|capability| capability_ids.contains(capability.capability.id.as_ref()))
+            .map(|capability| (
+                capability.capability.id.as_ref().to_owned(),
+                capability.action_allowlist.clone(),
+            ))
+            .collect::<FrozenActionAllowlists>();
+        let selections = selections_with_frozen_mcp_servers(&[], &snapshot.content.mcp_tool_locks);
+        self.resolve_selected_with_requirement(
+            owner.as_ref(),
+            &selections,
+            &capability_ids,
+            &action_allowlists,
+            &snapshot.content.mcp_tool_locks,
+            false,
+        )
+        .await
+        .map(|bindings| bindings.into_iter().map(|binding| TypedResourceBindingDto {
+            binding_id: binding.binding_id.as_ref().to_owned(),
+            resource_kind: binding.resource_kind.as_ref().to_owned(),
+            resource_id: binding.resource_id.as_ref().to_owned(),
+            owner_id: binding.owner_id,
+            operations: binding.operations,
+            connection_config_ref: binding.connection_config_ref.map(|reference| reference.as_ref().to_owned()),
+            typed_parameters: binding.typed_parameters,
+        }).collect())
     }
 
     /// Resolve only the mutable Knowledge subset of an existing Session.
@@ -695,6 +756,25 @@ impl NomiCoreResourceBindingResolverRegistry {
                 .collect()
         })
     }
+}
+
+/// A product selection is optional for MCP tools already frozen by the
+/// control plane. Derive only their exact servers, never the global catalog.
+/// An explicit MCP selection remains subject to normal exact-lock admission.
+fn selections_with_frozen_mcp_servers(
+    selections: &[AgentResourceSelectionDto],
+    locks: &[ResolvedMcpToolLock],
+) -> Vec<AgentResourceSelectionDto> {
+    let mut resolved = selections.to_vec();
+    if selections.iter().any(|selection| selection.resource_kind == "mcp_server") {
+        return resolved;
+    }
+    resolved.extend(locks.iter().map(|lock| lock.server_id.as_ref()).collect::<BTreeSet<_>>()
+        .into_iter().map(|server_id| AgentResourceSelectionDto {
+            resource_kind: "mcp_server".to_owned(),
+            resource_id: server_id.to_owned(),
+        }));
+    resolved
 }
 
 fn validate_selection_field(
@@ -1403,6 +1483,20 @@ impl ProductResourceAuthority {
                 "the selected MCP server is disabled",
             ));
         }
+        let server_id = nomifun_api_types::McpServerId::parse(server.mcp_server_id.clone())
+            .map_err(|_| ResourceSelectionResolutionError::unavailable(
+                self.kind, &request.resource_id, "the selected MCP server identity is invalid",
+            ))?;
+        let transport = nomifun_mcp::McpServerTransport::from_db(
+            &server.transport_type, &server.transport_config,
+        ).map_err(|_| ResourceSelectionResolutionError::unavailable(
+            self.kind, &request.resource_id, "the selected MCP connection is invalid",
+        ))?;
+        let connection_config_ref = nomifun_mcp::canonical_mcp_connection_config_ref(&server_id, &transport)
+            .map(ConnectionConfigRef::from)
+            .map_err(|_| ResourceSelectionResolutionError::unavailable(
+                self.kind, &request.resource_id, "the selected MCP connection cannot be canonicalized",
+            ))?;
         let selected_tools = request.selected_capability_ids.iter()
             .filter(|id| super::nomi_core_mcp_catalog::is_product_tool(id)).collect::<BTreeSet<_>>();
         if !selected_tools.is_empty() {
@@ -1421,10 +1515,7 @@ impl ProductResourceAuthority {
                 "invoke".to_owned(),
                 "read".to_owned(),
             ]),
-            connection_config_ref: Some(ConnectionConfigRef::from(format!(
-                "mcp-server:{}@{}",
-                server.mcp_server_id, server.updated_at
-            ))),
+            connection_config_ref: Some(connection_config_ref),
             typed_parameters: BTreeMap::new(),
         })
     }
@@ -1563,6 +1654,61 @@ mod tests {
 
     const MCP_SERVER_A: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ab";
     const MCP_SERVER_B: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ac";
+
+    fn mcp_lock(server_id: &str, tool: &str) -> ResolvedMcpToolLock {
+        let id = nomifun_api_types::McpServerId::parse(server_id).unwrap();
+        let capability = nomifun_mcp::canonical_mcp_tool_capability_id(&id, tool).unwrap();
+        ResolvedMcpToolLock {
+            server_id: server_id.into(), canonical_tool_key: capability.clone().into(),
+            capability_id: capability.into(), schema_digest: "a".repeat(64).into(),
+            materialization_revision: nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
+        }
+    }
+
+    #[test]
+    fn frozen_mcp_servers_are_derived_once_and_preserve_explicit_choices() {
+        let other = AgentResourceSelectionDto { resource_kind: "workspace".into(), resource_id: "workspace".into() };
+        let locks = [mcp_lock(MCP_SERVER_A, "lookup"), mcp_lock(MCP_SERVER_A, "read"), mcp_lock(MCP_SERVER_B, "query")];
+        let selections = selections_with_frozen_mcp_servers(&[other.clone()], &locks);
+        assert_eq!(selections[0], other);
+        assert_eq!(selections[1..].iter().map(|value| value.resource_id.as_str()).collect::<Vec<_>>(),
+            vec![MCP_SERVER_A, MCP_SERVER_B]);
+        let explicit = vec![AgentResourceSelectionDto { resource_kind: "mcp_server".into(), resource_id: MCP_SERVER_A.into() }];
+        assert_eq!(selections_with_frozen_mcp_servers(&explicit, &locks), explicit);
+        assert_eq!(selections_with_frozen_mcp_servers(&[other.clone()], &[]), vec![other]);
+    }
+
+    #[tokio::test]
+    async fn automatically_derived_mcp_server_still_requires_authoritative_resource_admission() {
+        struct KnownMcpAuthority;
+        #[async_trait]
+        impl NomiCoreResourceAuthority for KnownMcpAuthority {
+            async fn resolve(&self, request: ResourceAuthorityRequest) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+                if request.resource_id != MCP_SERVER_A {
+                    return Err(ResourceSelectionResolutionError::not_found("mcp_server", &request.resource_id));
+                }
+                Ok(ServerResolvedResource {
+                    resource_id: request.resource_id,
+                    allowed_operations: BTreeSet::from(["connect".into(), "read".into(), "invoke".into()]),
+                    connection_config_ref: Some("frozen-connection".into()), typed_parameters: BTreeMap::new(),
+                })
+            }
+        }
+        let resolver = NomiCoreResourceBindingResolverRegistry::from_authorities([
+            ("mcp_server".to_owned(), Arc::new(KnownMcpAuthority) as Arc<dyn NomiCoreResourceAuthority>),
+        ]).unwrap();
+        let lock = mcp_lock(MCP_SERVER_A, "lookup");
+        let bindings = resolver.resolve_selected("owner", &selections_with_frozen_mcp_servers(&[], &[lock.clone()]),
+            &BTreeSet::from([lock.capability_id.as_ref().to_owned()]), &FrozenActionAllowlists::new(), &[lock]).await.unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].resource_id.as_ref(), MCP_SERVER_A);
+        assert_eq!(bindings[0].operations, BTreeSet::from(["connect".into(), "read".into(), "invoke".into()]));
+
+        let unknown = mcp_lock(MCP_SERVER_B, "lookup");
+        let error = resolver.resolve_selected("owner", &selections_with_frozen_mcp_servers(&[], &[unknown.clone()]),
+            &BTreeSet::from([unknown.capability_id.as_ref().to_owned()]), &FrozenActionAllowlists::new(), &[unknown]).await.unwrap_err();
+        assert_eq!(error.code(), "RESOURCE_SELECTION_NOT_FOUND");
+    }
 
     struct RecordingAuthority {
         allowed: BTreeSet<String>,

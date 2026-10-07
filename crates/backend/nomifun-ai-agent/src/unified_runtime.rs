@@ -265,6 +265,7 @@ impl TurnProjection {
                 self.calls.lock().unwrap_or_else(|e| e.into_inner()).insert(
                     call.call_id.as_ref().to_owned(),
                     ToolCallEventData {
+                        identity: Default::default(),
                         call_id: call.call_id.as_ref().to_owned(),
                         name: call.name,
                         args: call.arguments.0,
@@ -285,14 +286,16 @@ impl TurnProjection {
                 for id in discarded_tool_call_ids { calls.remove(id.as_ref()); }
                 None
             }
-            AgentEngineEvent::ToolStarted { call_id, .. } => self
-                .calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(call_id.as_ref())
-                .filter(|call| !call.call_id.starts_with("agent-instructions:"))
-                .cloned()
-                .map(EngineProgress::ToolCall),
+            AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
+                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                calls.get_mut(call_id.as_ref())
+                    .filter(|call| !call.call_id.starts_with("agent-instructions:"))
+                    .map(|call| {
+                        call.identity.capability_id = Some(capability_id.as_ref().to_owned());
+                        call.identity.action_id = Some(action_id.as_ref().to_owned());
+                        EngineProgress::ToolCall(call.clone())
+                    })
+            }
             AgentEngineEvent::ToolCompleted { result, .. } => {
                 let mut call = self
                     .calls
@@ -399,6 +402,9 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 // No proposed tool batch is executed before a valid model
                 // terminal. Preserve progress for an explicit owner retry;
                 // the SDK must still prove cleanup before publishing pause.
+                if let AgentEngineError::Model { code, message } = &error {
+                    projection.output.record_model_gateway_failure(*code, message);
+                }
                 Ok(EngineTurnOutcome { model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
                     terminal:EngineTurnTerminal::Paused { reason:model_pause_reason(&error) } })
             }
@@ -556,7 +562,6 @@ mod tests {
             model: None,
             conversation_id: SESSION.to_owned(),
             delegation_policy: Default::default(),
-            device_mcp_servers: Vec::new(),
             extra: serde_json::json!({}),
             conversation_created_at: None,
             workspace_binding_lease: Some(
@@ -833,6 +838,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_model_failure_reaches_transient_notice_and_preserves_typed_pause() {
+        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+        use nomifun_chat_model_broker::{ChatModelErrorCode, ChatRetryDirective};
+        struct GatewayFailureModel { code: ChatModelErrorCode, business: GatewayBusinessError }
+        #[async_trait]
+        impl AgentModelPort for GatewayFailureModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                let mut error = ChatModelError::new(self.code, self.business.action_message(), ChatRetryDirective::Never);
+                error.provider_status = Some(self.business.http_status());
+                Err(error)
+            }
+        }
+        for (business, code, agent_code) in [
+            (GatewayBusinessError::InsufficientBalance, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (GatewayBusinessError::SubscriptionExpired, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (GatewayBusinessError::ModelNotInPlan, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (GatewayBusinessError::KeyExpired, ChatModelErrorCode::AuthenticationFailed, "USER_LLM_PROVIDER_AUTH_FAILED"),
+            (GatewayBusinessError::RateLimited, ChatModelErrorCode::RateLimited, "USER_LLM_PROVIDER_RATE_LIMITED"),
+        ] {
+            let host = Host::new();
+            let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(),
+                Arc::new(GatewayFailureModel { code, business }), Arc::new(NoTools), host.clone()).unwrap();
+            let mut events = runtime.subscribe();
+            runtime.send_message(message()).await.unwrap();
+            let notice = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match events.recv().await.unwrap() {
+                        AgentStreamEvent::System(notice) => break notice,
+                        AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_) => panic!("gateway notice must precede pause finish"),
+                        _ => {},
+                    }
+                }
+            }).await.unwrap();
+            assert_eq!(notice["kind"], "model_gateway_account_action");
+            assert_eq!(notice["error"]["code"], agent_code);
+            assert_eq!(notice["error"]["message"], business.action_message());
+            assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1, "notice follows cleanup");
+            let expected_reason = format!("EXECUTION_MODEL_{}", serde_json::to_value(code).unwrap().as_str().unwrap());
+            assert!(host.events.lock().unwrap().iter().any(|event|
+                matches!(event, AgentEngineEvent::TurnPaused { reason, .. } if reason == &expected_reason)));
+            assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
+            assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Paused)));
+            runtime.kill_and_wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn task_plan_change_is_published_only_after_its_canonical_record() {
         let host = Host::new();
         let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
@@ -1007,6 +1059,8 @@ mod tests {
         };
         assert_eq!(started.status, ToolCallStatus::Running);
         assert_eq!(started.args["path"], "README.md");
+        assert_eq!(started.identity.capability_id.as_deref(), Some("workspace.files"));
+        assert_eq!(started.identity.action_id.as_deref(), Some("workspace.files/read"));
         projection
             .emit(AgentEngineEvent::ToolCompleted {
                 step: 1,
@@ -1019,6 +1073,8 @@ mod tests {
         };
         assert_eq!(completed.call_id, started.call_id);
         assert_eq!(completed.name, started.name);
+        assert_eq!(completed.identity.capability_id, started.identity.capability_id);
+        assert_eq!(completed.identity.action_id, started.identity.action_id);
         assert_eq!(completed.args, started.args);
         assert_eq!(completed.status, ToolCallStatus::Error);
         assert_eq!(completed.output.as_deref(), Some("file unavailable"));

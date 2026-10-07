@@ -14,6 +14,8 @@ Mobile采用同级refactor/nomifun-mobile，原main/c4ecae6740f01d27529b6f2a0f7c
 
 ## 当前范围
 
+本次commit/push同步已将远端81a8e035b的14提交与本任务070f66b21合入；三处冲突逐项保留upstream IDMM和voice opt-in writer/围栏，没有whole ours/theirs或改写共享历史。合并后七个相关Core库cargo --lib命令exit0（Session/Runtime/Broker/Execution/Conversation/Voice/model-invoke）；App voice22、App IDMM6、ASR/runner18项通过。Desktop typecheck、880x600边界、Agent Session边界、i18n、voice依赖/原生wire边界与合同检查通过。Mobile已提交并推送97868ea到main，SDKpatch入库字节仍222279B/d4f2119b，未夹构建产物或凭据。上述是代码合并验证，不补证真实云/设备/声学或用户验收；前批API-only/Web报告仍保其执行时源码身份。
+
 | 范围 | 代码/本地证据 | 真实验收 |
 | --- | --- | --- |
 | M0–M1 | 新Prompt/方案、全量快照、更新02f7；Desktop全双工UI、Agent voice tab/save gate及全局W5改动撤出 | 源码交付 |

@@ -78,9 +78,8 @@ test('personal editor submits order through its existing save action', () => {
   expect(view.getAllByRole('combobox')).toHaveLength(1);
   expect(view.queryByRole('region', { name: en.middlewareOrder.title }) === null).toBe(true);
   expect(view.queryByRole('region', { name: en.contextOrder.title }) === null).toBe(true);
-  fireEvent.click(view.getByRole('tab', { name: en.workbench.skillsTab }));
+  fireEvent.click(view.getByRole('tab', { name: en.workbench.extensionsTab }));
   expect(view.getAllByRole('heading', { level: 3 }).slice(0, 2).map(node => node.textContent)).toEqual([en.middlewareOrder.title, en.contextOrder.title]);
-  expect(within(view.getByRole('tabpanel')).getByText(en.sections.skillsMcp)).toBeTruthy();
   expect(view.queryByRole('textbox', { name: en.fields.name }) === null).toBe(true);
   fireEvent.click(view.getByRole('button', { name: 'Move z earlier' }));
   fireEvent.click(view.getByRole('button', { name: 'Move m-z earlier' }));

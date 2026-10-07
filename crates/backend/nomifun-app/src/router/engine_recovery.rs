@@ -59,7 +59,7 @@ impl EngineSessionHost {
                     if !input.inject_skills.is_empty() {
                         let (skills, active) = selected_skills.as_ref().ok_or_else(|| error("recovery selected Skill context is missing"))?;
                         skills.validate_active(&input.inject_skills, &active.active)?;
-                        input.prepared_skill_instructions = skills.turn_instructions(&input.inject_skills)?;
+                        input.prepared_skill_instructions = skills.explicit_instructions(&input.inject_skills)?;
                     }
                     prepared_skill_bytes = prepared_skill_bytes.saturating_add(
                         input.prepared_skill_instructions.iter().map(String::len).sum::<usize>());

@@ -64,9 +64,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::time::Duration;
 
-use nomi_config::hooks::HooksConfig;
 use nomi_protocol::events::ToolCategory;
-use nomi_types::skill_types::ContextModifier;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 /// Safety-net wall-clock budget for a tool invocation.
@@ -237,34 +235,6 @@ pub trait Tool: Send + Sync {
         _context: &ToolExecutionContext,
     ) -> ToolResult {
         self.execute(input).await
-    }
-
-    /// Consume machine-observed state-changing effects completed by a nested
-    /// Agent during this exact invocation.
-    ///
-    /// This channel is deliberately orthogonal to [`Self::category_for`]: tool
-    /// categories drive approval policy, while completion evidence must never
-    /// widen or bypass that policy. Native tools return zero and are accounted
-    /// for directly by the engine. Boundary tools such as fork-mode `Skill`
-    /// may override this after correlating evidence with the trusted operation
-    /// id supplied to [`Self::execute_with_context`].
-    fn take_delegated_effects(&self, _context: &ToolExecutionContext) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Return an optional context modifier based on the tool input.
-    /// Called after execute() to collect any engine-level overrides.
-    /// Only SkillTool overrides this; all other tools return None.
-    fn context_modifier_for(&self, _input: &Value) -> Option<ContextModifier> {
-        None
-    }
-
-    /// Return any hooks declared in the skill's frontmatter for dynamic registration.
-    /// Called after a successful execute() so the tool-execution layer can merge
-    /// the returned hooks into the active HookEngine.
-    /// Only SkillTool overrides this; all other tools return None.
-    fn skill_hooks_for(&self, _input: &Value) -> Option<HooksConfig> {
-        None
     }
 
     /// Max result size in chars before truncation

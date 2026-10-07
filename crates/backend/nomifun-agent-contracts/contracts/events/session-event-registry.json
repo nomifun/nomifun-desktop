@@ -275,6 +275,26 @@
       "replay_rule": "rebuild_projection"
     },
     {
+      "kind": "idmm/notice-recorded",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/idmm-notice-recorded/v1",
+      "producer": {
+        "allowed": ["session_api"]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": ["message/completed", "message/assistant-projected"]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": ["message-projection"]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
       "kind": "message/user-accepted",
       "version": 1,
       "persistence": "persistent",

@@ -45,7 +45,7 @@ pub use chat_executor::{
     SingleAttemptFraming, SingleAttemptHttpExecutor, SingleAttemptRequest,
     SingleAttemptStream,
 };
-pub use error::{InvokeError, InvokeErrorKind};
+pub use error::{GatewayBusinessError, InvokeError, InvokeErrorKind};
 pub use default_model::default_model_preference_key;
 pub use manifest::{
     ALL_MODEL_TASKS, AuthSchemeDescriptor, ModelProtocolManifestResponse,

@@ -36,6 +36,7 @@ const NomiReadOnlyChat: React.FC<{
       agent_name={agent_name}
       hideSendBox
       readOnly
+      creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
     />
   );
 };

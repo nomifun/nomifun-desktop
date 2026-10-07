@@ -11,6 +11,7 @@ import {
 } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { mergeProcessStates } from '../turnProcessState';
+import { formatToolDiagnostics, formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
 
 export interface ToolSummaryDescriptor {
   target: string;
@@ -46,6 +47,7 @@ export interface ToolReceiptDetailRow {
   action: ToolReceiptAction;
   state: TurnDisclosureProcessState;
   title: string;
+  diagnostics?: string;
   target?: string;
   input?: string;
   output?: string;
@@ -165,14 +167,9 @@ const compactToolText = (value?: unknown): string => {
   return text.replace(/\s+/g, ' ').trim();
 };
 
-const formatToolTarget = (tool: NormalizedToolCall): string => {
+const formatToolTarget = (tool: NormalizedToolCall, language = 'en-US'): string => {
   if (classifyToolForReceipt(tool) === 'run_commands') return getCommandTarget(tool);
-
-  const rawName = compactToolText(tool.name);
-  const name = compactToolText(formatToolDisplayName(rawName));
-  const description = compactToolText(tool.description);
-  if (name && description && description !== name && description !== rawName) return `${name} ${description}`;
-  return name || description || tool.key;
+  return formatToolPresentationLabel(resolveToolPresentation(tool, language));
 };
 
 const commandFieldNames = ['command', 'cmd', 'script', 'shell', 'bash'];
@@ -330,6 +327,8 @@ const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => 
   if (['glob', 'list'].includes(kind)) return 'list_files';
   if (['edit', 'write'].includes(kind)) return 'edit_files';
   if (kind === 'read') return 'read_files';
+  const explicitAction = resolveToolPresentation(tool).receiptAction;
+  if (explicitAction) return explicitAction as ToolReceiptAction;
   // A server-local MCP name is descriptive metadata, not a trusted semantic
   // kind. Preserve strong compound actions such as read_file/exec_command, but
   // do not turn ambiguous one-word names such as search/read/run/list into
@@ -394,7 +393,7 @@ const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => 
   return 'generic';
 };
 
-const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptAction): string | undefined => {
+const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptAction, language: string): string | undefined => {
   if (action === 'run_commands') {
     return getCommandTarget(tool);
   }
@@ -402,15 +401,15 @@ const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptActio
     return getFileTarget(tool);
   }
   if (action !== 'generic') return undefined;
-  return formatToolTarget(tool);
+  return formatToolTarget(tool, language);
 };
 
-const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceiptAction): string | undefined => {
+const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceiptAction, language: string): string | undefined => {
   const description = compactToolText(tool.description);
   const rawName = compactToolText(tool.name);
   const name = compactToolText(formatToolDisplayName(rawName));
 
-  if (action === 'generic') return formatToolTarget(tool);
+  if (action === 'generic') return formatToolTarget(tool, language);
   if (action === 'read_files' || action === 'edit_files') return getFileTarget(tool);
   if (description && description !== name && description !== rawName) return description;
   if (action === 'run_commands') return getCommandTarget(tool);
@@ -431,7 +430,8 @@ const getToolProcessState = (tool: NormalizedToolCall): TurnDisclosureProcessSta
 
 export const buildToolReceiptSummaryParts = (
   tools: NormalizedToolCall[],
-  _state: TurnDisclosureProcessState
+  _state: TurnDisclosureProcessState,
+  language = 'en-US'
 ): ToolReceiptSummaryPart[] => {
   const grouped = new Map<
     string,
@@ -450,7 +450,7 @@ export const buildToolReceiptSummaryParts = (
 
   groupExplicitToolRetries(tools).forEach(({ latest: tool }) => {
     const action = classifyToolForReceipt(tool);
-    const target = getToolReceiptTarget(tool, action);
+    const target = getToolReceiptTarget(tool, action, language);
     // A pre-dispatch rejection is a different receipt outcome from a tool that
     // actually ran. Keep them separate even when their semantic action matches.
     const groupKey = `${action}:${tool.notExecutedReason ?? 'executed'}:${tool.commandExitCode ?? 'unknown'}:${tool.commandNotStarted === true}:${tool.commandTimedOut === true}`;
@@ -493,11 +493,12 @@ export const getToolReceiptIconFromSummaryParts = (parts: ToolReceiptSummaryPart
   return focusedPart ? toolReceiptIconByAction[focusedPart.action] : undefined;
 };
 
-export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolReceiptDetailRow[] =>
+export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[], language = 'en-US'): ToolReceiptDetailRow[] =>
   groupExplicitToolRetries(tools).map(({ attempts, latest: tool }) => {
     const action = classifyToolForReceipt(tool);
-    const title = compactToolText(formatToolDisplayName(tool.name)) || tool.key;
-    const target = getToolReceiptDetailTarget(tool, action);
+    const presentation = resolveToolPresentation(tool, language);
+    const title = presentation.title;
+    const target = getToolReceiptDetailTarget(tool, action, language);
     return {
       // Keep the rendered detail row anchored to the immutable retry root.
       // Using the latest call id here remounted the row whenever a retry
@@ -506,6 +507,8 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
       action,
       state: getToolProcessState(tool),
       title,
+      ...(presentation.title !== tool.name || presentation.source || tool.capabilityId || tool.actionId
+        ? { diagnostics: formatToolDiagnostics(presentation) } : {}),
       ...(target ? { target } : {}),
       ...(tool.input ? { input: tool.input } : {}),
       ...(tool.output ? { output: tool.output } : {}),
@@ -536,7 +539,8 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
 
 export const buildToolSummaryDescriptor = (
   tools: NormalizedToolCall[],
-  state: TurnDisclosureProcessState
+  state: TurnDisclosureProcessState,
+  language = 'en-US'
 ): ToolSummaryDescriptor | null => {
   const logicalTools = groupExplicitToolRetries(tools).map(({ latest }) => latest);
   if (!logicalTools.length) return null;
@@ -545,7 +549,7 @@ export const buildToolSummaryDescriptor = (
   if (!focusedTool) return null;
 
   return {
-    target: formatToolTarget(focusedTool),
+    target: formatToolTarget(focusedTool, language),
     count: logicalTools.length,
   };
 };

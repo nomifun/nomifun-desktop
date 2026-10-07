@@ -1,0 +1,84 @@
+use super::*;
+use nomifun_agent_contracts::{IdmmDecisionModel, IdmmDecisionSource, IdmmQuestionRef};
+
+fn decision() -> IdmmDecisionExplanation {
+    IdmmDecisionExplanation {
+        intervention_id: Uuid::now_v7().to_string(),
+        source: IdmmDecisionSource::BypassModel,
+        reason_code: "bypass_model_decision".into(),
+        rationale: "用户已明确希望采用简单难度".into(),
+        model: Some(IdmmDecisionModel { provider_id: Uuid::now_v7().to_string(), model: "step-3.7-flash".into() }),
+        question: Some(IdmmQuestionRef { message_id: Uuid::now_v7().to_string(), sequence: 8, fingerprint: "a".repeat(64) }),
+    }
+}
+
+fn projection(message_id: &str, intent: &str, state: &str, extra: Value) -> MessageProjection {
+    let mut document = json!({ "correlation_id":message_id,"state":state,"content":"简单", "display_at_ms":1234 });
+    for (key,value) in extra.as_object().unwrap() { document[key] = value.clone(); }
+    MessageProjection {
+        session_id: AgentSessionId::from(Uuid::now_v7().to_string()),
+        projection_id: format!("{}:{message_id}",if intent == "idmm_notice" { "idmm" } else { "message" }),
+        first_seq:9,last_seq:9,presentation_intent:intent.into(),message_type:None,message_status:None,
+        projection:document,semantic_digest:"b".repeat(64),
+    }
+}
+
+#[test]
+fn idmm_public_input_cannot_forge_server_authored_sources() {
+    for input in [json!({"content":"hello","origin":"idmm"}),
+        json!({"content":"hello","idmm_decision":decision()}),
+        json!({"content":"hello","idmm_notice":null}),
+        json!({"content":"hello","input_source":{"kind":"idmm"}})] {
+        assert!(bounded_turn_input(input).is_err());
+    }
+    let input=bounded_turn_input(json!({"content":"human typed this"})).unwrap();
+    assert_eq!(input.content,"human typed this");
+    assert_eq!(input.origin,None);
+}
+
+#[test]
+fn idmm_history_keeps_frozen_metadata_separate_from_answer_body() {
+    let id=Uuid::now_v7().to_string();
+    let explanation=decision();
+    let row=projection(&id,"message","accepted",json!({"idmm_decision":explanation}));
+    let response=canonical_message_response(&row.session_id.clone(),1,row).unwrap().unwrap();
+    assert_eq!(response.content["content"],"简单");
+    assert_eq!(response.content["idmm_decision"],serde_json::to_value(&explanation).unwrap());
+    assert_eq!(response.position,Some(MessagePosition::Right));
+    assert_eq!(response.status,Some(MessageStatus::Finish));
+    assert_eq!(response.r#type,MessageType::Text);
+    assert!(!response.content["idmm_decision"].as_object().unwrap().contains_key("confidence"));
+}
+
+#[test]
+fn idmm_history_does_not_infer_metadata_from_origin_or_current_model() {
+    let id=Uuid::now_v7().to_string();
+    let row=projection(&id,"message","accepted",json!({"origin":"idmm","model":"unverified-model"}));
+    let response=canonical_message_response(&row.session_id.clone(),1,row).unwrap().unwrap();
+    assert!(response.content["idmm_decision"].is_null());
+}
+
+#[test]
+fn idmm_notice_history_is_a_note_not_an_answer_or_turn_terminal() {
+    let notice=IdmmDecisionNotice { decision:decision(),status:nomifun_agent_contracts::IdmmDecisionNoticeStatus::WaitingForHuman,created_at:1234 };
+    let id=notice.decision.intervention_id.clone();
+    let row=projection(&id,"idmm_notice","waiting_for_human",json!({"reference":notice}));
+    let response=canonical_message_response(&row.session_id.clone(),1,row).unwrap().unwrap();
+    assert_eq!(response.content["idmm_notice"],serde_json::to_value(&notice).unwrap());
+    assert_eq!(response.r#type,MessageType::Tips);
+    assert_eq!(response.position,Some(MessagePosition::Center));
+    assert_eq!(response.status,Some(MessageStatus::Finish));
+    assert!(response.content.get("turn_summary").is_none());
+    assert!(response.content.get("turn_id").is_none());
+}
+
+#[test]
+fn idmm_invalid_projection_metadata_fails_closed() {
+    let id=Uuid::now_v7().to_string();
+    let mut explanation=decision();
+    explanation.source=IdmmDecisionSource::Rule;
+    let row=projection(&id,"message","accepted",json!({"idmm_decision":explanation}));
+    assert!(canonical_message_response(&row.session_id.clone(),1,row).is_err());
+    let row=projection(&id,"idmm_notice","waiting_for_human",json!({"reference":{"status":"waiting_for_human","created_at":1234}}));
+    assert!(canonical_message_response(&row.session_id.clone(),1,row).is_err());
+}

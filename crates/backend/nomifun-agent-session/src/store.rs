@@ -62,6 +62,9 @@ mod native_execution;
 pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
 use native_execution::reject_unleased_native_turn_tx;
 
+#[path = "idmm_notice.rs"]
+mod idmm_notice;
+
 #[path = "native_recovery.rs"]
 mod native_recovery;
 pub use native_recovery::{NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED};
@@ -571,6 +574,14 @@ impl AgentSessionStore {
             let admission=input.0.as_object_mut().ok_or_else(||SessionStoreError::InvalidPayload("voice input must be an object".into()))?.entry("admission").or_insert_with(||json!({}));
             admission.as_object_mut().ok_or_else(||SessionStoreError::InvalidPayload("voice admission must be an object".into()))?.insert("voice_input_context".into(),serde_json::to_value(fence)?);
         }
+        let idmm_decision = input.0.get("idmm_decision").map(|value| {
+            let decision: nomifun_agent_contracts::IdmmDecisionExplanation =
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    SessionStoreError::InvalidPayload(format!("invalid IDMM input explanation: {error}"))
+                })?;
+            decision.validate().map_err(|error| SessionStoreError::InvalidPayload(error.into()))?;
+            Ok::<_, SessionStoreError>(decision)
+        }).transpose()?;
         if input
             .0
             .get("content")
@@ -671,6 +682,14 @@ impl AgentSessionStore {
         }
 
         if let Some(fence)=voice_context {native_mutation_fence::validate_input_tx(&mut tx,session_id,fence).await?;}
+        if let Some(question) = idmm_decision.as_ref().and_then(|decision| decision.question.as_ref()) {
+            if !idmm_notice::question_is_current_tx(&mut tx, session_id, question).await? {
+                return Err(SessionStoreError::Conflict(
+                    "IDMM question was already answered or replaced by newer Session input".into(),
+                ));
+            }
+        }
+
         if initial_only {
             let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
             let has_history = sqlx::query_scalar::<_, i64>(
@@ -2776,7 +2795,7 @@ impl AgentSessionStore {
                     projection_json, semantic_digest \
              FROM agent_messages \
              WHERE session_id = ? AND first_seq < ? \
-               AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking') \
+                AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking', 'idmm_notice') \
              ORDER BY first_seq DESC, projection_id DESC LIMIT ?",
         )
         .bind(session_id.as_ref())
@@ -2822,7 +2841,7 @@ impl AgentSessionStore {
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
-               AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking')",
+                AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking', 'idmm_notice')",
         )
         .bind(session_id.as_ref())
         .fetch_one(&mut *tx)

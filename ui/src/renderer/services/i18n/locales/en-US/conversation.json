@@ -622,6 +622,7 @@
     }
   },
   "capabilityPicker": {
+    "unavailable": "Removed or unavailable",
     "ariaLabel": "Session capabilities",
     "createApplyNote": "New session · applied on creation",
     "nextSendApplyNote": "This session · applied on next send",

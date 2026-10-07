@@ -19,6 +19,7 @@ import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
 import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
+import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 import { Alert, Button, Collapse, Form, Message, Modal, Switch, Tooltip } from '@arco-design/web-react';
 import { FolderSearch } from '@icon-park/react';
@@ -59,6 +60,7 @@ const SystemModalContent: React.FC = () => {
   const [sendKey, setSendKey] = useState<'enter' | 'mod-enter'>('enter');
   const [factoryResetVisible, setFactoryResetVisible] = useState(false);
   const thinkingDisplay = useThinkingDisplayPreferences();
+  const [showDecisionBasis, setShowDecisionBasis] = useConfig('chat.idmm.showDecisionBasis');
 
   useEffect(() => {
     // Start-on-boot is only meaningful in the Tauri desktop shell (backed by
@@ -209,6 +211,13 @@ const SystemModalContent: React.FC = () => {
   );
 
   const { keepAwake, setKeepAwake: applyKeepAwake } = useKeepAwake();
+  const handleDecisionBasisChange = useCallback((checked: boolean) => {
+    const previous = showDecisionBasis;
+    void setShowDecisionBasis(checked).catch(() => {
+      configService.setLocal('chat.idmm.showDecisionBasis', previous);
+      Message.error(t('settings.idmmDecisionBasisSaveFailed'));
+    });
+  }, [setShowDecisionBasis, showDecisionBasis, t]);
 
   const handleKeepAwakeChange = useCallback(async (checked: boolean) => {
     try { await applyKeepAwake(checked); } catch (err) { Message.error(String(err)); }
@@ -264,6 +273,12 @@ const SystemModalContent: React.FC = () => {
       label: t('settings.thinkingProcessVisible'),
       description: t('settings.thinkingProcessVisibleDesc'),
       component: <Switch checked={thinkingDisplay.visible} onChange={handleThinkingVisibleChange} />,
+    },
+    {
+      key: 'idmmDecisionBasis',
+      label: t('settings.idmmDecisionBasis'),
+      description: t('settings.idmmDecisionBasisDesc'),
+      component: <Switch checked={showDecisionBasis === true} onChange={handleDecisionBasisChange} />,
     },
     {
       key: 'thinkingContentLength',

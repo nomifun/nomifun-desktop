@@ -134,6 +134,10 @@ name = "nomi_core_route_gap"
 path = "tests/nomi_core_route_gap.rs"
 
 [[test]]
+name = "session_capability_selection_e2e"
+path = "tests/session_capability_selection_e2e.rs"
+
+[[test]]
 name = "conversation_task_plan"
 path = "tests/conversation_task_plan.rs"
 
@@ -154,8 +158,17 @@ name = "native_coding_reliability"
 path = "tests/native_coding_reliability.rs"
 
 [[test]]
+name = "native_media_creation"
+path = "tests/native_media_creation.rs"
+
+[[test]]
 name = "live_agnes_preset_creation"
 path = "tests/live_agnes_preset_creation.rs"
+required-features = ["browser-use", "computer-use"]
+
+[[test]]
+name = "live_text_model_creation"
+path = "tests/live_text_model_creation.rs"
 required-features = ["browser-use", "computer-use"]
 
 [features]

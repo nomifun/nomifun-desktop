@@ -1591,3 +1591,235 @@ async fn missing_model_returns_false_without_applying_cleanup() {
         0
     );
 }
+
+#[tokio::test]
+async fn graph_create_persists_all_models_labels_and_connections_atomically() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let (provider, models) = providers
+        .create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[
+                model("chat", &CHAT_CAPABILITIES),
+                model("voice", &VOICE_CAPABILITIES),
+            ],
+            &[Some("Chat label".into()), Some("Voice label".into())],
+            &[voice_connection(Some("Voice API"), "https://voice.example/v1")],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(provider.config_revision, 0);
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].model, "chat");
+    assert_eq!(models[0].display_name.as_deref(), Some("Chat label"));
+    assert_eq!(models[1].display_name.as_deref(), Some("Voice label"));
+    assert_eq!(
+        SqliteProviderModelCapabilityRepository::new(db.pool().clone())
+            .list_for_provider(PROVIDER_ID)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        SqliteProviderConnectionRepository::new(db.pool().clone())
+            .get(PROVIDER_ID, "voice")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn graph_create_rolls_back_earlier_models_connections_and_provider() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let error = providers
+        .create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[model("valid", &CHAT_CAPABILITIES), model("invalid", &[])],
+            &[Some("First".into()), None],
+            &[voice_connection(None, "https://voice.example/v1")],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    for table in ["providers", "provider_models", "provider_model_capabilities", "provider_connections"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE provider_id = ?"))
+            .bind(PROVIDER_ID)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "{table} must roll back");
+    }
+}
+
+#[tokio::test]
+async fn graph_create_rejects_empty_duplicate_and_mismatched_model_sets() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    assert!(matches!(
+        providers.create_graph(provider_params(Some(PROVIDER_ID)), &[], &[], &[]).await,
+        Err(DbError::Conflict(_))
+    ));
+    assert!(matches!(
+        providers.create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[model("duplicate", &CHAT_CAPABILITIES), model("duplicate", &CHAT_CAPABILITIES)],
+            &[None, None], &[],
+        ).await,
+        Err(DbError::Conflict(_))
+    ));
+    assert!(matches!(
+        providers.create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[model("chat", &CHAT_CAPABILITIES)], &[], &[],
+        ).await,
+        Err(DbError::Conflict(_))
+    ));
+    assert!(providers.find_by_id(PROVIDER_ID).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn graph_connection_update_bumps_once_and_invalidates_only_changed_roles() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let spare_capabilities = [NewProviderModelCapability {
+        connection_role: "spare",
+        ..VOICE_CAPABILITIES[0]
+    }];
+    let spare_connection = UpsertProviderConnectionParams {
+        role: "spare",
+        ..voice_connection(None, "https://spare.example/v1")
+    };
+    providers
+        .create_graph(
+            provider_params(Some(PROVIDER_ID)),
+            &[
+                model("chat", &CHAT_CAPABILITIES),
+                model("voice", &VOICE_CAPABILITIES),
+                model("spare", &spare_capabilities),
+            ],
+            &[None, None, None],
+            &[voice_connection(None, "https://voice.example/v1"), spare_connection],
+        )
+        .await
+        .unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    for (model, task) in [("chat", "chat"), ("voice", "speech_synthesis"), ("spare", "speech_synthesis")] {
+        capabilities.set_health(PROVIDER_ID, 0, model, task, Some(r#"{"status":"healthy"}"#))
+            .await.unwrap();
+    }
+    let connection_repository = SqliteProviderConnectionRepository::new(db.pool().clone());
+    let original = connection_repository.get(PROVIDER_ID, "voice").await.unwrap().unwrap();
+    let changed = providers.update_with_connections(
+        PROVIDER_ID,
+        0,
+        UpdateProviderParams { credentials_encrypted: Some("rotated-default"), ..Default::default() },
+        &[UpsertProviderConnectionParams {
+            credentials_encrypted: "rotated-voice",
+            ..voice_connection(Some("New label"), "https://new-voice.example/v1")
+        }],
+    ).await.unwrap();
+    assert_eq!(changed.config_revision, 1);
+    assert_eq!(changed.credentials_encrypted, "rotated-default");
+    let voice = connection_repository.get(PROVIDER_ID, "voice").await.unwrap().unwrap();
+    assert_eq!(voice.connection_id, original.connection_id);
+    assert_eq!(voice.created_at, original.created_at);
+    assert_eq!(voice.credentials_encrypted, "rotated-voice");
+    assert!(capabilities.get(PROVIDER_ID, "chat", "chat").await.unwrap().unwrap().health.is_none());
+    assert!(capabilities.get(PROVIDER_ID, "voice", "speech_synthesis").await.unwrap().unwrap().health.is_none());
+    assert!(capabilities.get(PROVIDER_ID, "spare", "speech_synthesis").await.unwrap().unwrap().health.is_some());
+
+    let label_only = providers.update_with_connections(
+        PROVIDER_ID, 1, UpdateProviderParams { name: Some("Gateway"), ..Default::default() },
+        &[UpsertProviderConnectionParams {
+            label: Some("Label only"), credentials_encrypted: "rotated-voice",
+            ..voice_connection(None, "https://new-voice.example/v1")
+        }],
+    ).await.unwrap();
+    assert_eq!(label_only.config_revision, 1);
+}
+
+#[tokio::test]
+async fn graph_connection_update_rolls_back_parent_and_earlier_role_on_failure() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers.create(
+        provider_params(Some(PROVIDER_ID)), &model("voice", &VOICE_CAPABILITIES),
+        &[voice_connection(None, "https://voice.example/v1")],
+    ).await.unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    capabilities.set_health(PROVIDER_ID, 0, "voice", "speech_synthesis", Some(r#"{"status":"healthy"}"#))
+        .await.unwrap();
+    let error = providers.update_with_connections(
+        PROVIDER_ID, 0,
+        UpdateProviderParams { credentials_encrypted: Some("must-roll-back"), ..Default::default() },
+        &[
+            voice_connection(None, "https://must-roll-back.example/v1"),
+            UpsertProviderConnectionParams { role: "default", ..voice_connection(None, "https://invalid.example/v1") },
+        ],
+    ).await.unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    let parent = providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap();
+    assert_eq!(parent.credentials_encrypted, "cipher");
+    assert_eq!(parent.config_revision, 0);
+    assert_eq!(SqliteProviderConnectionRepository::new(db.pool().clone())
+        .get(PROVIDER_ID, "voice").await.unwrap().unwrap().base_url, "https://voice.example/v1");
+    assert!(capabilities.get(PROVIDER_ID, "voice", "speech_synthesis").await.unwrap().unwrap().health.is_some());
+}
+
+#[tokio::test]
+async fn graph_model_sync_preserves_unselected_models_and_fences_stale_updates() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers.create(
+        provider_params(Some(PROVIDER_ID)), &model("unselected", &CHAT_CAPABILITIES), &[],
+    ).await.unwrap();
+    let saved = providers.save_graph_models(
+        PROVIDER_ID, 0,
+        &[model("first", &CHAT_CAPABILITIES), model("second", &IMAGE_CAPABILITIES)],
+        &[Some("First label".into()), None],
+    ).await.unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0].display_name.as_deref(), Some("First label"));
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 1);
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    assert!(models.get(PROVIDER_ID, "unselected").await.unwrap().is_some());
+    let stale = providers.save_graph_models(
+        PROVIDER_ID, 0, &[model("stale", &CHAT_CAPABILITIES)], &[None],
+    ).await.unwrap_err();
+    assert!(matches!(stale, DbError::Conflict(_)));
+    assert!(models.get(PROVIDER_ID, "stale").await.unwrap().is_none());
+    providers.save_graph_models(
+        PROVIDER_ID, 1,
+        &[model("first", &CHAT_CAPABILITIES), model("second", &IMAGE_CAPABILITIES)],
+        &[Some("Display only".into()), None],
+    ).await.unwrap();
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 1);
+}
+
+#[tokio::test]
+async fn graph_model_sync_rolls_back_earlier_model_and_rejects_deleted_parent() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    providers.create(
+        provider_params(Some(PROVIDER_ID)), &model("existing", &CHAT_CAPABILITIES), &[],
+    ).await.unwrap();
+    let error = providers.save_graph_models(
+        PROVIDER_ID, 0, &[model("first", &CHAT_CAPABILITIES), model("invalid", &[])],
+        &[Some("Must roll back".into()), None],
+    ).await.unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    assert!(models.get(PROVIDER_ID, "first").await.unwrap().is_none());
+    assert!(models.get(PROVIDER_ID, "existing").await.unwrap().is_some());
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 0);
+    providers.delete(PROVIDER_ID).await.unwrap();
+    let error = providers.save_graph_models(
+        PROVIDER_ID, 0, &[model("resurrection", &CHAT_CAPABILITIES)], &[None],
+    ).await.unwrap_err();
+    assert!(matches!(error, DbError::NotFound(_)));
+    assert!(models.get(PROVIDER_ID, "resurrection").await.unwrap().is_none());
+}

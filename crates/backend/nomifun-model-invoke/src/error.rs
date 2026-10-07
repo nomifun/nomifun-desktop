@@ -8,6 +8,7 @@
 use serde::Serialize;
 use nomifun_net::secret_redaction::redact_url_queries as transport_cause_detail;
 use nomifun_api_types::ModelTechnicalCapability;
+pub use nomifun_net::provider_gateway_error::GatewayBusinessError;
 
 /// Machine-readable classification of an invocation failure.
 /// Wire values are snake_case (serialized into API error payloads/logs).
@@ -68,6 +69,9 @@ pub struct InvokeError {
     /// machine-readable code and exact parameter identify an unsupported
     /// technical capability. Natural-language diagnostics never set it.
     pub unsupported_technical_capability: Option<ModelTechnicalCapability>,
+    /// Exact native gateway business code from a complete bounded error body.
+    /// This transport-only classification is never a canonical Session field.
+    pub gateway_business_error: Option<GatewayBusinessError>,
 }
 
 /// Render a transport error's cause chain for a diagnostic, with URL query
@@ -107,6 +111,7 @@ impl InvokeError {
             catalog_failure: false,
             context_length_rejected: false,
             unsupported_technical_capability: None,
+            gateway_business_error: None,
         }
     }
 

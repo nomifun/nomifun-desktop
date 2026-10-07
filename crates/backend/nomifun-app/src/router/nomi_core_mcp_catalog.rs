@@ -176,11 +176,13 @@ pub(super) fn server_tools(
     {
         return Err(failure());
     }
-    let config_ref = ConnectionConfigRef::from(format!(
-        "mcp-server:{}@{}",
-        row.mcp_server_id, row.updated_at
-    ));
     let server = nomifun_mcp::McpServer::from_row(row).map_err(|_| failure())?;
+    let config_ref = nomifun_mcp::canonical_mcp_connection_config_ref(
+        &server.mcp_server_id,
+        &server.transport,
+    )
+    .map(ConnectionConfigRef::from)
+    .map_err(|_| failure())?;
     if server.tools.len() > 256 {
         return Err(failure());
     }
@@ -603,31 +605,18 @@ pub(crate) fn validate_resources(
     Ok(())
 }
 
-pub(crate) fn settlement_witness(
-    host: Arc<NomiCoreWave2Host>,
-    owner: String,
-    session: String,
-) -> Arc<dyn nomifun_ai_agent::engine_effect_scope::EngineEffectSettlement> {
-    Arc::new(McpSettlement {
-        host,
-        owner,
-        session,
-    })
-}
-
 /// Shared by engines using the frozen per-tool lane. Session overlays may
 /// project these servers, never add authority beyond the Agent Snapshot.
 pub(crate) fn validate_product_session_selection(
     snapshot: &ResolvedSnapshotEnvelope,
     resources: &[TypedResourceBinding],
-    extra: &Value,
 ) -> Result<(), AppError> {
     if !snapshot.content.mcp_tool_locks.is_empty()
         || resources
             .iter()
             .any(|resource| resource.resource_kind.as_ref() == "mcp_server")
     {
-        validate_session_selection(snapshot, resources, extra)?;
+        validate_session_selection(snapshot, resources)?;
     }
     Ok(())
 }
@@ -635,7 +624,6 @@ pub(crate) fn validate_product_session_selection(
 pub(crate) fn validate_session_selection(
     snapshot: &ResolvedSnapshotEnvelope,
     resources: &[TypedResourceBinding],
-    extra: &Value,
 ) -> Result<(), AppError> {
     let lock_ids = snapshot
         .content
@@ -670,7 +658,7 @@ pub(crate) fn validate_session_selection(
         .collect::<BTreeSet<_>>();
     // Resource-only servers have no frozen tool mapping. Their authority is
     // the typed platform binding itself, never an authorable generic switch
-    // switch or an extra/alias value.
+    // or an extra/alias value.
     let selected = resources
         .iter()
         .filter(|resource| resource.resource_kind.as_ref() == "mcp_server")
@@ -708,70 +696,7 @@ pub(crate) fn validate_session_selection(
             return Err(failure());
         }
     }
-    if expected.len() > MAX_SESSION_SERVERS {
-        return Err(failure());
-    }
-    for key in ["mcp_server_ids", "selected_mcp_server_ids"] {
-        if let Some(value) = extra.get(key) {
-            let values = value.as_array().ok_or_else(failure)?;
-            let actual = values
-                .iter()
-                .map(|value| value.as_str().ok_or_else(failure))
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            if actual != expected || actual.len() != values.len() {
-                return Err(AppError::Conflict(
-                    "MCP overlay differs from the Agent's exact frozen server mapping".into(),
-                ));
-            }
-        }
-    }
-    if let Some(value) = extra.get("mcp_servers") {
-        let names = value.as_array().ok_or_else(failure)?;
-        if names.len() != expected.len()
-            || names.iter().any(|name| {
-                !name
-                    .as_str()
-                    .is_some_and(|name| !name.is_empty() && name.len() <= 256)
-            })
-        {
-            return Err(AppError::Conflict(
-                "MCP name projection differs from the frozen server selection".into(),
-            ));
-        }
-    }
     Ok(())
-}
-
-struct McpSettlement {
-    host: Arc<NomiCoreWave2Host>,
-    owner: String,
-    session: String,
-}
-
-#[async_trait]
-impl nomifun_ai_agent::engine_effect_scope::EngineEffectSettlement for McpSettlement {
-    async fn ensure_settled(&self) -> Result<(), AppError> {
-        self.host
-            .ensure_mcp_settled(&self.owner, &self.session)
-            .await
-    }
-    async fn ensure_source_replay_safe(&self, source: &str) -> Result<(), AppError> {
-        self.host
-            .ensure_mcp_source_replay_safe(&self.owner, &self.session, source)
-            .await
-    }
-}
-
-pub(crate) fn recovery_context(
-    host: Arc<NomiCoreWave2Host>,
-    owner: String,
-    session: String,
-) -> Arc<dyn nomifun_ai_agent::ContextContributor> {
-    Arc::new(McpSettlement {
-        host,
-        owner,
-        session,
-    })
 }
 
 #[cfg(test)]
@@ -798,7 +723,13 @@ mod tests {
                 schema_digest: digest_payload(&input_schema).unwrap(),
                 materialization_revision: nomifun_mcp::MCP_TOOL_MATERIALIZATION_REVISION,
             },
-            connection_config_ref: format!("mcp-server:{SERVER_ID}@1").into(),
+            connection_config_ref: nomifun_mcp::canonical_mcp_connection_config_ref(
+                &server_id,
+                &nomifun_mcp::McpServerTransport::Http {
+                    url: "https://example.test/mcp".into(),
+                    headers: Default::default(),
+                },
+            ).unwrap().into(),
             remote_tool_name: "lookup".into(),
             input_schema,
             display_name: "Server / lookup".into(),
@@ -843,31 +774,5 @@ mod tests {
         tool.lock.canonical_tool_key = broad_proxy.into();
         tool.lock.capability_id = broad_proxy.into();
         assert!(tool.validator().is_err());
-    }
-}
-
-#[async_trait]
-impl nomifun_ai_agent::ContextContributor for McpSettlement {
-    async fn pre_turn_context(&self) -> Option<String> {
-        self.host
-            .mcp_recovery_context(&self.owner, &self.session)
-            .await
-            .ok()
-            .flatten()
-    }
-    async fn pre_turn_context_for_turn_result(
-        &self,
-        _: &nomifun_ai_agent::TurnContext,
-    ) -> Result<Option<String>, String> {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.host.mcp_recovery_context(&self.owner, &self.session),
-        )
-        .await
-        .map_err(|_| "MCP_EFFECT_CONTEXT_TIMEOUT".to_owned())?
-        .map_err(|_| "MCP_EFFECT_CONTEXT_UNAVAILABLE".to_owned())
-    }
-    fn label(&self) -> &str {
-        "platform_mcp_effect_history"
     }
 }

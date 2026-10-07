@@ -15,7 +15,8 @@ import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
-import { ComposerToolRail } from '@/renderer/components/chat/SessionCapabilityPicker';
+import SessionCapabilityPicker, { useSessionCapabilityCatalog, type SessionCapabilityDraft } from '@/renderer/components/chat/SessionCapabilityPicker';
+import { defaultSessionCapabilityDraft, toSessionCapabilitySelection } from '@/renderer/components/chat/SessionCapabilityPicker/model';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
@@ -110,6 +111,14 @@ const GuidPage: React.FC = () => {
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
   const [resourcePickerReady, setResourcePickerReady] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<SessionReasoningEffort>();
+  const capabilityCatalog = useSessionCapabilityCatalog();
+  const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({ skillNames: [], mcpServerIds: [] });
+  const initializedCapabilities = useRef(false);
+  useEffect(() => {
+    if (capabilityCatalog.loading || capabilityCatalog.error || initializedCapabilities.current) return;
+    initializedCapabilities.current = true;
+    setCapabilityDraft(defaultSessionCapabilityDraft(capabilityCatalog.catalog));
+  }, [capabilityCatalog.catalog, capabilityCatalog.loading, capabilityCatalog.error]);
 
   useEffect(() => {
     void import('@renderer/pages/conversation');
@@ -185,9 +194,7 @@ const GuidPage: React.FC = () => {
     ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
     : presetCapabilities.requiredResourceKinds;
   const presetCapabilityIds = agentSelection.selectedTemplate
-      ? new Set([
-        ...agentSelection.selectedTemplate.seed.enabled_capabilities,
-      ].map((selection) => selection.capability.id))
+      ? new Set(agentSelection.selectedTemplate.seed.enabled_capabilities.map((selection) => selection.capability.id))
     : presetCapabilities.capabilityIds;
   const presetActionIds = agentSelection.selectedTemplate
     ? new Set(
@@ -196,7 +203,7 @@ const GuidPage: React.FC = () => {
         )
       )
     : presetCapabilities.actionIds;
-  const selectedAgentRequiresToolCalls = presetActionIds.size > 0;
+  const selectedAgentRequiresToolCalls = presetActionIds.size > 0 || capabilityDraft.mcpServerIds.length > 0;
   const requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = selectedAgentRequiresToolCalls
     ? ['function_calling']
     : [];
@@ -258,7 +265,7 @@ const GuidPage: React.FC = () => {
   // AgentSession admission boundary. Knowledge keeps its compact header control
   // but contributes to this same frozen resource request at Session creation.
   const resourcePickerKinds = new Set(
-    [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base')
+    [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base' && kind !== 'mcp_server')
   );
   const optionalResourcePickerKinds = requiredAgentResourcePickerKinds(
     [...resourcePickerKinds].filter(agentResourceKindMayRemainUnbound)
@@ -377,9 +384,11 @@ const GuidPage: React.FC = () => {
     workspaceEnabled,
     resourceResolutionReady: selectedAgentModelCompatible
       && resourceSelectionsReady
+      && initializedCapabilities.current && !capabilityCatalog.loading && !capabilityCatalog.error
       && (!collaborationEnabled || collaboration.ready),
     collaboration: collaborationEnabled ? collaboration.config : undefined,
     resourceSelections: sessionResourceSelections,
+    sessionCapabilities: toSessionCapabilitySelection(capabilityDraft),
     knowledgePolicy,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
@@ -750,7 +759,18 @@ const GuidPage: React.FC = () => {
               {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
               <Composer
                 sideTools={
-                  collaborationEnabled && <ComposerToolRail ariaLabel={t('guid.collaboration.models.label')}>
+                  <SessionCapabilityPicker
+                    catalog={capabilityCatalog.catalog}
+                    draft={capabilityDraft}
+                    onChange={setCapabilityDraft}
+                    loading={capabilityCatalog.loading}
+                    loadFailed={Boolean(capabilityCatalog.error)}
+                    errorMessage={capabilityCatalog.error?.message}
+                    onRetry={capabilityCatalog.retry}
+                    disabled={guidInput.loading}
+                    applyMode='create'
+                  >
+                    {collaborationEnabled &&
                     <CollaborationComposerControl
                       value={collaboration.activeCollaborators}
                       onChange={collaboration.setCollaborators}
@@ -763,8 +783,8 @@ const GuidPage: React.FC = () => {
                       onPolicyChange={collaboration.setPolicy}
                       disabled={advancedConfig.autoWork.enabled}
                       disabledReason={advancedConfig.autoWork.enabled ? t('guid.collaboration.autoworkExclusive') : undefined}
-                    />
-                  </ComposerToolRail>
+                    />}
+                  </SessionCapabilityPicker>
                 }
                 isFileDragging={guidInput.isFileDragging}
                 dragHandlers={guidInput.dragHandlers}
@@ -806,7 +826,7 @@ const GuidPage: React.FC = () => {
                 }}
                 attachments={<ComposerAttachments files={guidInput.files} onRemoveFile={guidInput.handleRemoveFile} />}
                 tools={<div className='inline-flex items-center gap-6px'>
-                  <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} showLoadedCapabilities={false} />
+                  <FileAttachButton openFileSelector={openFileSelector} onLocalFilesAdded={guidInput.handleFilesPasted} />
                 </div>}
                 creationTools={<CreationControls prompt={guidInput.input} onPromptChange={guidInput.setInput} files={guidInput.files} />}
                 rightTools={<div className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0' data-composer-group>{modelSelectorNode}</div>}

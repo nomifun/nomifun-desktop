@@ -117,17 +117,6 @@ export type TChatConversation = IChatConversation<
     execution_pause?: { reason: string; cleanup_proven: boolean; paused_at_ms: number };
     custom_workspace?: boolean;
     proxy?: string;
-    /** Skills snapshot for this conversation — authoritative list, written
-     * once at creation. Join with `GET /api/skills` for descriptions. */
-    skills?: string[];
-    /** MCP server id snapshot chosen when the conversation was created. */
-    mcp_server_ids?: McpServerId[];
-    /** MCP server name snapshot chosen when the conversation was created. */
-    mcp_servers?: string[];
-    /** Conversation-scoped MCP status snapshot shown in the sendbox menu. */
-    mcp_statuses?: IConversationMcpStatus[];
-    /** Session-only MCP server snapshot persisted at creation time. */
-    session_mcp_servers?: ISessionMcpServer[];
     /** Max tokens per response */
     /** Max agentic turns */
     maxTurns?: number;
@@ -243,22 +232,6 @@ export interface IMcpServer {
   original_json: string; // 存储原始JSON配置，用于编辑时的准确显示
   /** Built-in MCP server managed by Nomi (hide edit/delete in UI) */
   builtin?: boolean;
-}
-
-/** Conversation-scoped MCP snapshot keyed by the stable MCP business ID. */
-export interface ISessionMcpServer {
-  mcp_server_id: McpServerId;
-  name: string;
-  transport: IMcpServerTransport;
-}
-
-export type IConversationMcpStatusKind = 'loaded' | 'failed' | 'unsupported';
-
-export interface IConversationMcpStatus {
-  mcp_server_id: McpServerId;
-  name: string;
-  status: IConversationMcpStatusKind;
-  reason?: string;
 }
 
 interface IMcpTool {

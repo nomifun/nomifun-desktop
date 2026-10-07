@@ -47,6 +47,7 @@ interface EventTypes {
   ];
   // 填充输入框事件 / Fill sendbox input event
   'sendbox.fill': [string]; // prompt text to fill
+  'sendbox.focus': [ConversationId]; // focus the owning composer without changing its draft
   'sendbox.reply': [ReplyQuote]; // reply/quote a message
   'sendbox.reply.clear': void; // clear reply quote
   'sendbox.edit': [{ msgId: MessageId; createdAt: number; content: string }]; // edit a sent user message (recall into composer)

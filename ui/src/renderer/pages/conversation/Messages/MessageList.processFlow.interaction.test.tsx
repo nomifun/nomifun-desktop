@@ -8,16 +8,19 @@ import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
 import MessageList from './MessageList';
-import { MessageListProvider, useUpdateMessageList } from './hooks';
+import { MessageListProvider, MessageListLoadingProvider, useMessageLstCache, useUpdateMessageList } from './hooks';
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
 import { ipcBridge } from '@/common';
 import agentExecutionLocale from '@/renderer/services/i18n/locales/en-US/agentExecution.json';
+import idmmLocale from '@/renderer/services/i18n/locales/en-US/idmm.json';
+import { useState } from 'react';
+import { dispatchChatMessageJump } from '@/renderer/utils/chat/chatMinimapEvents';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { ExecutionProvider, useExecutionSafe } from '../execution/ExecutionContext';
 import { executionId, leadConversation, leadConversationId, makeAttempt, makeDetail, makeStep, requestId } from '../../../../../test/fixtures/conversationDelegation';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale, agentExecution: agentExecutionLocale } } } });
+await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale, agentExecution: agentExecutionLocale, idmm: idmmLocale } } } });
 const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000061');
 const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000062');
 const messageId = (index: number) => parseMessageId(`0190f5fe-7c00-7a00-8000-${String(index).padStart(12, '0')}`);
@@ -41,6 +44,85 @@ beforeEach(() => {
 });
 
 afterEach(() => { cleanup(); restoreListeners(); });
+
+test('decision question jumps load an older history page and historical failures remain standalone notes', async () => {
+  const questionId = messageId(91);
+  const question: TMessage = { id: 'question', type: 'text', position: 'left', conversation_id: conversationId,
+    message_id: questionId, msg_id: questionId, created_at: 1, content: { content: 'Choose a cache strategy?' } };
+  const notice: TMessage = { id: 'notice', type: 'tips', position: 'center', conversation_id: conversationId,
+    message_id: messageId(92), msg_id: messageId(92), created_at: 2, content: { content: '', type: 'error', idmm_notice: {
+      status: 'failed', created_at: 2, decision: { intervention_id: messageId(93), source: 'rule',
+        reason_code: 'rule_cannot_answer', rationale: 'This question needs human input.',
+        question: { message_id: questionId, sequence: 1, fingerprint: 'a'.repeat(64) } },
+    } } };
+  let olderLoads = 0;
+  const PagingTimeline = () => {
+    const update = useUpdateMessageList();
+    const [loaded, setLoaded] = useState(false);
+    return <MessageList hasMoreOlder={!loaded} loadingOlder={false} onLoadOlder={async () => {
+      olderLoads++;
+      update(current => [question, ...current]);
+      setLoaded(true);
+    }} />;
+  };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='idmm-question-history-test' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: false }}>
+        <MessageListProvider initialValue={[notice]}><PagingTimeline /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+  const renderedNotice = page.getByTestId('idmm-decision-notice');
+  expect(renderedNotice.closest('.turn-process-disclosure')).toBeNull();
+  expect(page.queryByTestId('conversation-current-activity')).toBeNull();
+  act(() => dispatchChatMessageJump({ conversation_id: conversationId, messageId: questionId, loadOlder: true }));
+  await waitFor(() => expect(olderLoads).toBe(1));
+  await waitFor(() => expect(page.container.querySelector(`[data-message-business-id="${questionId}"]`)).not.toBeNull());
+  expect(page.getByTestId('idmm-decision-notice').closest('.turn-process-disclosure')).toBeNull();
+});
+
+test('a failed question history page stops automatic loading and a second click can retry successfully', async () => {
+  const questionId = messageId(94);
+  const question: TMessage = { id: 'older-question', type: 'text', position: 'left', conversation_id: conversationId,
+    message_id: questionId, msg_id: questionId, created_at: 1, content: { content: 'Choose a cache strategy?' } };
+  const reply: TMessage = { id: 'automatic-reply', type: 'text', position: 'right', conversation_id: conversationId,
+    message_id: messageId(95), msg_id: messageId(95), created_at: 2, content: { content: '2', idmm_decision: {
+      intervention_id: messageId(96), source: 'rule', reason_code: 'rule_selected_recommended_option',
+      rationale: 'Choose the recommended safe option.', question: { message_id: questionId, sequence: 1, fingerprint: 'a'.repeat(64) },
+    } } };
+  let olderRequests = 0;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  const completed = spyOn(ipcBridge.conversation.turnCompleted, 'on').mockImplementation(() => () => {});
+  const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(() => () => {});
+  const history = spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockImplementation(async query => {
+    if (!query.cursor) return { items: [reply], has_more: true, total: 2 };
+    olderRequests++;
+    if (olderRequests === 1) throw new Error('fixture page unavailable');
+    return { items: [question], has_more: false, total: 2 };
+  });
+  const Timeline = () => {
+    const paging = useMessageLstCache(conversationId);
+    return <MessageList onLoadOlder={paging.loadOlder} hasMoreOlder={paging.hasMore} loadingOlder={paging.loadingOlder} />;
+  };
+  try {
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+      <PreviewProvider persistNamespace='idmm-question-failed-history-test' subscribeGlobalOpen={false}>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: false }}>
+          <MessageListProvider><MessageListLoadingProvider><Timeline /></MessageListLoadingProvider></MessageListProvider>
+        </ConversationProvider>
+      </PreviewProvider>
+    </I18nextProvider></MemoryRouter>);
+    await waitFor(() => expect(page.getByRole('button', { name: 'View original question' })).toBeTruthy());
+    fireEvent.click(page.getByRole('button', { name: 'View original question' }));
+    await waitFor(() => expect(olderRequests).toBe(1));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 80)); });
+    expect(olderRequests).toBe(1);
+    expect(page.container.querySelector(`[data-message-business-id="${questionId}"]`)).toBeNull();
+    fireEvent.click(page.getByRole('button', { name: 'View original question' }));
+    await waitFor(() => expect(olderRequests).toBe(2));
+    await waitFor(() => expect(page.container.querySelector(`[data-message-business-id="${questionId}"]`)).not.toBeNull());
+  } finally { history.mockRestore(); errors.mockRestore(); completed.mockRestore(); reconnect.mockRestore(); }
+});
 
 test('a live journal only animates its current thought and preserves completed thought disclosures', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };

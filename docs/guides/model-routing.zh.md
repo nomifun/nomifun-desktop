@@ -2,7 +2,7 @@
 
 NomiFun 的**模型**页面是一套可扩展控制面，不是固定厂商清单。它把 provider
 凭据、模型记录、任务能力与可靠性策略分开管理，让同一份目录可以被会话、伙伴、
-计划任务、设定和创意工坊复用。
+计划任务、设定和创作复用。
 
 > English: [model-routing.md](model-routing.md)
 
@@ -44,6 +44,45 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 配置。模型别名和描述由各用途共用；凭据和模型的完整调用接口集合仍可在
 **供应商与密钥**中管理。
 
+## 接入可选模型网关
+
+**NomiFun 模型网关**供应商预设可以连接你自托管的网关，也可以连接社区成员
+独立运营的服务。NomiFun 官方提供开源软件和协议：无广告、无会员制，官方不做任何
+商业化运营；永远不对本项目的任何功能收费，官方也不运营任何付费服务；唯一的花费
+是模型 token，由你直接支付给自己选择的模型服务方。已有供应商和手工配置仍可使用。
+
+选择网关预设，先填写网关的**运行时 URL**，通过匿名的 `/nomifun/v1/meta` 确认运营方，
+再输入 **API Key** 并读取需鉴权的 `/nomifun/v1/catalog`。由你选择要导入的
+模型，再将供应商、所选模型、调用接口和连接一起保存。目录元数据只代表服务声明的
+能力；导入目录不代表模型调用已验证通过。
+
+每个导入模型保留其原生协议，目录协议的映射为：
+
+| 网关协议 | Desktop 调用协议 | 连接 |
+| --- | --- | --- |
+| `openai` | `openai.chat_text` | `default` |
+| `openai-response` | `openai.responses` | `default` |
+| `anthropic` | `anthropic.messages` | `anthropic` |
+| `gemini` | `gemini.generate_text` | `gemini` |
+
+供应商保存三个连接，统一使用你填入的密钥：
+
+- `default`：Bearer 鉴权，地址为运行时 base URL 后追加 `/v1`；
+- `anthropic`：`x-api-key` 请求头鉴权，地址为运行时 URL 根路径；
+- `gemini`：`x-goog-api-key` 请求头鉴权，地址为运行时 URL 根路径。
+
+其他受支持的标准任务使用 `default` 连接。元信息、目录与账户 API 是网关控制接口，
+不额外生成模型调用连接。额度等账户信息通过 `/nomifun/v1/account` 按需查询，使用当前
+配置的网关密钥。
+
+通过供应商设置轮换网关密钥，一次保存同时更新三个连接。**同步模型目录**会添加新
+模型并更新你未修改的目录元数据，保留你的修改，且不会删除任何模型。这些操作不代表模型健康检查通过；请为实际要用的
+接口运行当前界面提供的调用检查。
+
+网关元信息可以提供官网、密钥管理、充值和账单链接。只有 HTTPS 链接可打开，统一在
+系统浏览器中打开。Desktop 不内嵌供应商登录页，不通过深链接接收密钥，也不要求其他
+供应商的用户开通网关账户。密钥由你在 Desktop 中手工填写或轮换。
+
 ## 模型目录与调用接口
 
 模型目录提供建议，不限制可录入的模型，也不要求先选择“支持的任务”。目录没有
@@ -67,9 +106,9 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 | Vision | 带图片的聊天与分析 |
 | 语音识别（ASR） | 语音输入、伙伴和设备语音 |
 | 语音合成（TTS） | 伙伴、设备与 Canvas 音频节点 |
-| 图片生成 / 编辑 | 创意工坊 Canvas 与 Image Workbench |
-| 视频生成 | 创意工坊 Canvas 与 Video Workbench |
-| 音乐生成 | 会话创作与 Creative Studio |
+| 图片生成 / 编辑 | 创作 Canvas 与 Image Workbench |
+| 视频生成 | 创作 Canvas 与 Video Workbench |
+| 音乐生成 | 会话创作与 Creation |
 | Embedding / Rerank | 检索与知识工作流 |
 
 这些任务表示独立调用协议与 endpoint。运行时不会只凭模型名猜测图片或视频生成
@@ -124,7 +163,7 @@ Chat 不需要用户勾选识图、视频理解、音频输入、工具调用、
 收窄后续路由。Chat 的输入与技术能力不会自动创建生图、视频、音乐、TTS 或 ASR
 接口；自动创作只会选择已配置对应任务接口的模型。
 
-创意工坊会把精确的 `{ providerId, model, task, capability }` 身份随每次已接纳
+创作会把精确的 `{ providerId, model, task, capability }` 身份随每次已接纳
 的媒体操作持久化。复用同一个幂等任务重试时，不能更换这些事实。
 
 ## 模型故障转移队列
@@ -171,5 +210,5 @@ AutoWork 位于更上一层：它负责让带标签的需求队列继续认领�
   `crates/backend/nomifun-app/src/router/model_failover.rs`
 - IDMM 策略：
   `crates/backend/nomifun-idmm/src/policy.rs`
-- 创意工坊模型目录：
+- 创作模型目录：
   `ui/src/renderer/pages/creativeStudio/models/catalog.ts`

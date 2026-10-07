@@ -18,6 +18,7 @@ use nomifun_api_types::{
     UpdateWorkDirRequest,
 };
 use nomifun_common::AppError;
+use nomifun_api_types::{ModelGatewayMetaRequest, ModelGatewayCatalogRequest, ModelGatewayMetaResponse, ModelGatewayCatalogResponse, ModelGatewayAccountResponse, CreateModelGatewayRequest, UpdateModelGatewayConnectionRequest, SyncModelGatewayResponse};
 
 use crate::client_pref::ClientPrefService;
 use crate::model_fetcher::ModelFetchService;
@@ -87,7 +88,14 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         // provider id.
         .route("/api/providers/fetch-models", post(fetch_models_anonymous))
         .route("/api/providers/probe-connection", post(probe_connection_anonymous))
+        .route("/api/providers/model-gateway/meta", post(gateway_meta_anonymous))
+        .route("/api/providers/model-gateway/catalog", post(gateway_catalog_anonymous))
+        .route("/api/providers/model-gateway/create", post(create_model_gateway))
         .route("/api/model-protocols", get(list_model_protocols))
+        .route("/api/providers/{provider_id}/model-gateway/meta", get(gateway_meta))
+        .route("/api/providers/{provider_id}/model-gateway/account", get(gateway_account))
+        .route("/api/providers/{provider_id}/model-gateway/sync", post(sync_model_gateway))
+        .route("/api/providers/{provider_id}/model-gateway/connection", axum::routing::put(update_model_gateway_connection))
         .route(
             "/api/providers/{provider_id}",
             delete(delete_provider).put(update_provider),
@@ -287,6 +295,34 @@ async fn list_providers(
 ) -> Result<Json<ApiResponse<Vec<ProviderResponse>>>, AppError> {
     let providers = state.provider_service.list().await?;
     Ok(Json(ApiResponse::ok(providers)))
+}
+
+async fn gateway_meta_anonymous(Json(req): Json<ModelGatewayMetaRequest>) -> Result<Json<ApiResponse<ModelGatewayMetaResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(crate::model_gateway::fetch_meta(&req.base_url).await?)))
+}
+
+async fn gateway_catalog_anonymous(Json(req): Json<ModelGatewayCatalogRequest>) -> Result<Json<ApiResponse<ModelGatewayCatalogResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(crate::model_gateway::fetch_catalog(&req.base_url, &req.api_key).await?)))
+}
+
+async fn create_model_gateway(State(state): State<SystemRouterState>, Json(req): Json<CreateModelGatewayRequest>) -> Result<(StatusCode, Json<ApiResponse<ProviderResponse>>), AppError> {
+    Ok((StatusCode::CREATED, Json(ApiResponse::ok(state.provider_service.create_gateway(req).await?))))
+}
+
+async fn gateway_meta(State(state): State<SystemRouterState>, Path(id): Path<String>) -> Result<Json<ApiResponse<ModelGatewayMetaResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.gateway_meta(&id).await?)))
+}
+
+async fn gateway_account(State(state): State<SystemRouterState>, Path(id): Path<String>) -> Result<Json<ApiResponse<ModelGatewayAccountResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.gateway_account(&id).await?)))
+}
+
+async fn sync_model_gateway(State(state): State<SystemRouterState>, Path(id): Path<String>) -> Result<Json<ApiResponse<SyncModelGatewayResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.sync_gateway_catalog(&id).await?)))
+}
+
+async fn update_model_gateway_connection(State(state): State<SystemRouterState>, Path(id): Path<String>, Json(req): Json<UpdateModelGatewayConnectionRequest>) -> Result<Json<ApiResponse<ProviderResponse>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.provider_service.update_gateway_connection(&id, req).await?)))
 }
 
 async fn create_provider(

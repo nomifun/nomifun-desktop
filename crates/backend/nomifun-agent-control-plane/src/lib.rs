@@ -35,7 +35,7 @@ pub use impact::{
 pub use routes::{
     AuthenticatedOwner, control_plane_router, control_plane_router_without_legacy_skills,
 };
-pub use service::{AgentControlPlane, DefaultChatRouteResolver};
+pub use service::{AgentControlPlane, DefaultChatRouteResolver, SessionCapabilitiesResolver, ResolvedSessionCapabilities, is_global_extension_module};
 pub use store::{
     AgentBindingTarget, ControlPlaneStore, InMemoryControlPlaneStore, StoredAgentBinding,
     StoredPreset,

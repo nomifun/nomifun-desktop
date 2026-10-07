@@ -1060,7 +1060,7 @@ fn create_nomi_core_router_with_all_state(
     // unguessable ids; listing/creation stay authenticated. See `companion_public_routes`.
     let companion_public = companion_public_routes(states.companion);
 
-    // 创意工坊 asset/thumbnail serving — exempt from auth for the same reason as
+    // 创作 asset/thumbnail serving — exempt from auth for the same reason as
     // companion figure images: `<img>`/`<video>` subresource loads can't carry
     // the local-trust header, so an authenticated route would 403 every asset
     // preview and canvas gallery thumbnail. GET-only, opaque bare UUIDv7 asset

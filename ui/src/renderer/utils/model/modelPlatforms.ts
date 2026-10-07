@@ -21,6 +21,7 @@ type PlatformType =
   | 'openai'
   | 'custom'
   | 'new-api'
+  | 'nomifun-model-gateway'
   | 'bedrock'
   | 'deepseek'
   | 'deepgram'
@@ -70,6 +71,7 @@ export interface PlatformConfig {
 
 export const MODEL_PLATFORMS: PlatformConfig[] = [
   { name: 'Custom', value: 'custom', logo: null, platform: 'custom', i18nKey: 'settings.platformCustom' },
+  { name: 'NomiFun Model Gateway', value: 'nomifun-model-gateway', logo: null, platform: 'nomifun-model-gateway', i18nKey: 'settings.modelGateway.title' },
   {
     name: 'New API',
     value: 'new-api',

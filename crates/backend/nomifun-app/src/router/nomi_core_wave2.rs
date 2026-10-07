@@ -319,18 +319,6 @@ impl NomiCoreWave2Host {
             None => Ok(()),
         }
     }
-    pub(crate) async fn ensure_mcp_source_replay_safe(&self, user: &str, session: &str, source: &str) -> Result<(), AppError> {
-        match &self.mcp {
-            Some(owner) => owner.ensure_source_replay_safe(user, session, source).await,
-            None => Ok(()),
-        }
-    }
-    pub(crate) async fn mcp_recovery_context(&self, user: &str, session: &str) -> Result<Option<String>, AppError> {
-        match &self.mcp {
-            Some(owner) => owner.recovery_context(user, session).await,
-            None => Ok(None),
-        }
-    }
     pub(crate) async fn runtime_processes_quiescent(&self, user: &str, session: &str) -> Result<bool, AppError> {
         let scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
             .iter().filter(|((owner, id, _), _)| owner == user && id == session)

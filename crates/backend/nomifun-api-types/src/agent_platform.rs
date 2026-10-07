@@ -888,6 +888,10 @@ pub enum SessionReasoningEffortDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
+    /// Global extensions chosen for this Session. Omitted uses installation
+    /// defaults; explicit empty lists select none. Never an Agent module gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_capabilities: Option<SessionCapabilitySelectionDto>,
     /// Launch requirements can only narrow admission; they never grant modules.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub required_modules: BTreeSet<String>,
@@ -915,6 +919,30 @@ pub struct CreateAgentSessionRequestDto {
     /// directory, and derive the frozen typed resource binding itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionCapabilitySelectionDto {
+    #[serde(default)]
+    pub skill_names: Vec<String>,
+    #[serde(default)]
+    pub mcp_server_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionCapabilitySelectionDto {
+    pub selection: SessionCapabilitySelectionDto,
+    pub binding_version: u64,
+    pub editable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionCapabilitySelectionDto {
+    pub selection: SessionCapabilitySelectionDto,
+    pub expected_binding_version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

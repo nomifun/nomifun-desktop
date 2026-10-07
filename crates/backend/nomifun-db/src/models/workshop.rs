@@ -69,7 +69,7 @@ pub struct CreativeStudioTemplateRunRow {
     pub updated_at: TimestampMs,
 }
 
-/// Row mapping for the `workshop_assets` table (创意工坊 资产库).
+/// Row mapping for the `workshop_assets` table (创作 资产库).
 ///
 /// Metadata is indexed here; the binary lives under the data dir at `rel_path`
 /// (`workshop/assets/{asset_id}.{ext}`). `text` assets carry their body in
