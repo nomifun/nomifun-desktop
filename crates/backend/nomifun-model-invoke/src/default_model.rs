@@ -61,7 +61,18 @@ impl ModelInvokeService {
                 .unwrap_or(HealthStatus::Unknown);
             if health == HealthStatus::Unhealthy { continue; }
             let model = ModelRef { provider_id: capability.provider_id, model: capability.model };
-            match self.validate(&model, task).await {
+            // Text creation uses the native Agent Chat executor. Chat has no
+            // one-shot TaskRequest/adapter, so validate its exact transport
+            // configuration rather than discarding it as an unsupported probe.
+            let validation = if task == ModelTask::Chat {
+                self.resolve_task_config(&model, task).await.and_then(|config| {
+                    config.connection.auth.validate()?;
+                    Ok(())
+                })
+            } else {
+                self.validate(&model, task).await
+            };
+            match validation {
                 Ok(()) => candidates.push((health, model)),
                 Err(error) if error.is_catalog_failure() => return Err(error),
                 Err(_) => {}
