@@ -1113,6 +1113,14 @@ impl EngineTurnJournal {
             cursor.uncertain = true;
             Self::append_progress(&journal, &cursor, &event_value, kind).await?;
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
+            if let Some(AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,cleanup,..})=&runtime_event {
+                if model_operation_id.as_ref()!=format!("{}:model:{step}",journal.operation.as_ref())||cleanup.operation_id!=*model_operation_id||cleanup.task_id.is_empty()
+                    ||cursor.assistant_step.as_ref().is_some_and(|current|current.step>*step) {return Err(failure("voice source withdrawal differs from the exact owned model step"));}
+                // Keep immutable partial parts for audit. This obsolete source
+                // never receives a completed-message publication or flows into
+                // the next response cursor. Ordinary journal events are unchanged.
+                if cursor.assistant_step.as_ref().is_some_and(|current|current.step==*step){cursor.assistant_step=None;}
+            }
             if let Some(AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text }) = &runtime_event {
                 Self::append_assistant_part(&journal, &mut cursor, *step, text).await?;
             }
@@ -1332,6 +1340,24 @@ mod reliability_tests;
 mod history_display_tests {
     use super::*;
     use super::super::runtime_event_buffer::AgentEventBuffer;
+
+    #[tokio::test]
+    async fn voice_owned_journal_keeps_withdrawn_parts_as_audit_without_completing_the_obsolete_source() {
+        let(journal,pool)=test_fixture().await;let task=tokio::spawn(async{});let task_id=task.id().to_string();task.await.unwrap();
+        let operation=OperationId::from(format!("{}:model:1",journal.0.operation.as_ref()));
+        for event in [AgentEngineEvent::OutputTextDelta {step:1,text:"obsolete public draft".into()},
+            AgentEngineEvent::VoiceModelStepSuperseded {step:1,model_operation_id:operation.clone(),steering_receipt_ids:vec!["actual-voice-receipt".into()],discarded_tool_call_ids:vec![],
+                cleanup:nomifun_chat_model_broker::OwnedModelCleanupReceipt {operation_id:operation,task_id,stage:nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,outcome:nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined}},
+            AgentEngineEvent::OutputTextDelta {step:2,text:"current public reply".into()}] {
+            journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+        }
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
+        journal.append(serde_json::to_string(&AgentEngineEvent::TurnCompleted {model_steps:2,finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed}).unwrap(),None,EngineJournalWrite::Terminal).await.unwrap();
+        let rows:Vec<(String,String)>=sqlx::query_as("SELECT kind,correlation_id FROM agent_events WHERE session_id=? AND kind IN ('message/content-part','message/completed') ORDER BY seq").bind(journal.0.session.as_ref()).fetch_all(&pool).await.unwrap();
+        let old=canonical_assistant_step_message_id(journal.0.root.as_ref(),1).unwrap();let current=canonical_assistant_step_message_id(journal.0.root.as_ref(),2).unwrap();
+        assert!(rows.iter().any(|(kind,id)|kind=="message/content-part"&&id==&old));assert!(!rows.iter().any(|(kind,id)|kind=="message/completed"&&id==&old));
+        assert!(rows.iter().any(|(kind,id)|kind=="message/completed"&&id==&current));
+    }
 
     #[tokio::test]
     async fn checkpoint_uses_the_production_journal_and_disappears_on_completion() {

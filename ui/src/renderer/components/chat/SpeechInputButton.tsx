@@ -83,7 +83,7 @@ const formatSpeechDuration = (durationMs: number): string => {
 
 const getTooltipKey = (availability: SpeechInputAvailability, isListening: boolean, isProcessing: boolean) => {
   if (isProcessing) {
-    return 'conversation.chat.speech.processing';
+    return 'conversation.chat.speech.cancelTooltip';
   }
   if (isListening) {
     return 'conversation.chat.speech.stopTooltip';
@@ -101,6 +101,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
   const { data: providers } = useProvidersQuery();
   const {
     availability,
+    cancel,
     clearError,
     errorCode,
     errorMessage,
@@ -211,6 +212,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
       stopRecording();
       return;
     }
+    if (isProcessing) { cancel(); return; }
 
     void startRecording();
   };
@@ -256,7 +258,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
           size='small'
           shape='circle'
           className={`speech-input-button ${isRecording ? 'speech-input-button--listening' : ''} ${isProcessing ? 'speech-input-button--processing' : ''}`}
-          disabled={disabled || isProcessing}
+          disabled={disabled}
           onClick={handleClick}
           aria-label={ariaLabel}
           icon={icon}

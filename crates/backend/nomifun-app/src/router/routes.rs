@@ -1101,6 +1101,14 @@ fn create_nomi_core_router_with_all_state(
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
         .merge(mcp_authenticated);
+    let router=match states.mobile_voice{
+        Some(mut mobile_voice)=>{
+            mobile_voice.allowed_origins=ws_state.allowed_origins.clone();
+            let voice_media=super::mobile_voice_host::media_routes(mobile_voice.clone());
+            let voice_api=admit_headless_installation_owner(protect_instance_owner(super::mobile_voice_host::routes(mobile_voice),&auth_mw_state,&instance_owner_state),&installation_token_trust_state);
+            router.merge(voice_api).merge(voice_media)
+        },None=>router,
+    };
     let router = match skill_authenticated {
         Some(skill) => router.merge(skill),
         None => router,

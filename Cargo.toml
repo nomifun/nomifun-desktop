@@ -49,6 +49,10 @@ nomifun-app = { path = "crates/backend/nomifun-app" }
 nomifun-robot = { path = "crates/backend/nomifun-robot" }
 nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
 nomifun-agent-contracts = { path = "crates/backend/nomifun-agent-contracts" }
+nomifun-voice-contracts = { path = "crates/backend/nomifun-voice-contracts" }
+nomifun-voice-core = { path = "crates/backend/nomifun-voice-core" }
+nomifun-voice = { path = "crates/backend/nomifun-voice" }
+nomifun-audio = { path = "crates/shared/nomifun-audio" }
 nomifun-agent-session = { path = "crates/backend/nomifun-agent-session" }
 nomifun-agent-kernel = { path = "crates/backend/nomifun-agent-kernel" }
 nomifun-js-runtime = { path = "crates/backend/nomifun-js-runtime" }

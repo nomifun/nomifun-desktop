@@ -29,6 +29,7 @@ pub(crate) fn discardable_model_event(event: &AgentEngineEvent) -> bool {
         | AgentEngineEvent::CompactionSummaryRejected { .. }
         | AgentEngineEvent::ContextCompacted { .. } | AgentEngineEvent::ContextLimitRecoveryStarted { .. }
         | AgentEngineEvent::ModelOutputTruncated { .. } | AgentEngineEvent::ModelResponseRejected { .. }
+        | AgentEngineEvent::VoiceModelStepSuperseded { .. }
         | AgentEngineEvent::ExecutionResumed { .. } | AgentEngineEvent::ExecutionBudgetPrepared { .. }
         | AgentEngineEvent::ExecutionSegmentRenewed { .. } | AgentEngineEvent::ContextPrepared { .. }
         | AgentEngineEvent::RuntimeModulesActivated { .. })
@@ -93,7 +94,7 @@ impl AgentTurnRecovery {
                 AgentEngineEvent::OutputTextDelta { step, .. } | AgentEngineEvent::ReasoningDelta { step, .. }
                 | AgentEngineEvent::ToolCallDelta { step, .. } | AgentEngineEvent::ToolCallCompleted { step, .. }
                 | AgentEngineEvent::Usage { step, .. } | AgentEngineEvent::ModelOutputTruncated { step, .. }
-                | AgentEngineEvent::ModelResponseRejected { step, .. } => Some(*step), _ => None,
+                | AgentEngineEvent::ModelResponseRejected { step, .. } | AgentEngineEvent::VoiceModelStepSuperseded {step,..} => Some(*step), _ => None,
             };
             if event_step.is_some_and(|step| step != last_model_step || step <= checkpoint.model_steps) { return Err(fail()); }
             match event {
