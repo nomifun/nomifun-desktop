@@ -17,6 +17,7 @@ describe('execution transcript capability boundary', () => {
     // would mean an unaudited second surface was reintroduced.
     expect(source.match(/readOnly/g)?.length ?? 0).toBe(1);
     expect(source.match(/hideSendBox/g)?.length ?? 0).toBe(1);
+    expect(source.includes("creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}")).toBe(true);
   });
 
 });

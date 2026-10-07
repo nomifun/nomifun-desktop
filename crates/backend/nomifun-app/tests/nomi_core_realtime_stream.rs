@@ -164,6 +164,7 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             .ack
             .expect("new tool call must be accepted");
         let _ = self.events.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: call_id.clone(),
             name: "write_file".to_owned(),
             args: json!({"path": "settlement.txt", "content": "x"}),
@@ -212,6 +213,7 @@ impl AgentRuntimeControl for SettlementErrorMockAgent {
             .ack
             .expect("tool result must be accepted");
         let _ = self.events.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: call_id.clone(),
             name: "write_file".to_owned(),
             args: json!({"path": "settlement.txt", "content": "x"}),

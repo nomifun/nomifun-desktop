@@ -264,6 +264,7 @@ impl TurnProjection {
                 self.calls.lock().unwrap_or_else(|e| e.into_inner()).insert(
                     call.call_id.as_ref().to_owned(),
                     ToolCallEventData {
+                        identity: Default::default(),
                         call_id: call.call_id.as_ref().to_owned(),
                         name: call.name,
                         args: call.arguments.0,
@@ -283,14 +284,16 @@ impl TurnProjection {
                 for id in discarded_tool_call_ids { calls.remove(id.as_ref()); }
                 None
             }
-            AgentEngineEvent::ToolStarted { call_id, .. } => self
-                .calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(call_id.as_ref())
-                .filter(|call| !call.call_id.starts_with("agent-instructions:"))
-                .cloned()
-                .map(EngineProgress::ToolCall),
+            AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
+                let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                calls.get_mut(call_id.as_ref())
+                    .filter(|call| !call.call_id.starts_with("agent-instructions:"))
+                    .map(|call| {
+                        call.identity.capability_id = Some(capability_id.as_ref().to_owned());
+                        call.identity.action_id = Some(action_id.as_ref().to_owned());
+                        EngineProgress::ToolCall(call.clone())
+                    })
+            }
             AgentEngineEvent::ToolCompleted { result, .. } => {
                 let mut call = self
                     .calls
@@ -1055,6 +1058,8 @@ mod tests {
         };
         assert_eq!(started.status, ToolCallStatus::Running);
         assert_eq!(started.args["path"], "README.md");
+        assert_eq!(started.identity.capability_id.as_deref(), Some("workspace.files"));
+        assert_eq!(started.identity.action_id.as_deref(), Some("workspace.files/read"));
         projection
             .emit(AgentEngineEvent::ToolCompleted {
                 step: 1,
@@ -1067,6 +1072,8 @@ mod tests {
         };
         assert_eq!(completed.call_id, started.call_id);
         assert_eq!(completed.name, started.name);
+        assert_eq!(completed.identity.capability_id, started.identity.capability_id);
+        assert_eq!(completed.identity.action_id, started.identity.action_id);
         assert_eq!(completed.args, started.args);
         assert_eq!(completed.status, ToolCallStatus::Error);
         assert_eq!(completed.output.as_deref(), Some("file unavailable"));

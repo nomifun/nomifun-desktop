@@ -12,6 +12,7 @@
   "toolGroupViewSteps": "查看步骤",
   "toolDetailInput": "输入",
   "toolDetailOutput": "输出",
+  "toolDetailIdentity": "调用标识",
   "delegation": {
     "title": "子智能体任务",
     "activity": "子智能体：{{status}}",

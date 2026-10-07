@@ -239,6 +239,9 @@ export type IMessageToolCall = IMessage<
      * can inspect exactly what the model sent.
      */
     args?: Record<string, unknown> | null;
+    /** Canonical identity projected by the host, separate from the model alias. */
+    capability_id?: string;
+    action_id?: string;
     error?: string;
     status?: 'running' | 'completed' | 'error' | 'canceled';
     input?: Record<string, unknown>;
