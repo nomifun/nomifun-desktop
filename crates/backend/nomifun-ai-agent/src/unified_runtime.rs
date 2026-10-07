@@ -223,25 +223,16 @@ impl TurnProjection {
         // This runs only after the typed transition is recorded by the host.
         // Closing one reasoning phase does not complete the enclosing Turn;
         // its terminal remains owned by the cleanup and receipt path.
-        match &event {
-            AgentEngineEvent::ReasoningDelta { step, .. } => {
+        match event.reasoning_display_transition() {
+            Some(Some(step)) => {
                 let previous = *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner());
-                if previous.is_some_and(|previous| previous != *step) {
+                if previous.is_some_and(|previous| previous != step) {
                     self.complete_thinking();
                 }
-                *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()) = Some(*step);
+                *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()) = Some(step);
             }
-            AgentEngineEvent::ModelStepStarted { .. }
-            | AgentEngineEvent::ExecutionResumed { .. }
-            | AgentEngineEvent::OutputTextDelta { .. }
-            | AgentEngineEvent::CompletionDelivered { .. }
-            | AgentEngineEvent::ToolCallDelta { .. }
-            | AgentEngineEvent::ToolCallCompleted { .. }
-            | AgentEngineEvent::ToolStarted { .. }
-            | AgentEngineEvent::ModelOutputTruncated { .. }
-            | AgentEngineEvent::ModelResponseRejected { .. }
-            | AgentEngineEvent::DeliveryReviewSuperseded { .. } => self.complete_thinking(),
-            _ => {}
+            Some(None) => self.complete_thinking(),
+            None => {}
         }
         let projected = match event {
             // The host has committed the full plan. Re-read the canonical

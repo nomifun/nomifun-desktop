@@ -1237,32 +1237,24 @@ export const composeMessage = (
     return pushMessage(message);
   }
 
-  // Handle thinking message merging — only merge contiguous streaming chunks
+  // Reasoning has one canonical identity per Turn/model step. A provider can
+  // resume that step after narration or a tool proposal, so reconcile by that
+  // identity rather than creating duplicate rows at transcript boundaries.
   if (message.type === 'thinking') {
-    if (message.content.status === 'done') {
+    if (message.msg_id) {
       for (let i = list.length - 1; i >= 0; i--) {
         const msg = list[i];
         if (msg.type !== 'thinking' || msg.msg_id !== message.msg_id) continue;
 
         const merged = {
           ...msg.content,
-          status: 'done' as const,
+          content: msg.content.content + message.content.content,
+          status: message.content.status,
           duration: message.content.duration,
           subject: message.content.subject || msg.content.subject,
         };
-        return updateMessage(i, { ...msg, content: merged });
+        return updateMessage(i, { ...msg, turn_id: message.turn_id ?? msg.turn_id, content: merged });
       }
-    }
-
-    if (last.type === 'thinking' && last.msg_id === message.msg_id) {
-      // Otherwise append content
-      const merged = {
-        ...last.content,
-        content: last.content.content + message.content.content,
-        status: message.content.status,
-        subject: message.content.subject || last.content.subject,
-      };
-      return updateMessage(list.length - 1, { ...last, content: merged });
     }
     return pushMessage(message);
   }
