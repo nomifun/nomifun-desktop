@@ -62,7 +62,7 @@ describe('home companion showcase', () => {
   });
   test('collapse preserves the draft and remembers the manual preference', () => {
     const view = mount({ companions: [companion(1)] });
-    expect(view.getByText('Float on desktop')).toBeTruthy();
+    expect(view.getByRole('region', { name: 'My companions' }).getAttribute('data-collapsed')).toBe('false');
     fireEvent.click(view.getByRole('button', { name: 'Collapse' }));
     expect(view.getByRole('button', { name: 'Expand' }).getAttribute('aria-expanded')).toBe('false');
     expect(view.queryByText('Float on desktop')).toBeNull();
@@ -70,7 +70,7 @@ describe('home companion showcase', () => {
     view.unmount();
     expect(mount({ companions: [companion(1)] }).getByRole('button', { name: 'Expand' })).toBeTruthy();
   });
-  test('desktop floating switches toggle the intended companion directly in both showcase and roster', async () => {
+  test('desktop floating lives in companion popovers for expanded, roster and collapsed views', async () => {
     const toggled: Array<[string, boolean]> = [];
     const opened: string[] = [];
     const view = mount({
@@ -78,27 +78,50 @@ describe('home companion showcase', () => {
       onToggleFloating: (item, enabled) => toggled.push([item.companion_id, enabled]),
       onOpenChat: (item) => opened.push(item.companion_id),
     });
-    const first = view.getByRole('switch', { name: 'Float Companion 1 on desktop' });
-    expect(first.getAttribute('aria-checked')).toBe('false');
+    expect(view.queryByRole('button', { name: 'Float Companion 1 on desktop' })).toBeNull();
+    expect(view.queryByRole('switch')).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: 'Companion 1' }));
+    await settle();
+    const detail = within(document.body).getByRole('dialog', { name: 'Companion 1' });
+    const first = within(detail).getByRole('button', { name: 'Float Companion 1 on desktop' });
+    expect(first.getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(first);
     expect(toggled).toEqual([[id(1), true]]);
     expect(opened).toEqual([]);
-    expect(within(document.body).queryByRole('dialog', { name: 'Companion 1' })).toBeNull();
+    expect(within(document.body).getByRole('dialog', { name: 'Companion 1' })).toBeTruthy();
 
     fireEvent.click(view.getByRole('button', { name: 'All companions · 2' }));
     await settle();
     const roster = within(document.body).getByRole('dialog', { name: 'All companions · 2' });
-    const second = within(roster).getByRole('switch', { name: 'Float Companion 2 on desktop' });
-    expect(second.getAttribute('aria-checked')).toBe('true');
+    expect(within(roster).queryByRole('button', { name: 'Float Companion 2 on desktop' })).toBeNull();
+    fireEvent.click(within(roster).getByRole('button', { name: 'More actions for Companion 2' }));
+    await settle();
+    const menu = within(roster).getByRole('dialog', { name: 'More actions for Companion 2' });
+    const second = within(menu).getByRole('button', { name: 'Float Companion 2 on desktop' });
+    expect(second.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(second);
     expect(toggled).toEqual([[id(1), true], [id(2), false]]);
     expect(within(document.body).getByRole('dialog', { name: 'All companions · 2' })).toBeTruthy();
+    expect(within(menu).getByRole('button', { name: 'Float Companion 2 on desktop' })).toBeTruthy();
+
+    fireEvent.click(within(roster).getByRole('button', { name: 'Close companion list' }));
+    fireEvent.click(view.getByRole('button', { name: 'Collapse' }));
+    expect(view.queryByRole('button', { name: 'Float Companion 1 on desktop' })).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: 'Companion 1' }));
+    await settle();
+    const compactDetail = within(document.body).getByRole('dialog', { name: 'Companion 1' });
+    fireEvent.click(within(compactDetail).getByRole('button', { name: 'Float Companion 1 on desktop' }));
+    expect(toggled).toEqual([[id(1), true], [id(2), false], [id(1), true]]);
   });
-  test('a pending desktop visibility change shows its target state and prevents a second click', () => {
+  test('a pending desktop visibility change shows its target state and prevents a second click', async () => {
     const toggled: boolean[] = [];
     const view = mount({ companions: [companion(1)], pendingFloating: { [id(1)]: true }, onToggleFloating: (_item, enabled) => toggled.push(enabled) });
-    const toggle = view.getByRole('switch', { name: 'Float Companion 1 on desktop' });
-    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(view.getByRole('button', { name: 'Companion 1' }));
+    await settle();
+    const detail = within(document.body).getByRole('dialog', { name: 'Companion 1' });
+    const toggle = within(detail).getByRole('button', { name: 'Float Companion 1 on desktop' });
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle.getAttribute('aria-busy')).toBe('true');
     expect(toggle.hasAttribute('disabled')).toBe(true);
     fireEvent.click(toggle);
     expect(toggled).toEqual([]);
