@@ -1,39 +1,6 @@
 //! One bounded publication review for explicit multi-item action tasks.
 //! This is model interpretation, never semantic proof or execution authority.
 use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentDeliveryReviewState {
-    pub pending: bool,
-    pub used: bool,
-    pub input_revision: usize,
-    #[serde(default)]
-    pub account_repair: bool,
-}
-
-impl AgentDeliveryReviewState {
-    pub(crate) fn align_inputs(&mut self, revision: usize) {
-        if self.input_revision != revision {
-            *self = Self { input_revision: revision, ..Default::default() };
-        }
-    }
-
-    pub(crate) fn begin(&mut self, inputs: &[ChatMessage], observations: usize) -> bool {
-        self.align_inputs(inputs.len());
-        if self.used || observations < 3 || !inputs.iter().any(multi_item_input) { return false; }
-        self.used = true;
-        self.pending = true;
-        true
-    }
-
-    pub(crate) fn valid_for(&self, inputs: usize) -> bool {
-        (!self.pending || self.used) && !(self.pending && self.account_repair)
-            && self.input_revision <= inputs
-            && (!(self.used || self.account_repair) || self.input_revision > 0)
-    }
-}
 
 fn multi_item_input(input: &ChatMessage) -> bool {
     if input.role != ChatRole::User { return false; }
@@ -100,6 +67,7 @@ pub(crate) const INSTRUCTION: &str = concat!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AgentCompletionReviewState;
 
     fn input(text: &str) -> Vec<ChatMessage> {
         vec![crate::context_lifecycle::text_message(ChatRole::User, text.into())]
@@ -108,23 +76,23 @@ mod tests {
     #[test]
     fn review_is_once_per_accepted_scope_not_per_repeated_report() {
         let inputs = input("1. Read the actual directory.\n2. Report its exact entries.");
-        let mut state = AgentDeliveryReviewState::default();
+        let mut state = AgentCompletionReviewState::default();
         assert!(!state.begin(&inputs, 2));
         assert!(state.begin(&inputs, 3));
-        assert!(state.pending && state.used && state.valid_for(1));
+        assert!(state.delivery_pending && state.delivery_used && state.valid_for(1));
         assert!(!state.begin(&inputs, 3));
-        state.pending = false;
+        state.delivery_pending = false;
         assert!(!state.begin(&inputs, 4));
         let mut changed = inputs; changed.extend(input("Do not continue the old task."));
         state.align_inputs(changed.len());
-        assert!(!state.pending && !state.used);
+        assert!(!state.delivery_pending && !state.delivery_used);
     }
 
     #[test]
     fn examples_and_single_actions_do_not_create_a_publication_phase() {
         for text in ["Read one file.", "1. Read one file.", "```text\n1. example\n2. example\n```", "> 1. quote\n> 2. quote"] {
-            assert!(!AgentDeliveryReviewState::default().begin(&input(text), 8));
+            assert!(!AgentCompletionReviewState::default().begin(&input(text), 8));
         }
-        assert!(AgentDeliveryReviewState::default().begin(&input("1、读取\n2、报告"), 3));
+        assert!(AgentCompletionReviewState::default().begin(&input("1、读取\n2、报告"), 3));
     }
 }

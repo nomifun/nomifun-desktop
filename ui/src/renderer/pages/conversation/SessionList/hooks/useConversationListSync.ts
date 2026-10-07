@@ -6,7 +6,8 @@
 
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
-import type { ConversationId, MessageId, SshHostId } from '@/common/types/ids';
+import type { ConversationId, MessageId } from '@/common/types/ids';
+import { conversationSshHostId } from '../../utils/conversationSshBinding';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import {
   getConversationRuntimeAuthority,
@@ -121,18 +122,20 @@ export const shouldAcceptSidebarTurnCompletion = ({
   return !activeTurnId || !completedTurnId || activeTurnId === completedTurnId;
 };
 
-/** Host id of an SSH-bound session, or undefined for every other conversation. */
-const sshHostIdOf = (conversation: TChatConversation): SshHostId | undefined =>
-  (conversation.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
-
 /**
  * Snapshot arrays must keep their identity while the underlying rows are
  * unchanged, otherwise every `useSyncExternalStore` consumer re-renders on each
  * refresh (and refreshes are frequent: every stream/turn/list event triggers one).
  */
-const isSameConversationList = (previous: TChatConversation[], next: TChatConversation[]): boolean =>
+export const isSameConversationList = (previous: TChatConversation[], next: TChatConversation[]): boolean =>
   previous.length === next.length &&
-  previous.every((item, index) => item.id === next[index].id && item.modified_at === next[index].modified_at);
+  previous.every((item, index) =>
+    item.id === next[index].id &&
+    item.modified_at === next[index].modified_at &&
+    item.agent_snapshot?.canonical_binding?.binding_version ===
+      next[index].agent_snapshot?.canonical_binding?.binding_version &&
+    conversationSshHostId(item) === conversationSshHostId(next[index]),
+  );
 
 type ConversationListSyncSnapshot = {
   conversations: TChatConversation[];
@@ -202,7 +205,7 @@ const refreshConversations = () => {
         for (const conversation of items) {
           if (isOrdinaryWorkConversation(conversation)) {
             filteredData.push(conversation);
-          } else if (sshHostIdOf(conversation) != null) {
+          } else if (conversationSshHostId(conversation) != null) {
             sshConversations.push(conversation);
           }
         }
@@ -302,6 +305,7 @@ const initializeConversationListSyncStore = () => {
   // offline), so reload the durable conversation snapshot.
   ipcBridge.conversation.reconnected.on(() => refreshConversations());
   ipcBridge.conversation.turnPaused.on(() => refreshConversations());
+  ipcBridge.agentPlatform.sessions.onAgentChanged.on(() => refreshConversations());
   ipcBridge.conversation.listChanged.on((event) => {
     if (event.action === 'deleted') {
       activeTurnIdsState.delete(event.conversation_id);

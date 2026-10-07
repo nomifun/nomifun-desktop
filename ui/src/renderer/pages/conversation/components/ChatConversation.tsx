@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IProvider, TChatConversation } from '@/common/config/storage';
@@ -58,12 +57,6 @@ import {
   reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
-
-/** Host id of an SSH-bound session, or undefined for every other conversation. */
-const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | undefined =>
-  (conversation?.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
-
-
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
@@ -421,7 +414,6 @@ const NomiConversationPanel: React.FC<{
   );
   const hideAdvancedControls = hasPreset &&
     (conversation.agent_snapshot?.enabled_capabilities.length ?? 0) === 0;
-  const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {
     title: conversation.name,
@@ -436,7 +428,7 @@ const NomiConversationPanel: React.FC<{
         {/* An SSH-bound session is indistinguishable from a local one everywhere
             else in the chrome, so the host it drives — and whether the link is
             actually up — leads the header. */}
-        {sshHostId ? <SshHostStatusPill conversationId={conversation.id} sshHostId={sshHostId} /> : null}
+        <SshHostStatusPill conversation={conversation} />
         {/* The collaboration canvas lives beside the mounted conversation; the
             header keeps the existing capability controls. */}
         {!hideAdvancedControls && <CronJobManager

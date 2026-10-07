@@ -3,7 +3,7 @@
 //! close-with-evidence contracts the connection pool relies on.
 mod support;
 
-use std::time::Duration;
+use std::{io::Write, process::{Command, Stdio}, time::Duration};
 
 use nomi_ssh::connection::SshError;
 
@@ -128,7 +128,7 @@ async fn cancelling_a_run_retires_the_channel_instead_of_reusing_it() {
 /// forensics impossible: the pool cannot tell "still running, be patient" from
 /// "link is gone, redial".
 #[tokio::test(flavor = "multi_thread")]
-async fn run_reports_disconnect_when_the_shell_exits() {
+async fn shell_exit_reports_terminal_status_and_retires_the_channel() {
     let Some(sshd) = support::start_pubkey_sshd() else {
         eprintln!("SKIP: no usable sshd");
         return;
@@ -139,8 +139,8 @@ async fn run_reports_disconnect_when_the_shell_exits() {
         .await
         .unwrap();
 
-    // `exit` ends the remote shell, so this submission's sentinel can never
-    // arrive — the channel closes instead.
+    // `exit` prevents a sentinel, but the server still supplies its terminal
+    // process status. That receipt must not make the channel reusable.
     let first = sh.run("exit", T).await;
     let second = sh.run("echo after_exit", T).await;
 
@@ -152,6 +152,8 @@ async fn run_reports_disconnect_when_the_shell_exits() {
             );
         }
     }
+    assert!(matches!(first, Ok(ref outcome) if outcome.exit_code == 0 && outcome.cwd.is_empty() && !outcome.timed_out),
+        "server exit-status must remain an exact terminal receipt: {first:?}");
     assert!(
         matches!(second, Err(SshError::Disconnected(_))),
         "a run against a dead shell must report Disconnected, got: {second:?}"
@@ -219,18 +221,61 @@ async fn a_paging_command_completes_instead_of_hanging() {
         eprintln!("SKIP: no usable sshd");
         return;
     };
-    // The remote is this machine, so this crate's own checkout is a git repo
-    // with plenty of history to page.
-    let repo = env!("CARGO_MANIFEST_DIR");
-    let sh = support::connect(&sshd).await.open_shell(repo).await.unwrap();
-    let probe = sh
-        .run("git rev-parse --is-inside-work-tree", Duration::from_secs(5))
-        .await
-        .expect("probe");
-    if !probe.output.contains("true") {
-        eprintln!("SKIP: no git / not a work tree here (honest skip): {probe:?}");
-        return;
+    let available = match Command::new("git").arg("--version").output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("SKIP: git is unavailable");
+            return;
+        }
+        Err(error) => panic!("probe git: {error}"),
+    };
+    assert!(available.status.success(), "git --version failed: {available:?}");
+
+    // This sshd connects back to the same machine. Use its native temporary
+    // filesystem, independent of contributor history and WSL /mnt/c latency.
+    #[cfg(target_os = "linux")]
+    let repo = tempfile::tempdir_in("/tmp").unwrap();
+    #[cfg(not(target_os = "linux"))]
+    let repo = tempfile::tempdir().unwrap();
+    let initialized = fixture_git(repo.path())
+        .args(["init", "--bare", "--quiet", "--template=", "."])
+        .output()
+        .unwrap();
+    assert!(initialized.status.success(), "git init: {}", String::from_utf8_lossy(&initialized.stderr));
+    let head = fixture_git(repo.path())
+        .args(["symbolic-ref", "HEAD", "refs/heads/nomi-pager-test"])
+        .output()
+        .unwrap();
+    assert!(head.status.success(), "git symbolic-ref: {}", String::from_utf8_lossy(&head.stderr));
+
+    let mut history = String::new();
+    for index in 1..=100 {
+        let message = format!("pager fixture {index:03}\n");
+        history.push_str(&format!(
+            "commit refs/heads/nomi-pager-test\nmark :{index}\n\
+             committer SSH Fixture <ssh-fixture@example.invalid> {} +0000\n\
+             data {}\n{message}",
+            1_700_000_000 + index,
+            message.len(),
+        ));
+        if index > 1 {
+            history.push_str(&format!("from :{}\n", index - 1));
+        }
+        history.push('\n');
     }
+    history.push_str("done\n");
+    let mut importer = fixture_git(repo.path())
+        .args(["fast-import", "--quiet"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    importer.stdin.take().unwrap().write_all(history.as_bytes()).unwrap();
+    let imported = importer.wait_with_output().unwrap();
+    assert!(imported.status.success(), "git fast-import: {}", String::from_utf8_lossy(&imported.stderr));
+
+    let sh = support::connect(&sshd).await.open_shell(repo.path().to_str().unwrap()).await.unwrap();
 
     let out = sh
         .run("git log --oneline -100", Duration::from_secs(5))
@@ -247,6 +292,23 @@ async fn a_paging_command_completes_instead_of_hanging() {
         "the full log must reach the caller, got: {:?}",
         out.output
     );
+}
+
+fn fixture_git(directory: &std::path::Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_COUNT", "0");
+    for variable in [
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_TEMPLATE_DIR",
+    ] {
+        command.env_remove(variable);
+    }
+    command
 }
 
 /// `is_reaped()` is the teardown verdict, so it must be backed by evidence from
@@ -277,9 +339,9 @@ async fn close_proves_the_shell_was_reaped() {
     assert!(proof.is_reaped(), "got: {proof:?}");
 }
 
-/// The honest half of the contract: no evidence, no `reaped`.
+/// Terminal evidence consumed by run remains owned by the channel lifecycle.
 #[tokio::test(flavor = "multi_thread")]
-async fn close_after_the_shell_died_is_not_reaped() {
+async fn close_preserves_the_terminal_proof_already_observed_by_run() {
     let Some(sshd) = support::start_pubkey_sshd() else {
         eprintln!("SKIP: no usable sshd");
         return;
@@ -289,18 +351,13 @@ async fn close_after_the_shell_died_is_not_reaped() {
         .open_shell("/tmp")
         .await
         .unwrap();
-    // Kill the shell out from under us, then drain it so the close path has
-    // nothing left to learn from.
-    let _ = sh.run("exit", T).await;
+    let terminal = sh.run("printf terminal_marker; exit 7", T).await.unwrap();
+    assert_eq!(terminal.exit_code, 7);
+    assert_eq!(terminal.output, "terminal_marker");
     let _ = sh.run("echo drained", T).await;
 
     let proof = sh.close(T).await;
-    assert!(
-        !proof.is_reaped(),
-        "a shell that vanished before close must not be reported reaped: {proof:?}"
-    );
-    assert!(
-        !proof.errors.is_empty() || proof.exit_status.is_none(),
-        "an unproven close must say why it is unproven: {proof:?}"
-    );
+    assert!(proof.is_reaped(), "run's exact terminal messages must survive until teardown: {proof:?}");
+    assert_eq!(proof.exit_status, Some(7));
+    assert_eq!(sh.close(T).await, proof, "repeated close must return the retained proof");
 }

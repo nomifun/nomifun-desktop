@@ -91,8 +91,8 @@ pub struct SshSessionBinding {
 }
 
 /// Connects a conversation to its bound SSH host and returns a ready
-/// `SshBackend`. This is the seam the agent factory calls when a session's
-/// `extra` carries an `ssh_host_id`; the implementation (in `nomifun-ssh`)
+/// `SshBackend`. The current Agent binding selects the typed `ssh_host`
+/// resource; the implementation (in `nomifun-ssh`)
 /// decrypts the stored credential, dials, and opens the shell + SFTP. Kept
 /// separate from `SshBackend` so the factory can request a connection without
 /// the Runtime depending on the transport crate (that would
