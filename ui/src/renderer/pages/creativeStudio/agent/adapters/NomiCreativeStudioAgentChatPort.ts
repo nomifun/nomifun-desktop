@@ -728,11 +728,15 @@ export function createNomiCreativeStudioAgentChatPort(
               }
               await transport.stopAndConfirm(binding.conversationId);
               admittedNonTerminalTurn = false;
+              const error = normalizeAgentStreamError(event.data);
               yield {
                 type: 'failed',
                 code: 'NOMI_STREAM_ERROR',
                 message: errorText(event),
-                retryable: true,
+                retryable: error?.retryable ?? true,
+                ...(error ? { error } : {}),
+                turnId: activeTurnId,
+                ...(event.created_at !== undefined ? { timestamp: event.created_at } : {}),
               };
               return;
             }

@@ -13,7 +13,10 @@ use super::{SingleAttemptFrame, SingleAttemptStream};
 use crate::error::{InvokeError, InvokeErrorKind};
 
 pub(super) fn elapsed(phase: &'static str) -> InvokeError {
-    InvokeError::new(InvokeErrorKind::Timeout, phase)
+    let mut error = InvokeError::new(InvokeErrorKind::Timeout, phase)
+        .with_diagnostic(crate::error::ModelFailureReason::RequestTimeout);
+    error.diagnostic.as_mut().expect("typed deadline").transport_detail = Some(phase.to_owned());
+    error
 }
 
 pub(super) struct FrameDeadlineStream {

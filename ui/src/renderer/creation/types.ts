@@ -1,5 +1,6 @@
 import type { ConversationId, MessageId, ProviderId } from '@/common/types/ids';
 import type { AgentPresetId } from '@/common/types/agentPlatform';
+import type { ModelFailureDiagnostic } from '@/common/chat/providerDiagnostic';
 
 export type CreationMode = 'image' | 'video' | 'music';
 export type CreationCapability = 't2i' | 'i2i' | 'inpaint' | 't2v' | 'i2v' | 'music' | 'tts';
@@ -36,7 +37,7 @@ export interface ConversationCreationTask {
   params: CreationParameters;
   inputs: CreationInput[] | null;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
-  error: { message?: string; kind?: string } | null;
+  error: { message?: string; kind?: string; http_status?: number; providerDiagnostic?: ModelFailureDiagnostic } | null;
   result_asset_ids: string[];
   submitted_at: number;
   started_at: number | null;

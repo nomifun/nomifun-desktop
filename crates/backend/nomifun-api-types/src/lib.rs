@@ -56,7 +56,8 @@ pub use agent_discovery::{
 };
 pub use agent_error::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,
-    AgentErrorResolutionTarget, AgentStreamErrorData,
+    AgentErrorResolutionTarget, AgentStreamErrorData, AgentTaskIncompleteReason,
+    ModelFailureDiagnostic, ModelFailureReason,
 };
 pub use agent_execution::{
     AddExecutionStepsRequest, AdjustAgentExecutionRequest, AdoptExecutionStepOutputRequest,

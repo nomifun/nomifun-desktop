@@ -33,6 +33,13 @@ pub enum AuthScheme {
 }
 
 impl AuthScheme {
+    /// Non-secret mode only. Header/query names and credential values are excluded.
+    pub(crate) fn diagnostic_id(&self) -> &'static str {
+        match self {
+            Self::Bearer => "bearer", Self::TokenHeader => "token", Self::HeaderKey(_) => "header_key",
+            Self::QueryKey(_) => "query_key", Self::MultiHeader(_) => "multi_header", Self::Bedrock => "bedrock",
+        }
+    }
     /// Whether the scheme draws on the `api_keys` ARRAY and is therefore
     /// eligible for multi-key rotation
     /// ([`crate::transport::send_with_rotation`]). [`AuthScheme::MultiHeader`]

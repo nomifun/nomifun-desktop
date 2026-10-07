@@ -1268,7 +1268,12 @@ describe('normalizeDbMessage', () => {
         content: {
           content: 'provider failed',
           type: 'error',
-          error: { message: 'provider failed', code: 'USER_LLM_PROVIDER_RATE_LIMITED' },
+          error: {
+            message: 'provider failed', code: 'USER_LLM_PROVIDER_RATE_LIMITED',
+            agentLabel: 'Original Agent', modelName: 'original-model', workspacePath: '/original-workspace',
+            providerDiagnostic: { reason: 'rate_limited', httpStatus: 429, providerCode: 'rate_limit_error',
+              requestId: 'req-original', retryAfterMs: 5000, endpoint: 'https://api.example.com/v1/chat', modelName: 'actual-model' },
+          },
           started_at_ms: 4_000_000,
           finished_at_ms: 4_002_000,
         } as any,
@@ -1281,6 +1286,12 @@ describe('normalizeDbMessage', () => {
     expect(normalized.content.started_at_ms).toBe(4_000_000);
     expect(normalized.content.finished_at_ms).toBe(4_002_000);
     expect(normalized.content.error?.code).toBe('USER_LLM_PROVIDER_RATE_LIMITED');
+    expect(normalized.content.error?.agentLabel).toBe('Original Agent');
+    expect(normalized.content.error?.modelName).toBe('original-model');
+    expect(normalized.content.error?.workspacePath).toBe('/original-workspace');
+    expect(normalized.content.error?.providerDiagnostic).toEqual({ reason: 'rate_limited', httpStatus: 429,
+      providerCode: 'rate_limit_error', requestId: 'req-original', retryAfterMs: 5000,
+      endpoint: 'https://api.example.com/v1/chat', modelName: 'actual-model' });
   });
 
   test('keeps persisted turn identity for tools and text', () => {

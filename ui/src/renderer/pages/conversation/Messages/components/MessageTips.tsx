@@ -6,14 +6,12 @@
 
 import type { IMessageTips } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
-import { Tooltip } from '@arco-design/web-react';
-import { Attention, CheckOne, Down, Refresh } from '@icon-park/react';
+import { Attention, CheckOne, Refresh } from '@icon-park/react';
 import { theme } from '@/platform';
 import classNames from 'classnames';
-import React, { useId, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarkdownView from '@renderer/components/Markdown';
-import FeedbackButton from '@renderer/components/base/FeedbackButton';
 import CollapsibleContent from '@renderer/components/chat/CollapsibleContent';
 import { emitter } from '@/renderer/utils/emitter';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
@@ -22,7 +20,7 @@ import { parseMessageFileMarker } from './messageFileMarker';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import { IdmmDecisionNotice } from './IdmmDecisionNotice';
-import GatewayBillingAction, { gatewayActionError } from './GatewayBillingAction';
+import ConversationErrorNote from './ConversationErrorNote';
 
 const icon = {
   success: <CheckOne theme='filled' size='16' fill={theme.Color.FunctionalColor.success} className='m-t-2px' />,
@@ -73,7 +71,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
   return useMemo(() => {
     if (message.content.type !== 'error') return null;
     if (message.content.idmm_notice) return null;
-    if (message.content.recovery) return null;
+    if (message.content.recovery || message.content.execution_pause || conversationContext?.executionPause) return null;
     if (message.content.error?.retryable === false) return null;
     if (conversationContext?.type !== 'nomi') return null;
     if (conversationContext.readOnly === true) return null;
@@ -84,12 +82,13 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
     const retryMessageId = lastRight.message_id ?? lastRight.msg_id;
     const retryCreatedAt = lastRight.created_at;
     if (!retryMessageId || retryCreatedAt == null) return null;
+    if (message.turn_id && message.turn_id !== retryMessageId) return null;
     if ((message.created_at ?? 0) < retryCreatedAt) return null;
     const rawContent = typeof lastRight.content?.content === 'string' ? lastRight.content.content : '';
     const { text } = parseMessageFileMarker(rawContent, 'right');
     if (!text.trim()) return null;
     return () => emitter.emit('sendbox.edit', { msgId: retryMessageId, createdAt: retryCreatedAt, content: text });
-  }, [conversationContext, message.content, message.created_at, messageList]);
+  }, [conversationContext, message.content, message.created_at, message.turn_id, messageList]);
 };
 
 const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
@@ -113,18 +112,12 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const structuredError = type === 'error' ? message.content.error : undefined;
   const { json, data } = useFormatContent(content);
   const retry = useErrorRetry(message);
-  const [detailsExpanded, setDetailsExpanded] = useState(false);
-  const detailsId = useId();
-  const detailsLabel = t(
-    detailsExpanded ? 'conversation.agentError.collapseDetails' : 'conversation.agentError.expandDetails'
-  );
   const retryButton = retry ? (
     <button type='button' className='message-error-note__retry' data-testid='message-error-retry' onClick={retry}>
       <Refresh theme='outline' size='14' fill='currentColor' aria-hidden='true' />
       {t('common.retry', { defaultValue: 'Retry' })}
     </button>
   ) : null;
-  const recoveryButton = retryButton;
 
   const displayContent = json ? '' : content;
   if (message.content.idmm_notice) return <IdmmDecisionNotice message={message} />;
@@ -139,95 +132,15 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   }
   if (type !== 'error' && !content.trim()) return null;
   if (type === 'error') {
-    const code = structuredError?.code;
-    const gatewayFailure = conversationContext?.currentModel?.platform === 'nomifun-model-gateway' && gatewayActionError(code);
-    const ownership = structuredError?.ownership;
-    const title = code
-      ? t(`conversation.agentError.codes.${code}.title`, {
-          defaultValue: t('conversation.agentError.fallbackTitle'),
-        })
-      : t('conversation.agentError.fallbackTitle');
-    const body = code
-      ? t(
-          structuredError?.workspacePath
-            ? `conversation.agentError.codes.${code}.bodyWithPath`
-            : `conversation.agentError.codes.${code}.body`,
-          {
-            workspacePath: structuredError?.workspacePath,
-            defaultValue: structuredError?.message || content,
-          }
-        )
-      : structuredError?.message || (json ? '' : content);
-    const ownershipLabel = ownership
-      ? t(`conversation.agentError.ownership.${ownership}`, {
-          defaultValue: t('conversation.agentError.ownership.unknown_upstream'),
-        })
-      : null;
-    const retryHint =
-      structuredError?.retryable === undefined
-        ? null
-        : structuredError.retryable
-          ? t('conversation.agentError.retryable')
-          : t('conversation.agentError.notRetryable');
-    const resolutionText = structuredError?.resolution
-      ? t(`conversation.agentError.resolution.${structuredError.resolution.kind}`)
-      : null;
-    const detailParts = [
-      code ? `${t('conversation.agentError.errorCode')}: ${code}` : '',
-      structuredError?.detail || structuredError?.message || (json ? JSON.stringify(data, null, 2) : ''),
-    ].filter(Boolean);
-
-    return (
-      <div className='message-error-note'>
-        <div className='message-error-note__summary'>
-          <span className='message-error-note__icon' aria-hidden='true'>
-            <Attention theme='outline' size='16' fill='currentColor' />
-          </span>
-          <span className='message-error-note__title' role='alert'>
-            {title}
-          </span>
-          <div className='message-error-note__controls'>
-            <Tooltip content={detailsLabel}>
-              <button
-                type='button'
-                className='message-error-note__toggle'
-                aria-label={detailsLabel}
-                aria-expanded={detailsExpanded}
-                aria-controls={detailsId}
-                onClick={() => setDetailsExpanded((expanded) => !expanded)}
-              >
-                <Down theme='outline' size='14' fill='currentColor' aria-hidden='true' />
-              </button>
-            </Tooltip>
-            {recoveryButton && <div className='message-error-note__recovery'>{recoveryButton}</div>}
-          </div>
-        </div>
-        {gatewayFailure && <>
-          {structuredError?.message && <div className='message-error-note__body'>{structuredError.message}</div>}
-        </>}
-        {gatewayActionError(code) && <GatewayBillingAction code={code} model={conversationContext?.currentModel} />}
-        <div id={detailsId} className='message-error-note__details' hidden={!detailsExpanded}>
-          {body && <div className='message-error-note__body'>{body}</div>}
-          {resolutionText && (
-            <div className='message-error-note__body'>
-              {t('conversation.agentError.resolutionPrefix')}
-              {resolutionText}
-            </div>
-          )}
-          {(ownershipLabel || retryHint) && (
-            <div className='message-error-note__meta'>
-              {[ownershipLabel, retryHint].filter(Boolean).join(' · ')}
-            </div>
-          )}
-          {detailParts.length > 0 && (
-            <div className='message-error-note__detail-body'>{detailParts.join('\n')}</div>
-          )}
-          <div className='message-error-note__actions'>
-            <FeedbackButton className='message-error-note__feedback' />
-          </div>
-        </div>
-      </div>
-    );
+    return <ConversationErrorNote
+      error={structuredError}
+      rawDetail={structuredError?.detail || structuredError?.message || (json ? JSON.stringify(data, null, 2) : content)}
+      timestamp={message.content.finished_at_ms ?? message.created_at}
+      turnId={message.turn_id}
+      sessionId={message.conversation_id}
+      recoveryAction={retryButton}
+      currentModel={conversationContext?.currentModel}
+    />;
   }
 
   if (json)

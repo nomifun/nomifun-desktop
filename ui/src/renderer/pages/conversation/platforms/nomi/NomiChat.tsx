@@ -21,7 +21,6 @@ import React, { useEffect, useMemo } from 'react';
 import LocalImageView from '@renderer/components/media/LocalImageView';
 import NomiSendBox from './NomiSendBox';
 import { useNomiMessage } from './useNomiMessage';
-import { ExecutionPauseNotice } from './ExecutionPauseNotice';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import { ConversationCreationTasksProvider } from '@/renderer/creation/ConversationCreationTasks';
 import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
@@ -101,6 +100,7 @@ const NomiChat: React.FC<{
       readOnly,
       isProcessing: resolvedIsProcessing,
       stopNotice: turnActivity.stopNotice,
+      executionPause: turnActivity.pauseNotice,
       currentAgent,
       currentModel,
     };
@@ -112,6 +112,7 @@ const NomiChat: React.FC<{
     readOnly,
     resolvedIsProcessing,
     turnActivity.stopNotice,
+    turnActivity.pauseNotice,
     currentAgent,
     currentModel,
   ]);
@@ -129,7 +130,6 @@ const NomiChat: React.FC<{
               loadingOlder={historyPaging.loadingOlder}
             />
           </FlexFullContainer>
-          {turnActivity.pauseNotice && <ExecutionPauseNotice pause={turnActivity.pauseNotice} />}
           {!readOnly && PLUGIN_FEATURE_VISIBLE && <ConversationPluginArtifacts conversationId={conversation_id} />}
           {!readOnly && !hideSendBox && (
             <NomiSendBox

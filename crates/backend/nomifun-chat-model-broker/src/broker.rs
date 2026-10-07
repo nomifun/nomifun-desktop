@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex, ModelRouteId};
+use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex, ModelFailureDiagnostic, ModelFailureReason, ModelRouteId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -365,6 +365,7 @@ async fn run_broker(
                 error,
                 semantic_output_committed: true,
             } => {
+                let error = with_attempt_identity(error, route);
                 let _ = sender.send(Err(error.after_semantic_output())).await;
                 return;
             }
@@ -372,6 +373,7 @@ async fn run_broker(
                 error,
                 semantic_output_committed: false,
             } => {
+                let error = with_attempt_identity(error, route);
                 if let Some(feature) = error.unsupported_feature {
                     capability_observer.record_unsupported(route, feature).await;
                 }
@@ -411,6 +413,31 @@ async fn run_broker(
         )
     });
     let _ = sender.send(Err(error)).await;
+}
+
+fn with_attempt_identity(mut error: ChatModelError, route: &ResolvedChatRoute) -> ChatModelError {
+    if let Some(diagnostic) = &mut error.diagnostic {
+        let provider_id = route.provider_id.as_ref();
+        diagnostic.provider_id = (!provider_id.is_empty() && provider_id.len() <= 200
+            && provider_id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'-' | b'.' | b':' | b'#')))
+            .then(|| provider_id.to_owned());
+        diagnostic.model_name = (!route.model.is_empty() && route.model.len() <= 512
+            && !route.model.chars().any(char::is_control)).then(|| route.model.clone());
+    }
+    error
+}
+
+fn with_stream_diagnostic(mut error: ChatModelError) -> ChatModelError {
+    if error.diagnostic.is_none() {
+        let reason = match error.code {
+            ChatModelErrorCode::ProtocolViolation => Some(ModelFailureReason::InvalidResponse),
+            ChatModelErrorCode::StreamInterrupted => Some(ModelFailureReason::StreamInterrupted),
+            _ => None,
+        };
+        error.diagnostic = reason.map(ModelFailureDiagnostic::new);
+    }
+    error
 }
 
 async fn run_attempt(
@@ -521,7 +548,7 @@ async fn consume_attempt_stream(
             Ok(events) => events,
             Err(error) => {
                 return AttemptOutcome::Failed {
-                    error: error.with_route(route.model_route_id.clone()),
+                    error: with_stream_diagnostic(error).with_route(route.model_route_id.clone()),
                     semantic_output_committed,
                 };
             }
@@ -531,14 +558,15 @@ async fn consume_attempt_stream(
             if let ChatModelEvent::ProviderReasoningBlock { block } = &mut event {
                 if let Err(message) = block.bind_route(route) {
                     return AttemptOutcome::Failed {
-                        error: ChatModelError::protocol_violation(message).with_route(route.model_route_id.clone()),
+                        error: with_stream_diagnostic(ChatModelError::protocol_violation(message))
+                            .with_route(route.model_route_id.clone()),
                         semantic_output_committed,
                     };
                 }
             }
             if let Err(error) = sequence.observe(&event) {
                 return AttemptOutcome::Failed {
-                    error: error.with_route(route.model_route_id.clone()),
+                    error: with_stream_diagnostic(error).with_route(route.model_route_id.clone()),
                     semantic_output_committed,
                 };
             }
@@ -554,9 +582,9 @@ async fn consume_attempt_stream(
             if !semantic_output_committed && !semantic {
                 if buffered.len() >= MAX_BUFFERED_PRE_SEMANTIC_EVENTS {
                     return AttemptOutcome::failed(
-                        ChatModelError::protocol_violation(
+                        with_stream_diagnostic(ChatModelError::protocol_violation(
                             "provider emitted too many pre-semantic stream events",
-                        )
+                        ))
                         .with_route(route.model_route_id.clone()),
                     );
                 }
@@ -582,9 +610,9 @@ async fn consume_attempt_stream(
     }
 
     AttemptOutcome::Failed {
-        error: ChatModelError::stream_interrupted(
+        error: with_stream_diagnostic(ChatModelError::stream_interrupted(
             "provider stream ended before a canonical terminal event",
-        )
+        ))
         .with_route(route.model_route_id.clone()),
         semantic_output_committed,
     }

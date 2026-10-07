@@ -1,6 +1,6 @@
 use nomifun_api_types::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind, AgentErrorResolutionTarget,
-    AgentStreamErrorData,
+    AgentStreamErrorData, AgentTaskIncompleteReason, ModelFailureDiagnostic, ModelFailureReason,
 };
 use nomifun_common::AppError;
 use nomifun_net::secret_redaction::redact_url_queries;
@@ -38,35 +38,225 @@ impl ClassifiedError {
 }
 
 impl AgentSendError {
-    /// Convert only the Broker's locally authored gateway action and its
-    /// existing typed model classification. Native diagnostics never enter
-    /// this mapper, and the current Agent error contract stays unchanged.
-    pub fn from_model_gateway_failure(
-        model_code: nomifun_chat_model_broker::ChatModelErrorCode,
-        message: &str,
-    ) -> Option<Self> {
-        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+    /// The broker owns this classification. Provider prose cannot select an
+    /// Agent code, and a finished Turn is never permission to replay effects.
+    pub fn from_model_failure(
+        code: nomifun_chat_model_broker::ChatModelErrorCode,
+        diagnostic: Option<&ModelFailureDiagnostic>,
+    ) -> Self {
         use nomifun_chat_model_broker::ChatModelErrorCode;
-        let message = if let Some(rest) = message.strip_prefix("provider_http_status=") {
-            let (status, action) = rest.split_once("; ")?;
-            if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
-            action
-        } else { message };
-        let business = GatewayBusinessError::from_action_message(message)?;
-        let (expected_code, agent_code, retryable, kind) = match business {
-            GatewayBusinessError::InsufficientBalance | GatewayBusinessError::SubscriptionExpired
-            | GatewayBusinessError::ModelNotInPlan => (ChatModelErrorCode::ProviderUnavailable,
-                AgentErrorCode::UserLlmProviderBillingRequired, false, AgentErrorResolutionKind::CheckProviderBilling),
-            GatewayBusinessError::KeyExpired => (ChatModelErrorCode::AuthenticationFailed,
-                AgentErrorCode::UserLlmProviderAuthFailed, false, AgentErrorResolutionKind::CheckProviderCredentials),
-            GatewayBusinessError::RateLimited => (ChatModelErrorCode::RateLimited,
-                AgentErrorCode::UserLlmProviderRateLimited, true, AgentErrorResolutionKind::Retry),
+        let (mut message, mut agent_code, mut ownership, mut kind, mut target) = match code {
+            ChatModelErrorCode::AuthenticationFailed => (
+                "The model provider rejected authentication", AgentErrorCode::UserLlmProviderAuthFailed,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::CheckProviderCredentials,
+                Some(AgentErrorResolutionTarget::ProviderSettings),
+            ),
+            ChatModelErrorCode::RateLimited => (
+                "The model provider rate limit was reached", AgentErrorCode::UserLlmProviderRateLimited,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::Retry, None,
+            ),
+            ChatModelErrorCode::PromptTooLong => (
+                "The model context limit was exceeded", AgentErrorCode::UserLlmProviderContextTooLarge,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::ReduceContext, None,
+            ),
+            ChatModelErrorCode::ProviderUnavailable => (
+                "The model service is temporarily unavailable", AgentErrorCode::UserLlmProviderUnavailable,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::Retry, None,
+            ),
+            ChatModelErrorCode::InvalidRequest => (
+                "The model provider rejected the request", AgentErrorCode::UserLlmProviderInvalidRequest,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::ChangeModel,
+                Some(AgentErrorResolutionTarget::ProviderSettings),
+            ),
+            ChatModelErrorCode::UnsupportedFeature => (
+                "The selected model does not support a required feature", AgentErrorCode::UserLlmProviderUnsupportedFeature,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::ChangeModel,
+                Some(AgentErrorResolutionTarget::ProviderSettings),
+            ),
+            ChatModelErrorCode::ProtocolViolation => (
+                "The model response did not match the expected protocol", AgentErrorCode::UserLlmProviderInvalidResponse,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::ChangeModel,
+                Some(AgentErrorResolutionTarget::ProviderSettings),
+            ),
+            ChatModelErrorCode::StreamInterrupted | ChatModelErrorCode::Cancelled => (
+                "The model response was interrupted", AgentErrorCode::UserLlmProviderStreamInterrupted,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::Retry, None,
+            ),
+            ChatModelErrorCode::RouteNotFound | ChatModelErrorCode::CredentialReferenceMissing
+            | ChatModelErrorCode::CredentialTargetMismatch => (
+                "The model provider configuration is unavailable", AgentErrorCode::UserLlmProviderConfigError,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorResolutionKind::CheckProviderCredentials,
+                Some(AgentErrorResolutionTarget::ProviderSettings),
+            ),
+            ChatModelErrorCode::RouteRevisionMismatch => (
+                "The model configuration no longer matches this Session", AgentErrorCode::NomifunSessionConfigurationChanged,
+                AgentErrorOwnership::Nomifun, AgentErrorResolutionKind::StartNewSession,
+                Some(AgentErrorResolutionTarget::NewConversation),
+            ),
+            ChatModelErrorCode::CausalityRejected | ChatModelErrorCode::DuplicateOperation
+            | ChatModelErrorCode::ShadowNotPrimary | ChatModelErrorCode::SessionTerminal => (
+                "The model request does not match the active Turn", AgentErrorCode::NomifunStateInconsistent,
+                AgentErrorOwnership::Nomifun, AgentErrorResolutionKind::SendFeedback,
+                Some(AgentErrorResolutionTarget::Feedback),
+            ),
+            ChatModelErrorCode::AdapterUnavailable | ChatModelErrorCode::Internal => (
+                "The model request could not be executed", AgentErrorCode::NomifunInternalError,
+                AgentErrorOwnership::Nomifun, AgentErrorResolutionKind::SendFeedback,
+                Some(AgentErrorResolutionTarget::Feedback),
+            ),
         };
-        if expected_code != model_code { return None; }
-        let target = (kind != AgentErrorResolutionKind::Retry).then_some(AgentErrorResolutionTarget::ProviderSettings);
-        Some(Self::new(message, agent_code, AgentErrorOwnership::UserLlmProvider,
-            None, retryable, false, resolution(kind, target)))
+        let synthesized;
+        let diagnostic = if diagnostic.is_some() { diagnostic } else {
+            synthesized = match code {
+                ChatModelErrorCode::CredentialReferenceMissing => Some(ModelFailureDiagnostic::new(ModelFailureReason::CredentialsMissing)),
+                ChatModelErrorCode::CredentialTargetMismatch => Some(ModelFailureDiagnostic::new(ModelFailureReason::CredentialTargetMismatch)),
+                ChatModelErrorCode::AdapterUnavailable => Some(ModelFailureDiagnostic::new(ModelFailureReason::ConfigurationError)),
+                _ => None,
+            };
+            synthesized.as_ref()
+        };
+        if let Some(diagnostic) = diagnostic {
+            use ModelFailureReason as R;
+            let local_application_failure = ownership == AgentErrorOwnership::Nomifun;
+            let refined = match diagnostic.reason {
+                R::ConfigurationError => (
+                    "The local model configuration could not be executed", if local_application_failure { agent_code } else { AgentErrorCode::UserLlmProviderConfigError },
+                    if local_application_failure { kind } else { AgentErrorResolutionKind::CheckProviderBaseUrl },
+                    if local_application_failure { target } else { Some(AgentErrorResolutionTarget::ProviderSettings) },
+                ),
+                R::CredentialsMissing | R::CredentialTargetMismatch => (
+                    "The selected model credentials are missing or do not match the configured provider", AgentErrorCode::UserLlmProviderConfigError,
+                    AgentErrorResolutionKind::CheckProviderCredentials, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::InvalidEndpoint => (
+                    "The configured API endpoint is invalid", AgentErrorCode::UserLlmProviderConfigError,
+                    AgentErrorResolutionKind::CheckProviderBaseUrl, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::AuthFailed | R::InvalidKey | R::ExpiredKey => (
+                    "The model provider rejected authentication", AgentErrorCode::UserLlmProviderAuthFailed,
+                    AgentErrorResolutionKind::CheckProviderCredentials, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::BillingRequired | R::InsufficientQuota | R::InsufficientBalance | R::SubscriptionExpired | R::ModelNotInPlan | R::SpendLimitReached => (
+                    "The model provider account cannot cover this request", AgentErrorCode::UserLlmProviderBillingRequired,
+                    AgentErrorResolutionKind::CheckProviderBilling, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::PermissionDenied | R::ModelPermissionDenied => (
+                    "The model provider denied access", AgentErrorCode::UserLlmProviderPermissionDenied,
+                    AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::ModelNotFound => (
+                    "The selected model was not found", AgentErrorCode::UserLlmProviderModelNotFound,
+                    AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::EndpointMissing => (
+                    "The requested API endpoint was not found", AgentErrorCode::UserLlmProviderEndpointNotFound,
+                    AgentErrorResolutionKind::CheckProviderBaseUrl, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::NonApiResponse => (
+                    "The endpoint returned a non-API response", AgentErrorCode::UserLlmProviderInvalidResponse,
+                    AgentErrorResolutionKind::CheckProviderBaseUrl, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::AuthSchemeMismatch => (
+                    "The configured authentication scheme was not accepted", AgentErrorCode::UserLlmProviderConfigError,
+                    AgentErrorResolutionKind::CheckProviderCredentials, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::DnsFailure | R::ConnectionFailed | R::TlsFailure | R::ProxyFailure | R::NetworkFailure => (
+                    "The connection to the model service failed", AgentErrorCode::UserLlmProviderNetworkError,
+                    AgentErrorResolutionKind::CheckProviderBaseUrl, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::RequestTimeout => (
+                    "The model request timed out", AgentErrorCode::UserLlmProviderTimeout,
+                    AgentErrorResolutionKind::Retry, None,
+                ),
+                R::PromptTooLong => (
+                    "The request exceeded the model context limit", AgentErrorCode::UserLlmProviderContextTooLarge,
+                    AgentErrorResolutionKind::ReduceContext, None,
+                ),
+                R::UpstreamServerError | R::ProviderOverloaded => (
+                    "The model service returned a server error", AgentErrorCode::UserLlmProviderGatewayError,
+                    AgentErrorResolutionKind::Retry, None,
+                ),
+                R::ProviderUnavailable => (
+                    "The model service is unavailable", AgentErrorCode::UserLlmProviderUnavailable,
+                    AgentErrorResolutionKind::Retry, None,
+                ),
+                R::RateLimited => (
+                    "The model service temporarily limited requests", AgentErrorCode::UserLlmProviderRateLimited,
+                    AgentErrorResolutionKind::Retry, None,
+                ),
+                R::StreamInterrupted => (
+                    "The model response was interrupted", AgentErrorCode::UserLlmProviderStreamInterrupted,
+                    AgentErrorResolutionKind::Retry, None,
+                ),
+                R::InvalidResponse => (
+                    "The model service returned an invalid response", AgentErrorCode::UserLlmProviderInvalidResponse,
+                    AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::InvalidRequest | R::ContentPolicy => (
+                    "The model service rejected the request", AgentErrorCode::UserLlmProviderInvalidRequest,
+                    AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+                R::UnsupportedFeature => (
+                    "The selected model does not support the required feature", AgentErrorCode::UserLlmProviderUnsupportedFeature,
+                    AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings),
+                ),
+            };
+            (message, agent_code, kind, target) = refined;
+            ownership = if local_application_failure && diagnostic.reason == R::ConfigurationError {
+                AgentErrorOwnership::Nomifun
+            } else { AgentErrorOwnership::UserLlmProvider };
+        }
+        let resolution = if diagnostic.is_some_and(|diagnostic| diagnostic.reason == ModelFailureReason::ContentPolicy) {
+            None
+        } else { resolution(kind, target) };
+        // Arbitrary provider prose is not approved technical detail. Transport
+        // causes arrive in the same credential-redacted typed diagnostic.
+        let mut error = Self::new(message, agent_code, ownership, None, false,
+            ownership == AgentErrorOwnership::Nomifun, resolution);
+        error.stream_error.provider_diagnostic = diagnostic.cloned();
+        error
     }
+
+    pub fn from_runtime_turn_failure(
+        detail: impl Into<String>,
+        failure: Option<&nomifun_agent_runtime::AgentTurnFailure>,
+    ) -> Self {
+        use nomifun_agent_runtime::AgentTurnFailure;
+        let detail = detail.into();
+        match failure {
+            Some(AgentTurnFailure::Model { code, diagnostic }) => Self::from_model_failure(*code, diagnostic.as_ref()),
+            Some(AgentTurnFailure::ModelStreamEndedWithoutTerminal) => Self::new(
+                "The model response ended before completion was confirmed", AgentErrorCode::UserLlmProviderStreamInterrupted,
+                AgentErrorOwnership::UserLlmProvider, Some(detail), false, false,
+                resolution(AgentErrorResolutionKind::Retry, None),
+            ),
+            Some(AgentTurnFailure::InvalidModelEvent) => Self::new(
+                "The model returned an invalid response", AgentErrorCode::UserLlmProviderInvalidResponse,
+                AgentErrorOwnership::UserLlmProvider, Some(detail), false, false,
+                resolution(AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings)),
+            ),
+            None => Self::from_engine_turn_failure(detail),
+        }
+    }
+
+    /// Current canonical machine reasons only; manual pauses and unrelated
+    /// recovery/cleanup suspensions cannot become failures through this mapper.
+    pub fn from_model_pause_reason(reason: &str) -> Option<Self> {
+        use nomifun_agent_runtime::AgentTurnFailure;
+        let suffix = reason.strip_prefix("EXECUTION_MODEL_")?;
+        let failure = match suffix {
+            "STREAM_ENDED_WITHOUT_TERMINAL" => AgentTurnFailure::ModelStreamEndedWithoutTerminal,
+            "INVALID_EVENT" => AgentTurnFailure::InvalidModelEvent,
+            _ => AgentTurnFailure::Model { code: serde_json::from_value(serde_json::json!(suffix)).ok()?, diagnostic: None },
+        };
+        let mut error = Self::from_runtime_turn_failure(reason, Some(&failure));
+        error.stream_error.detail = Some(reason.into());
+        // An old pause records only its coarse machine cause, not today's
+        // credential/configuration evidence or a fine provider diagnosis.
+        error.stream_error.provider_diagnostic = None;
+        Some(error)
+    }
+
     pub fn session_configuration_changed(detail: impl Into<String>) -> Self {
         Self::new(
             "The tool configuration no longer matches this session",
@@ -179,19 +369,33 @@ impl AgentSendError {
                 ),
             );
         }
-        let guarded = detail.starts_with("model step limit of ")
-            || detail.starts_with("EXECUTION_")
-            || detail.starts_with("NATIVE_RECOVERY_")
-            || detail.starts_with("model output remained truncated after the bounded continuation budget;")
-            || detail.starts_with("execution plan remains unresolved;")
-            || detail.starts_with("failed patch targets have not been re-observed;")
-            || detail.starts_with("processes remain running;")
-            || detail.starts_with("completion account is missing or stale;")
-            || detail.starts_with("completion account contains blocked work;")
-            || detail.starts_with("engine control repeatedly rejected;")
-            || detail.starts_with("engine control made no progress;");
-        if guarded {
-            Self::new(
+        let task_incomplete_reason = if detail.starts_with("model step limit of ") {
+            Some(AgentTaskIncompleteReason::StepLimit)
+        } else if detail.starts_with("EXECUTION_") {
+            Some(AgentTaskIncompleteReason::ExecutionGuard)
+        } else if detail.starts_with("NATIVE_RECOVERY_") {
+            Some(AgentTaskIncompleteReason::RecoveryGuard)
+        } else if detail.starts_with("model output remained truncated after the bounded continuation budget;") {
+            Some(AgentTaskIncompleteReason::OutputTruncated)
+        } else if detail.starts_with("execution plan remains unresolved;") {
+            Some(AgentTaskIncompleteReason::UnresolvedPlan)
+        } else if detail.starts_with("failed patch targets have not been re-observed;") {
+            Some(AgentTaskIncompleteReason::UnverifiedChanges)
+        } else if detail.starts_with("processes remain running;") {
+            Some(AgentTaskIncompleteReason::RunningProcesses)
+        } else if detail.starts_with("completion account is missing or stale;") {
+            Some(AgentTaskIncompleteReason::UnverifiedCompletion)
+        } else if detail.starts_with("completion account contains blocked work;") {
+            Some(AgentTaskIncompleteReason::BlockedWork)
+        } else if detail.starts_with("engine control repeatedly rejected;") {
+            Some(AgentTaskIncompleteReason::RejectedControl)
+        } else if detail.starts_with("engine control made no progress;") {
+            Some(AgentTaskIncompleteReason::NoProgress)
+        } else {
+            None
+        };
+        if let Some(reason) = task_incomplete_reason {
+            let mut error = Self::new(
                 "The Agent stopped before completing the task",
                 AgentErrorCode::NomifunTaskIncomplete,
                 AgentErrorOwnership::Nomifun,
@@ -199,7 +403,9 @@ impl AgentSendError {
                 false,
                 false,
                 None,
-            )
+            );
+            error.stream_error.task_incomplete_reason = Some(reason);
+            error
         } else {
             Self::from_app_error(AppError::Conflict(detail))
         }
@@ -242,6 +448,11 @@ impl AgentSendError {
                     ownership: Some(AgentErrorOwnership::Nomifun),
                     detail: Some(sanitize_error_detail(&detail)),
                     workspace_path: Some(path.clone()),
+                    agent_label: None,
+                    agent_template_key: None,
+                    model_name: None,
+                    task_incomplete_reason: None,
+                    provider_diagnostic: None,
                     retryable: Some(false),
                     feedback_recommended: Some(false),
                     resolution: Some(AgentErrorResolution::new(
@@ -257,6 +468,11 @@ impl AgentSendError {
                     ownership: Some(AgentErrorOwnership::Nomifun),
                     detail: Some(sanitize_error_detail(&detail)),
                     workspace_path: Some(path.clone()),
+                    agent_label: None,
+                    agent_template_key: None,
+                    model_name: None,
+                    task_incomplete_reason: None,
+                    provider_diagnostic: None,
                     retryable: Some(false),
                     feedback_recommended: Some(false),
                     resolution: Some(AgentErrorResolution::new(
@@ -1077,36 +1293,139 @@ fn truncate_chars(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_model_failure_never_guesses_an_agent_code_from_provider_prose() {
+        use nomifun_chat_model_broker::ChatModelErrorCode;
+        for (broker, expected) in [
+            (ChatModelErrorCode::AuthenticationFailed, AgentErrorCode::UserLlmProviderAuthFailed),
+            (ChatModelErrorCode::RateLimited, AgentErrorCode::UserLlmProviderRateLimited),
+            (ChatModelErrorCode::PromptTooLong, AgentErrorCode::UserLlmProviderContextTooLarge),
+            (ChatModelErrorCode::ProviderUnavailable, AgentErrorCode::UserLlmProviderUnavailable),
+            (ChatModelErrorCode::UnsupportedFeature, AgentErrorCode::UserLlmProviderUnsupportedFeature),
+            (ChatModelErrorCode::ProtocolViolation, AgentErrorCode::UserLlmProviderInvalidResponse),
+            (ChatModelErrorCode::StreamInterrupted, AgentErrorCode::UserLlmProviderStreamInterrupted),
+        ] {
+            let error = AgentSendError::from_runtime_turn_failure("quota exceeded; authentication failed; unknown model", Some(
+                &nomifun_agent_runtime::AgentTurnFailure::Model { code: broker, diagnostic: None }));
+            assert_eq!(error.code(), Some(expected));
+            assert!(error.stream_error().detail.is_none());
+            assert!(!error.stream_error().message.contains("quota exceeded"));
+            assert_eq!(error.stream_error().retryable, Some(false));
+            assert!(error.stream_error().provider_diagnostic.is_none());
+        }
+    }
+
+    #[test]
+    fn current_model_pause_mapper_rejects_manual_cleanup_and_untyped_reasons() {
+        for reason in ["EXECUTION_USER_REQUESTED", "EXECUTION_CLEANUP_UNPROVEN", "EXECUTION_PREPARATION_BLOCKED",
+            "EXECUTION_MODEL_unknown", "EXECUTION_MODEL_PRIVATE_SECRET", "authentication failed"] {
+            assert!(AgentSendError::from_model_pause_reason(reason).is_none(), "{reason}");
+        }
+        for (reason, expected) in [
+            ("EXECUTION_MODEL_PROVIDER_UNAVAILABLE", AgentErrorCode::UserLlmProviderUnavailable),
+            ("EXECUTION_MODEL_AUTHENTICATION_FAILED", AgentErrorCode::UserLlmProviderAuthFailed),
+            ("EXECUTION_MODEL_ADAPTER_UNAVAILABLE", AgentErrorCode::NomifunInternalError),
+            ("EXECUTION_MODEL_CREDENTIAL_REFERENCE_MISSING", AgentErrorCode::UserLlmProviderConfigError),
+            ("EXECUTION_MODEL_STREAM_ENDED_WITHOUT_TERMINAL", AgentErrorCode::UserLlmProviderStreamInterrupted),
+            ("EXECUTION_MODEL_INVALID_EVENT", AgentErrorCode::UserLlmProviderInvalidResponse),
+        ] {
+            let error = AgentSendError::from_model_pause_reason(reason).unwrap();
+            assert_eq!(error.code(), Some(expected));
+            assert_eq!(error.stream_error().detail.as_deref(), Some(reason));
+            assert_eq!(error.stream_error().retryable, Some(false));
+            assert!(error.stream_error().provider_diagnostic.is_none(), "a recorded pause does not contain today's fine evidence");
+        }
+    }
     use nomifun_api_types::{AgentErrorResolutionKind, AgentErrorResolutionTarget};
 
     #[test]
-    fn gateway_model_actions_use_existing_agent_codes_without_provider_diagnostics() {
+    fn typed_provider_reasons_select_precise_existing_codes_without_prose_inference() {
         use nomifun_chat_model_broker::ChatModelErrorCode;
-        use nomifun_net::provider_gateway_error::GatewayBusinessError;
-        for business in [GatewayBusinessError::InsufficientBalance, GatewayBusinessError::SubscriptionExpired,
-            GatewayBusinessError::ModelNotInPlan, GatewayBusinessError::KeyExpired, GatewayBusinessError::RateLimited] {
-            let (model_code, code) = if business.is_billing() {
-                (ChatModelErrorCode::ProviderUnavailable, AgentErrorCode::UserLlmProviderBillingRequired)
-            } else if business == GatewayBusinessError::KeyExpired {
-                (ChatModelErrorCode::AuthenticationFailed, AgentErrorCode::UserLlmProviderAuthFailed)
-            } else { (ChatModelErrorCode::RateLimited, AgentErrorCode::UserLlmProviderRateLimited) };
-            for message in [business.action_message().to_owned(),
-                format!("provider_http_status={}; {}", business.http_status(), business.action_message())] {
-                let error = AgentSendError::from_model_gateway_failure(model_code, &message).unwrap();
-                assert_eq!(error.code(), Some(code));
-                assert_eq!(error.stream_error().message, business.action_message());
-                assert_eq!(error.stream_error().detail, None);
-                assert_eq!(error.stream_error().retryable, Some(business == GatewayBusinessError::RateLimited));
-                assert_eq!(error.stream_error().feedback_recommended, Some(false));
-            }
-            assert!(AgentSendError::from_model_gateway_failure(ChatModelErrorCode::InvalidRequest,
-                business.action_message()).is_none());
+        use ModelFailureReason as R;
+        for (reason, expected) in [
+            (R::AuthFailed, AgentErrorCode::UserLlmProviderAuthFailed),
+            (R::InvalidKey, AgentErrorCode::UserLlmProviderAuthFailed),
+            (R::ExpiredKey, AgentErrorCode::UserLlmProviderAuthFailed),
+            (R::BillingRequired, AgentErrorCode::UserLlmProviderBillingRequired),
+            (R::InsufficientQuota, AgentErrorCode::UserLlmProviderBillingRequired),
+            (R::InsufficientBalance, AgentErrorCode::UserLlmProviderBillingRequired),
+            (R::SubscriptionExpired, AgentErrorCode::UserLlmProviderBillingRequired),
+            (R::ModelNotInPlan, AgentErrorCode::UserLlmProviderBillingRequired),
+            (R::SpendLimitReached, AgentErrorCode::UserLlmProviderBillingRequired),
+            (R::PermissionDenied, AgentErrorCode::UserLlmProviderPermissionDenied),
+            (R::ModelPermissionDenied, AgentErrorCode::UserLlmProviderPermissionDenied),
+            (R::ModelNotFound, AgentErrorCode::UserLlmProviderModelNotFound),
+            (R::EndpointMissing, AgentErrorCode::UserLlmProviderEndpointNotFound),
+            (R::NonApiResponse, AgentErrorCode::UserLlmProviderInvalidResponse),
+            (R::AuthSchemeMismatch, AgentErrorCode::UserLlmProviderConfigError),
+            (R::DnsFailure, AgentErrorCode::UserLlmProviderNetworkError),
+            (R::ConnectionFailed, AgentErrorCode::UserLlmProviderNetworkError),
+            (R::TlsFailure, AgentErrorCode::UserLlmProviderNetworkError),
+            (R::ProxyFailure, AgentErrorCode::UserLlmProviderNetworkError),
+            (R::NetworkFailure, AgentErrorCode::UserLlmProviderNetworkError),
+            (R::RequestTimeout, AgentErrorCode::UserLlmProviderTimeout),
+            (R::UpstreamServerError, AgentErrorCode::UserLlmProviderGatewayError),
+            (R::ProviderOverloaded, AgentErrorCode::UserLlmProviderGatewayError),
+            (R::ProviderUnavailable, AgentErrorCode::UserLlmProviderUnavailable),
+            (R::RateLimited, AgentErrorCode::UserLlmProviderRateLimited),
+            (R::StreamInterrupted, AgentErrorCode::UserLlmProviderStreamInterrupted),
+            (R::InvalidResponse, AgentErrorCode::UserLlmProviderInvalidResponse),
+            (R::InvalidRequest, AgentErrorCode::UserLlmProviderInvalidRequest),
+            (R::UnsupportedFeature, AgentErrorCode::UserLlmProviderUnsupportedFeature),
+            (R::ContentPolicy, AgentErrorCode::UserLlmProviderInvalidRequest),
+            (R::PromptTooLong, AgentErrorCode::UserLlmProviderContextTooLarge),
+            (R::ConfigurationError, AgentErrorCode::UserLlmProviderConfigError),
+            (R::InvalidEndpoint, AgentErrorCode::UserLlmProviderConfigError),
+            (R::CredentialsMissing, AgentErrorCode::UserLlmProviderConfigError),
+            (R::CredentialTargetMismatch, AgentErrorCode::UserLlmProviderConfigError),
+        ] {
+            let mut diagnostic = ModelFailureDiagnostic::new(reason);
+            diagnostic.http_status = Some(400);
+            diagnostic.provider_code = Some("safe_machine_code".into());
+            let failure = nomifun_agent_runtime::AgentTurnFailure::Model {
+                code: ChatModelErrorCode::ProviderUnavailable, diagnostic: Some(diagnostic.clone()),
+            };
+            let error = AgentSendError::from_runtime_turn_failure("untrusted provider body containing a private credential", Some(&failure));
+            assert_eq!(error.code(), Some(expected));
+            assert_eq!(error.stream_error().provider_diagnostic, Some(diagnostic));
+            assert_eq!(error.stream_error().retryable, Some(false));
+            assert!(error.stream_error().detail.is_none());
+            assert!(!error.stream_error().message.contains("private credential"));
+            if reason == R::ContentPolicy { assert!(error.stream_error().resolution.is_none()); }
         }
-        for message in ["insufficient_balance", "provider said subscription_expired",
-            "The model gateway balance is insufficient. Top up the account to continue. secret",
-            "provider_http_status=secret; The model gateway balance is insufficient. Top up the account to continue."] {
-            assert!(AgentSendError::from_model_gateway_failure(ChatModelErrorCode::ProviderUnavailable, message).is_none());
+    }
+
+    #[test]
+    fn exact_local_broker_faults_never_become_remote_request_rejections() {
+        use nomifun_chat_model_broker::ChatModelErrorCode;
+        for (code, reason, owner, public) in [
+            (ChatModelErrorCode::CredentialReferenceMissing, ModelFailureReason::CredentialsMissing,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorCode::UserLlmProviderConfigError),
+            (ChatModelErrorCode::CredentialTargetMismatch, ModelFailureReason::CredentialTargetMismatch,
+                AgentErrorOwnership::UserLlmProvider, AgentErrorCode::UserLlmProviderConfigError),
+            (ChatModelErrorCode::AdapterUnavailable, ModelFailureReason::ConfigurationError,
+                AgentErrorOwnership::Nomifun, AgentErrorCode::NomifunInternalError),
+        ] {
+            let error = AgentSendError::from_model_failure(code, None);
+            assert_eq!(error.code(), Some(public));
+            assert_eq!(error.ownership(), Some(owner));
+            let diagnostic = error.stream_error().provider_diagnostic.as_ref().unwrap();
+            assert_eq!(diagnostic.reason, reason);
+            assert!(diagnostic.http_status.is_none());
+            assert!(diagnostic.endpoint.is_none());
+            assert!(!error.stream_error().message.contains("rejected"));
         }
+    }
+
+    #[test]
+    fn approved_transport_cause_survives_as_one_typed_diagnostic() {
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::ConnectionFailed);
+        diagnostic.transport_detail = Some("connection refused (os error 61)".into());
+        diagnostic.endpoint = Some("https://api.example.test/v1/chat/completions".into());
+        let error = AgentSendError::from_model_failure(nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable, Some(&diagnostic));
+        assert_eq!(error.stream_error().provider_diagnostic.as_ref(), Some(&diagnostic));
+        assert!(error.stream_error().detail.is_none(), "the approved cause is not copied into a second raw-detail field");
     }
 
     #[test]
@@ -1344,21 +1663,31 @@ mod tests {
         assert_eq!(malformed.code(), Some(AgentErrorCode::UserLlmProviderInvalidToolCall));
         assert_eq!(malformed.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
         assert_eq!(malformed.stream_error().retryable, Some(false));
-        for detail in [
-            "model step limit of 32 exceeded",
-            "execution plan remains unresolved; completion was not accepted",
-            "completion account is missing or stale; call report_completion",
-            "engine control repeatedly rejected; report_completion failed four consecutive times",
-            "model output remained truncated after the bounded continuation budget; task completion was not accepted",
+        for (detail, reason) in [
+            ("model step limit of 32 exceeded", AgentTaskIncompleteReason::StepLimit),
+            ("execution plan remains unresolved; completion was not accepted", AgentTaskIncompleteReason::UnresolvedPlan),
+            ("completion account is missing or stale; call report_completion", AgentTaskIncompleteReason::UnverifiedCompletion),
+            ("completion account contains blocked work; this turn cannot be published as task completion", AgentTaskIncompleteReason::BlockedWork),
+            ("engine control repeatedly rejected; report_completion failed four consecutive times", AgentTaskIncompleteReason::RejectedControl),
+            ("engine control made no progress; report_completion made no progress", AgentTaskIncompleteReason::NoProgress),
+            ("model output remained truncated after the bounded continuation budget; task completion was not accepted", AgentTaskIncompleteReason::OutputTruncated),
+            ("failed patch targets have not been re-observed; task completion was not accepted", AgentTaskIncompleteReason::UnverifiedChanges),
+            ("processes remain running; poll or cancel them explicitly before completion", AgentTaskIncompleteReason::RunningProcesses),
+            ("EXECUTION_PREPARATION_BLOCKED", AgentTaskIncompleteReason::ExecutionGuard),
+            ("NATIVE_RECOVERY_RECONCILIATION_REQUIRED", AgentTaskIncompleteReason::RecoveryGuard),
         ] {
             let error = AgentSendError::from_engine_turn_failure(detail);
             assert_eq!(error.code(), Some(AgentErrorCode::NomifunTaskIncomplete));
             assert_eq!(error.ownership(), Some(AgentErrorOwnership::Nomifun));
             assert_eq!(error.stream_error().retryable, Some(false));
+            assert_eq!(error.stream_error().resolution, None);
+            assert_eq!(error.stream_error().task_incomplete_reason, Some(reason));
+            assert_eq!(error.stream_error().detail.as_deref(), Some(detail));
         }
         let unrelated = AgentSendError::from_engine_turn_failure("provider returned 503");
         assert_eq!(unrelated.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
         assert_eq!(unrelated.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
+        assert_eq!(unrelated.stream_error().task_incomplete_reason, None);
         let local = AgentSendError::from_engine_turn_failure(
             "Internal error: Nomi runtime: Nomi workspace context failed: instruction scope unavailable",
         );

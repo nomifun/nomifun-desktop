@@ -2352,6 +2352,7 @@ async fn fail_turn(
         .emit(AgentEngineEvent::TurnFailed {
             model_steps,
             message: message.clone(),
+            failure: None,
         })
         .await?;
     Err(AgentEngineError::TurnFailed(message))
@@ -3585,7 +3586,7 @@ mod tests {
                         AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"original-read".into(),name:"read_file".into(),
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
                         AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
-                        AgentEngineEvent::TurnFailed {model_steps:1,message:"original report failure".into()},
+                        AgentEngineEvent::TurnFailed {model_steps:1,message:"original report failure".into(),failure:None},
                     ],
                 })})
             }
@@ -3632,7 +3633,7 @@ mod tests {
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
                         AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行 MAC-B\n第二行 after\n",false)},
                         AgentEngineEvent::WorkStatus {status:crate::AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
-                        AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into()},
+                        AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failed".into(),failure:None},
                     ]})})
             }
         }

@@ -16,9 +16,10 @@ describe('conversation runtime authority', () => {
         reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanup_proven: true, paused_at_ms: 123,
       } },
       runtime: { state: 'idle', has_runtime: false, is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
-    } as TChatConversation;
+    } as unknown as TChatConversation;
     expect(getConversationPauseNotice(snapshot)).toEqual({ turnId: activeTurnId,
-      reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanupProven: true, pausedAt: 123 });
+      reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanupProven: true, pausedAt: 123,
+      error: { message: '', workspacePath: '/fixture' } });
     expect(getConversationRuntimeAuthority(snapshot)).toBe('unknown');
     for (const change of [
       { status: 'finished' },
@@ -28,7 +29,29 @@ describe('conversation runtime authority', () => {
     ]) expect(getConversationPauseNotice({ ...snapshot, ...change } as TChatConversation)).toBeNull();
     expect(getConversationPauseNotice({ ...snapshot, extra: { ...snapshot.extra,
       execution_pause: { reason: 'untrusted detail', cleanup_proven: false, paused_at_ms: Number.NaN },
-    } })).toEqual({ turnId: activeTurnId, reason: undefined, cleanupProven: false, pausedAt: undefined });
+    } })).toEqual({ turnId: activeTurnId, reason: undefined, cleanupProven: false, pausedAt: undefined,
+      error: { message: '', workspacePath: '/fixture' } });
+  });
+
+  test('paused diagnostics capture the active frozen binding and ignore renderer selection metadata', () => {
+    const snapshot = {
+      status: 'running', extra: { workspace: '/fixture/Archive ', execution_phase: 'paused',
+        official_template_key: 'assistant.general', agent_name: 'Forged extra name',
+        execution_pause: { reason: 'EXECUTION_MODEL_AUTHENTICATION_FAILED', cleanup_proven: true, paused_at_ms: 123 },
+      },
+      model: { use_model: 'later-renderer-model' },
+      agent_snapshot: { preset_name: 'Admitted Agent', resolved_model: { model: 'admitted-model' } },
+      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+    } as unknown as TChatConversation;
+    expect(getConversationPauseNotice(snapshot)?.error).toEqual({ message: '',
+      agentLabel: 'Admitted Agent', modelName: 'admitted-model',
+      agentTemplateKey: 'assistant.general', workspacePath: '/fixture/Archive ',
+    });
+    const unverifiedSnapshot = { ...snapshot, extra: { ...snapshot.extra,
+      official_template_key: 'unverified-template' },
+    };
+    expect(getConversationPauseNotice(unverifiedSnapshot)?.error?.agentTemplateKey).toBeUndefined();
+    expect(getConversationPauseNotice({ ...snapshot, status: 'finished' })).toBeNull();
   });
 
   test('Finished cannot be promoted by a stale processing bit', () => {

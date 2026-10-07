@@ -750,6 +750,7 @@ mod tests {
         let mut decoder = ResponsesDecoder::new(false);
         let events = decoder
             .decode(&ProviderWireFrame {
+                diagnostic: None,
                 event: "json".into(),
                 data: serde_json::json!({
                     "id": "resp_1",

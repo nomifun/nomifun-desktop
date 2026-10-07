@@ -59,9 +59,6 @@ pub struct EngineTurnOutput {
 struct TurnOutputProgress {
     open: bool,
     model_steps: u16,
-    /// A current-turn UI notice only. This is never part of EngineTurnOutcome,
-    /// the Session journal, checkpoint, or retained settlement receipt.
-    model_gateway_notice: Option<nomifun_api_types::AgentStreamErrorData>,
 }
 
 impl EngineTurnOutput {
@@ -69,7 +66,7 @@ impl EngineTurnOutput {
         Self {
             state,
             turn,
-            progress: Arc::new(Mutex::new(TurnOutputProgress { open: true, model_steps: 0, model_gateway_notice: None })),
+            progress: Arc::new(Mutex::new(TurnOutputProgress { open: true, model_steps: 0 })),
         }
     }
 
@@ -110,31 +107,6 @@ impl EngineTurnOutput {
         progress.open = false;
         progress.model_steps
     }
-
-    pub(crate) fn record_model_gateway_failure(
-        &self,
-        code: nomifun_chat_model_broker::ChatModelErrorCode,
-        message: &str,
-    ) -> bool {
-        let Some(error) = AgentSendError::from_model_gateway_failure(code, message) else { return false; };
-        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
-        if !progress.open { return false; }
-        progress.model_gateway_notice = Some(error.into_stream_error());
-        true
-    }
-
-    /// Called by the SDK only after cleanup and the unchanged pause receipt
-    /// succeed. System is nonterminal; the existing Finish(Paused) follows.
-    fn publish_settled_model_gateway_notice(&self) -> bool {
-        let error = {
-            let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
-            if progress.open { return false; }
-            progress.model_gateway_notice.take()
-        };
-        error.is_some_and(|error| self.state.emit_for_turn(self.turn, AgentStreamEvent::System(
-            serde_json::json!({"kind":"model_gateway_account_action", "error":error})
-        )))
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -149,7 +121,11 @@ pub enum EngineTurnTerminal {
     Completed { finish_reason: ChatFinishReason },
     Cancelled,
     Paused { reason: String },
-    Failed { message: String },
+    Failed {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<nomifun_agent_runtime::AgentTurnFailure>,
+    },
 }
 
 impl EngineTurnOutcome {
@@ -164,6 +140,7 @@ impl EngineTurnOutcome {
             model_steps: 0,
             terminal: EngineTurnTerminal::Failed {
                 message: message.into(),
+                failure: None,
             },
         }
     }
@@ -435,16 +412,11 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                     ChatFinishReason::ToolCalls => TurnStopReason::MaxTurnRequests,
                 },
                 EngineTurnTerminal::Cancelled => TurnStopReason::Cancelled,
-                EngineTurnTerminal::Paused { .. } => {
-                    if !requested_cancellation.is_cancelled() {
-                        output.publish_settled_model_gateway_notice();
-                    }
-                    TurnStopReason::Paused
-                }
-                EngineTurnTerminal::Failed { message } => {
+                EngineTurnTerminal::Paused { .. } => TurnStopReason::Paused,
+                EngineTurnTerminal::Failed { message, failure } => {
                     shared.state.emit_error_data_for_turn(
                         turn,
-                        AgentSendError::from_engine_turn_failure(message)
+                        AgentSendError::from_runtime_turn_failure(message, failure.as_ref())
                             .into_stream_error(),
                     );
                     return;
@@ -653,7 +625,7 @@ pub fn hosted_engine_factory(factory: EngineDriverFactory) -> OfficialRuntimeFac
 mod tests {
     use super::*;
 
-    struct GatewayNoticeDriver {
+    struct ModelFailureDriver {
         fail_cleanup: bool,
         fail_record: bool,
         cleanup_entered: tokio::sync::Notify,
@@ -662,15 +634,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl EngineSessionDriver for GatewayNoticeDriver {
-        async fn run_turn(&self, _: &SendMessageData, _: CancellationToken, output: EngineTurnOutput)
+    impl EngineSessionDriver for ModelFailureDriver {
+        async fn run_turn(&self, _: &SendMessageData, _: CancellationToken, _output: EngineTurnOutput)
             -> Result<EngineTurnOutcome, AppError> {
-            assert!(output.record_model_gateway_failure(
-                nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable,
-                nomifun_net::provider_gateway_error::GatewayBusinessError::InsufficientBalance.action_message(),
-            ));
             Ok(EngineTurnOutcome { model_steps: 1,
-                terminal: EngineTurnTerminal::Paused { reason: "EXECUTION_MODEL_PROVIDER_UNAVAILABLE".into() } })
+                terminal: EngineTurnTerminal::Failed {
+                    message: "Safe fixed model failure".into(),
+                    failure: Some(nomifun_agent_runtime::AgentTurnFailure::Model {
+                        code: nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable,
+                        diagnostic: Some(nomifun_agent_contracts::ModelFailureDiagnostic::new(
+                            nomifun_agent_contracts::ModelFailureReason::InsufficientBalance)),
+                    }),
+                } })
         }
 
         async fn cleanup_turn(&self, _: &SendMessageData) -> Result<(), AppError> {
@@ -688,8 +663,8 @@ mod tests {
         async fn cleanup_session(&self) -> Result<(), AppError> { Ok(()) }
     }
 
-    fn gateway_notice_runtime(fail_cleanup: bool, fail_record: bool) -> (HostedAgentRuntime, Arc<GatewayNoticeDriver>) {
-        let driver = Arc::new(GatewayNoticeDriver { fail_cleanup, fail_record,
+    fn model_failure_runtime(fail_cleanup: bool, fail_record: bool) -> (HostedAgentRuntime, Arc<ModelFailureDriver>) {
+        let driver = Arc::new(ModelFailureDriver { fail_cleanup, fail_record,
             cleanup_entered: tokio::sync::Notify::new(), cleanup_release: tokio::sync::Notify::new(),
             receipt: Mutex::new(None) });
         let options = AgentRuntimeBuildOptions {
@@ -702,69 +677,70 @@ mod tests {
         (HostedAgentRuntime::new(&options, driver.clone()).unwrap(), driver)
     }
 
-    fn gateway_notice_message() -> SendMessageData {
+    fn model_failure_message() -> SendMessageData {
         SendMessageData { content: "hello".into(), msg_id: "message".into(), source_message_id: Some("root".into()),
             files: Vec::new(), inject_skills: Vec::new(), origin: None }
     }
 
-    async fn notice_event(events: &mut broadcast::Receiver<AgentStreamEvent>) -> AgentStreamEvent {
+    async fn next_event(events: &mut broadcast::Receiver<AgentStreamEvent>) -> AgentStreamEvent {
         tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await.unwrap().unwrap()
     }
 
     #[tokio::test]
-    async fn gateway_notice_follows_cleanup_and_unchanged_pause_receipt_before_finish() {
-        let (runtime, driver) = gateway_notice_runtime(false, false);
+    async fn model_failure_follows_cleanup_and_failed_receipt_without_a_pause_notice() {
+        let (runtime, driver) = model_failure_runtime(false, false);
         let mut events = runtime.subscribe();
-        runtime.send_message(gateway_notice_message()).await.unwrap();
+        runtime.send_message(model_failure_message()).await.unwrap();
         driver.cleanup_entered.notified().await;
-        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)), "no notice before cleanup proof");
+        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)), "no error before cleanup proof");
         assert!(driver.receipt.lock().unwrap().is_none());
         driver.cleanup_release.notify_one();
-        let notice = notice_event(&mut events).await;
-        let receipt = driver.receipt.lock().unwrap().clone().expect("receipt precedes notice");
-        assert_eq!(serde_json::to_value(receipt).unwrap(), serde_json::json!({"model_steps":1,
-            "terminal":{"status":"paused","reason":"EXECUTION_MODEL_PROVIDER_UNAVAILABLE"}}));
-        let AgentStreamEvent::System(notice) = notice else { panic!("nonterminal System notice expected"); };
-        assert_eq!(notice["kind"], "model_gateway_account_action");
-        assert_eq!(notice["error"]["code"], "USER_LLM_PROVIDER_BILLING_REQUIRED");
-        assert_eq!(notice["error"]["message"], nomifun_net::provider_gateway_error::GatewayBusinessError::InsufficientBalance.action_message());
-        assert!(matches!(notice_event(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Paused)));
+        let error = next_event(&mut events).await;
+        let receipt = driver.receipt.lock().unwrap().clone().expect("failed receipt precedes error");
+        assert!(matches!(receipt.terminal, EngineTurnTerminal::Failed {
+            failure: Some(nomifun_agent_runtime::AgentTurnFailure::Model {
+                code: nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable,
+                ..
+            }), ..
+        }));
+        let AgentStreamEvent::Error(error) = error else { panic!("terminal Error expected"); };
+        assert_eq!(error.code, Some(nomifun_api_types::AgentErrorCode::UserLlmProviderBillingRequired));
+        assert_eq!(error.provider_diagnostic.as_ref().unwrap().reason, nomifun_agent_contracts::ModelFailureReason::InsufficientBalance);
+        assert_eq!(error.retryable, Some(false));
+        assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
+        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)), "one failure, no System or FinishPaused");
+        let completion = runtime.shared.active.lock().unwrap().as_ref().unwrap().completion.clone();
+        completion.await.unwrap();
+        let mut next = model_failure_message();
+        next.msg_id = "next-message".into();
+        next.source_message_id = Some("next-root".into());
+        runtime.send_message(next).await.expect("a new message requires no manual End Turn");
+        driver.cleanup_entered.notified().await;
+        driver.cleanup_release.notify_one();
+        assert!(matches!(next_event(&mut events).await, AgentStreamEvent::Error(_)));
     }
 
     #[tokio::test]
-    async fn gateway_notice_is_suppressed_when_cleanup_receipt_or_cancel_prevents_pause_delivery() {
+    async fn cleanup_or_receipt_failure_and_cancellation_cannot_publish_the_model_failure() {
         for (fail_cleanup, fail_record, cancel) in [(true, false, false), (false, true, false), (false, false, true)] {
-            let (runtime, driver) = gateway_notice_runtime(fail_cleanup, fail_record);
+            let (runtime, driver) = model_failure_runtime(fail_cleanup, fail_record);
             let mut events = runtime.subscribe();
-            runtime.send_message(gateway_notice_message()).await.unwrap();
+            runtime.send_message(model_failure_message()).await.unwrap();
             driver.cleanup_entered.notified().await;
             if cancel { runtime.shared.active.lock().unwrap().as_ref().unwrap().cancellation.cancel(); }
             driver.cleanup_release.notify_one();
-            let event = notice_event(&mut events).await;
+            let event = next_event(&mut events).await;
             if cancel {
                 assert!(matches!(event, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Cancelled)));
                 assert!(matches!(driver.receipt.lock().unwrap().as_ref().unwrap().terminal, EngineTurnTerminal::Cancelled));
             } else {
-                assert!(matches!(event, AgentStreamEvent::Error(_)), "settlement failure wins over account notice");
+                assert!(matches!(event, AgentStreamEvent::Error(error)
+                    if error.code != Some(nomifun_api_types::AgentErrorCode::UserLlmProviderBillingRequired)),
+                    "unproven settlement cannot publish the provider failure");
                 assert!(driver.receipt.lock().unwrap().is_none());
             }
-            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)), "no delayed gateway notice");
+            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)), "no delayed failure notice");
         }
-    }
-
-    #[test]
-    fn gateway_notice_is_current_turn_only_and_cannot_be_queued_after_close() {
-        let state = AgentRuntimeState::new("fixture", "fixture", 8);
-        let mut events = state.subscribe();
-        let first = EngineTurnOutput::new(state.clone(), state.reset_for_new_turn(ConversationStatus::Running));
-        let code = nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable;
-        let action = nomifun_net::provider_gateway_error::GatewayBusinessError::InsufficientBalance.action_message();
-        assert!(first.record_model_gateway_failure(code, action));
-        first.close();
-        assert!(!first.record_model_gateway_failure(code, action));
-        state.reset_for_new_turn(ConversationStatus::Running);
-        assert!(!first.publish_settled_model_gateway_notice());
-        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
     }
 
     #[test]

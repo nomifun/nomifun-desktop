@@ -1,12 +1,4 @@
 {
-  "executionPause": {
-    "title": "执行已暂停",
-    "stop": "结束本回合",
-    "providerUnavailable": "模型服务暂时不可用，任务尚未完成。已完成的操作会保留。",
-    "incomplete": "任务尚未完成，已完成的操作会保留。",
-    "cleanupRequired": "资源清理状态尚未确认，需要先核对执行状态。",
-    "sendBlocked": "继续前需要确认恢复条件，当前会话暂不接受新消息。"
-  },
   "welcome": {
     "title": "新会话",
     "placeholder": "发消息、上传文件、打开文件夹或创建定时任务...",
@@ -115,13 +107,80 @@
     }
   },
   "agentError": {
-    "expandDetails": "展开错误详情",
-    "collapseDetails": "收起错误详情",
+    "expandDetails": "技术细节",
+    "collapseDetails": "收起技术细节",
     "fallbackTitle": "Agent 未能回复",
-    "errorCode": "错误码",
-    "retryable": "可重试",
-    "notRetryable": "需先处理配置",
-    "resolutionPrefix": "建议：",
+    "fallbackBody": "本次请求失败，暂时无法确定具体原因。请查看技术细节；如果问题持续出现，请提交反馈并附上这些信息。",
+    "details": {
+      "rawDetail": "原始详情",
+      "agent": "Agent",
+      "model": "模型",
+      "timestamp": "时间",
+      "turn": "Turn 标识",
+      "session": "会话标识",
+      "message": "消息标识",
+      "creationTask": "创作任务标识",
+      "workspace": "工作区路径",
+      "unavailable": "未记录",
+      "httpStatus": "HTTP 状态",
+      "providerCode": "上游错误码",
+      "providerType": "上游错误类型",
+      "endpoint": "请求地址",
+      "requestId": "请求 ID",
+      "retryAfterMs": "重试等待时间（毫秒）",
+      "protocol": "API 协议",
+      "authScheme": "认证方式",
+      "contentType": "响应内容类型",
+      "providerParam": "相关参数或字段",
+      "providerId": "服务商标识",
+      "sessionModel": "会话所选模型"
+    },
+    "incompleteReasons": {
+      "blocked_work": {
+        "title": "任务中仍有受阻事项",
+        "body": "Agent 报告仍有事项受阻，本次任务未能全部完成。请查看过程记录中的失败说明，处理相关问题后重新发送剩余任务。"
+      },
+      "step_limit": {
+        "title": "已达到本轮执行步数上限",
+        "body": "Agent 已用尽本轮允许的执行步数，任务尚未完成。请先检查已有结果，再将剩余任务拆成较小步骤重新发送。"
+      },
+      "output_truncated": {
+        "title": "模型回复被输出上限截断",
+        "body": "模型回复多次达到输出上限，任务未能完成。请先检查已有文件和过程记录，再缩小任务范围或更换模型后重新发送剩余任务。"
+      },
+      "unresolved_plan": {
+        "title": "执行计划仍有未完成事项",
+        "body": "Agent 结束回复时，执行计划中仍有事项未完成。请查看待办列表和已有结果，再要求 Agent 完成或说明剩余事项。"
+      },
+      "unverified_changes": {
+        "title": "文件修改结果尚未确认",
+        "body": "文件修改失败后，Agent 未重新检查相关文件，无法确认最终结果。请先检查这些文件，再要求 Agent 核对修改结果并处理剩余问题。"
+      },
+      "running_processes": {
+        "title": "结束时仍有进程未完成",
+        "body": "Agent 尝试结束任务时，仍有进程未完成，任务结果未获确认。请检查过程记录中的输出和已有结果，确认剩余工作后重新发送任务。"
+      },
+      "unverified_completion": {
+        "title": "任务完成结果尚未核实",
+        "body": "Agent 未提交有效的最终结果，应用无法确认任务已完成。请检查已有文件和过程记录，再要求 Agent 核对结果并说明剩余事项。"
+      },
+      "rejected_control": {
+        "title": "模型操作格式不符合要求",
+        "body": "模型未按要求提交工具调用或有效的结束回复，任务已停止。请先检查已有结果，再简化剩余请求或更换模型后重试。"
+      },
+      "no_progress": {
+        "title": "重复操作未推进任务",
+        "body": "Agent 多次尝试调整计划或提交结果，但任务状态没有进展。请查看过程记录，明确剩余目标或更换模型后重新发送任务。"
+      },
+      "execution_guard": {
+        "title": "执行状态校验未通过",
+        "body": "当前执行状态未通过应用校验，本轮任务已停止。请检查已有结果和技术细节；如果重试后仍然出现，请提交反馈。"
+      },
+      "recovery_guard": {
+        "title": "任务恢复校验未通过",
+        "body": "应用未能确认任务可以安全恢复，本轮任务已停止。请检查已有文件和过程记录，再新建会话发送剩余任务。"
+      }
+    },
     "resolution": {
       "retry": "稍后重试，或重新发送这条消息。",
       "wait_for_current_response": "请等待当前回复结束后再发送下一条消息。",
@@ -138,14 +197,9 @@
       "reduce_context": "请减少消息内容、引用文件或上下文大小后重试。",
       "send_feedback": "请提交反馈并附带日志，方便团队排查。"
     },
-    "ownership": {
-      "nomifun": "应用",
-      "user_agent": "Agent",
-      "user_llm_provider": "模型服务商",
-      "unknown_upstream": "上游"
-    },
     "codes": {
       "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED": {
+        "title": "会话 Agent 配置不兼容",
         "body": "当前会话保存的 Agent 配置与当前配置不兼容，无法直接继续。请通过会话的 Agent 切换流程确认兼容配置，或新建会话；已有记录会保留。"
       },
       "INTERRUPTED_BY_RESTART": {
@@ -154,11 +208,11 @@
       },
       "OUTPUT_TRUNCATED": {
         "title": "模型已达到输出上限",
-        "body": "回复在任务完成前被截断。已有文件和已完成操作均已保留，可点击“继续执行”从持久状态安全续跑。"
+        "body": "回复在任务完成前被输出上限截断。请先检查已有文件和过程记录，再缩小任务范围后重新发送剩余任务。"
       },
       "TURN_REQUESTS_EXHAUSTED": {
         "title": "本轮模型请求次数已用尽",
-        "body": "任务在本轮请求额度用尽前未能完成。已有文件和已完成操作均已保留，可点击“继续执行”安全续跑。"
+        "body": "Agent 已用尽本轮允许的模型请求次数，任务尚未完成。请先检查已有文件和过程记录，再重新发送剩余任务。"
       },
       "PROVIDER_UNAVAILABLE": {
         "title": "当前没有可用的模型",
@@ -189,8 +243,8 @@
         "body": "本次请求在应用处理过程中失败。请先重试一次；如果仍然出现，可以提交反馈。"
       },
       "NOMIFUN_TASK_INCOMPLETE": {
-        "title": "Agent 未完成本次任务",
-        "body": "本回合已停止，部分文件或操作可能已经完成。请先检查项目文件和下方过程记录，再继续任务。"
+        "title": "任务完成状态尚未确认",
+        "body": "本轮执行已停止，但应用无法确认任务已全部完成。请先检查已有文件和过程记录，再重新发送需要完成或核实的事项。"
       },
       "USER_LLM_PROVIDER_INVALID_TOOL_CALL": {
         "title": "模型工具调用格式异常",
@@ -257,8 +311,8 @@
         "body": "该 Agent 需要的环境变量尚未配置。请在设置或 shell 环境中补齐后重新连接。"
       },
       "USER_LLM_PROVIDER_AUTH_FAILED": {
-        "title": "模型服务商鉴权失败",
-        "body": "所选服务商拒绝了 API Key 或账号凭证。请检查模型设置后重试。"
+        "title": "模型服务认证未通过",
+        "body": "模型服务认证未通过，但暂时无法确定是凭证还是认证方式问题。请核对 API Key 所属服务商、有效期和认证方式后重试。"
       },
       "USER_LLM_PROVIDER_CONFIG_ERROR": {
         "title": "模型服务商配置无效",
@@ -277,16 +331,16 @@
         "body": "服务商没有及时返回结果。请稍后重试，或切换到更稳定的服务商。"
       },
       "USER_LLM_PROVIDER_NETWORK_ERROR": {
-        "title": "无法连接模型服务商",
-        "body": "网络或 DNS 错误导致无法访问服务商。请检查网络、代理和 Base URL。"
+        "title": "模型服务网络请求失败",
+        "body": "模型服务网络请求失败，具体连接原因尚未确定。请检查网络、代理和请求地址，并通过技术细节进一步定位。"
       },
       "USER_LLM_PROVIDER_GATEWAY_ERROR": {
         "title": "模型服务商暂不可用",
         "body": "服务商返回了网关或服务异常。请稍后重试，或切换到其他服务商。"
       },
       "USER_LLM_PROVIDER_PERMISSION_DENIED": {
-        "title": "模型服务商无权处理请求",
-        "body": "当前服务商账号没有使用该模型或执行该操作的权限。请检查账号权限，或切换其他模型。"
+        "title": "模型服务拒绝访问",
+        "body": "模型服务拒绝了访问，但暂时无法确定具体限制。请核对账号和模型权限、API 地址，以及代理或网关的访问规则。"
       },
       "USER_LLM_PROVIDER_BILLING_REQUIRED": {
         "title": "模型服务商需要开通计费",
@@ -297,8 +351,8 @@
         "body": "所选模型不可用，或不支持本次请求所需能力。请切换到受支持的模型后重试。"
       },
       "USER_LLM_PROVIDER_ENDPOINT_NOT_FOUND": {
-        "title": "找不到模型服务商接口",
-        "body": "服务商接口或 API 路径不存在。请检查 Base URL、部署名称和 API 兼容性。"
+        "title": "模型服务未找到请求资源",
+        "body": "模型服务未找到请求的资源。请核对 Base URL、API 路径和协议，以及部署名称或模型名称后重试。"
       },
       "USER_LLM_PROVIDER_INVALID_REQUEST": {
         "title": "模型服务商拒绝了请求",
@@ -333,8 +387,253 @@
       "UNKNOWN_UPSTREAM_ERROR": {
         "title": "上游 Agent 或模型服务商出错",
         "body": "收到上游错误，但暂时无法准确分类。可以查看下方详情或提交反馈。"
+      },
+      "EXECUTION_MODEL_PROVIDER_UNAVAILABLE": {
+        "title": "模型服务暂时不可用",
+        "body": "模型服务当前无法处理请求，本次请求失败。请先检查已有结果，稍后重试或更换模型后重新发送剩余任务。"
+      },
+      "EXECUTION_CLEANUP_UNCONFIRMED": {
+        "title": "任务资源清理尚未确认",
+        "body": "本回合的资源清理尚未确认，当前无法发送新消息。请等待应用确认清理并更新状态；如果持续无法发送，请查看技术细节并提交反馈。"
+      },
+      "EXECUTION_PAUSED": {
+        "title": "任务已暂停",
+        "body": "本回合已暂停，已完成的操作会保留。请查看过程记录和已有结果，确认剩余事项。"
+      },
+      "EXECUTION_USER_REQUESTED": {
+        "title": "任务已按你的请求暂停",
+        "body": "本回合已按你的请求暂停。请查看过程记录和已有结果，确认剩余事项。"
+      },
+      "EXECUTION_ATTACH_FAILED": {
+        "title": "执行环境连接失败",
+        "body": "应用未能连接本回合的执行环境，任务已暂停。请检查已有结果和技术细节；如果无法恢复，请提交反馈。"
+      },
+      "EXECUTION_PREPARATION_BLOCKED": {
+        "title": "任务执行准备未完成",
+        "body": "本回合未能完成执行前的准备，任务已暂停。请查看技术细节，处理相关问题后再试。"
+      },
+      "EXECUTION_SESSION_PAYLOAD_BUDGET": {
+        "title": "会话内容达到容量限制",
+        "body": "本会话的内容已达到容量限制，任务已暂停，无法继续记录执行结果。请检查已有结果，再新建会话发送剩余任务。"
+      },
+      "EXECUTION_MODEL_STREAM_ENDED_WITHOUT_TERMINAL": {
+        "title": "模型回复意外中断",
+        "body": "模型响应流在正常结束前中断，本次请求失败。请检查已有结果，重试或更换模型后重新发送剩余任务。"
+      },
+      "EXECUTION_MODEL_INVALID_EVENT": {
+        "title": "模型回复格式异常",
+        "body": "模型返回了无法处理的响应数据，本次请求失败。请检查已有结果后重试；如果反复出现，请更换模型或提交反馈。"
+      },
+      "CONVERSATION_SEND_FAILED": {
+        "title": "消息发送失败",
+        "body": "发送消息时出错，暂时无法确定具体原因。请先检查会话中是否已收到该消息，再尝试重新发送；如果问题持续出现，请查看技术细节并提交反馈。"
+      },
+      "CONVERSATION_PREPARATION_FAILED": {
+        "title": "消息发送准备失败",
+        "body": "准备发送消息时出错，暂时无法确定具体原因。请检查所选 Agent、模型和工作区，再重试；如果问题持续出现，请查看技术细节并提交反馈。"
+      },
+      "CONVERSATION_CREATION_FAILED": {
+        "title": "会话创建失败",
+        "body": "创建会话时出错，暂时无法确定具体原因。请先检查会话列表，确认是否已创建，再尝试新建会话；如果问题持续出现，请查看技术细节并提交反馈。"
+      },
+      "CONVERSATION_STEER_FAILED": {
+        "title": "补充要求提交失败",
+        "body": "提交补充要求时出错，暂时无法确定具体原因。请先检查过程记录，确认要求是否已收到，再尝试重新发送；如果问题持续出现，请查看技术细节并提交反馈。"
+      },
+      "CONVERSATION_CONTEXT_CLEAR_FAILED": {
+        "title": "会话上下文清理失败",
+        "body": "清理会话上下文时出错，暂时无法确定具体原因。请重新打开会话确认状态后再试；如果问题持续出现，请查看技术细节并提交反馈。"
+      },
+      "SESSION_CAPABILITIES_FAILED": {
+        "title": "会话能力信息读取失败",
+        "body": "未能读取本会话可用的模型和能力信息。请重新打开会话后再试；如果问题持续出现，请检查 Agent 连接并查看技术细节。"
+      },
+      "CONVERSATION_CREATION_STATUS_FAILED": {
+        "title": "会话创建状态读取失败",
+        "body": "未能读取会话的创建状态，暂时无法确认创建结果。请检查会话列表或稍后再试，避免重复创建同一会话。"
+      },
+      "CONVERSATION_GENERATION_FAILED": {
+        "title": "生成请求处理失败",
+        "body": "处理生成请求时出错，暂时无法确定具体原因。请先检查已有结果，再重试；如果问题持续出现，请查看技术细节并提交反馈。"
+      },
+      "EXECUTION_MODEL_UNSUPPORTED_FEATURE": {
+        "title": "模型不支持所需功能",
+        "body": "模型服务不支持本次请求所需的功能，本次请求失败。请移除不支持的内容或更换模型后重新发送剩余任务。"
+      },
+      "EXECUTION_MODEL_PROTOCOL_VIOLATION": {
+        "title": "模型响应协议异常",
+        "body": "模型服务返回的数据不符合响应协议，本次请求失败。请重试；如果反复出现，请更换模型或提交反馈。"
+      },
+      "EXECUTION_MODEL_STREAM_INTERRUPTED": {
+        "title": "模型回复流中断",
+        "body": "模型回复流在执行期间中断，本次请求失败。请检查已有结果，重试或更换模型后重新发送剩余任务。"
+      },
+      "USER_LLM_PROVIDER_IMAGE_UNSUPPORTED": {
+        "title": "模型不支持图片输入",
+        "body": "当前模型无法处理请求中的图片。请移除图片，或选择支持图片输入的模型后重新发送。"
+      },
+      "USER_LLM_PROVIDER_UNAVAILABLE": {
+        "title": "模型服务暂时不可用",
+        "body": "模型服务当前无法处理请求，本次请求失败。请先检查已有文件和过程记录，稍后重试或更换模型后重新发送剩余任务。"
+      },
+      "USER_LLM_PROVIDER_UNSUPPORTED_FEATURE": {
+        "title": "模型不支持所需功能",
+        "body": "模型服务不支持本次请求所需的功能，本次请求失败。请先检查已有结果，再移除不支持的内容或更换模型后重新发送剩余任务。"
+      },
+      "USER_LLM_PROVIDER_INVALID_RESPONSE": {
+        "title": "模型响应格式异常",
+        "body": "模型服务返回了无法处理的响应数据，本次请求失败。请先检查已有结果，再重试剩余任务；如果反复出现，请更换模型或提交反馈。"
+      },
+      "USER_LLM_PROVIDER_STREAM_INTERRUPTED": {
+        "title": "模型回复流中断",
+        "body": "模型回复流在任务完成前中断，本次请求失败。请先检查已有文件和过程记录，再重试或更换模型后重新发送剩余任务。"
       }
-    }
+    },
+    "adjustAndRetry": "调整后重试",
+    "providerReasons": {
+      "auth_failed": {
+        "title": "模型服务认证未通过",
+        "body": "模型服务认证未通过，但暂时无法确定是凭证还是认证方式问题。请核对 API Key 所属服务商、有效期和认证方式后重试。"
+      },
+      "invalid_key": {
+        "title": "模型服务凭证无效",
+        "body": "服务商明确判定当前凭证无效。请核对 API Key、访问令牌或云服务凭证及其所属服务商、项目或区域，必要时在模型设置中更新后重试。"
+      },
+      "expired_key": {
+        "title": "模型服务凭证已过期",
+        "body": "服务商明确报告当前凭证已过期。请刷新凭证或创建新的 API Key，在模型设置中更新后重试。"
+      },
+      "insufficient_quota": {
+        "title": "模型服务额度不足",
+        "body": "服务商明确报告当前账号可用额度不足。请检查额度、计费状态和重置时间，补足额度或等待重置后重试。"
+      },
+      "insufficient_balance": {
+        "title": "模型服务账号余额不足",
+        "body": "服务商明确报告当前账号余额不足。请在服务商账户中充值，或切换到有可用余额的服务商后重试。"
+      },
+      "subscription_expired": {
+        "title": "模型服务订阅已到期",
+        "body": "服务商明确报告当前账号订阅已到期。请续订或选择当前账号可用的套餐及模型后重试。"
+      },
+      "model_not_in_plan": {
+        "title": "当前套餐未包含所选模型",
+        "body": "服务商明确报告所选模型不在当前套餐范围内。请选择套餐包含的模型，或调整订阅后重试。"
+      },
+      "permission_denied": {
+        "title": "模型服务拒绝访问",
+        "body": "模型服务拒绝了访问，但暂时无法确定具体限制。请核对账号和模型权限、API 地址，以及代理或网关的访问规则。"
+      },
+      "model_permission_denied": {
+        "title": "账号无权使用所选模型",
+        "body": "服务商明确拒绝当前账号访问所选模型。请确认账号、项目和模型授权，或选择当前账号可用的模型后重试。"
+      },
+      "endpoint_missing": {
+        "title": "模型服务未找到请求资源",
+        "body": "模型服务未找到请求的资源。请核对 Base URL、API 路径和协议，以及部署名称或模型名称后重试。"
+      },
+      "non_api_response": {
+        "title": "模型接口返回了非 API 内容",
+        "body": "请求返回了网页或其他非模型 API 内容。请确认 Base URL 指向 API 接口、所选协议正确，并排查代理或网关的登录页面。"
+      },
+      "auth_scheme_mismatch": {
+        "title": "模型接口认证方式不匹配",
+        "body": "当前认证方式与模型 API 的要求不匹配。请按服务商 API 说明选择认证方式，核对所选协议和凭证后重试。"
+      },
+      "rate_limited": {
+        "title": "模型服务请求被限流",
+        "body": "服务商限制了本次请求，可能涉及请求速率、并发或周期额度。请检查所用模型和组织的限制；若返回了重试等待时间，按提示等待后再试。"
+      },
+      "dns_failure": {
+        "title": "无法解析模型服务地址",
+        "body": "模型服务地址的域名解析失败。请检查 Base URL 的域名、DNS、网络及代理配置后重试。"
+      },
+      "connection_failed": {
+        "title": "无法连接模型服务",
+        "body": "无法建立到模型服务的连接。请检查请求地址的主机和端口、服务是否可用，以及网络和代理配置后重试。"
+      },
+      "tls_failure": {
+        "title": "模型服务安全连接失败",
+        "body": "与模型服务的 TLS 握手或证书校验失败。请检查 HTTPS 地址、证书、系统时间及代理配置后重试。"
+      },
+      "proxy_failure": {
+        "title": "模型请求的代理连接失败",
+        "body": "模型请求未能通过已配置的代理。请检查代理地址、端口、认证方式及代理是否可用后重试。"
+      },
+      "request_timeout": {
+        "title": "模型服务请求超时",
+        "body": "未能在限定时间内收到完整的模型响应。请检查网络与代理，稍后重试或切换服务商。"
+      },
+      "upstream_server_error": {
+        "title": "模型服务返回服务端错误",
+        "body": "模型服务或中间网关返回了服务端错误。请稍后重试并查看服务商状态；如果持续出现，可切换服务商。"
+      },
+      "provider_unavailable": {
+        "title": "模型服务当前不可用",
+        "body": "模型服务当前无法处理请求，具体原因尚未确定。请稍后重试；如果持续出现，请查看服务商状态和技术细节，或切换服务商。"
+      },
+      "network_failure": {
+        "title": "模型服务网络请求失败",
+        "body": "模型服务网络请求失败，具体连接原因尚未确定。请检查网络、代理和请求地址，并通过技术细节进一步定位。"
+      },
+      "stream_interrupted": {
+        "title": "模型回复传输中断",
+        "body": "模型回复的传输在完成前中断。请检查网络和代理后重试；如果反复出现，可切换服务商或提交反馈。"
+      },
+      "invalid_response": {
+        "title": "模型响应不符合 API 协议",
+        "body": "模型服务返回了无法按当前 API 协议处理的数据。请核对 Base URL、所选协议和服务兼容性；如果配置正确，请切换模型或提交反馈。"
+      },
+      "invalid_request": {
+        "title": "模型请求参数无法使用",
+        "body": "本次请求参数无法按模型接口要求处理。请核对模型名称、API 协议、生成参数及引用内容，或简化消息后重试。"
+      },
+      "unsupported_feature": {
+        "title": "本次请求所需功能不可用",
+        "body": "模型服务无法处理本次请求所需的功能。请核对模型能力和 API 协议，调整请求内容或更换兼容模型。"
+      },
+      "model_not_found": {
+        "title": "模型不存在或不可见",
+        "body": "服务商明确报告无法找到所选模型，但该结果也可能表示当前账号不可见。请核对模型 ID、部署名称和账号可用的模型列表后重试。"
+      },
+      "content_policy": {
+        "title": "模型服务拒绝了请求内容",
+        "body": "服务商因内容政策拒绝了本次请求。请检查消息和引用内容是否符合服务商要求；如果正常内容被误判，请向服务商反馈，并附上技术细节中的请求 ID（如有）。"
+      },
+      "billing_required": {
+        "title": "模型服务要求计费",
+        "body": "模型服务返回了需要计费的响应，具体计费限制尚未确定。请检查账号计费状态、套餐和余额后重试。"
+      },
+      "prompt_too_long": {
+        "title": "本次上下文超过模型限制",
+        "body": "服务商明确拒绝了本次请求的上下文长度。请减少消息、引用文件或历史内容，或选择支持更长上下文的模型后重试。"
+      },
+      "provider_overloaded": {
+        "title": "模型服务当前负载过高",
+        "body": "服务商明确报告当前负载过高，无法处理本次请求。请按返回的等待时间稍后重试，或选择其他可用的服务商。"
+      },
+      "configuration_error": {
+        "title": "模型请求配置无法使用",
+        "body": "应用无法按当前配置准备或完成模型请求。请核对 API 协议、接口地址、认证配置和必填参数。"
+      },
+      "invalid_endpoint": {
+        "title": "模型接口地址格式无效",
+        "body": "配置的接口地址不符合请求要求。请检查 Base URL 的 HTTP(S) 协议、域名、端口和 API 路径，并移除地址中的用户名、密码及 # 片段。"
+      },
+      "credentials_missing": {
+        "title": "模型服务凭证不可用",
+        "body": "应用无法获取当前模型绑定的凭证。请检查是否已配置或删除了该服务商的凭证，并确认所需环境变量或连接配置可用。"
+      },
+      "credential_target_mismatch": {
+        "title": "凭证与目标模型接口不匹配",
+        "body": "应用已拒绝将当前凭证发送到不匹配的目标接口。请核对凭证所属服务商、连接绑定、API 地址和区域设置。"
+      },
+      "spend_limit_reached": {
+        "title": "模型服务预算上限已达到",
+        "body": "服务商明确报告当前组织或项目已达到配置的支出上限。请核对所用组织和项目，在服务商控制台检查预算限制及重置周期，按账号授权调整额度后再试。"
+      }
+    },
+    "copyDetails": "复制技术细节",
+    "renewSubscription": "续订"
   },
   "workspace": {
     "title": "项目",

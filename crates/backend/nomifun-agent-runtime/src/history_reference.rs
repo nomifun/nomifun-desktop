@@ -205,7 +205,7 @@ mod tests {
                             arguments:nomifun_agent_contracts::StrictJsonValue(json!({"path":"result.txt"})),provider_metadata:None}},
                         crate::AgentEngineEvent::ToolCompleted {step:1,result:crate::AgentToolResult::text(
                             "original-read".into(),"第一行 MAC-B\n第二行 after\n",false)},
-                        crate::AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failure".into()},
+                        crate::AgentEngineEvent::TurnFailed {model_steps:1,message:"old report failure".into(),failure:None},
                     ],
                 })}))
             }

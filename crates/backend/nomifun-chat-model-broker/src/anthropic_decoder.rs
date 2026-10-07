@@ -588,6 +588,7 @@ mod tests {
         let mut decoder = AnthropicDecoder::default();
         let events = decoder
             .decode(&ProviderWireFrame {
+                diagnostic: None,
                 event: "json".into(),
                 data: serde_json::json!({
                     "id": "msg_1",

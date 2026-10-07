@@ -93,6 +93,7 @@ pub(super) struct Journal {
     generation: i64,
     snapshot: ResolvedSnapshotRef,
     route: Option<ChatRouteIdentity>,
+    error_context: super::nomi_core_session::TurnErrorContext,
     cancellation: CancellationToken,
     cursor: Mutex<Cursor>,
     sequence: AtomicU64,
@@ -307,6 +308,9 @@ impl EngineTurnJournal {
                 .content
                 .chat_route_identity
                 .clone(),
+            error_context: super::nomi_core_session::TurnErrorContext::from_response(
+                receipt.session().session(), Some(receipt.session().workspace()),
+            ),
             cancellation,
             cursor: Mutex::new(Cursor {
                 assistant_message_id: Some(assistant_message_id),
@@ -410,7 +414,7 @@ impl EngineTurnJournal {
         let event = if let Some(recovery) = &self.0.recovery {
             AgentEngineEvent::TurnPaused { model_steps: recovery.last_model_step(), reason: "EXECUTION_ATTACH_FAILED".into() }
         } else {
-            AgentEngineEvent::TurnFailed { model_steps: 0, message: "Recovery could not attach an uninitialized runtime".into() }
+            AgentEngineEvent::TurnFailed { model_steps: 0, message: "Recovery could not attach an uninitialized runtime".into(), failure: None }
         };
         self.append(serde_json::to_string(&event).map_err(failure)?, None, EngineJournalWrite::Terminal).await
     }
@@ -992,11 +996,12 @@ impl EngineTurnJournal {
                             "finished_at_ms": now_ms(),
                         }),
                     ),
-                    AgentEngineEvent::TurnFailed { model_steps, message } => {
-                        let error = nomifun_ai_agent::AgentSendError::from_engine_turn_failure(
-                            message.clone(),
+                    AgentEngineEvent::TurnFailed { model_steps, message, failure: typed_failure } => {
+                        let mut error = nomifun_ai_agent::AgentSendError::from_runtime_turn_failure(
+                            message.clone(), typed_failure.as_ref(),
                         )
                         .into_stream_error();
+                        journal.error_context.apply(&mut error);
                         (
                             "turn/failed",
                             json!({
@@ -1313,6 +1318,12 @@ async fn test_fixture_from_pool(
         generation: turn.cursor.seq as i64,
         snapshot: binding.resolved_snapshot_ref,
         route: None,
+        error_context: super::nomi_core_session::TurnErrorContext {
+            agent_label: Some("Fixture Agent".into()),
+            agent_template_key: None,
+            model_name: Some("fixture-model".into()),
+            workspace_path: Some("/tmp/fixture-workspace".into()),
+        },
         cancellation: CancellationToken::new(),
         cursor: Mutex::new(Cursor::default()),
         sequence: AtomicU64::new(0),
@@ -1431,6 +1442,7 @@ mod history_display_tests {
         let terminal = AgentEngineEvent::TurnFailed {
             model_steps: 32,
             message: "model step limit of 32 exceeded".into(),
+            failure: None,
         };
         journal.append(serde_json::to_string(&terminal).unwrap(), None, EngineJournalWrite::Terminal)
             .await.unwrap();
@@ -1442,6 +1454,51 @@ mod history_display_tests {
             .expect("terminal summary persisted");
         assert_eq!(summary.projection["error"]["code"], "NOMIFUN_TASK_INCOMPLETE");
         assert_eq!(summary.projection["error"]["ownership"], "nomifun");
+        assert_eq!(summary.projection["error"]["taskIncompleteReason"], "step_limit");
+        assert_eq!(summary.projection["error"]["agentLabel"], "Fixture Agent");
+        assert_eq!(summary.projection["error"]["modelName"], "fixture-model");
+        assert_eq!(summary.projection["error"]["workspacePath"], "/tmp/fixture-workspace");
+    }
+
+    #[tokio::test]
+    async fn typed_model_failure_releases_the_turn_and_preserves_context_and_detail() {
+        let (journal, pool) = test_fixture().await;
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup)
+            .await.unwrap();
+        let mut diagnostic = nomifun_agent_contracts::ModelFailureDiagnostic::new(
+            nomifun_agent_contracts::ModelFailureReason::UpstreamServerError);
+        diagnostic.http_status = Some(503);
+        diagnostic.provider_code = Some("service_unavailable".into());
+        diagnostic.provider_param = Some("model".into());
+        diagnostic.provider_id = Some("0190f5fe-7c00-7a00-8000-000000000074".into());
+        diagnostic.model_name = Some("actual-failed-model".into());
+        diagnostic.request_id = Some("fixture-request".into());
+        let terminal = AgentEngineEvent::TurnFailed {
+            model_steps: 2, message: "Safe locally authored server failure".into(),
+            failure: Some(nomifun_agent_runtime::AgentTurnFailure::Model {
+                code: nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable,
+                diagnostic: Some(diagnostic.clone()),
+            }),
+        };
+        journal.append(serde_json::to_string(&terminal).unwrap(), None, EngineJournalWrite::Terminal)
+            .await.unwrap();
+        let store = AgentSessionStore::from_pool(pool).await.unwrap();
+        assert_eq!(store.read_turn_receipt(&journal.0.session, &journal.0.operation).await.unwrap().status,
+            TurnReceiptStatus::Failed);
+        let head = store.head(&journal.0.session).await.unwrap();
+        assert_eq!(head.status, "ready");
+        assert!(head.active_turn_id.is_none());
+        let (history, _, _) = store.message_history_before(&journal.0.session, None, 50).await.unwrap();
+        let summary = history.iter().find(|row| row.presentation_intent == "turn_summary").unwrap();
+        assert_eq!(summary.projection["error"]["code"], "USER_LLM_PROVIDER_GATEWAY_ERROR");
+        assert_eq!(summary.projection["error"]["providerDiagnostic"], serde_json::to_value(diagnostic).unwrap());
+        assert!(summary.projection["error"].get("detail").is_none());
+        assert_eq!(summary.projection["error"]["agentLabel"], "Fixture Agent");
+        assert_eq!(summary.projection["error"]["modelName"], "fixture-model");
+        assert_eq!(summary.projection["error"]["retryable"], false);
+        store.start_turn(&journal.0.session, "session_api".into(), "next-input".into(),
+            "next-turn".into(), StrictJsonValue(json!({"content":"Continue from the completed work"}))).await
+            .expect("the next user input needs no manual End Turn");
     }
 
     #[tokio::test]

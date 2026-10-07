@@ -141,6 +141,7 @@ impl<S> SseFrameStream<S> {
             return Ok(Some(SingleAttemptFrame {
                 event: "done".to_owned(),
                 data: Value::Object(Default::default()),
+                diagnostic: None,
             }));
         }
         let data = serde_json::from_str(&data)
@@ -152,6 +153,7 @@ impl<S> SseFrameStream<S> {
                 event
             },
             data,
+            diagnostic: None,
         }))
     }
 }

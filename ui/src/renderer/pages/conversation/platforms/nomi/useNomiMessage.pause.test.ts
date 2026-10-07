@@ -67,7 +67,8 @@ test('cold paused hydration shows the cause without completing or rewriting the 
   const run = await mount(paused);
   expect(run.hook.result.current.running).toBe(false);
   expect(run.hook.result.current.pauseNotice).toEqual({ turnId,
-    reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanupProven: true, pausedAt: 123 });
+    reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanupProven: true, pausedAt: 123,
+    error: { message: '', workspacePath: '/fixture' } });
   expect(run.hook.result.current.getTurnCompletionGeneration()).toBe(0);
   expect(run.persist).not.toHaveBeenCalled();
 });

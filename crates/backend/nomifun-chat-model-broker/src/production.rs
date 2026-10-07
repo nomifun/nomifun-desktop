@@ -38,7 +38,7 @@ use crate::ports::{
     ChatCapabilityObserver, ChatCausalityGate, ChatRouteResolver, CredentialLease,
     CredentialTarget, NoopChatCapabilityObserver, ProviderCredentialStore,
 };
-use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex};
+use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex, ModelFailureDiagnostic};
 
 /// Safe, fixed-shape failures returned by a repository bridge.
 ///
@@ -590,16 +590,57 @@ fn contains_sensitive_wire_key(value: &Value) -> bool {
     }
 }
 
+fn safe_identifier(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty() && value.len() <= 200
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'#')))
+}
+
+fn sanitize_diagnostic(mut diagnostic: ModelFailureDiagnostic) -> ModelFailureDiagnostic {
+    diagnostic.provider_code = safe_identifier(diagnostic.provider_code);
+    diagnostic.provider_type = safe_identifier(diagnostic.provider_type);
+    diagnostic.provider_id = safe_identifier(diagnostic.provider_id);
+    diagnostic.model_name = diagnostic.model_name.filter(|value|
+        !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control));
+    diagnostic.provider_param = diagnostic.provider_param.filter(|value|
+        !value.is_empty() && value.len() <= 200 && value.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'_' | b'-' | b'/' | b'~' | b'[' | b']')));
+    diagnostic.request_id = safe_identifier(diagnostic.request_id);
+    diagnostic.endpoint = diagnostic.endpoint.as_deref()
+        .and_then(nomifun_net::secret_redaction::sanitized_endpoint);
+    diagnostic.protocol = diagnostic.protocol.filter(|value| matches!(value.as_str(),
+        "anthropic.messages" | "openai.chat_text" | "openai.responses" | "gemini.generate_text"
+        | "bedrock.anthropic_messages" | "vertex.anthropic_messages"));
+    diagnostic.auth_scheme = diagnostic.auth_scheme.filter(|value| matches!(value.as_str(),
+        "bearer" | "token" | "header_key" | "query_key" | "multi_header" | "bedrock"));
+    diagnostic.content_type = diagnostic.content_type.filter(|value| {
+        let mut parts = value.split('/');
+        let token = |part: &str| !part.is_empty() && part.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || matches!(byte, b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'));
+        value.len() <= 100 && parts.next().is_some_and(token)
+            && parts.next().is_some_and(token) && parts.next().is_none()
+    });
+    // This field is locally authored and credential-redacted by its HTTP/OS
+    // owner. Apply a second URL scrub before bounding it at the final seam.
+    diagnostic.transport_detail = diagnostic.transport_detail.map(|value|
+        nomifun_net::secret_redaction::redact_url_queries(&value).chars()
+            .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+            .take(1024).collect::<String>()).filter(|value| !value.is_empty());
+    diagnostic
+}
+
 fn sanitize_model_error(mut error: ChatModelError) -> ChatModelError {
-    // The HTTP owner has already discarded native diagnostics and supplied
-    // one of these locally authored actions. Preserve it through the final
-    // production transport seam only when code and retry semantics agree.
-    // Arbitrary provider prose, URLs, prefixes and capability claims still
-    // take the normal fixed-message sanitizer below.
-    if let Some(business) = nomifun_net::provider_gateway_error::GatewayBusinessError::from_action_message(&error.message) {
+    error.diagnostic = error.diagnostic.map(sanitize_diagnostic);
+    // Reconstruct fixed gateway actions from typed evidence, never from a
+    // message that a remote service can imitate. Code, retry and capability
+    // semantics remain governed by the existing broker contract.
+    if let Some(business) = error.diagnostic.as_ref()
+        .and_then(|diagnostic| diagnostic.provider_code.as_deref())
+        .and_then(nomifun_net::provider_gateway_error::GatewayBusinessError::from_code) {
         let expected = crate::provider_errors::gateway_error(business);
         if error.code == expected.code && error.retry == expected.retry
             && error.unsupported_feature.is_none()
+            && error.diagnostic.as_ref().map(|diagnostic| diagnostic.reason)
+                == expected.diagnostic.as_ref().map(|diagnostic| diagnostic.reason)
         {
             error.message = business.action_message().to_owned();
             return error;
@@ -1163,7 +1204,7 @@ mod tests {
         ] {
             for stream_error in [false, true] {
                 let fixture = fixture();
-                let mut error = ChatModelError::new(code, business.action_message(), retry);
+                let mut error = crate::provider_errors::gateway_error(business);
                 error.provider_status = Some(business.http_status());
                 let script = if stream_error { InvokeScript::StreamError(error) } else { InvokeScript::Error(error) };
                 let invoke = ScriptedModelInvoke::new([script]);
@@ -1181,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_action_sanitizer_keeps_only_exact_local_actions_with_matching_semantics() {
+    fn gateway_action_sanitizer_requires_matching_typed_evidence() {
         use nomifun_net::provider_gateway_error::GatewayBusinessError;
         let action = GatewayBusinessError::InsufficientBalance.action_message();
         for error in [
@@ -1197,6 +1238,99 @@ mod tests {
         let mut error = ChatModelError::new(ChatModelErrorCode::ProviderUnavailable, action, ChatRetryDirective::Never);
         error.unsupported_feature = Some(crate::ChatModelFeature::ToolCalls);
         assert_ne!(sanitize_model_error(error).message, action, "gateway billing must never authorize a feature downgrade");
+        for reason in [nomifun_agent_contracts::ModelFailureReason::AuthFailed,
+            nomifun_agent_contracts::ModelFailureReason::PermissionDenied] {
+            let mut error = crate::provider_errors::gateway_error(GatewayBusinessError::InsufficientBalance);
+            error.diagnostic.as_mut().unwrap().reason = reason;
+            assert_ne!(sanitize_model_error(error).message, action);
+        }
+        let mut error = crate::provider_errors::gateway_error(GatewayBusinessError::InsufficientBalance);
+        error.message = "private provider body https://untrusted.test/?key=private-key-value".to_owned();
+        assert_eq!(sanitize_model_error(error).message, action);
+    }
+
+    #[test]
+    fn structured_diagnostic_sanitizer_keeps_bounded_safe_http_context() {
+        use nomifun_agent_contracts::ModelFailureReason;
+        let mut error = ChatModelError::new(ChatModelErrorCode::ProviderUnavailable,
+            "provider prose private-key-value", ChatRetryDirective::Never);
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::ConnectionFailed);
+        diagnostic.http_status = Some(503);
+        diagnostic.provider_code = Some("UPSTREAM_UNAVAILABLE".to_owned());
+        diagnostic.provider_type = Some("upstream_error".to_owned());
+        diagnostic.provider_param = Some("messages[0].content".to_owned());
+        diagnostic.provider_id = Some("provider-openai-123".to_owned());
+        diagnostic.model_name = Some("accounts/123/models/Model Name v2".to_owned());
+        diagnostic.request_id = Some("req_123".to_owned());
+        diagnostic.endpoint = Some("https://user:password@api.example.test/v1/messages?key=private-key-value#secret".to_owned());
+        diagnostic.protocol = Some("openai.chat_text".to_owned());
+        diagnostic.auth_scheme = Some("bearer".to_owned());
+        diagnostic.content_type = Some("application/json".to_owned());
+        diagnostic.transport_detail = Some(format!("connection refused by https://user:password@api.example.test/?key=private-key-value#secret {}", "x".repeat(1100)));
+        error.diagnostic = Some(diagnostic);
+        let error = sanitize_model_error(error);
+        let diagnostic = error.diagnostic.as_ref().unwrap();
+        assert_eq!(diagnostic.reason, ModelFailureReason::ConnectionFailed);
+        assert_eq!(diagnostic.endpoint.as_deref(), Some("https://api.example.test/v1/messages"));
+        assert_eq!(diagnostic.provider_code.as_deref(), Some("UPSTREAM_UNAVAILABLE"));
+        assert_eq!(diagnostic.provider_param.as_deref(), Some("messages[0].content"));
+        assert_eq!(diagnostic.provider_id.as_deref(), Some("provider-openai-123"));
+        assert_eq!(diagnostic.model_name.as_deref(), Some("accounts/123/models/Model Name v2"));
+        assert_eq!(diagnostic.request_id.as_deref(), Some("req_123"));
+        assert_eq!(diagnostic.transport_detail.as_ref().unwrap().chars().count(), 1024);
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("\"providerParam\":\"messages[0].content\""));
+        assert!(json.contains("\"providerId\":\"provider-openai-123\""));
+        assert!(json.contains("\"modelName\":\"accounts/123/models/Model Name v2\""));
+        for private in ["private-key-value", "password", "#secret", "provider prose"] {
+            assert!(!json.contains(private), "{private}");
+        }
+
+        let mut unsafe_metadata = ModelFailureDiagnostic::new(ModelFailureReason::InvalidResponse);
+        unsafe_metadata.provider_code = Some("opaque native body prose".to_owned());
+        unsafe_metadata.provider_type = Some("https://untrusted.test/?key=secret".to_owned());
+        unsafe_metadata.provider_param = Some("messages[0].content='private-key-value'".to_owned());
+        unsafe_metadata.provider_id = Some("provider body prose".to_owned());
+        unsafe_metadata.model_name = Some("model\nprivate-value".to_owned());
+        unsafe_metadata.request_id = Some("secret\nvalue".to_owned());
+        unsafe_metadata.endpoint = Some("file:///private/secret".to_owned());
+        unsafe_metadata.protocol = Some("unknown secret protocol".to_owned());
+        unsafe_metadata.auth_scheme = Some("Authorization: secret".to_owned());
+        unsafe_metadata.content_type = Some("text/html; key=secret".to_owned());
+        let sanitized = sanitize_diagnostic(unsafe_metadata);
+        assert_eq!(sanitized, ModelFailureDiagnostic::new(ModelFailureReason::InvalidResponse));
+    }
+
+    #[test]
+    fn diagnostic_parameter_accepts_bounded_paths_and_rejects_values_or_prose() {
+        use nomifun_agent_contracts::ModelFailureReason;
+        for parameter in ["messages[0].content", "/messages/0/content", "/input/~0text/~1content",
+            "response-format.output_schema", "tools[0].parameters"] {
+            let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::InvalidRequest);
+            diagnostic.provider_param = Some(parameter.to_owned());
+            assert_eq!(sanitize_diagnostic(diagnostic).provider_param.as_deref(), Some(parameter));
+        }
+        for parameter in ["messages[0].content='private-value'".to_owned(), "invalid parameter body prose".to_owned(),
+            "https://private.test/?key=secret".to_owned(), "input\nprivate-value".to_owned(), "x".repeat(201)] {
+            let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::InvalidRequest);
+            diagnostic.provider_param = Some(parameter);
+            assert_eq!(sanitize_diagnostic(diagnostic).provider_param, None);
+        }
+    }
+
+    #[test]
+    fn diagnostic_keeps_qualified_aws_identifiers_and_bounds_configuration_identity() {
+        use nomifun_agent_contracts::ModelFailureReason;
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::ExpiredKey);
+        diagnostic.provider_code = Some("com.amazon.coral.service#ExpiredTokenException".to_owned());
+        diagnostic.provider_type = diagnostic.provider_code.clone();
+        diagnostic.provider_id = Some("x".repeat(201));
+        diagnostic.model_name = Some("x".repeat(513));
+        let diagnostic = sanitize_diagnostic(diagnostic);
+        assert_eq!(diagnostic.provider_code.as_deref(), Some("com.amazon.coral.service#ExpiredTokenException"));
+        assert_eq!(diagnostic.provider_type, diagnostic.provider_code);
+        assert_eq!(diagnostic.provider_id, None);
+        assert_eq!(diagnostic.model_name, None);
     }
 
     #[tokio::test]

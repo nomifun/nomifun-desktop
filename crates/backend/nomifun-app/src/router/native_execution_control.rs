@@ -22,6 +22,7 @@ pub(super) async fn pause(
     Path(id): Path<String>, Json(request): Json<PauseRequest>,
 ) -> Result<Json<ApiResponse<nomifun_agent_contracts::SessionEventAck>>, NomiCoreApiError> {
     let session = parse_agent_session_id(&id)?;
+    let _operation_guard = state.session_owner.session_operation_lock(session.as_ref()).write_owned().await;
     let principal = authenticated_principal(&owner);
     let store = state.session_owner.canonical().store();
     store.inspect_latest_native_execution(&principal,&session).await.map_err(agent_session_store_error)?;
@@ -78,6 +79,7 @@ pub(super) async fn reconcile(
     Path(id): Path<String>, Json(request): Json<NativeEffectReconciliationRequest>,
 ) -> Result<Json<ApiResponse<nomifun_agent_contracts::SessionEventAck>>, NomiCoreApiError> {
     let session = parse_agent_session_id(&id)?;
+    let _operation_guard = state.session_owner.session_operation_lock(session.as_ref()).write_owned().await;
     let ack = state.session_owner.canonical().store().reconcile_native_effect_by_owner(
         &authenticated_principal(&owner), &session, &request).await.map_err(agent_session_store_error)?;
     Ok(Json(ApiResponse::ok(ack)))
@@ -88,6 +90,7 @@ pub(in crate::router) async fn resume(
     Path(id): Path<String>, Json(request): Json<NativeResumeRequest>,
 ) -> Result<Json<ApiResponse<nomifun_agent_session::NativeResumeReceipt>>, NomiCoreApiError> {
     let session = parse_agent_session_id(&id)?;
+    let _operation_guard = state.session_owner.session_operation_lock(session.as_ref()).write_owned().await;
     let principal = authenticated_principal(&owner);
     let store = state.session_owner.canonical().store();
     let receipt = if let Some(receipt) = store.native_resume_receipt(&principal,&session,&request).await.map_err(agent_session_store_error)? {

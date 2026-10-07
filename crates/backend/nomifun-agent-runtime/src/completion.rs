@@ -1598,7 +1598,7 @@ mod tests {
             AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"read".into(),name:"read_file".into(),arguments:StrictJsonValue(serde_json::json!({"path":path})),provider_metadata:None}},
             AgentEngineEvent::ToolCompleted {step:1,result:AgentToolResult::text("read".into(),"第一行\n第二行\n",false)},
             AgentEngineEvent::WorkStatus {status:AgentWorkStatus {failed_tools:10,failed_commands:2,..Default::default()}},
-            AgentEngineEvent::TurnFailed {model_steps:1,message:"old failure".into()}];
+            AgentEngineEvent::TurnFailed {model_steps:1,message:"old failure".into(),failure:None}];
         let mut archive=crate::tool_archive::ToolArchive::new("current".into());
         archive.import_scoped_reference(crate::AgentHistoryPage {has_older:false,turn:Some(crate::AgentRecordedTurn {
             operation_id:SOURCE.into(),receipt_status:"failed".into(),requirement:crate::context_lifecycle::text_message(ChatRole::User,"old file task".into()),events,

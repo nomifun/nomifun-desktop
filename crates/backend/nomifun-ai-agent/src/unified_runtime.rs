@@ -373,7 +373,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                         AgentTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
                         AgentTurnTerminal::Cancelled => EngineTurnTerminal::Cancelled,
                         AgentTurnTerminal::Paused { reason } => EngineTurnTerminal::Paused { reason },
-                        AgentTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message },
+                        AgentTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message, failure: None },
                     },
                 };
                 if pending.as_ref() != Some(&runtime_terminal(&outcome)) {
@@ -391,20 +391,18 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                     _ => projection.last_model_step.load(std::sync::atomic::Ordering::Acquire) })),
             Err(AgentEngineError::TurnFailed(message)) => {
                 let model_steps = match pending {
-                    Some(AgentEngineEvent::TurnFailed { model_steps, message: recorded }) if recorded == message => model_steps,
+                    Some(AgentEngineEvent::TurnFailed { model_steps, message: recorded, failure: None }) if recorded == message => model_steps,
                     _ => return Err(AppError::Conflict("Nomi failure has no matching terminal record".into())),
                 };
-                Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message } })
+                Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message, failure: None } })
             }
             Err(error @ (AgentEngineError::Model { .. } | AgentEngineError::ModelStreamEndedWithoutTerminal | AgentEngineError::InvalidModelEvent(_))) => {
-                // No proposed tool batch is executed before a valid model
-                // terminal. Preserve progress for an explicit owner retry;
-                // the SDK must still prove cleanup before publishing pause.
-                if let AgentEngineError::Model { code, message } = &error {
-                    projection.output.record_model_gateway_failure(*code, message);
-                }
+                // The model failure ends this Turn only after the existing
+                // cleanup and canonical receipt barriers. Completed effects
+                // stay recorded; the next user input is a new Turn.
+                let (message, failure) = model_turn_failure(error);
                 Ok(EngineTurnOutcome { model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
-                    terminal:EngineTurnTerminal::Paused { reason:model_pause_reason(&error) } })
+                    terminal:EngineTurnTerminal::Failed { message, failure: Some(failure) } })
             }
             Err(error) => Err(contract_error(error)),
         }
@@ -429,18 +427,16 @@ impl EngineSessionDriver for UnifiedSessionDriver {
     async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
 }
 
-fn model_pause_reason(error: &AgentEngineError) -> String {
-    // Persist a bounded typed cause, never provider prose, credentials, or
-    // model output. The old catch-all erased the only diagnostic on pause.
-    let code = match error {
-        AgentEngineError::Model { code, .. } => serde_json::to_value(code).ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "failure".into()),
-        AgentEngineError::ModelStreamEndedWithoutTerminal => "stream_ended_without_terminal".into(),
-        AgentEngineError::InvalidModelEvent(_) => "invalid_event".into(),
-        _ => "failure".into(),
-    };
-    format!("EXECUTION_MODEL_{}", code.to_ascii_uppercase())
+fn model_turn_failure(error: AgentEngineError) -> (String, nomifun_agent_runtime::AgentTurnFailure) {
+    use nomifun_agent_runtime::AgentTurnFailure;
+    match error {
+        AgentEngineError::Model { code, message, diagnostic } => (message, AgentTurnFailure::Model { code, diagnostic }),
+        AgentEngineError::ModelStreamEndedWithoutTerminal => (
+            "Model stream ended without a terminal event".into(), AgentTurnFailure::ModelStreamEndedWithoutTerminal,
+        ),
+        AgentEngineError::InvalidModelEvent(message) => (message, AgentTurnFailure::InvalidModelEvent),
+        _ => unreachable!("only typed model failures enter model Turn settlement"),
+    }
 }
 
 fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
@@ -450,8 +446,8 @@ fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
         },
         EngineTurnTerminal::Cancelled => AgentEngineEvent::TurnCancelled { model_steps: outcome.model_steps },
         EngineTurnTerminal::Paused { reason } => AgentEngineEvent::TurnPaused { model_steps: outcome.model_steps, reason: reason.clone() },
-        EngineTurnTerminal::Failed { message } => AgentEngineEvent::TurnFailed {
-            model_steps: outcome.model_steps, message: message.clone(),
+        EngineTurnTerminal::Failed { message, failure } => AgentEngineEvent::TurnFailed {
+            model_steps: outcome.model_steps, message: message.clone(), failure: failure.clone(),
         },
     }
 }
@@ -514,16 +510,25 @@ mod tests {
     const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 
     #[test]
-    fn model_pause_preserves_typed_cause_without_provider_text() {
+    fn model_failure_preserves_typed_cause_and_original_diagnostic() {
         use nomifun_chat_model_broker::ChatModelErrorCode;
-        assert_eq!(model_pause_reason(&AgentEngineError::Model {
+        use nomifun_agent_runtime::AgentTurnFailure;
+        assert_eq!(model_turn_failure(AgentEngineError::Model {
             code: ChatModelErrorCode::AuthenticationFailed, message: "private provider body".into(),
-        }), "EXECUTION_MODEL_AUTHENTICATION_FAILED");
-        assert_eq!(model_pause_reason(&AgentEngineError::Model {
+            diagnostic: None,
+        }), ("private provider body".into(), AgentTurnFailure::Model { code: ChatModelErrorCode::AuthenticationFailed, diagnostic: None }));
+        assert_eq!(model_turn_failure(AgentEngineError::Model {
             code: ChatModelErrorCode::InvalidRequest, message: "private request".into(),
-        }), "EXECUTION_MODEL_INVALID_REQUEST");
-        assert_eq!(model_pause_reason(&AgentEngineError::InvalidModelEvent("raw output".into())),
-            "EXECUTION_MODEL_INVALID_EVENT");
+            diagnostic: None,
+        }), ("private request".into(), AgentTurnFailure::Model { code: ChatModelErrorCode::InvalidRequest, diagnostic: None }));
+        assert_eq!(model_turn_failure(AgentEngineError::InvalidModelEvent("raw output".into())),
+            ("raw output".into(), AgentTurnFailure::InvalidModelEvent));
+        let mut diagnostic = nomifun_agent_contracts::ModelFailureDiagnostic::new(
+            nomifun_agent_contracts::ModelFailureReason::ConnectionFailed);
+        diagnostic.transport_detail = Some("connection refused (os error 61)".into());
+        assert_eq!(model_turn_failure(AgentEngineError::Model {
+            code:ChatModelErrorCode::ProviderUnavailable, message:"Safe fixed failure".into(), diagnostic:Some(diagnostic.clone()),
+        }), ("Safe fixed failure".into(), AgentTurnFailure::Model {code:ChatModelErrorCode::ProviderUnavailable, diagnostic:Some(diagnostic)}));
     }
 
     #[test]
@@ -836,50 +841,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_model_failure_reaches_transient_notice_and_preserves_typed_pause() {
-        use nomifun_net::provider_gateway_error::GatewayBusinessError;
+    async fn gateway_model_failure_records_typed_failed_turn_after_cleanup() {
+        use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
         use nomifun_chat_model_broker::{ChatModelErrorCode, ChatRetryDirective};
-        struct GatewayFailureModel { code: ChatModelErrorCode, business: GatewayBusinessError }
+        struct GatewayFailureModel { code: ChatModelErrorCode, reason: ModelFailureReason }
         #[async_trait]
         impl AgentModelPort for GatewayFailureModel {
             async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
-                let mut error = ChatModelError::new(self.code, self.business.action_message(), ChatRetryDirective::Never);
-                error.provider_status = Some(self.business.http_status());
+                let mut error = ChatModelError::new(self.code, "Safe fixed model failure", ChatRetryDirective::Never);
+                error.diagnostic = Some(ModelFailureDiagnostic::new(self.reason));
                 Err(error)
             }
         }
-        for (business, code, agent_code) in [
-            (GatewayBusinessError::InsufficientBalance, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
-            (GatewayBusinessError::SubscriptionExpired, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
-            (GatewayBusinessError::ModelNotInPlan, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
-            (GatewayBusinessError::KeyExpired, ChatModelErrorCode::AuthenticationFailed, "USER_LLM_PROVIDER_AUTH_FAILED"),
-            (GatewayBusinessError::RateLimited, ChatModelErrorCode::RateLimited, "USER_LLM_PROVIDER_RATE_LIMITED"),
+        for (reason, code, agent_code) in [
+            (ModelFailureReason::InsufficientBalance, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (ModelFailureReason::SubscriptionExpired, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (ModelFailureReason::ModelNotInPlan, ChatModelErrorCode::ProviderUnavailable, "USER_LLM_PROVIDER_BILLING_REQUIRED"),
+            (ModelFailureReason::ExpiredKey, ChatModelErrorCode::AuthenticationFailed, "USER_LLM_PROVIDER_AUTH_FAILED"),
+            (ModelFailureReason::RateLimited, ChatModelErrorCode::RateLimited, "USER_LLM_PROVIDER_RATE_LIMITED"),
         ] {
             let host = Host::new();
             let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(),
-                Arc::new(GatewayFailureModel { code, business }), Arc::new(NoTools), host.clone()).unwrap();
+                Arc::new(GatewayFailureModel { code, reason }), Arc::new(NoTools), host.clone()).unwrap();
             let mut events = runtime.subscribe();
             runtime.send_message(message()).await.unwrap();
-            let notice = tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    match events.recv().await.unwrap() {
-                        AgentStreamEvent::System(notice) => break notice,
-                        AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_) => panic!("gateway notice must precede pause finish"),
-                        _ => {},
-                    }
-                }
-            }).await.unwrap();
-            assert_eq!(notice["kind"], "model_gateway_account_action");
-            assert_eq!(notice["error"]["code"], agent_code);
-            assert_eq!(notice["error"]["message"], business.action_message());
-            assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1, "notice follows cleanup");
-            let expected_reason = format!("EXECUTION_MODEL_{}", serde_json::to_value(code).unwrap().as_str().unwrap());
-            assert!(host.events.lock().unwrap().iter().any(|event|
-                matches!(event, AgentEngineEvent::TurnPaused { reason, .. } if reason == &expected_reason)));
-            assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
-            assert!(matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Paused)));
+            let failure = terminal(&mut events).await;
+            let AgentStreamEvent::Error(failure) = failure else { panic!("a model error must end as a failed Turn"); };
+            assert_eq!(serde_json::to_value(failure.code).unwrap(), agent_code);
+            assert_eq!(failure.provider_diagnostic.as_ref().unwrap().reason, reason);
+            assert!(failure.detail.is_none());
+            assert_eq!(failure.retryable, Some(false));
+            assert_eq!(host.cleanup_turns.load(Ordering::Acquire), 1, "failure follows cleanup");
+            assert!(host.events.lock().unwrap().iter().any(|event| matches!(event,
+                AgentEngineEvent::TurnFailed { failure: Some(nomifun_agent_runtime::AgentTurnFailure::Model { code: recorded, .. }), .. }
+                    if recorded == &code)));
+            assert!(!host.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::TurnPaused { .. })));
+            assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
+            assert!(runtime.is_transport_healthy());
             runtime.kill_and_wait(None).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn interrupted_model_response_keeps_partial_output_and_finishes_the_failed_turn() {
+        struct InterruptedModel;
+        #[async_trait]
+        impl AgentModelPort for InterruptedModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ChatModelEvent::OutputTextDelta { text: "Completed work remains available.".into() }),
+                    Err(ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::ProviderUnavailable,
+                        "original temporary provider failure", nomifun_chat_model_broker::ChatRetryDirective::Never)),
+                ])))
+            }
+        }
+        let host = Host::new();
+        let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(),
+            Arc::new(InterruptedModel), Arc::new(NoTools), host.clone()).unwrap();
+        let mut events = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        let AgentStreamEvent::Error(error) = terminal(&mut events).await else { panic!("terminal failure expected"); };
+        assert_eq!(error.code, Some(nomifun_api_types::AgentErrorCode::UserLlmProviderUnavailable));
+        assert!(error.detail.is_none(), "opaque provider prose is not an approved public diagnostic");
+        assert!(!error.message.contains("original temporary provider failure"));
+        let recorded = host.events.lock().unwrap();
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::OutputTextDelta { text, .. }
+            if text == "Completed work remains available.")));
+        assert!(recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { model_steps: 1, .. })));
+        assert!(!recorded.iter().any(|event| matches!(event, AgentEngineEvent::TurnPaused { .. })));
+        drop(recorded);
+        assert_eq!(runtime.status(), Some(ConversationStatus::Finished));
+        runtime.kill_and_wait(None).await.unwrap();
     }
 
     #[tokio::test]

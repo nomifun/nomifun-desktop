@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, type ReactNode, useState } from 'react';
 import useSWR from 'swr';
-import { Alert, Message, Tooltip } from '@arco-design/web-react';
+import { Message, Tooltip } from '@arco-design/web-react';
 import { Close, Download, EditTwo, Loading, Music, Pic, Refresh, Text, VideoTwo, Voice } from '@icon-park/react';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { conversation as conversationEvents } from '@/common/adapter/ipcBridge';
@@ -16,6 +16,9 @@ import { recallCreationTask } from './recallTask';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { isAuthoritativeCompletionRuntimeIdle } from '@/renderer/pages/conversation/platforms/authoritativeTurnLifecyclePolicy';
+import ConversationErrorNote from '@/renderer/pages/conversation/Messages/components/ConversationErrorNote';
+import { normalizeAgentStreamError } from '@/common/chat/chatLib';
+import { useTranslation } from 'react-i18next';
 
 function useTasks(id: ConversationId, enabled: boolean) {
   const conversation = useConversationContextSafe();
@@ -48,7 +51,13 @@ function useTasks(id: ConversationId, enabled: boolean) {
 const TaskContext = createContext<ReturnType<typeof useTasks> | null>(null);
 export function ConversationCreationTasksProvider({ conversationId, enabled, children }: { conversationId: ConversationId; enabled: boolean; children: ReactNode }) {
   const tasks = useTasks(conversationId, enabled);
-  return <TaskContext.Provider value={tasks}>{children}{tasks.error && <Alert type='warning' content={<span>生成任务状态读取失败。<button type='button' onClick={() => void tasks.mutate()}>重试</button></span>} />}</TaskContext.Provider>;
+  const { t } = useTranslation();
+  return <TaskContext.Provider value={tasks}>{children}{tasks.error && <ConversationErrorNote
+    error={{ message: tasks.error instanceof Error ? tasks.error.message : String(tasks.error), code: 'CONVERSATION_CREATION_STATUS_FAILED' }}
+    sessionId={conversationId}
+    feedback={false}
+    recoveryAction={<button type='button' className='message-error-note__retry' onClick={() => void tasks.mutate().catch(() => {})}>{t('common.retry')}</button>}
+  />}</TaskContext.Provider>;
 }
 
 const statusLabel = { queued: '排队中', running: '生成中', succeeded: '已完成', failed: '生成失败', canceled: '已取消' };
@@ -82,6 +91,7 @@ export function useConversationCreationTaskOwnerMessageIds(): ReadonlySet<Messag
 }
 
 function TaskCard({ task, refresh }: { task: ConversationCreationTask; refresh(): unknown }) {
+  const { t } = useTranslation();
   const creation = useCreationComposer();
   const readOnly = useConversationContextSafe()?.readOnly === true;
   const [canceling, setCanceling] = useState(false);
@@ -104,18 +114,29 @@ function TaskCard({ task, refresh }: { task: ConversationCreationTask; refresh()
   const active = task.status === 'queued' || task.status === 'running';
   const title = task.capability === 'text' ? '文本创作' : mode === 'image' ? '图片生成' : mode === 'video' ? '视频生成' : mode === 'music' ? '音乐生成' : '语音合成';
   const details = `${task.model}${task.params.size ? ` · ${task.params.size}` : ''}${task.params.seconds ? ` · ${task.params.seconds}s` : ''}`;
+  const structuredError = normalizeAgentStreamError(task.error);
+  const failed = task.status === 'failed';
   return <article className={styles.card} data-creation-task={task.creation_task_id}>
     <div className={styles.header}>
       <strong>{title}</strong>
       <div className={styles.headerActions}>
         <span role='status' aria-live='polite' aria-atomic='true'>{statusLabel[task.status]}</span>
         {!readOnly && (active ? <TaskAction label={canceling ? '取消中…' : '取消任务'} disabled={canceling} onClick={() => void cancel()}><Close size={16} /></TaskAction>
-          : creation && mode && <TaskAction label={task.status === 'failed' ? '调整后重试' : '再次创作'} onClick={() => void recall()}><Refresh size={16} /></TaskAction>)}
+          : !failed && creation && mode && <TaskAction label='再次创作' onClick={() => void recall()}><Refresh size={16} /></TaskAction>)}
       </div>
     </div>
     <div className={styles.meta} title={details}>{details}</div>
     {active && <PendingCreationTask task={task} title={title} mode={mode} />}
-    {task.error && <p role='alert'>{task.error.message || task.error.kind || '生成失败，请检查模型和参数后重试。'}</p>}
+    {(failed || task.error) && <ConversationErrorNote
+      error={{ message: task.error?.message || task.error?.kind || '', ...structuredError, code: structuredError?.code ?? 'CONVERSATION_GENERATION_FAILED', modelName: structuredError?.modelName ?? task.model }}
+      rawDetail={structuredError?.detail || task.error?.message || task.error?.kind}
+      timestamp={task.finished_at ?? task.submitted_at}
+      sessionId={task.owner.conversation_id}
+      messageId={task.owner.message_id}
+      creationTaskId={task.creation_task_id}
+      feedback={false}
+      recoveryAction={failed && !readOnly && creation && mode ? <button type='button' className='message-error-note__retry' onClick={() => void recall()}><Refresh size={14} aria-hidden='true' />{t('conversation.agentError.adjustAndRetry', { defaultValue: 'Adjust and retry' })}</button> : undefined}
+    />}
     <div className={styles.results}>{task.result_asset_ids.map(id => <ResultAsset key={id} id={id} onRecall={!readOnly && creation && mode ? recall : undefined} />)}</div>
   </article>;
 }

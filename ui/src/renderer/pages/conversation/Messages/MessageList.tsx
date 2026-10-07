@@ -81,6 +81,7 @@ import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 import { useExecutionSafe } from '../execution/ExecutionContext';
 import { delegatedTurnPresentation, resolveConversationDelegation } from './conversationDelegationModel';
 import DelegationProgress from './components/DelegationProgress';
+import { conversationPauseErrorMessage } from '../utils/conversationPauseError';
 
 type SourceMessageId = MessageId;
 
@@ -740,6 +741,16 @@ const MessageList: React.FC<{
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
+  const pauseError = useMemo(() => {
+    const pause = conversationContext?.executionPause;
+    if (!pause || !conversationContext?.conversation_id) return null;
+    // A canonical error closes this Turn. A stale pause snapshot must not
+    // mask that failure while its lifecycle notification is being delivered.
+    const alreadyShown = list.some(message => message.type === 'tips' && message.content.type === 'error'
+      && message.turn_id === pause.turnId && message.content.error
+      && !message.content.idmm_notice);
+    return alreadyShown ? null : conversationPauseErrorMessage(conversationContext.conversation_id, pause);
+  }, [list, conversationContext?.executionPause, conversationContext?.conversation_id]);
   const execution = useExecutionSafe();
   const creationTaskOwnerMessageIds = useConversationCreationTaskOwnerMessageIds();
   const thinkingDisplay = useThinkingDisplayPreferences();
@@ -1113,7 +1124,7 @@ const MessageList: React.FC<{
     hideScrollButton,
   } = useAutoScroll({
     messages: list,
-    itemCount: displayList.length,
+    itemCount: displayList.length + (pauseError ? 1 : 0),
   });
   const handleColumnRef = useConversationColumnRef(handleContentRef);
 
@@ -1466,7 +1477,7 @@ const MessageList: React.FC<{
     return <MessageListSkeleton />;
   }
 
-  if (displayList.length === 0 && emptySlot && conversationContext?.isProcessing !== true) {
+  if (displayList.length === 0 && !pauseError && emptySlot && conversationContext?.isProcessing !== true) {
     return <div className='relative flex-1 h-full flex items-center justify-center'>{emptySlot}</div>;
   }
 
@@ -1495,6 +1506,7 @@ const MessageList: React.FC<{
               {displayList.map((item, index) => (
                 <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
               ))}
+              {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
               <div className='h-20px' />
             </div>
           </div>

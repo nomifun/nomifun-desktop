@@ -716,6 +716,9 @@ describe('NomiCreativeStudioAgentChatPort', () => {
             code: 'USER_LLM_PROVIDER_RATE_LIMITED',
             ownership: 'user_llm_provider',
             detail: 'raw provider payload must stay out of the Canvas panel',
+            agentLabel: 'Original Agent',
+            modelName: 'original-model',
+            workspacePath: '/original-workspace',
             retryable: true,
           },
           msg_id: assistantMessageId,
@@ -739,6 +742,12 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     expect(events[1].message.includes('{')).toBe(false);
     expect(events[1].message.includes('USER_LLM_PROVIDER_RATE_LIMITED')).toBe(false);
     expect(events[1].message.includes('raw provider payload')).toBe(false);
+    expect(events[1].turnId).toBe(turnId);
+    expect(events[1].error).toEqual({
+      message: 'rate limited', code: 'USER_LLM_PROVIDER_RATE_LIMITED', ownership: 'user_llm_provider',
+      detail: 'raw provider payload must stay out of the Canvas panel', agentLabel: 'Original Agent',
+      modelName: 'original-model', workspacePath: '/original-workspace', retryable: true,
+    });
     expect(transport.stopCalls).toEqual([conversationId]);
     expect(transport.responseListeners.size).toBe(0);
   });

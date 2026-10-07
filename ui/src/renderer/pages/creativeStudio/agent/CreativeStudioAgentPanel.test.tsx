@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -20,16 +21,20 @@ import {
   type CreativeStudioAgentTurnEvent,
 } from './chatPort';
 import type { CreativeStudioAgentPanelProps } from './types';
+import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
+import common from '@/renderer/services/i18n/locales/en-US/common.json';
+import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
   lng: 'en-US',
   fallbackLng: 'en-US',
-  resources: { 'en-US': { translation: {} } },
+  resources: { 'en-US': { translation: { conversation, common, agentSettings } } },
   interpolation: { escapeValue: false },
 });
 
 const noop = () => undefined;
+afterEach(cleanup);
 const model = {
   providerId: parseProviderId('0190f5fe-7c00-7a00-8000-000000000001'),
   model: 'chat-model',
@@ -125,7 +130,26 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(loading.includes('data-agent-panel-state="loading"')).toBe(true);
     expect(loading.includes('Loading conversation')).toBe(true);
     expect(failed.includes('data-agent-panel-state="failed"')).toBe(true);
+    expect(failed.includes('message-error-note')).toBe(true);
+    expect(failed.includes(conversation.agentError.codes.CONVERSATION_PREPARATION_FAILED.title)).toBe(true);
     expect(failed.includes('本地会话服务不可用')).toBe(true);
+  });
+
+  test('keeps load-failure diagnostics collapsed and retries through shared controls', () => {
+    const retry = mock(noop);
+    const page = render(<I18nextProvider i18n={testI18n}><CreativeStudioAgentPanel {...baseProps({
+      loadState: 'failed', errorMessage: 'Original preparation diagnostic', onRetryLoad: retry,
+    })} /></I18nextProvider>);
+    expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_PREPARATION_FAILED.title);
+    const diagnostic = page.getByText('Original preparation diagnostic');
+    expect(diagnostic.closest('[hidden]')).not.toBeNull();
+    const retryButton = page.getByRole('button', { name: 'Retry' });
+    expect(retryButton.closest('.message-error-note__controls')).not.toBeNull();
+    fireEvent.click(retryButton);
+    expect(retry).toHaveBeenCalledTimes(1);
+    fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
+    expect(diagnostic.closest('[hidden]')).toBeNull();
+    expect(page.container.querySelector('[data-agent-panel-state="failed"]')).not.toBeNull();
   });
 
   test('surfaces ready-state send and persistence failures', () => {
@@ -134,8 +158,22 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     });
 
     expect(html.includes('data-agent-panel-error="true"')).toBe(true);
+    expect(html.includes('message-error-note')).toBe(true);
+    expect(html.includes(conversation.agentError.codes.CONVERSATION_SEND_FAILED.title)).toBe(true);
     expect(html.includes('role="alert"')).toBe(true);
     expect(html.includes('Agent 会话保存失败')).toBe(true);
+  });
+
+  test('ready-state local panel diagnostics remain inside collapsed technical details', () => {
+    const page = render(<I18nextProvider i18n={testI18n}><CreativeStudioAgentPanel {...baseProps({
+      errorMessage: 'Original local panel diagnostic',
+    })} /></I18nextProvider>);
+    const diagnostic = page.getByText('Original local panel diagnostic');
+    expect(diagnostic.closest('[hidden]')).not.toBeNull();
+    expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_SEND_FAILED.title);
+    fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
+    expect(diagnostic.closest('[hidden]')).toBeNull();
+    expect(diagnostic.closest('[data-agent-panel-error]')).not.toBeNull();
   });
 
   test('renders supplied message, running, stopped and failed states without fake replies', () => {
@@ -187,10 +225,43 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
       isRunning: true, onRetryMessage: noop,
     });
     expect(html.includes('data-agent-message-status="paused"')).toBe(true);
-    expect(html.includes('data-testid="execution-pause-notice"')).toBe(true);
+    expect(html.includes('message-error-note')).toBe(true);
+    expect(html.includes(conversation.agentError.codes.EXECUTION_CLEANUP_UNCONFIRMED.title)).toBe(true);
     expect(html.includes('data-thinking-process-state="running"')).toBe(false);
     expect(html.includes('Retry this message')).toBe(false);
     expect(html.includes('Stop Agent')).toBe(true);
+  });
+
+  test('shows canonical failure guidance and keeps the original diagnostic and identity collapsed', () => {
+    const retry = mock(noop);
+    const canonicalSessionId = '0190f5fe-7c00-7a00-8000-000000000110';
+    const canonicalTurnId = '0190f5fe-7c00-7a00-8000-000000000111';
+    const page = render(<I18nextProvider i18n={testI18n}><CreativeStudioAgentPanel {...baseProps({
+      activeSessionId: 'canvas-local-session', conversationId: canonicalSessionId,
+      messages: [{ id: 'failed', role: 'assistant', status: 'failed', text: '', errorMessage: 'Provider rejected request',
+        error: { message: 'Provider rejected request', code: 'USER_LLM_PROVIDER_NETWORK_ERROR', detail: 'Original provider diagnostic',
+          agentLabel: 'Original Agent', modelName: 'original-model', workspacePath: '/original-workspace', retryable: true },
+        turnId: canonicalTurnId, timestamp: 1_700_000_000_000 }], onRetryMessage: retry,
+    })} /></I18nextProvider>);
+    expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.USER_LLM_PROVIDER_NETWORK_ERROR.title);
+    const detail = page.getByText('Original provider diagnostic');
+    expect(detail.closest('[hidden]')).not.toBeNull();
+    fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
+    expect(detail.closest('[hidden]')).toBeNull();
+    expect(page.getByText(canonicalSessionId)).toBeTruthy();
+    expect(page.getByText(canonicalTurnId)).toBeTruthy();
+    expect(page.getByText('original-model')).toBeTruthy();
+    expect(page.queryByText('canvas-local-session')).toBeNull();
+    fireEvent.click(page.getByRole('button', { name: 'Retry this message' }));
+    expect(retry).toHaveBeenCalledWith('failed');
+  });
+
+  test('does not offer a blind retry for a canonical non-retryable failure', () => {
+    const html = renderPanel({ messages: [{ id: 'failed', role: 'assistant', status: 'failed', text: '', errorMessage: 'blocked',
+      error: { message: 'blocked', code: 'NOMIFUN_TASK_INCOMPLETE', taskIncompleteReason: 'blocked_work', retryable: false } }],
+      onRetryMessage: noop });
+    expect(html.includes(conversation.agentError.incompleteReasons.blocked_work.title)).toBe(true);
+    expect(html.includes('Retry this message')).toBe(false);
   });
 
   test('renders removable context and explicit NomiFun Skill chips', () => {

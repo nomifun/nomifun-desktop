@@ -148,6 +148,44 @@ pub(crate) struct NomiCoreSessionOwner {
         Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
+/// Presentation context captured from the host-admitted binding. Error
+/// diagnostics must not borrow a later Agent or model selection in this Session.
+#[derive(Clone, Default)]
+pub(super) struct TurnErrorContext {
+    pub(super) agent_label: Option<String>,
+    pub(super) agent_template_key: Option<String>,
+    pub(super) model_name: Option<String>,
+    pub(super) workspace_path: Option<String>,
+}
+
+impl TurnErrorContext {
+    pub(super) fn from_response(response: &ConversationResponse, workspace: Option<&str>) -> Self {
+        let snapshot = response.agent_snapshot.as_ref();
+        Self {
+            agent_label: snapshot.map(|snapshot| snapshot.preset_name.clone())
+                .filter(|label| !label.trim().is_empty()),
+            agent_template_key: response.extra.get("official_template_key")
+                .and_then(Value::as_str)
+                .filter(|value| nomifun_agent_contracts::OfficialPresetKey::ALL.iter()
+                    .any(|key| key.as_str() == *value))
+                .map(str::to_owned),
+            model_name: snapshot.and_then(|snapshot| snapshot.resolved_model.as_ref())
+                .map(|model| model.model.clone()).filter(|model| !model.trim().is_empty()),
+            workspace_path: workspace.filter(|path| !path.is_empty()).map(str::to_owned),
+        }
+    }
+
+    pub(super) fn apply(&self, error: &mut nomifun_api_types::AgentStreamErrorData) {
+        error.agent_label = self.agent_label.clone();
+        error.agent_template_key = self.agent_template_key.clone();
+        error.model_name = self.model_name.clone();
+        // A path-specific failure can identify the rejected path more precisely.
+        if error.workspace_path.is_none() {
+            error.workspace_path = self.workspace_path.clone();
+        }
+    }
+}
+
 pub(crate) struct CanonicalAgentTranscriptSource {
     sessions: Arc<NomiCoreSessionOwner>,
     owner_id: Arc<str>,
@@ -1584,11 +1622,12 @@ impl NomiCoreSessionOwner {
 
     async fn settle_dispatch_failure(
         &self,
+        owner_id: &str,
         session_id: &AgentSessionId,
         operation_id: &OperationId,
         message: &str,
-        error: nomifun_api_types::AgentStreamErrorData,
-    ) -> Result<(), AppError> {
+        mut error: nomifun_api_types::AgentStreamErrorData,
+    ) -> Result<Option<nomifun_api_types::AgentStreamErrorData>, AppError> {
         let receipt = self
             .canonical
             .store()
@@ -1596,7 +1635,18 @@ impl NomiCoreSessionOwner {
             .await
             .map_err(agent_session_store_error)?;
         if receipt.status != nomifun_agent_session::TurnReceiptStatus::Running {
-            return Ok(());
+            return Ok(None);
+        }
+        // Dispatch still holds the Session operation lock; this binding is the
+        // one admitted for the failing Turn, before any subsequent selection.
+        if let Ok(Some(response)) = self.canonical_conversation_projection(owner_id, session_id).await
+            && let Some(binding) = response.agent_snapshot.as_ref().and_then(|snapshot| snapshot.canonical_binding.as_ref())
+            && let Some(started) = receipt.started_event.as_ref()
+            && let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = &started.payload
+            && payload.0.get("resolved_snapshot_ref") == serde_json::to_value(&binding.resolved_snapshot_ref).ok().as_ref()
+        {
+            let workspace = response.extra.get("workspace").and_then(Value::as_str);
+            TurnErrorContext::from_response(&response, workspace).apply(&mut error);
         }
         let started = receipt.started_event.ok_or_else(|| {
             AppError::Conflict("failed Turn has no start fact".to_owned())
@@ -1639,10 +1689,11 @@ impl NomiCoreSessionOwner {
             )
             .await;
         match result {
-            Ok(_) | Err(nomifun_agent_session::SessionStoreError::ExecutionLeaseActive) => {},
+            Ok(_) => {},
+            Err(nomifun_agent_session::SessionStoreError::ExecutionLeaseActive) => return Ok(None),
             Err(error) => return Err(agent_session_store_error(error)),
         }
-        Ok(())
+        Ok(Some(error))
     }
 
     /// A process restart cannot retain an in-memory Runtime owner. Reconcile
@@ -1650,6 +1701,18 @@ impl NomiCoreSessionOwner {
     /// immediately usable again instead of remaining permanently busy.
     pub(crate) async fn reconcile_orphaned_active_turns(self: &Arc<Self>, engine_sessions: Arc<super::engine_session_host::EngineSessionHost>) -> Result<usize, AppError> {
         let _ = self.native_engines.set(Arc::downgrade(&engine_sessions));
+        let failed_pauses: Vec<(String, String)> = sqlx::query_as(
+            "SELECT h.session_id,json_extract(s.owner_ref_json,'$.principal_id') FROM agent_session_heads h \
+             JOIN agent_sessions s ON s.agent_session_id=h.session_id WHERE s.state='live' AND h.status='paused' \
+             AND json_extract(s.owner_ref_json,'$.principal_kind')='user'")
+            .fetch_all(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
+        for (session, owner) in failed_pauses {
+            // Existing current-generation model failures need no Runtime
+            // restart or replay. Ordinary owner pauses remain recoverable.
+            if let Err(error) = self.canonical_conversation_projection(&owner, &session.into()).await {
+                tracing::warn!(%error, "existing native failure pause remains fenced during startup");
+            }
+        }
         self.schedule_native_recovery(engine_sessions).await
     }
 
@@ -1670,6 +1733,10 @@ impl NomiCoreSessionOwner {
     ) -> Option<WebSocketMessage<Value>> {
         let mut event_data = serde_json::to_value(event).ok()?;
         normalize_keys_to_snake_case(&mut event_data);
+        if let AgentStreamEvent::Error(error) = event {
+            // Structured error fields have their own public wire contract.
+            event_data["data"] = serde_json::to_value(error).ok()?;
+        }
         let step_message_id = match event {
             AgentStreamEvent::Text(data) => data.step.and_then(|step|
                 super::engine_journal::canonical_assistant_step_message_id(root_message_id, step).ok()),
@@ -1687,6 +1754,7 @@ impl NomiCoreSessionOwner {
                 "type": event_data.get("type").cloned().unwrap_or(json!("unknown")),
                 "data": event_data.get("data").cloned().unwrap_or_else(|| json!({})),
                 "hidden": false,
+                "created_at": now_ms(),
             }),
         ))
     }
@@ -1829,7 +1897,7 @@ impl NomiCoreSessionOwner {
         let store = self.canonical.store().clone();
         let task = async move {
             loop {
-                let event = tokio::select! {
+                let mut event = tokio::select! {
                     _ = cancellation.cancelled() => break,
                     received = events.recv() => match received {
                         Ok(event) => event,
@@ -1853,6 +1921,17 @@ impl NomiCoreSessionOwner {
                     // producer owns the Turn. Only a matching canonical
                     // terminal may close the product stream.
                     if !Self::canonical_stream_terminal_agrees(&store, &session_id, &operation_id, turn_generation, &event).await { break; }
+                    if matches!(event, AgentStreamEvent::Error(_))
+                        && let Ok(receipt) = store.read_turn_receipt(&session_id, &operation_id).await
+                        && let Some(terminal) = receipt.terminal_event
+                        && let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = terminal.payload
+                        && let Some(error) = payload.0.get("error")
+                        && let Ok(error) = serde_json::from_value(error.clone())
+                    {
+                        // The canonical terminal contains the captured Agent,
+                        // model and workspace, shared by realtime and history.
+                        event = AgentStreamEvent::Error(error);
+                    }
                 }
                 if let Some(message) = Self::canonical_stream_wire_event(
                     &session_id,
@@ -1921,6 +2000,11 @@ impl NomiCoreSessionOwner {
         initial_only: bool,
         idmm_decision: Option<IdmmDecisionExplanation>,
     ) -> Result<IdempotentMessageDelivery, AppError> {
+        if self.canonical.store().head(session_id).await.map_err(agent_session_store_error)?.status == "paused" {
+            // The same owner settlement used by reload also precedes a fresh
+            // request from callers that do not first fetch the conversation.
+            self.canonical_conversation_projection(owner_id, session_id).await?;
+        }
         let _operation_fence = self
             .session_operation_lock(session_id.as_ref())
             .write_owned()
@@ -2019,9 +2103,23 @@ impl NomiCoreSessionOwner {
         {
             Ok(runtime) => runtime,
             Err(error) => {
-                self.settle_dispatch_failure(session_id, &operation_id, &error.to_string(),
-                    AgentSendError::from_app_error_ref(&error).into_stream_error())
-                    .await?;
+                let detail = error.to_string();
+                let settled_error = self.settle_dispatch_failure(
+                    owner_id, session_id, &operation_id, &detail,
+                    AgentSendError::from_app_error_ref(&error).into_stream_error(),
+                ).await?;
+                if let Some(settled_error) = settled_error
+                    && let Some(message) = Self::canonical_stream_wire_event(
+                        session_id, &root_message_id,
+                        &Self::canonical_assistant_stream_message_id(&root_message_id)?,
+                        &AgentStreamEvent::Error(settled_error),
+                    )
+                {
+                    self.user_events.send_to_user(owner_id, message);
+                    self.user_events.send_to_user(owner_id, Self::canonical_turn_dispatch_failed_wire_event(
+                        session_id, &root_message_id, &detail,
+                    ));
+                }
                 return Err(error);
             }
         };
@@ -2036,7 +2134,7 @@ impl NomiCoreSessionOwner {
             owner_id.to_owned(),
             session_id.clone(),
             root_message_id.clone(),
-            assistant_message_id,
+            assistant_message_id.clone(),
             generation,
             operation_id.clone(),
             relay_cancellation.clone(),
@@ -2056,16 +2154,23 @@ impl NomiCoreSessionOwner {
             // publish a successor Turn; otherwise a rejected dispatch may
             // misattribute that successor's frames to this failed root.
             relay_cancellation.cancel();
-            self.settle_dispatch_failure(session_id, &operation_id, &detail, error.stream_error().clone())
-                    .await?;
-            self.user_events.send_to_user(
-                owner_id,
-                Self::canonical_turn_dispatch_failed_wire_event(
-                    session_id,
-                    &root_message_id,
-                    &detail,
-                ),
-            );
+            let settled_error = self.settle_dispatch_failure(
+                owner_id, session_id, &operation_id, &detail, error.stream_error().clone(),
+            ).await?;
+            if let Some(settled_error) = settled_error
+                && let Some(message) = Self::canonical_stream_wire_event(
+                    session_id, &root_message_id, &assistant_message_id,
+                    &AgentStreamEvent::Error(settled_error),
+                )
+            {
+                self.user_events.send_to_user(owner_id, message);
+                self.user_events.send_to_user(
+                    owner_id,
+                    Self::canonical_turn_dispatch_failed_wire_event(
+                        session_id, &root_message_id, &detail,
+                    ),
+                );
+            }
             if let Err(release_error) = self
                 .runtime_sessions
                 .release_runtime_turn(session_id.as_ref(), generation)
@@ -2179,6 +2284,120 @@ impl NomiCoreSessionOwner {
     /// AgentSession. `None` means there is no canonical row; foreign ownership,
     /// deletion and invalid saved artifacts fail closed.
     pub(crate) async fn canonical_conversation_projection(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+    ) -> Result<Option<ConversationResponse>, AppError> {
+        let projection = self.canonical_conversation_projection_readonly(owner_id, session_id).await?;
+        let Some(response) = projection.as_ref() else { return Ok(None); };
+        if response.extra.get("execution_phase").and_then(Value::as_str) != Some("paused") {
+            return Ok(projection);
+        }
+        // Projection is also called under admission/recovery locks. Those
+        // callers cannot recursively acquire the writer lock; a fresh GET or
+        // the pre-admission pass performs settlement instead.
+        let Ok(_operation_guard) = self.session_operation_lock(session_id.as_ref()).try_write_owned() else {
+            return Ok(projection);
+        };
+        // A Session could have resumed or selected a successor between the
+        // first read and this lock. Only this fresh exact binding may release
+        // the registry owner; the Store CAS alone would be too late for that.
+        let current = self.canonical_conversation_projection_readonly(owner_id, session_id).await?;
+        let Some(current) = current.as_ref() else { return Ok(None); };
+        self.settle_existing_model_failure_pause(owner_id, session_id, current).await?;
+        self.canonical_conversation_projection_readonly(owner_id, session_id).await
+    }
+
+    async fn settle_existing_model_failure_pause(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        response: &ConversationResponse,
+    ) -> Result<bool, AppError> {
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() };
+        let store = self.canonical.store();
+        let Some(execution) = store.inspect_latest_native_execution(&principal, session_id).await
+            .map_err(agent_session_store_error)? else { return Ok(false); };
+        let Some(pause) = execution.pause else { return Ok(false); };
+        if execution.state != "paused" || !pause.cleanup_proven
+            || execution.pending_effects != 0 || execution.unknown_effects != 0
+            || execution.producer_lease_live || execution.pause_requested
+            || execution.checkpoint_revision != pause.checkpoint_revision
+            || execution.checkpoint_digest.as_deref() != pause.checkpoint_digest.as_ref().map(|digest| digest.as_ref())
+        {
+            return Ok(false);
+        }
+        let Some(failure) = AgentSendError::from_model_pause_reason(&pause.reason) else { return Ok(false); };
+        let Some(binding) = response.agent_snapshot.as_ref().and_then(|snapshot| snapshot.canonical_binding.as_ref()) else {
+            return Ok(false);
+        };
+        let snapshot: nomifun_agent_contracts::ResolvedSnapshotRef = serde_json::to_value(&binding.resolved_snapshot_ref)
+            .and_then(serde_json::from_value).map_err(|error| AppError::Conflict(format!(
+                "native failure pause has an invalid admitted Snapshot: {error}")))?;
+        let operation = OperationId::from(execution.operation_id);
+        if self.runtime_sessions.active_turn_generation(session_id.as_ref())
+            .is_some_and(|generation| generation != execution.execution_generation)
+        {
+            return Ok(false);
+        }
+        let receipt = store.read_turn_receipt(session_id, &operation).await.map_err(agent_session_store_error)?;
+        let Some(started) = receipt.started_event else { return Ok(false); };
+        let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(started_payload) = &started.payload else {
+            return Ok(false);
+        };
+        let Some(root) = started_payload.0.get("source_message_id").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let facts = store.chat_causality_facts(session_id, &operation).await.map_err(agent_session_store_error)?;
+        if facts.head.status != "paused" || facts.head.active_turn_id.as_deref() != Some(operation.as_ref())
+            || facts.session.owner_ref != principal
+            || facts.session.agent_binding.resolved_snapshot_ref != snapshot
+            || facts.execution_generation != execution.execution_generation
+            || facts.execution_fence != pause.execution_fence
+            || response.runtime.as_ref().and_then(|runtime| runtime.active_turn_id.as_deref()) != Some(root)
+            || response.extra.pointer("/execution_pause/paused_at_ms").and_then(Value::as_i64) != Some(pause.paused_at_ms)
+            || started_payload.0.get("resolved_snapshot_ref") != Some(&serde_json::to_value(&snapshot)
+                .map_err(|error| AppError::Internal(error.to_string()))?)
+        {
+            return Ok(false);
+        }
+        // Preserve release failures as fences. A cleanup flag is not proof
+        // that this process has joined and released its retained native owner.
+        if let Err(error) = self.runtime_sessions.terminate_and_wait_result(session_id.as_ref(), None).await {
+            tracing::warn!(agent_session_id=session_id.as_ref(), %error,
+                "native model failure pause could not release its Runtime owner");
+            return Ok(false);
+        }
+        self.runtime_sessions.release_runtime_turn(session_id.as_ref(), execution.execution_generation).await?;
+        let mut error = failure.into_stream_error();
+        TurnErrorContext::from_response(response, response.extra.get("workspace").and_then(Value::as_str)).apply(&mut error);
+        let identity = format!("native-failure-settled:{}:{}:{}", session_id.as_ref(), operation.as_ref(), pause.revision);
+        let failed = nomifun_agent_contracts::SessionEventAppend {
+            agent_session_id: session_id.clone(), event_id: identity.clone().into(), producer_id: "runtime_supervisor".into(),
+            idempotency_key: identity.into(),
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: nomifun_agent_contracts::SessionEventKind("turn/failed".into()), kind_version: 1, correlation_id: operation.as_ref().into(),
+                causation_event_id: Some(started.event_id.clone()),
+                payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "message":error.message,"error":error,"finished_at_ms":pause.paused_at_ms,
+                    "native_failure_pause_revision":pause.revision,
+                }))),
+            },
+        };
+        let committed = store.settle_native_failure_pause(&principal, session_id, &operation,
+            &snapshot, &pause, &[pause.reason.as_str()], &failed).await.map_err(agent_session_store_error)?;
+        if committed {
+            if let Some(message) = Self::canonical_stream_wire_event(session_id, root,
+                &Self::canonical_assistant_stream_message_id(root)?, &AgentStreamEvent::Error(error.clone())) {
+                self.user_events.send_to_user(owner_id, message);
+            }
+            self.user_events.send_to_user(owner_id,
+                Self::canonical_turn_completed_wire_event(session_id, root, &AgentStreamEvent::Error(error)));
+        }
+        Ok(committed)
+    }
+
+    async fn canonical_conversation_projection_readonly(
         &self,
         owner_id: &str,
         session_id: &AgentSessionId,
@@ -2936,6 +3155,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                     return Ok(nomifun_cron::CronTurnReconciliation::LiveExactOwnerWait);
                 }
                 self.settle_dispatch_failure(
+                    &request.owner_id,
                     &request.agent_session_id,
                     &operation,
                     "Runtime owner was not recoverable after restart",
@@ -5131,6 +5351,46 @@ mod session_boundary_tests {
     }
 
     #[test]
+    fn error_context_keeps_the_same_public_fields_in_stream_and_history() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let mut error = nomifun_ai_agent::AgentSendError::from_engine_turn_failure(
+            "model step limit of 32 exceeded").into_stream_error();
+        let captured = super::TurnErrorContext {
+            agent_label: Some("Original Agent".into()),
+            agent_template_key: Some("chat.minimal".into()),
+            model_name: Some("original-model".into()),
+            workspace_path: Some("/tmp/original-workspace".into()),
+        };
+        captured.apply(&mut error);
+        let expected = serde_json::to_value(&error).unwrap();
+        let emitted_after = nomifun_common::now_ms();
+        let stream = NomiCoreSessionOwner::canonical_stream_wire_event(
+            &session_id, root, "0190f5fe-7c00-7a00-8abc-012345678910",
+            &AgentStreamEvent::Error(error),
+        ).unwrap();
+        let history = canonical_message_response(&session_id, 1_000, MessageProjection {
+            session_id: session_id.clone(), projection_id: "context-error".into(), first_seq: 2, last_seq: 3,
+            presentation_intent: "turn_summary".into(), message_type: Some("tips".into()), message_status: Some("error".into()),
+            projection: json!({"correlation_id":"0190f5fe-7c00-7a00-8abc-012345678912","state":"failed",
+                "source_message_id":root,"started_at_ms":4_000_000,"finished_at_ms":4_002_000,"error":expected}),
+            semantic_digest: "digest".into(),
+        }).unwrap().unwrap();
+        assert_eq!(stream.data["data"], expected);
+        assert!(stream.data["created_at"].as_i64().is_some_and(|timestamp|
+            timestamp >= emitted_after && timestamp <= nomifun_common::now_ms()));
+        assert_eq!(history.content["error"], expected);
+        assert_eq!(expected["agentLabel"], "Original Agent");
+        assert_eq!(expected["taskIncompleteReason"], "step_limit");
+        assert!(stream.data["data"].get("workspace_path").is_none());
+
+        let mut path_error = nomifun_api_types::AgentStreamErrorData::legacy("invalid path", None);
+        path_error.workspace_path = Some("/tmp/rejected-path".into());
+        captured.apply(&mut path_error);
+        assert_eq!(path_error.workspace_path.as_deref(), Some("/tmp/rejected-path"));
+    }
+
+    #[test]
     fn autowork_execution_is_not_projected_as_collaboration_or_attempt_ui() {
         let execution_id = "0190f5fe-7c00-7a00-8000-000000000099".to_owned();
         assert_eq!(
@@ -5911,9 +6171,21 @@ mod session_boundary_tests {
                 "workspace": std::env::temp_dir().to_string_lossy(),
                 "skills": ["forged-skill"],
                 "agent_name": "Forged Agent",
+                "official_template_key": "chat.minimal",
                 "custom_agent_id": "0190f5fe-7c00-7a00-8abc-012345678999",
             }),
         };
+        let context = super::TurnErrorContext::from_response(&response, Some("/tmp/admitted-workspace"));
+        assert_eq!(context.agent_label.as_deref(), Some("Frozen Agent"));
+        assert_eq!(context.agent_template_key.as_deref(), Some("chat.minimal"));
+        assert_eq!(context.model_name.as_deref(), Some("step-3.7-flash"));
+        assert_eq!(context.workspace_path.as_deref(), Some("/tmp/admitted-workspace"));
+        let mut changed_selection = response.clone();
+        changed_selection.model.as_mut().unwrap().model = "later-renderer-selection".into();
+        changed_selection.extra["agent_name"] = json!("Later Agent");
+        let captured = super::TurnErrorContext::from_response(&changed_selection, None);
+        assert_eq!(captured.agent_label, context.agent_label);
+        assert_eq!(captured.model_name, context.model_name);
         let projection =
             cron_session_projection_from_response(OWNER_ID, response, None).unwrap();
         assert_eq!(projection.skills, vec!["frozen-skill"]);
@@ -11974,6 +12246,7 @@ async fn get_nomi_core_agent_session(
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<SessionObservation>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
+    state.session_owner.canonical_conversation_projection(owner.as_ref(), &session_id).await?;
     let observation = state
         .session_owner
         .canonical()
@@ -11988,6 +12261,7 @@ async fn get_nomi_core_agent_session_execution(
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<Option<nomifun_agent_session::NativeExecutionInspection>>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
+    state.session_owner.canonical_conversation_projection(owner.as_ref(), &session_id).await?;
     let inspection = state.session_owner.canonical().store()
         .inspect_latest_native_execution(&authenticated_principal(&owner), &session_id)
         .await.map_err(agent_session_store_error)?;
@@ -15295,4 +15569,153 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+#[cfg(test)]
+mod failure_pause_settlement_tests {
+    use super::*;
+    use nomifun_agent_contracts::SessionEventPayloadRef;
+    use nomifun_agent_runtime::AgentEngineEvent;
+    #[tokio::test]
+    async fn reload_settles_a_proven_model_failure_pause_and_accepts_the_next_message() {
+        use tower::ServiceExt;
+        const TRUST: &str = "failure-pause-reload";
+        async fn request(router: &axum::Router, method: &str, path: &str, body: Value) -> Value {
+            let response = router.clone().oneshot(axum::http::Request::builder().method(method).uri(path)
+                .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await.unwrap()).unwrap();
+            assert!(status.is_success(), "{path}: {status}: {body}");
+            body["data"].clone()
+        }
+        let root = tempfile::tempdir().unwrap();
+        let config = crate::AppConfig {
+            data_dir:root.path().join("data"), work_dir:root.path().join("work"),
+            auth_policy:nomifun_auth::AuthPolicy::TrustLocalToken, local_trust_secret:Some(TRUST.into()), ..Default::default()
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
+        let services = crate::services::AppServices::from_config(database, &config).await.unwrap();
+        let (states, _components) = super::super::state::try_build_module_states(&services).await.unwrap();
+        let owner = states.nomi_core_agent_api.session_owner.clone();
+        let router = super::super::create_router_with_states(&services, states);
+        let provider = request(&router, "POST", "/api/providers", json!({
+            "platform":"custom","name":"failure fixture","base_url":"http://127.0.0.1:9/v1",
+            "auth_scheme":"bearer","credentials":{"api_keys":["test-only"]},"enabled":true,
+            "initial_model":{"model":"failure-fixture","enabled":true,"capabilities":[{
+                "task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default"
+            }]}
+        })).await;
+        let model = json!({"provider_id":provider["provider_id"],"model":"failure-fixture"});
+        let preset = request(&router, "POST", "/api/agent-presets/from-template/chat.minimal",
+            json!({"reuse_existing":false,"display_name":"Original failure Agent","model":model})).await;
+        let opened = request(&router, "POST", "/api/agent-sessions",
+            json!({"preset_id":preset["preset"]["preset_id"],"model":model})).await;
+        let session = AgentSessionId::from(opened["agent_session_id"].as_str().unwrap());
+        let principal = PrincipalRef { principal_kind:"user".into(), principal_id:services.authoritative_user_id.as_ref().into() };
+        let send: SendMessageRequest = serde_json::from_value(json!({"content":"Produce the requested result"})).unwrap();
+        let operation = NomiCoreSessionOwner::turn_operation_id(&principal.principal_id, session.as_ref(), "failed-model-turn");
+        let input = owner.canonical_turn_input_with_admission(&principal.principal_id, &session, &operation, &send).await.unwrap();
+        let admitted = owner.canonical.start_turn(&principal, &session, "failed-model-turn", input).await.unwrap();
+        assert_eq!(admitted.operation_id, operation);
+        let observed = owner.canonical.get(&principal, &session).await.unwrap();
+        let store = owner.canonical.store();
+        let started = store.read_turn_receipt(&session, &operation).await.unwrap().started_event.unwrap();
+        let SessionEventPayloadRef::InlineJson(payload) = &started.payload else { panic!("start payload must be inline") };
+        let source = payload.0["source_message_id"].as_str().unwrap();
+        let lease = store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
+            owner:principal.clone(), agent_session_id:session.clone(), operation_id:operation.clone(),
+            snapshot:observed.session.agent_binding.resolved_snapshot_ref.clone(),
+            active_set_generation:observed.head.active_set_generation, holder:"paused-failure-owner".into(),
+            expected_fence:0, checkpoint:None,
+        }).await.unwrap();
+        let runtime = services.official_runtime.binding().unwrap();
+        let engine = nomifun_agent_runtime::EngineBinding::new(session.clone(),
+            format!("conversation-runtime:{}", session.as_ref()).into(), runtime.build_id.into(), runtime.build_digest.into(),
+            observed.session.agent_binding.resolved_snapshot_ref.clone()).unwrap();
+        let historical_result = nomifun_agent_runtime::AgentToolResult::text("read-before-failure".into(), "ORIGINAL_OBSERVED_CONTENT", false);
+        let model_operation = OperationId::from("fixture-model-operation");
+        store.claim_native_chat_operation(&lease, nomifun_agent_session::ChatOperationClaimRequest {
+            agent_session_id:session.clone(), operation_id:model_operation.clone(), turn_operation_id:operation.clone(),
+            causation_event_id:source.into(), route_identity:serde_json::from_value(payload.0["route_identity"].clone()).unwrap(),
+            resolved_snapshot_ref:observed.session.agent_binding.resolved_snapshot_ref.clone(),
+        }).await.unwrap();
+        let native_events = [
+            serde_json::to_value(AgentEngineEvent::TurnStarted { binding:engine, turn_operation_id:operation.clone() }).unwrap(),
+            serde_json::to_value(AgentEngineEvent::TurnInputScope { wire_turn_id:source.into() }).unwrap(),
+            serde_json::to_value(AgentEngineEvent::ModelStepStarted { step:1, operation_id:model_operation }).unwrap(),
+            serde_json::to_value(AgentEngineEvent::ToolCallCompleted { step:1, call:nomifun_chat_model_broker::ChatToolCall {
+                call_id:"read-before-failure".into(), name:"read_file".into(), arguments:StrictJsonValue(json!({"path":"result.txt"})),
+                provider_metadata:None,
+            } }).unwrap(),
+            serde_json::to_value(AgentEngineEvent::ToolCompleted { step:1, result:historical_result.clone() }).unwrap(),
+            json!({"event":"host_cleanup_proven"}),
+            serde_json::to_value(AgentEngineEvent::TurnPaused { model_steps:1, reason:"EXECUTION_MODEL_PROVIDER_UNAVAILABLE".into() }).unwrap(),
+        ];
+        for (index, event) in native_events.into_iter().enumerate() {
+            let identity = format!("fixture-progress:{index}");
+            store.append_native_event(&lease, &nomifun_agent_contracts::SessionEventAppend {
+                agent_session_id:session.clone(), event_id:identity.clone().into(), producer_id:"runtime_supervisor".into(),
+                idempotency_key:identity.into(), semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
+                    kind:nomifun_agent_contracts::SessionEventKind("runtime/progress-recorded".into()), kind_version:1,
+                    correlation_id:operation.as_ref().into(), causation_event_id:Some(started.event_id.clone()),
+                    payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"producer_seq":index+1,"event":event}))),
+                },
+            }, None).await.unwrap();
+        }
+        store.pause_native_execution(&lease, "EXECUTION_MODEL_PROVIDER_UNAVAILABLE", true).await.unwrap();
+        assert_eq!(store.head(&session).await.unwrap().status, "paused");
+        let projected = request(&router, "GET", &format!("/api/agent-sessions/{}/projection", session.as_ref()), Value::Null).await;
+        assert_eq!(projected["runtime"]["can_send_message"], true);
+        assert_eq!(projected["extra"]["execution_phase"], "ready");
+        assert!(projected["runtime"]["active_turn_id"].is_null());
+        let failed = store.read_turn_receipt(&session, &operation).await.unwrap();
+        assert_eq!(failed.status, nomifun_agent_session::TurnReceiptStatus::Failed);
+        let SessionEventPayloadRef::InlineJson(failure) = failed.terminal_event.unwrap().payload else { panic!("failure payload must be inline") };
+        assert_eq!(failure.0["error"]["code"], "USER_LLM_PROVIDER_UNAVAILABLE");
+        assert_eq!(failure.0["error"]["modelName"], "failure-fixture");
+        assert_eq!(failure.0["error"]["detail"], "EXECUTION_MODEL_PROVIDER_UNAVAILABLE");
+        let next_operation = NomiCoreSessionOwner::turn_operation_id(&principal.principal_id, session.as_ref(), "next-message");
+        let next_input = owner.canonical_turn_input_with_admission(&principal.principal_id, &session, &next_operation, &send).await.unwrap();
+        let next = owner.canonical.start_turn(&principal, &session, "next-message", next_input).await.unwrap();
+        assert_eq!(store.head(&session).await.unwrap().active_turn_id.as_deref(), Some(next.operation_id.as_ref()));
+        let mut projection = owner.canonical_conversation_projection(&principal.principal_id, &session).await.unwrap().unwrap();
+        let workspace = match projection.extra.get("workspace").and_then(Value::as_str) {
+            Some(workspace) => workspace.to_owned(),
+            None => materialize_managed_session_workspace(&owner.managed_workspace_root, &session).await.unwrap(),
+        };
+        projection.extra["workspace"] = json!(workspace);
+        // This receipt only reads canonical history. No Runtime or physical
+        // Knowledge workspace owner is opened by the test.
+        let options = AgentRuntimeBuildOptions {
+            user_id:principal.principal_id.clone(), agent_type:projection.r#type, workspace,
+            model:projection.model, conversation_id:session.as_ref().into(), delegation_policy:projection.delegation_policy,
+            extra:projection.extra, conversation_created_at:Some(projection.created_at), workspace_binding_lease:None,
+        };
+        let successor_start = store.read_turn_receipt(&session, &next.operation_id).await.unwrap().started_event.unwrap();
+        let SessionEventPayloadRef::InlineJson(successor_payload) = successor_start.payload else { panic!("successor must have inline admission") };
+        let successor_root = successor_payload.0["source_message_id"].as_str().unwrap();
+        let engines = owner.native_engines.get().unwrap().upgrade().unwrap();
+        let receipt = engines.read_turn_receipt(&options, &services.official_runtime.binding().unwrap(),
+            &observed.session.agent_binding.resolved_snapshot_ref, &SendMessageData {
+                content:send.content.clone(), msg_id:successor_root.into(), source_message_id:Some(successor_root.into()),
+                files:Vec::new(), inject_skills:Vec::new(), origin:None,
+            }).await.unwrap();
+        let window = engines.read_history(&receipt, 8).await.unwrap();
+        assert_eq!(window.turns.len(), 1);
+        assert_eq!(window.turns[0].receipt_status, "failed");
+        let before_history_read = store.current_cursor(&session).await.unwrap();
+        let history = super::super::unified_runtime_history::load(window, &engines, &receipt, 1024 * 1024).await.unwrap();
+        assert!(history.messages.iter().flat_map(|message| &message.content).any(|content|
+            matches!(content, nomifun_chat_model_broker::ChatContentPart::ToolResult { output, .. }
+                if *output == historical_result.output)), "the original result stays historical data without tool replay");
+        assert_eq!(store.current_cursor(&session).await.unwrap(), before_history_read,
+            "history decoding grants no execution, checkpoint restoration or new facts");
+        assert_eq!(store.read_turn_receipt(&session, &operation).await.unwrap().status, nomifun_agent_session::TurnReceiptStatus::Failed);
+        owner.canonical.cancel_exact_turn(&principal, &session, "cancel-test-successor", &next.operation_id).await.unwrap();
+        services.shutdown_nomi_core_host().await.unwrap();
+        services.database.close().await;
+    }
 }

@@ -427,6 +427,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             status: 'failed',
             text: message.text,
             errorMessage: event.message,
+            error: event.error,
+            turnId: event.turnId,
+            timestamp: event.timestamp,
           }));
         }
       };
@@ -496,11 +499,11 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             }));
           }
           if (!terminalFailureObserved && mountedRef.current) {
-            setPanelError(outcomeErrorMessage);
+            setPanelError(undefined);
           }
         } catch (error) {
           if (mountedRef.current) {
-            setPanelError(errorMessage(error));
+            setPanelError(undefined);
             replaceRunningAssistant(transientAssistantId, (message) => ({
               id: message.id,
               role: 'assistant',
@@ -927,6 +930,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
         i18n.resolvedLanguage ?? i18n.language
       )}
       activeSessionId={documentState.activeSessionId}
+      conversationId={activeConversationId ?? undefined}
       messages={messages}
       proposals={proposalProjection.proposals}
       draft={draft}

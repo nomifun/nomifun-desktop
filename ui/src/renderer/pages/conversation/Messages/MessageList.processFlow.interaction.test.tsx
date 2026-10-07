@@ -12,6 +12,8 @@ import { MessageListProvider, MessageListLoadingProvider, useMessageLstCache, us
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
 import { ipcBridge } from '@/common';
 import agentExecutionLocale from '@/renderer/services/i18n/locales/en-US/agentExecution.json';
+import conversationLocale from '@/renderer/services/i18n/locales/en-US/conversation.json';
+import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
 import idmmLocale from '@/renderer/services/i18n/locales/en-US/idmm.json';
 import { useState } from 'react';
 import { dispatchChatMessageJump } from '@/renderer/utils/chat/chatMinimapEvents';
@@ -20,7 +22,7 @@ import { ExecutionProvider, useExecutionSafe } from '../execution/ExecutionConte
 import { executionId, leadConversation, leadConversationId, makeAttempt, makeDetail, makeStep, requestId } from '../../../../../test/fixtures/conversationDelegation';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale, agentExecution: agentExecutionLocale, idmm: idmmLocale } } } });
+await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale, conversation: conversationLocale, agentExecution: agentExecutionLocale, idmm: idmmLocale } } } });
 const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000061');
 const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000062');
 const messageId = (index: number) => parseMessageId(`0190f5fe-7c00-7a00-8000-${String(index).padStart(12, '0')}`);
@@ -44,6 +46,38 @@ beforeEach(() => {
 });
 
 afterEach(() => { cleanup(); restoreListeners(); });
+
+test.each([
+  { errorAt: undefined, cleanupProven: true, pausedAt: 10, expected: 1, projected: true },
+  { errorAt: 11, cleanupProven: true, pausedAt: 10, expected: 1, projected: false },
+  { errorAt: 9, cleanupProven: true, pausedAt: 10, expected: 1, projected: false },
+  { errorAt: 11, cleanupProven: false, pausedAt: 10, expected: 1, projected: false },
+  { errorAt: 11, cleanupProven: true, pausedAt: undefined, expected: 1, projected: false },
+  { errorAt: 11, cleanupProven: false, pausedAt: 10, foreignTurn: true, expected: 2, projected: true },
+])('pause uses the shared error note without duplicating the current diagnosis %j', (scenario) => {
+  const initial: TMessage[] = scenario.errorAt === undefined ? [] : [{
+    id: 'canonical-error', msg_id: messageId(4), type: 'tips', conversation_id: conversationId,
+    turn_id: 'foreignTurn' in scenario && scenario.foreignTurn ? messageId(5) : turnId,
+    created_at: scenario.errorAt, content: { type: 'error', content: '',
+      error: { message: 'Account action required', code: 'USER_LLM_PROVIDER_BILLING_REQUIRED', retryable: false } },
+  }];
+  const pause = { turnId, reason: 'EXECUTION_USER_REQUESTED', cleanupProven: scenario.cleanupProven,
+    pausedAt: scenario.pausedAt, error: { message: '', agentLabel: 'Admitted Agent', modelName: 'admitted-model' } };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}><ThemeProvider>
+    <PreviewProvider persistNamespace='shared-pause-note-test' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', executionPause: pause }}>
+        <MessageListProvider initialValue={initial}><MessageList emptySlot={<span>Welcome</span>} /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </ThemeProvider></I18nextProvider></MemoryRouter>);
+  expect(page.container.querySelectorAll('.message-error-note').length).toBe(scenario.expected);
+  expect(page.queryByTestId('conversation-pause-error') !== null).toBe(scenario.projected);
+  expect(page.container.querySelector('[data-testid="execution-pause-notice"]')).toBeNull();
+  expect(page.queryByText('Welcome')).toBeNull();
+  expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
+  if (!scenario.cleanupProven && scenario.projected) expect(page.container.textContent).toContain(conversationLocale.agentError.codes.EXECUTION_CLEANUP_UNCONFIRMED.title);
+  expect(page.queryByRole('button', { name: 'End this turn' })).toBeNull();
+});
 
 test('decision question jumps load an older history page and historical failures remain standalone notes', async () => {
   const questionId = messageId(91);
