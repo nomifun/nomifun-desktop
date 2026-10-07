@@ -19,7 +19,7 @@ use nomi_ssh::credential::{Auth, SshCredential};
 use nomi_ssh::fs::RemoteFs;
 use nomi_ssh::limits::validate_path;
 use nomi_ssh::responder::AnswerRule;
-use nomi_ssh::shell::{RemoteShell, ShellOutcome};
+use nomi_ssh::shell::{RemoteShell, ShellOutcome, UnprivilegedShellError};
 use nomifun_ai_agent::{RemoteCommandOutput, RemoteFileStat, SshBackend};
 use zeroize::Zeroizing;
 
@@ -203,26 +203,21 @@ impl SshConnectionHandle {
         &self,
         command: &str,
         timeout_ms: u64,
-    ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
-        const GUARD_FAILURE: &str = "__NOMIFUN_UNPRIVILEGED_EXEC_UNAVAILABLE__";
-        let wrapped = unprivileged_shell_command(command, GUARD_FAILURE);
-        let output = self
+    ) -> Result<ShellOutcome, SshActionDispatchError> {
+        self
             .shell
-            .run(&wrapped, std::time::Duration::from_millis(timeout_ms))
+            .run_unprivileged(command, std::time::Duration::from_millis(timeout_ms))
             .await
-            .map(remote_output)
-            .map_err(|error| {
-                SshActionDispatchError::OutcomeUnknown(format!(
-                    "ssh/exec dispatch did not produce a terminal receipt: {error}"
-                ))
-            })?;
-        if output.stdout.lines().any(|line| line.trim() == GUARD_FAILURE) {
-            return Err(SshActionDispatchError::Rejected(
-                "ssh/exec requires a non-root Linux host with util-linux setpriv no-new-privileges support"
-                    .into(),
-            ));
-        }
-        Ok(output)
+            .map_err(|error| match error {
+                UnprivilegedShellError::Rejected(error) => {
+                    SshActionDispatchError::Rejected(error.to_string())
+                }
+                UnprivilegedShellError::OutcomeUnknown(error) => {
+                    SshActionDispatchError::OutcomeUnknown(format!(
+                        "ssh/exec dispatch did not produce a terminal receipt: {error}"
+                    ))
+                }
+            })
     }
 
     /// Authenticate sudo in a dedicated command, remove the responder, then
@@ -292,14 +287,6 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn unprivileged_shell_command(command: &str, failure_marker: &str) -> String {
-    format!(
-        "( if [ \"$(id -u)\" = 0 ] || ! command -v setpriv >/dev/null 2>&1; then printf '{}\\n'; exit 125; fi; setpriv --no-new-privs /bin/sh -lc {} )",
-        failure_marker,
-        shell_single_quote(command),
-    )
-}
-
 /// The `SshBackend` the pool hands out: it resolves the link's *current* handle
 /// on every call, so a reconnect that swaps the transport underneath is invisible
 /// to the tool objects the agent is already holding.
@@ -364,19 +351,27 @@ impl SshLinkBackend {
         command: &str,
         timeout_ms: u64,
     ) -> Result<RemoteCommandOutput, String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let _command = self.link.command_slot(deadline).await?;
+        let handle = self.handle(action_lease).await?;
+        if handle.shell().needs_recovery().await && !handle.is_transport_closed() {
+            self.pool.recycle_shell(&self.link, "remote shell channel was retired after cancellation or failed recovery").await;
+        }
         let handle = self.handle(action_lease).await?;
         let shell = Arc::clone(handle.shell());
-        match shell.run(command, std::time::Duration::from_millis(timeout_ms)).await {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("SSH command budget expired before input was submitted".into());
+        }
+        match shell.run(command, remaining).await {
             Ok(outcome) => {
-                if outcome.timed_out && outcome.cwd.is_empty() {
-                    // `RemoteShell::run` only withholds the cwd on a timeout it
-                    // could not resynchronize from: the transport is fine, the
-                    // shell is not, so recycling the channel is the fix — not a
-                    // redial, and certainly not swallowing it.
+                if shell.needs_recovery().await {
+                    // Terminal process exit and failed timeout recovery retire
+                    // only this channel; the authenticated transport is reusable.
                     self.pool
                         .recycle_shell(
                             &self.link,
-                            "remote shell could not be resynchronized after a timeout",
+                            "remote shell ended or could not be resynchronized after a timeout",
                         )
                         .await;
                 } else if !outcome.cwd.is_empty() {
@@ -484,7 +479,7 @@ const GREP_TIMEOUT_MS: u64 = 30_000;
 const LIST_TIMEOUT_MS: u64 = 15_000;
 
 
-fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
+pub(crate) fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
     RemoteCommandOutput {
         stdout: outcome.output,
         exit_code: outcome.exit_code,
@@ -514,7 +509,7 @@ fn validate_backend_path(path: &str) -> Result<(), String> {
 fn grep_command(pattern: &str, path: &str) -> String {
     let path = if path == "-" { "./-" } else { path };
     format!(
-        "(if command -v rg >/dev/null 2>&1; then set -- rg --color=never -n; elif [ -d {d} ]; then set -- grep --color=never -rnE; else set -- grep --color=never -nEh; fi; if \"$@\" -- {p} {d}; then :; else _nomi_search_status=$?; [ \"$_nomi_search_status\" -eq 1 ] || exit \"$_nomi_search_status\"; fi)",
+        "(if command -v rg >/dev/null 2>&1; then set -- rg --color=never --no-heading -n; elif [ -d {d} ]; then set -- grep --color=never -rnE; else set -- grep --color=never -nEh; fi; if \"$@\" -- {p} {d}; then :; else _nomi_search_status=$?; [ \"$_nomi_search_status\" -eq 1 ] || exit \"$_nomi_search_status\"; fi)",
         p = sh_quote(pattern),
         d = sh_quote(path),
     )
@@ -707,18 +702,4 @@ mod tests {
         assert!(error.contains("invalid SSH input"), "{error}");
     }
 
-    #[test]
-    fn ordinary_agent_exec_is_kernel_fenced_from_setuid_elevation() {
-        let wrapped = unprivileged_shell_command(
-            "s'u'do id; /usr/bin/sudo id",
-            "__GUARD_FAILED__",
-        );
-        assert!(wrapped.contains("$(id -u)"));
-        assert!(wrapped.starts_with("( if "));
-        assert!(wrapped.ends_with(" )"));
-        assert!(wrapped.contains("command -v setpriv"));
-        assert!(wrapped.contains("setpriv --no-new-privs /bin/sh -lc"));
-        assert!(!wrapped.contains("exec setpriv"));
-        assert!(wrapped.contains("__GUARD_FAILED__"));
-    }
 }

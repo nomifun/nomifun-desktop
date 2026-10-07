@@ -23,7 +23,7 @@ describe('SshSessionGroup structure', () => {
   });
 
   test('groups sessions by host as a second level', () => {
-    expect(groupSource.includes('ssh_host_id')).toBe(true);
+    expect(groupSource.includes('conversationSshHostId(conversation)')).toBe(true);
     expect(groupSource.includes('new Map<SshHostId, TChatConversation[]>')).toBe(true);
     // Host names come from the host book under the very same SWR key the host
     // settings page uses, so the two mounts share one request.
@@ -70,12 +70,12 @@ describe('SshSessionGroup structure', () => {
 
   test('the list sync exposes host-bound sessions from the same single pass', () => {
     expect(syncSource.includes('sshConversations: TChatConversation[]')).toBe(true);
-    expect(syncSource.includes('sshHostIdOf')).toBe(true);
+    expect(syncSource.includes('conversationSshHostId')).toBe(true);
     // Stable array identity, or useSyncExternalStore re-renders on every refresh.
     expect(syncSource.includes('isSameConversationList')).toBe(true);
     // Still exactly one conversation fetch in the whole renderer.
     expect(syncSource.split('getUserConversations').length - 1).toBe(1);
-    // The exclusion itself stays untouched — the group is the missing half.
+    // The ordinary list excludes canonical host bindings.
     expect(filterSource.includes('!isSshHostConversation')).toBe(true);
   });
 

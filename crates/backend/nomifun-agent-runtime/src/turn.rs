@@ -14,9 +14,10 @@ use crate::context::{AgentContextAssembler, AgentContextBudget};
 use crate::error::AgentEngineError;
 use crate::events::{AgentEngineEvent, AgentEventSink};
 use crate::model::AgentModelPort;
+use crate::AgentExecutionPhase;
 use crate::tool::{
     invocation_for, parse_completed_arguments, validate_tool_argument_size, AgentEffectClass,
-    AgentToolInvoker, AgentToolPlan, AgentToolResult,
+    AgentToolInvoker, AgentToolPlan, AgentToolResult, ToolBatchDisposition,
 };
 
 const DEFAULT_MAX_MODEL_STEPS: u16 = 32;
@@ -252,7 +253,7 @@ pub(crate) async fn run_turn(
     let model = request.voice_immediate.as_ref().map(|port| port.model_port()).unwrap_or(model);
     let recovery = request.recovery.take();
     let interrupted_delivery_review = recovery.as_ref().is_some_and(|state|
-        state.checkpoint.delivery_review.pending && state.last_model_step > state.checkpoint.model_steps);
+        state.checkpoint.completion_review.delivery_pending && state.last_model_step > state.checkpoint.model_steps);
     if request.segment_policy.is_some() && !event_sink.supports_checkpoints() {
         return Err(AgentEngineError::InvalidContract("execution segments require durable checkpoints".into()));
     }
@@ -311,7 +312,7 @@ pub(crate) async fn run_turn(
             version: 1, binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
             active_set_generation: request.active_set_generation, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: Vec::new(), plan: Default::default(), work: Default::default(),
-            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), delivery_review: Default::default(),
+            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), completion_review: Default::default(),
         });
         if let Some(recovery) = &recovery { initial.model_steps = recovery.last_model_step; }
         initial.validate()?;
@@ -421,10 +422,11 @@ pub(crate) async fn run_turn(
         // earlier observations, never resume actions. Recovery still drops
         // old evidence freshness; it need not reopen a completed plan merely
         // to report historical facts or a blocker.
-        plan.needs_replan = adaptive.task_ledger() && !(recovery.checkpoint.delivery_review.pending
-            || recovery.checkpoint.delivery_review.account_repair);
+        plan.needs_replan = adaptive.task_ledger() && !(recovery.checkpoint.completion_review.is_report_only()
+            || recovery.checkpoint.completion_review.delivery_pending
+            || recovery.checkpoint.completion_review.account_repair);
         long_horizon = Some(LongHorizonState { execution_plan: plan, work_status: work, ..Default::default() });
-        long_horizon.as_mut().unwrap().completion.delivery_review = recovery.checkpoint.delivery_review.clone();
+        long_horizon.as_mut().unwrap().completion.review = recovery.checkpoint.completion_review.clone();
         let mut calls = BTreeMap::new();
         if let Some(archive) = tool_archive.as_mut() {
             for event in &recovery.prefix {
@@ -502,7 +504,7 @@ pub(crate) async fn run_turn(
     let mut model_steps = recovery.as_ref().map_or(0, |state| state.last_model_step);
     let mut tool_call_count = recovery.as_ref().map_or(0, |state| state.checkpoint.tool_call_count);
     let mut provider_round_id = None;
-    let mut completion_review_used = false;
+    let mut completion_review_used = recovery.as_ref().is_some_and(|state| state.checkpoint.completion_review.is_report_only());
     let mut control_rejections: ControlRejections = recovery.as_ref().map(|state| state.checkpoint.control_rejections.clone()).unwrap_or_default();
     let mut admitted_call_ids = recovery.as_ref().map(|state| state.reserved_call_ids.clone()).unwrap_or_default();
     let mut stream_budget = crate::stream_limits::StreamBudget::default();
@@ -660,7 +662,7 @@ pub(crate) async fn run_turn(
             long_horizon.get_or_insert_with(LongHorizonState::default);
         }
         if let Some(state) = long_horizon.as_mut() {
-            state.completion.delivery_review.align_inputs(retained_inputs.len());
+            state.completion.review.align_inputs(retained_inputs.len());
         }
         synchronize_adaptive_context(
             &mut model_request,
@@ -682,18 +684,22 @@ pub(crate) async fn run_turn(
             &mut adaptive_slots,
         )?;
         let review_has_running_processes = long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty());
-        let account_repair = long_horizon.as_ref().is_some_and(|state| state.completion.delivery_review.account_repair);
+        let account_repair = long_horizon.as_ref().is_some_and(|state| state.completion.review.account_repair);
+        let report_only_locked = long_horizon.as_ref().is_some_and(|state| state.completion.review.is_report_only());
         let continuing_complex_task = crate::delivery_review::multi_item_task(&retained_inputs)
-            && !account_repair && long_horizon.as_ref().is_some_and(|state| !state.completion.settled_failure_gate()
+            && !account_repair && !report_only_locked && long_horizon.as_ref().is_some_and(|state| !state.completion.settled_failure_gate()
                 && (state.execution_plan.revision == 0 || state.execution_plan.is_open()));
-        let review_can_report = long_horizon.as_ref().is_some_and(|state| state.work_status.running_processes.is_empty())
+        let review_can_report = report_only_locked || (long_horizon.as_ref().is_some_and(|state| state.work_status.running_processes.is_empty())
             && !patch_recovery.pending() && !patch_recovery.unresolved()
             && (account_repair || !crate::delivery_review::multi_item_task(&retained_inputs)
                 || long_horizon.as_ref().is_some_and(|state| state.completion.settled_failure_gate()
-                    || (state.execution_plan.revision > 0 && !state.execution_plan.is_open())));
-        synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used || account_repair, review_can_report, review_has_running_processes, continuing_complex_task);
-        let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.delivery_review.pending);
-        synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step);
+                    || (state.execution_plan.revision > 0 && !state.execution_plan.is_open()))));
+        let execution_surface = model_request.input.tools.iter().map(|tool| tool.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let phase = synchronize_completion_review(&mut model_request, &mut adaptive_slots, completion_review_used || account_repair || report_only_locked, review_can_report, review_has_running_processes, continuing_complex_task);
+        let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.review.delivery_pending);
+        let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
+        if let Some(state) = long_horizon.as_mut() { state.completion.review.phase = phase; }
         protocol_recovery.constrain_tool_choice(
             &mut model_request.input.tool_choice, !model_request.input.tools.is_empty(),
         );
@@ -1138,7 +1144,7 @@ pub(crate) async fn run_turn(
                 let state = long_horizon.get_or_insert_with(LongHorizonState::default);
                 state.execution_plan.needs_replan = true;
                 state.completion.invalidate();
-                state.completion.delivery_review.align_inputs(retained_inputs.len());
+                state.completion.review.align_inputs(retained_inputs.len());
                 completion_review_used = false;
                 protocol_recovery.observe_new_input();
                 control_rejections.reset();
@@ -1323,78 +1329,91 @@ pub(crate) async fn run_turn(
                 .await;
             }
 
-            let mut long_horizon_calls = 0usize;
-            let mut explicit_continuation = false;
-            let mut explicit_plan = false;
-            for call_id in &step.call_order {
-                let call = step
-                    .calls
-                    .get(call_id)
-                    .and_then(|pending| pending.completed.as_ref())
-                    .ok_or_else(|| {
-                        AgentEngineError::InvalidModelEvent(
-                            "incomplete tool call during adaptive classification".into(),
-                        )
-                    })?;
-                if let Some(tool) = request.tool_plan.binding(&call.name) {
-                    if crate::execution_policy::requires_task_ledger(tool) {
-                        long_horizon_calls = long_horizon_calls.saturating_add(1);
+            let completed = step.call_order.iter().map(|id| step.calls.get(id)
+                .and_then(|pending| pending.completed.clone())
+                .ok_or_else(|| AgentEngineError::InvalidModelEvent("incomplete tool call".into())))
+                .collect::<Result<Vec<_>, _>>()?;
+            // Classify with the host's exact pre-review surface, never model
+            // output text. A phase correction must not replace the real work
+            // account with fresh-ID proposals that never reached the owner.
+            let exposure_refusal = crate::tool::reject_tool_surface_batch(
+                &completed, &model_request.input.tools, &execution_surface, phase);
+            let disposition = exposure_refusal.as_ref().map_or(ToolBatchDisposition::WorkAccounting, |refusal| refusal.disposition);
+
+            if disposition == ToolBatchDisposition::WorkAccounting {
+                let mut long_horizon_calls = 0usize;
+                let mut explicit_continuation = false;
+                let mut explicit_plan = false;
+                for call_id in &step.call_order {
+                    let call = step
+                        .calls
+                        .get(call_id)
+                        .and_then(|pending| pending.completed.as_ref())
+                        .ok_or_else(|| {
+                            AgentEngineError::InvalidModelEvent(
+                                "incomplete tool call during adaptive classification".into(),
+                            )
+                        })?;
+                    if let Some(tool) = request.tool_plan.binding(&call.name) {
+                        if crate::execution_policy::requires_task_ledger(tool) {
+                            long_horizon_calls = long_horizon_calls.saturating_add(1);
+                        }
+                    } else if call.name == crate::task_continuation::TOOL_NAME {
+                        explicit_continuation = true;
+                    } else if call.name == crate::planning::TOOL_NAME {
+                        explicit_plan = true;
                     }
-                } else if call.name == crate::task_continuation::TOOL_NAME {
-                    explicit_continuation = true;
-                } else if call.name == crate::planning::TOOL_NAME {
-                    explicit_plan = true;
                 }
-            }
-            let discovery_only = step.call_order.iter().all(|call_id| {
-                step.calls
-                    .get(call_id)
-                    .and_then(|pending| pending.completed.as_ref())
-                    .is_some_and(|call| call.name == crate::tool_discovery::TOOL_NAME)
-            });
-            if !discovery_only {
-                adaptive
-                    .activate(
-                        crate::adaptive::TOOL_MODULES,
-                        crate::AgentRuntimeActivationReason::ToolCall,
-                        event_sink.as_ref(),
-                    )
-                    .await?;
-            }
-            let multi_step = adaptive.observe_external_batch(long_horizon_calls);
-            if explicit_continuation {
-                adaptive
-                    .activate(
-                        crate::adaptive::LONG_HORIZON_MODULES
-                            .into_iter()
-                            .chain([crate::AgentRuntimeModule::TaskContinuation]),
-                        crate::AgentRuntimeActivationReason::ExplicitTaskContinuation,
-                        event_sink.as_ref(),
-                    )
-                    .await?;
-            } else if explicit_plan {
-                adaptive
-                    .activate(
-                        crate::adaptive::LEDGER_MODULES,
-                        crate::AgentRuntimeActivationReason::ExplicitPlan,
-                        event_sink.as_ref(),
-                    )
-                    .await?;
-            } else if crate::delivery_review::multi_item_task(&retained_inputs)
-                && step.calls.values().filter_map(|pending| pending.completed.as_ref())
-                    .filter_map(|call| request.tool_plan.binding(&call.name))
-                    .any(|binding| matches!(binding.action_id.as_ref(),
-                        "workspace.files/write" | "workspace.files/patch" | "workspace.process/input")) {
-                adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
-                    crate::AgentRuntimeActivationReason::EffectfulToolCall,event_sink.as_ref()).await?;
-            } else if multi_step {
-                adaptive
-                    .activate(
-                        crate::adaptive::LONG_HORIZON_MODULES,
-                        crate::AgentRuntimeActivationReason::MultiStepToolUse,
-                        event_sink.as_ref(),
-                    )
-                    .await?;
+                let discovery_only = step.call_order.iter().all(|call_id| {
+                    step.calls
+                        .get(call_id)
+                        .and_then(|pending| pending.completed.as_ref())
+                        .is_some_and(|call| call.name == crate::tool_discovery::TOOL_NAME)
+                });
+                if !discovery_only {
+                    adaptive
+                        .activate(
+                            crate::adaptive::TOOL_MODULES,
+                            crate::AgentRuntimeActivationReason::ToolCall,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                }
+                let multi_step = adaptive.observe_external_batch(long_horizon_calls);
+                if explicit_continuation {
+                    adaptive
+                        .activate(
+                            crate::adaptive::LONG_HORIZON_MODULES
+                                .into_iter()
+                                .chain([crate::AgentRuntimeModule::TaskContinuation]),
+                            crate::AgentRuntimeActivationReason::ExplicitTaskContinuation,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                } else if explicit_plan {
+                    adaptive
+                        .activate(
+                            crate::adaptive::LEDGER_MODULES,
+                            crate::AgentRuntimeActivationReason::ExplicitPlan,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                } else if crate::delivery_review::multi_item_task(&retained_inputs)
+                    && step.calls.values().filter_map(|pending| pending.completed.as_ref())
+                        .filter_map(|call| request.tool_plan.binding(&call.name))
+                        .any(|binding| matches!(binding.action_id.as_ref(),
+                            "workspace.files/write" | "workspace.files/patch" | "workspace.process/input")) {
+                    adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES,
+                        crate::AgentRuntimeActivationReason::EffectfulToolCall,event_sink.as_ref()).await?;
+                } else if multi_step {
+                    adaptive
+                        .activate(
+                            crate::adaptive::LONG_HORIZON_MODULES,
+                            crate::AgentRuntimeActivationReason::MultiStepToolUse,
+                            event_sink.as_ref(),
+                        )
+                        .await?;
+                }
             }
             let state = long_horizon.get_or_insert_with(LongHorizonState::default);
             let archive = tool_archive.get_or_insert_with(|| {
@@ -1407,7 +1426,10 @@ pub(crate) async fn run_turn(
             let had_current_report = state.completion.current(
                 &state.execution_plan, &state.work_status, retained_inputs.len(),
             ).is_some();
-            let results = match invoke_tool_calls(
+            let invocation = if let Some(refusal) = exposure_refusal {
+                if disposition == ToolBatchDisposition::WorkAccounting { state.completion.invalidate_report(); }
+                finish_tool_results(refusal.results, event_sink.as_ref(), model_steps, &cancellation).await
+            } else { invoke_tool_calls(
                 &agent_session_id,
                 &request.principal,
                 &model_request,
@@ -1438,8 +1460,8 @@ pub(crate) async fn run_turn(
                 request.history_port.as_deref(),
                 &binding,
             )
-            .await
-            {
+            .await };
+            let results = match invocation {
                 Ok(results) => results,
                 Err(AgentEngineError::VoiceCorrectionBoundary) if request.voice_immediate.is_some()=>{
                     let port=request.voice_immediate.as_ref().expect("guarded voice owner");
@@ -1469,164 +1491,166 @@ pub(crate) async fn run_turn(
             let mut repeated_control_rejection = None;
             for (expected_call_id, result) in results {
                 result.validate_for(&expected_call_id)?;
-                if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
-                    terminal_completion_requested |= call.name == crate::completion::TOOL_NAME && !result.is_error;
-                    let account_parameter_refusal = call.name == crate::completion::TOOL_NAME && result.is_error
-                        && serde_json::from_str::<serde_json::Value>(&result.output_text()).ok().is_some_and(|value|
-                            value["status"]=="not_executed" && value["code"]=="INVALID_TOOL_ARGUMENTS"
-                                && value["tool"]==crate::completion::TOOL_NAME);
-                    let healthy_settled_account = account_parameter_refusal
-                        && (state.work_status.successful_commands > 0 || state.work_status.successful_workspace_mutations > 0);
-                    if single_call_batch && call.name == crate::completion::TOOL_NAME && result.is_error
-                        && (state.execution_plan.revision == 0 || !state.execution_plan.is_open())
-                        && (state.completion.settled_failure_gate() || healthy_settled_account)
-                        && state.work_status.running_processes.is_empty()
-                        && !patch_recovery.pending() && !patch_recovery.unresolved()
-                    {
-                        // A settled optional or explicitly closed task already entered terminal accounting.
-                        // Correct this terminal account in the existing review phase;
-                        // argument repair cannot restart checks or reset an absent plan.
-                        completion_review_used = true;
-                        state.completion.delivery_review.account_repair = true;
-                    }
-                    let made_progress = match call.name.as_str() {
-                        crate::planning::TOOL_NAME => state.execution_plan.revision != plan_revision_before,
-                        crate::completion::TOOL_NAME => !had_current_report,
-                        _ => true,
-                    };
-                    if let Some(reason) = control_rejections.observe(&call.name, &result, made_progress) {
-                        repeated_control_rejection = Some(reason);
-                    }
-                }
-                if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
-                    // Internal controls have no platform binding. Count their
-                    // paired failures here, including schema refusals, without
-                    // implying a command launch or a workspace mutation.
-                    if request.tool_plan.binding(&call.name).is_none() && result.is_error {
-                        state.work_status.observe_deferred();
-                    }
-                    if let Some(binding) = request.tool_plan.binding(&call.name) {
-                        let attempted = dispatch.attempted(&expected_call_id)?;
-                        let failed_process = attempted
-                            && crate::execution_policy::failed_process_observation(binding, &result);
-                        let process_not_applied = attempted
-                            && crate::execution_policy::process_operation_not_applied(binding, &result);
-                        terminal_collaboration_accepted |= single_call_batch
-                            && attempted
-                            && !result.is_error
-                            && crate::execution_policy::completes_turn_on_success(binding);
-                        if attempted {
-                            if let Some(segments) = segments.as_mut() { segments.observe(call, &result)?; }
-                            state.work_status.observe(
+                // One accounting boundary: phase corrections carry paired
+                // protocol feedback only, never work, evidence or plan changes.
+                if disposition == ToolBatchDisposition::WorkAccounting {
+                    if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                        terminal_completion_requested |= call.name == crate::completion::TOOL_NAME && !result.is_error;
+                        let account_parameter_refusal = call.name == crate::completion::TOOL_NAME && result.is_error
+                            && serde_json::from_str::<serde_json::Value>(&result.output_text()).ok().is_some_and(|value|
+                                value["status"]=="not_executed" && value["code"]=="INVALID_TOOL_ARGUMENTS"
+                                    && value["tool"]==crate::completion::TOOL_NAME);
+                        let healthy_settled_account = account_parameter_refusal
+                            && (state.work_status.successful_commands > 0 || state.work_status.successful_workspace_mutations > 0);
+                        if single_call_batch && call.name == crate::completion::TOOL_NAME && result.is_error
+                            && (state.execution_plan.revision == 0 || !state.execution_plan.is_open())
+                            && (state.completion.settled_failure_gate() || healthy_settled_account)
+                            && state.work_status.running_processes.is_empty()
+                            && !patch_recovery.pending() && !patch_recovery.unresolved()
+                        {
+                            // A settled optional or explicitly closed task already entered terminal accounting.
+                            // Correct this terminal account in the existing review phase;
+                            // argument repair cannot restart checks or reset an absent plan.
+                            completion_review_used = true;
+                            state.completion.review.account_repair = true;
+                        }
+                        let made_progress = match call.name.as_str() {
+                            crate::planning::TOOL_NAME => state.execution_plan.revision != plan_revision_before,
+                            crate::completion::TOOL_NAME => !had_current_report,
+                            _ => true,
+                        };
+                        if let Some(reason) = control_rejections.observe(&call.name, &result, made_progress) {
+                            repeated_control_rejection = Some(reason);
+                        }
+                        // Internal controls have no platform binding. Count their
+                        // paired failures here, including schema refusals, without
+                        // implying a command launch or a workspace mutation.
+                        if request.tool_plan.binding(&call.name).is_none() && result.is_error {
+                            state.work_status.observe_deferred();
+                        }
+                        if let Some(binding) = request.tool_plan.binding(&call.name) {
+                            let attempted = dispatch.attempted(&expected_call_id)?;
+                            let failed_process = attempted
+                                && crate::execution_policy::failed_process_observation(binding, &result);
+                            let process_not_applied = attempted
+                                && crate::execution_policy::process_operation_not_applied(binding, &result);
+                            terminal_collaboration_accepted |= single_call_batch
+                                && attempted
+                                && !result.is_error
+                                && crate::execution_policy::completes_turn_on_success(binding);
+                            if attempted {
+                                if let Some(segments) = segments.as_mut() { segments.observe(call, &result)?; }
+                                state.work_status.observe(
+                                    binding,
+                                    call,
+                                    &result,
+                                    &mut state.command_tracker,
+                                );
+                                if request.unscoped_tool_hooks {
+                                    state.work_status.before_resource_request();
+                                }
+                            } else {
+                                if !result.is_error {
+                                    return Err(AgentEngineError::InvalidContract("unattempted platform tool returned success".into()));
+                                }
+                                state.work_status.observe_deferred();
+                            }
+                            if failed_process {
+                                let reportable_failure = state.execution_plan.revision == 0
+                                    && (!state.execution_plan.needs_replan || state.completion.settled_failure_gate())
+                                    && !request.unscoped_tool_hooks
+                                    && crate::execution_policy::settled_reportable_process(binding, &result);
+                                adaptive.activate(
+                                    crate::adaptive::LONG_HORIZON_MODULES,
+                                    crate::AgentRuntimeActivationReason::EffectfulToolCall,
+                                    event_sink.as_ref(),
+                                ).await?;
+                                // The first failed command activates a plan. Once
+                                // a source-anchored plan is in progress, an
+                                // expected failing test remains an observation
+                                // within that plan, not an automatic demand to
+                                // replan before the next repair. Later serial
+                                // effects in this same batch were already held.
+                                if state.execution_plan.revision == 0 {
+                                    state.execution_plan.needs_replan = true;
+                                }
+                                state.completion.invalidate();
+                                state.completion.set_settled_failure_gate(reportable_failure);
+                            }
+                            if process_not_applied {
+                                // A typed non-start or rejected control proves this
+                                // call did not apply an effect. It neither advances
+                                // workspace evidence nor forces replanning. It is
+                                // still a visible tool
+                                // failure that needs an exact completion account.
+                                // Expose plan/completion controls before the model
+                                // can search for them or replay the failed launch.
+                                adaptive
+                                    .activate(
+                                        crate::adaptive::LEDGER_MODULES,
+                                        crate::AgentRuntimeActivationReason::ToolCall,
+                                        event_sink.as_ref(),
+                                    )
+                                    .await?;
+                                state.completion.invalidate();
+                            }
+                            if attempted && binding.action_id.as_ref() == "workspace.files/read" && state.work_status.running_processes.is_empty() {
+                                patch_recovery.observe_read(call, &result);
+                            }
+                            if (attempted && (request.unscoped_tool_hooks || (crate::execution_policy::affects_workspace(binding)
+                                && !crate::execution_policy::process_operation_not_applied(binding, &result))))
+                                || !state.work_status.running_processes.is_empty()
+                            {
+                                // Failed calls may have partial effects too.
+                                scoped_instructions.invalidate();
+                            }
+                            let observation = state.completion.observe_with_effect_scope(
+                                &state.work_status,
                                 binding,
                                 call,
                                 &result,
-                                &mut state.command_tracker,
+                                attempted,
+                                !request.unscoped_tool_hooks,
                             );
-                            if request.unscoped_tool_hooks {
-                                state.work_status.before_resource_request();
+                            if adaptive.task_ledger() {
+                                event_sink.emit(AgentEngineEvent::CompletionObservation { observation }).await?;
                             }
-                        } else {
-                            if !result.is_error {
-                                return Err(AgentEngineError::InvalidContract("unattempted platform tool returned success".into()));
-                            }
-                            state.work_status.observe_deferred();
-                        }
-                        if failed_process {
-                            let reportable_failure = state.execution_plan.revision == 0
-                                && (!state.execution_plan.needs_replan || state.completion.settled_failure_gate())
-                                && !request.unscoped_tool_hooks
-                                && crate::execution_policy::settled_reportable_process(binding, &result);
-                            adaptive.activate(
-                                crate::adaptive::LONG_HORIZON_MODULES,
-                                crate::AgentRuntimeActivationReason::EffectfulToolCall,
-                                event_sink.as_ref(),
-                            ).await?;
-                            // The first failed command activates a plan. Once
-                            // a source-anchored plan is in progress, an
-                            // expected failing test remains an observation
-                            // within that plan, not an automatic demand to
-                            // replan before the next repair. Later serial
-                            // effects in this same batch were already held.
-                            if state.execution_plan.revision == 0 {
+                            // A real owner observation starts a fresh account.
+                            // A proposal held before dispatch cannot reopen the
+                            // report-only review or authorize repeating work.
+                            if attempted { completion_review_used = false; }
+                            if crate::execution_policy::requires_replanning_after_result(
+                                binding, &result, attempted, state.execution_plan.revision,
+                            ) || (request.unscoped_tool_hooks && attempted && result.is_error) {
                                 state.execution_plan.needs_replan = true;
+                                if !failed_process || request.unscoped_tool_hooks
+                                    || !crate::execution_policy::settled_reportable_process(binding, &result)
+                                {
+                                    state.completion.set_settled_failure_gate(false);
+                                }
+                                // Expose the recovery control before asking the
+                                // model for another expensive proposed effect.
+                                if crate::execution_policy::requires_task_ledger(binding) {
+                                    adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                                        crate::AgentRuntimeActivationReason::EffectfulToolCall,
+                                        event_sink.as_ref()).await?;
+                                }
                             }
-                            state.completion.invalidate();
-                            state.completion.set_settled_failure_gate(reportable_failure);
-                        }
-                        if process_not_applied {
-                            // A typed non-start or rejected control proves this
-                            // call did not apply an effect. It neither advances
-                            // workspace evidence nor forces replanning. It is
-                            // still a visible tool
-                            // failure that needs an exact completion account.
-                            // Expose plan/completion controls before the model
-                            // can search for them or replay the failed launch.
-                            adaptive
-                                .activate(
-                                    crate::adaptive::LEDGER_MODULES,
-                                    crate::AgentRuntimeActivationReason::ToolCall,
-                                    event_sink.as_ref(),
-                                )
-                                .await?;
-                            state.completion.invalidate();
-                        }
-                        if attempted && binding.action_id.as_ref() == "workspace.files/read" && state.work_status.running_processes.is_empty() {
-                            patch_recovery.observe_read(call, &result);
-                        }
-                        if (attempted && (request.unscoped_tool_hooks || (crate::execution_policy::affects_workspace(binding)
-                            && !crate::execution_policy::process_operation_not_applied(binding, &result))))
-                            || !state.work_status.running_processes.is_empty()
-                        {
-                            // Failed calls may have partial effects too.
-                            scoped_instructions.invalidate();
-                        }
-                        let observation = state.completion.observe_with_effect_scope(
-                            &state.work_status,
-                            binding,
-                            call,
-                            &result,
-                            attempted,
-                            !request.unscoped_tool_hooks,
-                        );
-                        if adaptive.task_ledger() {
-                            event_sink.emit(AgentEngineEvent::CompletionObservation { observation }).await?;
-                        }
-                        // A real owner observation starts a fresh account.
-                        // A proposal held before dispatch cannot reopen the
-                        // report-only review or authorize repeating work.
-                        if attempted { completion_review_used = false; }
-                        if crate::execution_policy::requires_replanning_after_result(
-                            binding, &result, attempted, state.execution_plan.revision,
-                        ) || (request.unscoped_tool_hooks && attempted && result.is_error) {
-                            state.execution_plan.needs_replan = true;
-                            if !failed_process || request.unscoped_tool_hooks
-                                || !crate::execution_policy::settled_reportable_process(binding, &result)
-                            {
-                                state.completion.set_settled_failure_gate(false);
+                        } else if matches!(call.name.as_str(), crate::planning::TOOL_NAME | crate::task_continuation::TOOL_NAME) {
+                            // Idempotent/rejected proposals are not state changes.
+                            // Only a committed plan transition invalidates the
+                            // current report; do not create a plan/report loop.
+                            if state.execution_plan.revision != plan_revision_before
+                                && state.completion.current(&state.execution_plan, &state.work_status, retained_inputs.len()).is_none() {
+                                state.completion.invalidate();
+                                completion_review_used = false;
                             }
-                            // Expose the recovery control before asking the
-                            // model for another expensive proposed effect.
-                            if crate::execution_policy::requires_task_ledger(binding) {
-                                adaptive.activate(crate::adaptive::LEDGER_MODULES,
-                                    crate::AgentRuntimeActivationReason::EffectfulToolCall,
-                                    event_sink.as_ref()).await?;
-                            }
-                        }
-                    } else if matches!(call.name.as_str(), crate::planning::TOOL_NAME | crate::task_continuation::TOOL_NAME) {
-                        // Idempotent/rejected proposals are not state changes.
-                        // Only a committed plan transition invalidates the
-                        // current report; do not create a plan/report loop.
-                        if state.execution_plan.revision != plan_revision_before
-                            && state.completion.current(&state.execution_plan, &state.work_status, retained_inputs.len()).is_none() {
+                        } else if call.name != crate::completion::TOOL_NAME {
+                            // Planning/resource control can change the
+                            // model's account even though it supplies no evidence.
                             state.completion.invalidate();
                             completion_review_used = false;
                         }
-                    } else if call.name != crate::completion::TOOL_NAME {
-                        // Planning/resource control can change the
-                        // model's account even though it supplies no evidence.
-                        state.completion.invalidate();
-                        completion_review_used = false;
                     }
                 }
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
@@ -1660,6 +1684,9 @@ pub(crate) async fn run_turn(
                     }],
                     provider_round_id: None,
                 });
+            }
+            if disposition == ToolBatchDisposition::PhaseCorrection {
+                repeated_control_rejection = control_rejections.observe_phase_correction();
             }
             patch_recovery.end_batch();
             patch_recovery.persist(event_sink.as_ref()).await?;
@@ -1952,7 +1979,7 @@ async fn persist_execution_checkpoint(
         plan: state.map(|state| state.execution_plan.clone()).unwrap_or_default(),
         work, patch_recovery: patch_recovery.snapshot(), segments: segments.cloned(),
         control_rejections: control_rejections.clone(),
-        delivery_review: state.map(|state| state.completion.delivery_review.clone()).unwrap_or_default(),
+        completion_review: state.map(|state| state.completion.review.clone()).unwrap_or_default(),
     };
     checkpoint.validate()?;
     sink.save_checkpoint(checkpoint).await
@@ -1977,6 +2004,7 @@ pub struct AgentControlRejectionState {
     consecutive: u8,
     total: u8,
     no_progress: u8,
+    phase_corrections: u8,
 }
 
 type ControlRejections = AgentControlRejectionState;
@@ -1984,7 +2012,7 @@ type ControlRejections = AgentControlRejectionState;
 impl AgentControlRejectionState {
     pub(crate) fn validate(&self) -> Result<(), AgentEngineError> {
         if !matches!(self.name.as_str(), "" | crate::planning::TOOL_NAME | crate::completion::TOOL_NAME)
-            || self.consecutive > 4 || self.total > 8 || self.no_progress > 4 {
+            || self.consecutive > 4 || self.total > 8 || self.no_progress > 4 || self.phase_corrections > 4 {
             return Err(AgentEngineError::InvalidContract("invalid persisted control correction budget".into()));
         }
         Ok(())
@@ -1995,6 +2023,13 @@ impl AgentControlRejectionState {
         self.consecutive = 0;
         self.total = 0;
         self.no_progress = 0;
+        self.phase_corrections = 0;
+    }
+
+    fn observe_phase_correction(&mut self) -> Option<String> {
+        self.phase_corrections = self.phase_corrections.saturating_add(1);
+        (self.phase_corrections >= 4).then(||
+            "report-only phase rejected four new action batches before dispatch; original receipts and work counts are unchanged, but no valid completion account was submitted".into())
     }
 
     pub(crate) fn observe(&mut self, name: &str, result: &AgentToolResult, made_progress: bool) -> Option<String> {
@@ -2054,7 +2089,7 @@ fn synchronize_completion_review(
     can_report: bool,
     has_running_processes: bool,
     continuing_complex_task: bool,
-) {
+) -> AgentExecutionPhase {
     if active {
         if has_running_processes {
             // A provider's per-response stop can be a public progress update.
@@ -2062,12 +2097,12 @@ fn synchronize_completion_review(
             // user-held process merely to obtain a completion report.
             upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
                 "Execution remains unfinished for the same accepted task. A public progress reply does not complete it or authorize cancelling processes. Preserve the user's keep-alive/wait-for-input constraints, owned process IDs and output cursors; continue only the actions permitted by the accepted task. If the user requires keeping a helper until Stop, keep this turn active and poll that helper rather than cancel it to end a response. User cancellation and frozen execution budgets still apply. Unknown effects and pending recovery remain unresolved; this notice grants no verification, retry or wider scope. Claim completion only after the required work and owned processes have actually settled. Existing recovery policy may still permit a blocked partial account, which is never task success.".into());
-            return;
+            return AgentExecutionPhase::Execution;
         }
         if continuing_complex_task {
             upsert_instruction(&mut request.input.instructions,&mut slots.completion_review,
                 "A per-response stop can be a brief public progress update, not completion of this multi-item task. Remaining authorized work may still be unfinished. Continue only those unfinished parts through the frozen tools, or submit report_completion when the actual work settles. Do not restart, repeat settled observations or effects, or invent a missing-capability blocker merely because a prior response contained no tool calls. Existing plan, recovery, error-stop, cancellation and budget gates still apply; unresolved work must be disclosed rather than claimed complete. This notice grants no new authority.".into());
-            return;
+            return AgentExecutionPhase::Execution;
         }
         // The transcript review can be summarized with an oversized tool
         // suffix. Keep this host-owned phase in mandatory instructions; the
@@ -2082,21 +2117,25 @@ fn synchronize_completion_review(
             // This cannot accept arguments or create completion evidence.
             request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME);
             request.input.tool_choice = ChatToolChoice::Specific { name:crate::completion::TOOL_NAME.into() };
+            return AgentExecutionPhase::CompletionReview;
         }
     } else if let Some(slot) = slots.completion_review {
         request.input.instructions[slot].clear();
     }
+    AgentExecutionPhase::Execution
 }
 
-fn synchronize_delivery_review(request: &mut ChatModelRequest, slots: &mut AdaptiveContextSlots, active: bool) {
+fn synchronize_delivery_review(request: &mut ChatModelRequest, slots: &mut AdaptiveContextSlots, active: bool, phase: AgentExecutionPhase) -> AgentExecutionPhase {
     if active {
         upsert_instruction(&mut request.input.instructions, &mut slots.delivery_review,
             crate::delivery_review::INSTRUCTION.to_owned());
         request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME);
         request.input.tool_choice = ChatToolChoice::Specific { name: crate::completion::TOOL_NAME.into() };
+        return AgentExecutionPhase::DeliveryReview;
     } else if let Some(slot) = slots.delivery_review {
         request.input.instructions[slot].clear();
     }
+    phase
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2522,17 +2561,6 @@ async fn invoke_tool_calls(
     let completed = step.call_order.iter().map(|id| step.calls.get(id).and_then(|pending| pending.completed.clone())
         .ok_or_else(|| AgentEngineError::InvalidModelEvent("incomplete tool call".into())))
         .collect::<Result<Vec<_>, _>>()?;
-    if let Some(results) = crate::tool::reject_unexposed_batch(&completed, &model_request.input.tools) {
-        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
-        // This precedes control handlers, instruction discovery and platform
-        // admission. No internal control or workspace effect ran.
-        // The ordinary result path records all call/result pairs and feeds the
-        // error back on the next bounded model step, without transport replay.
-        // No control, discovery, admission or owner effect ran. A rejected
-        // proposed name cannot change the trusted cause of a settled gate.
-        completion.invalidate_report();
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
-    }
     if let Some(results) = argument_validators.reject_invalid_batch(&completed, plan, &model_request.input.tools)? {
         // This precedes instruction discovery, Kernel admission and controls.
         // All calls receive paired, non-executed results; no successful prefix
@@ -6156,7 +6184,7 @@ mod tests {
             control_step("unrequested-repeat", "exec_command", json!({"command":"bun","args":["test"]})),
             control_step("account", "report_completion", json!({
                 "summary":"The diagnostic exited with code 1; the additional command was not executed.",
-                "observed_tool_error_count":3,"observed_command_failure_count":1,
+                "observed_tool_error_count":1,"observed_command_failure_count":1,
                 "criteria":[{"disposition":"unverified","rationale":"Only the original diagnostic result is disclosed; no repeated command ran."}]
             })),
             text_step("No more work is authorized"),text_step("No more work is authorized"),
@@ -6174,8 +6202,106 @@ mod tests {
         assert_eq!(model.requests.lock().unwrap().len(),5);
         assert_eq!(model.requests.lock().unwrap()[4].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
             [crate::completion::TOOL_NAME], "a rejected proposal must not reopen the completion review's action surface");
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
         assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn completion_review_repeated_ssh_proposals_preserve_same_turn_timeout_and_success_receipts() {
+        #[derive(Default)]
+        struct SshReceipts(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for SshReceipts {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                assert_eq!(invocation.binding.action_id.as_ref(), "ssh/exec");
+                let timeout = match invocation.call.call_id.as_ref() {
+                    "ssh-timeout" => true,
+                    "ssh-followup" => false,
+                    other => panic!("a report-only proposal must never reach the owner: {other}"),
+                };
+                // These are the real SSH owner's settled result shapes. An
+                // expected remote timeout is a returned diagnostic, not an
+                // uncertain effect or a workspace-process launch failure.
+                let receipt = if timeout {
+                    json!({"status":"timed_out","stdout":"NOMIFUN_TIMEOUT_BEGIN_s9k4","exit_code":124,"timed_out":true})
+                } else {
+                    json!({"status":"succeeded","stdout":"NOMIFUN_AFTER_TIMEOUT_s9k4\nrika","exit_code":0,"timed_out":false})
+                };
+                Ok(AgentToolResult::text(invocation.call.call_id, receipt.to_string(), false))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let first = json!({"timeout_ms":1000,"command":"printf 'NOMIFUN_TIMEOUT_BEGIN_s9k4\\n'; sleep 4; printf 'NOMIFUN_UNEXPECTED_AFTER_SLEEP_s9k4\\n'"});
+        let second = json!({"timeout_ms":10000,"command":"printf 'NOMIFUN_AFTER_TIMEOUT_s9k4\\n'; whoami"});
+        let mut original = control_step("ssh-timeout", "ssh_exec", first.clone());
+        original.pop();
+        original.extend(control_step("ssh-followup", "ssh_exec", second.clone()));
+        let mut repeat = control_step("repeat-timeout", "ssh_exec", first.clone());
+        repeat.pop();
+        repeat.extend(control_step("repeat-followup", "ssh_exec", second.clone()));
+        let summary = "第1次 stdout=NOMIFUN_TIMEOUT_BEGIN_s9k4，exit_code=124，timed_out=true；第2次 stdout=NOMIFUN_AFTER_TIMEOUT_s9k4\nrika，exit_code=0，timed_out=false。两次命令已在本回合执行，未重试。";
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+            original,
+            text_step(summary),
+            repeat,
+            control_step("truthful-account", "report_completion", json!({
+                "summary":summary,"observed_tool_error_count":0,"observed_command_failure_count":0,
+                "criteria":[
+                    {"disposition":"supported","evidence_call_ids":["ssh-timeout"],"rationale":"The original receipt records the expected timeout, exit 124 and exact stdout."},
+                    {"disposition":"supported","evidence_call_ids":["ssh-followup"],"rationale":"The original follow-up receipt records exit zero and exact stdout."}
+                ]
+            })),
+        ]) });
+        let plan = AgentToolPlan::new([tool_binding("ssh_exec", "ssh", "ssh/exec", AgentEffectClass::ExternalUncertainEffect, false)]).unwrap();
+        let mut initial = request();
+        initial.input.messages[0].content = vec![ChatContentPart::Text { text:
+            "顺序调用 ssh_exec 两次，不要合并、不要重试：先验收指定的超时，再执行指定的 whoami。每次报告原始 stdout、exit_code、timed_out。".into() }];
+        let tools = Arc::new(SshReceipts::default());
+        let sink = Arc::new(Sink::default());
+        let result = run_turn(binding(), model.clone(), tools.clone(), sink.clone(),
+            AgentTurnRequest::new(initial, plan, principal(), 0).with_max_model_steps(4),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(*tools.0.lock().unwrap(), ["ssh-timeout", "ssh-followup"]);
+        assert!(result.output_text.contains("exit_code=124") && result.output_text.contains("timed_out=true"));
+        assert!(result.output_text.contains("NOMIFUN_AFTER_TIMEOUT_s9k4\nrika"));
+        assert!(!result.output_text.contains("未执行") && !result.output_text.contains("未成功的操作尝试"));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[2..] {
+            assert_eq!(request.input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(), [crate::completion::TOOL_NAME]);
+            let properties = &request.input.tools[0].input_schema.0["properties"];
+            assert_eq!(properties["observed_tool_error_count"]["const"], 0);
+            assert_eq!(properties["observed_command_failure_count"]["const"], 0);
+            assert_eq!(properties["criteria"]["items"]["properties"]["evidence_call_ids"]["items"]["enum"], json!(["ssh-followup", "ssh-timeout"]));
+        }
+        for id in ["repeat-timeout", "repeat-followup"] {
+            let feedback = requests[3].input.messages.iter().flat_map(|message| &message.content).find_map(|part| match part {
+                ChatContentPart::ToolResult { call_id, output, is_error: true } if call_id.as_ref() == id => output.iter().find_map(|part| match part {
+                    nomifun_chat_model_broker::ChatToolResultPart::Text { text } => serde_json::from_str::<serde_json::Value>(text).ok(),
+                    _ => None,
+                }),
+                _ => None,
+            }).expect("paired phase correction");
+            assert_eq!(feedback["code"], "REPORT_ONLY_ACTION_CLOSED");
+        }
+        let events = sink.0.lock().unwrap();
+        let observations = events.iter().filter_map(|event| match event {
+            AgentEngineEvent::CompletionObservation { observation } => Some(observation), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(observations.len(), 2, "phase corrections must not pollute the actual work ledger");
+        assert!(observations.iter().all(|observation| observation.invocation_attempted));
+        assert!(events.iter().filter_map(|event| match event {
+            AgentEngineEvent::WorkStatus { status } => Some(status), _ => None,
+        }).all(|status| status.failed_tools == 0 && status.failed_commands == 0));
     }
 
     #[tokio::test]
@@ -6365,7 +6491,7 @@ mod tests {
             control_step("settled-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"completed"}]})),
             control_step("bad-report","report_completion",report(2)),
             control_step("recreated-file","write_file",json!({"path":"a","content":"replayed"})),
-            control_step("fixed-report","report_completion",report(3)),
+            control_step("fixed-report","report_completion",report(2)),
             text_step("must not replay completed work"),
         ])});
         let tools=Arc::new(HealthyTools::default());
@@ -6383,7 +6509,7 @@ mod tests {
         let result=result.unwrap();
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
         assert_eq!(model.requests.lock().unwrap()[6].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
         let requests=model.requests.lock().unwrap();
         assert!(requests[1].input.tools.iter().any(|tool|tool.name=="update_plan"));
         assert!(requests[1].input.messages.iter().flat_map(|message|&message.content).any(|part|
@@ -6468,7 +6594,7 @@ mod tests {
             control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
             control_step("bad-report","report_completion",report(0)),
             control_step("reopen","update_plan",json!({"plan":[{"step":"Repeat the settled diagnostic","status":"in_progress"}]})),
-            control_step("fixed-report","report_completion",report(3)),
+            control_step("fixed-report","report_completion",report(2)),
             text_step("must not request more work"),
         ])});
         let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
@@ -6485,8 +6611,8 @@ mod tests {
             [crate::completion::TOOL_NAME],"a rejected terminal account must not advertise a plan reset or repeat effect");
         assert_eq!(requests[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
         assert_eq!(model.steps.lock().unwrap().len(),1);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"),
-            "the rejected account and plan reset each remain a counted unsuccessful attempt");
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"),
+            "the real command failure and rejected account remain counted; the report-only plan proposal is a phase correction");
     }
 
     #[tokio::test]
@@ -7887,6 +8013,114 @@ mod tests {
         let history = serde_json::to_string(&history).unwrap();
         assert!(!history.contains("ABANDONED_MODEL_OUTPUT") && !history.contains("NEVER_EXECUTE"));
         assert!(history.contains("preserve"));
+    }
+
+    #[tokio::test]
+    async fn native_resume_preserves_report_only_phase_and_its_independent_correction_budget() {
+        #[derive(Default)]
+        struct Journal {
+            events: std::sync::Mutex<Vec<AgentEngineEvent>>,
+            checkpoints: std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Journal {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, state: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                state.validate()?;
+                let mut checkpoints = self.checkpoints.lock().unwrap();
+                let revision = checkpoints.len() as u64 + 1;
+                let digest = nomifun_agent_contracts::digest_payload(&state).unwrap();
+                let mut events = self.events.lock().unwrap();
+                events.push(AgentEngineEvent::ExecutionCheckpointSaved { step: state.model_steps, revision, digest: digest.clone() });
+                checkpoints.push(state);
+                Ok(Some(crate::AgentCheckpointReceipt { revision, through_seq: events.len() as u64, digest }))
+            }
+        }
+        struct InterruptedModel {
+            steps: std::sync::Mutex<Vec<Vec<Result<ChatModelEvent, ChatModelError>>>>,
+            pending: Arc<Notify>,
+        }
+        #[async_trait]
+        impl AgentModelPort for InterruptedModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                let next = { let mut steps = self.steps.lock().unwrap(); if steps.is_empty() { None } else { Some(steps.remove(0)) } };
+                if let Some(events) = next { return Ok(Box::pin(stream::iter(events))); }
+                self.pending.notify_one();
+                std::future::pending().await
+            }
+        }
+        #[derive(Default)]
+        struct SshOwner(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl AgentToolInvoker for SshOwner {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                let receipt = match invocation.call.call_id.as_ref() {
+                    "original-timeout" => json!({"status":"timed_out","stdout":"TIMEOUT_BEGIN","exit_code":124,"timed_out":true}),
+                    "original-followup" => json!({"status":"succeeded","stdout":"AFTER_TIMEOUT\nrika","exit_code":0,"timed_out":false}),
+                    other => panic!("resume must not reopen settled actions: {other}"),
+                };
+                Ok(AgentToolResult::text(invocation.call.call_id, receipt.to_string(), false))
+            }
+        }
+        for refused_before_restart in [0, 1, 3] {
+            let mut original = control_step("original-timeout", "ssh_exec", json!({"command":"timeout diagnostic"}));
+            original.pop(); original.extend(control_step("original-followup", "ssh_exec", json!({"command":"whoami"})));
+            let mut steps = vec![original, text_step("Original timeout exit 124 and follow-up exit 0 were observed in this turn.")];
+            for index in 0..refused_before_restart {
+                steps.push(control_step(&format!("refused-before-{index}"), "ssh_exec", json!({"command":"whoami"})));
+            }
+            let pending = Arc::new(Notify::new());
+            let journal = Arc::new(Journal::default());
+            let tools = Arc::new(SshOwner::default());
+            let plan = AgentToolPlan::new([
+                tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+                tool_binding("ssh_exec", "ssh", "ssh/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            ]).unwrap();
+            let original_request = AgentTurnRequest::new(request(), plan, principal(), 0).with_max_model_steps(512);
+            let running = tokio::spawn(run_turn(binding(), Arc::new(InterruptedModel { steps: std::sync::Mutex::new(steps), pending: pending.clone() }),
+                tools.clone(), journal.clone(), original_request.clone(), AgentContextBudget::default(), CancellationToken::new()));
+            tokio::time::timeout(Duration::from_secs(2), pending.notified()).await.unwrap();
+            running.abort(); assert!(running.await.unwrap_err().is_cancelled());
+            let checkpoint = journal.checkpoints.lock().unwrap().last().cloned().unwrap();
+            let checkpoint: crate::AgentExecutionCheckpoint = serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
+            assert_eq!(checkpoint.completion_review.phase, AgentExecutionPhase::CompletionReview);
+            assert_eq!(checkpoint.control_rejections.phase_corrections, refused_before_restart);
+            assert_eq!(checkpoint.work.failed_tools, 0);
+            let recorded = journal.events.lock().unwrap().clone();
+            let through = recorded.iter().rposition(|event| matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. })).unwrap() + 1;
+            let revision = match &recorded[through - 1] { AgentEngineEvent::ExecutionCheckpointSaved { revision, .. } => *revision, _ => unreachable!() };
+            let recovery = crate::AgentTurnRecovery::new(checkpoint, revision, 1, recorded[..through].to_vec(), recorded[through..].to_vec(), vec![]).unwrap();
+            let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+                control_step("fresh-id-after-restart", "ssh_exec", json!({"command":"whoami"})),
+                control_step("account-after-restart", "report_completion", json!({
+                    "summary":"Earlier original receipts recorded TIMEOUT_BEGIN, exit 124, timed_out=true and AFTER_TIMEOUT\\nrika, exit 0, timed_out=false; no command was repeated and no fresh state is claimed.",
+                    "observed_tool_error_count":0,"observed_command_failure_count":0,
+                    "criteria":[{"disposition":"unverified","rationale":"Recovery preserves earlier results but drops their current-state evidence eligibility."}]
+                })),
+            ]) });
+            let result = run_turn(binding(), model.clone(), tools.clone(), journal.clone(), original_request.with_recovery(recovery),
+                AgentContextBudget::default(), CancellationToken::new()).await;
+            assert_eq!(*tools.0.lock().unwrap(), ["original-timeout", "original-followup"]);
+            let requests = model.requests.lock().unwrap();
+            assert!(requests.iter().all(|request| request.input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>() == [crate::completion::TOOL_NAME]));
+            let resumed_context = serde_json::to_string(&requests[0].input).unwrap();
+            assert!(resumed_context.contains("TIMEOUT_BEGIN") && resumed_context.contains("AFTER_TIMEOUT"));
+            if refused_before_restart == 3 {
+                assert!(matches!(result, Err(AgentEngineError::TurnFailed(reason)) if reason.contains("report-only phase rejected four")));
+                assert_eq!(requests.len(), 1, "restart cannot renew the phase-correction budget toward the 512-step turn cap");
+            } else {
+                assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Completed { .. }));
+                assert_eq!(requests.len(), 2);
+            }
+            assert!(journal.events.lock().unwrap().iter().filter_map(|event| match event {
+                AgentEngineEvent::WorkStatus { status } => Some(status), _ => None,
+            }).all(|status| status.failed_tools == 0 && status.failed_commands == 0));
+        }
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 
 import { useConversationListSync } from './hooks/useConversationListSync';
+import { conversationSshHostId } from '../utils/conversationSshBinding';
 
 interface Props {
   /** Active conversation id parsed from the `/conversation/:id` route. */
@@ -35,7 +36,7 @@ interface Props {
 /**
  * 会话侧边栏顶部的「SSH 会话」专属分组（设计 §10 的顶层独立分组）。
  *
- * 绑定了远程主机的会话（`extra.ssh_host_id`）被 `isOrdinaryWorkConversation`
+ * 当前 canonical binding 绑定远程主机的会话被 `isOrdinaryWorkConversation`
  * 排除出普通工作会话列表 —— 那个排除是对的（远程会话有自己的归属），但在本组
  * 落地之前它等于「建完一切走就再也找不回来」。本组补上缺的另一半：
  *
@@ -72,7 +73,7 @@ const SshSessionGroup: React.FC<Props> = ({
   const hostGroups = useMemo(() => {
     const byHost = new Map<SshHostId, TChatConversation[]>();
     for (const conversation of sshConversations) {
-      const sshHostId = (conversation.extra as { ssh_host_id?: SshHostId } | undefined)?.ssh_host_id;
+      const sshHostId = conversationSshHostId(conversation);
       if (sshHostId == null) continue;
       const bucket = byHost.get(sshHostId);
       if (bucket) bucket.push(conversation);

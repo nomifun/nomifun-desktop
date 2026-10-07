@@ -194,7 +194,7 @@ define_entity_id!(
     /// Globally unique SSH host identifier.
     ///
     /// Identifies a saved, reusable SSH connection profile in the `ssh_hosts`
-    /// table. Referenced from `conversations.extra.$.ssh_host_id`.
+    /// table. Canonical Agent bindings reference it as an `ssh_host` resource.
     SshHostId
 );
 define_entity_id!(
