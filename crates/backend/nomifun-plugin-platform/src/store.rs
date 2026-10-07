@@ -1474,7 +1474,7 @@ where
     deserializer
         .end()
         .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))?;
-    serde_json::from_value(value)
+    serde_path_to_error::deserialize::<_, T>(value)
         .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))
 }
 
@@ -1571,5 +1571,40 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
             values.insert(key, value);
         }
         Ok(Value::Object(values))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_errors_name_the_action_path() {
+        let manifest = br#"{
+            "schema": "test",
+            "id": "test.plugin",
+            "version": "1.0.0",
+            "name": "Test",
+            "description": "test plugin",
+            "hostApi": "1",
+            "entrypoints": {"service": "service/main.mjs"},
+            "actions": {
+                "trimAndUppercase": {
+                    "description": "trims",
+                    "input": {},
+                    "output": {},
+                    "effect": "read"
+                }
+            }
+        }"#;
+        let error = strict_json_from_slice::<PluginManifest>(manifest).unwrap_err();
+        let PluginArtifactStoreError::InvalidManifest(message) = error else {
+            panic!("expected InvalidManifest, got {error:?}");
+        };
+        assert!(
+            message.contains("actions.trimAndUppercase"),
+            "expected the action path in {message:?}"
+        );
+        assert!(message.contains("name"), "expected the missing field in {message:?}");
     }
 }

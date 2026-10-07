@@ -279,6 +279,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_creation_tools.rs"),
                     include_str!("automatic_creation_route.rs"),
                     include_str!("automatic_turn_intent.rs"),
+                    include_str!("plugin_delivery_route.rs"),
+                    include_str!("plugin_delivery_check.rs"),
                     include_str!("workspace_file_read.rs"),
                     include_str!("engine_history.rs")
                 )
@@ -792,7 +794,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .source_message_id
             .as_deref()
             .unwrap_or(&message.msg_id);
-        let admitted = self.admit_preparation(message, cancellation.clone()).await?;
+        let admitted = Arc::new(self.admit_preparation(message, cancellation.clone()).await?);
         // One trusted observation freezes inference settings for THIS Turn.
         // A save before capture must still match the original exact graph;
         // a save afterward cannot mix its new budget/wire fields into this Turn.
@@ -951,13 +953,56 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.options.delegation_policy,
             turn_plan,
         );
-        let mut turn_plan = collaboration.tool_plan;
+        let turn_plan = collaboration.tool_plan;
         let tool_choice = collaboration.tool_choice;
         instructions.extend(collaboration.instructions);
         // Media intent is a presentation hint. Keep the full authorized
         // surface: text classification must not erase workspace or other tools.
+        let mut preactivated_tools = Vec::new();
+        let mut plugin_delivery_check = false;
         if !collaboration.forced {
-            let automatic_creation_route =
+            // An explicit Plugin delivery obligation outranks the media hint:
+            // the host completion gate only accepts an installed plugin, so
+            // the model must see the exact authorized plugin.development
+            // functions now. Conversation-owned drafts alone are neutral
+            // context and never displace the media hint.
+            let plugin_requirement = receipt
+                .get("plugin_delivery")
+                .filter(|value| !value.is_null())
+                .map(|value| {
+                    serde_json::from_value::<nomifun_api_types::PluginDeliveryRequirement>(
+                        value.clone(),
+                    )
+                    .map_err(|error| AppError::Conflict(error.to_string()))
+                })
+                .transpose()?;
+            let mut plugin_obligation = false;
+            if super::plugin_delivery_route::has_plugin_development(&turn_plan) {
+                // The observer starts dormant when this ordinary conversation
+                // has no draft or explicit delivery request. A later accepted
+                // plugin plan can still create host-owned delivery facts, so
+                // natural authoring needs the same watchdog/settlement port.
+                // Routing continues to control only presentation and guidance.
+                plugin_delivery_check = true;
+                let drafts = self
+                    .session_host
+                    .conversation_plugin_drafts(
+                        &admitted.session().principal().principal_id,
+                        &response.conversation_id,
+                    )
+                    .await?;
+                if let Some(route) = super::plugin_delivery_route::route(
+                    &turn_plan,
+                    plugin_requirement.as_ref(),
+                    &drafts,
+                ) {
+                    preactivated_tools.extend(route.preactivated);
+                    instructions.push(route.instruction);
+                    plugin_obligation = route.obligation;
+                }
+            }
+            if !plugin_obligation
+                && let Some(route) =
                 super::automatic_creation_route::classify(&message.content).filter(|route| {
                     turn_plan
                         .model_name_for_action(
@@ -965,12 +1010,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                             route.action_id(),
                         )
                         .is_some()
-                });
-            if let Some(route) = automatic_creation_route.as_ref() {
+                })
+            {
                 let tool_name = turn_plan.model_name_for_action(
                     super::engine_creation_tools::CREATION_CAPABILITY_ID, route.action_id(),
                 ).expect("route was filtered against the frozen tool plan").to_owned();
-                turn_plan = route.expose(&turn_plan)?;
+                preactivated_tools.push(tool_name.clone());
                 instructions.push(route.instruction(&tool_name));
             }
         }
@@ -1014,6 +1059,31 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 metadata: Default::default(),
             },
         };
+        // The settlement check relays the planned current-conversation call
+        // only when the rebuilt turn actually binds the installed Plugin
+        // Action under its stable capability id.
+        let attached_plugin_tools: std::collections::BTreeMap<String, String> =
+            if plugin_delivery_check {
+                turn_plan
+                    .model_definitions()
+                    .iter()
+                    .filter_map(|definition| {
+                        let binding = turn_plan.binding(&definition.name)?;
+                        binding
+                            .capability_id
+                            .as_ref()
+                            .starts_with(nomifun_agent_contracts::plugin::PLUGIN_ACTION_ID_PREFIX)
+                            .then(|| {
+                                (
+                                    binding.capability_id.as_ref().to_owned(),
+                                    binding.model_name.clone(),
+                                )
+                            })
+                    })
+                    .collect()
+            } else {
+                Default::default()
+            };
         let mut request = AgentTurnRequest::new(
             request,
             turn_plan,
@@ -1021,6 +1091,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             capabilities.generation,
         ).with_model_budget(model_budget).with_context_resources(self.skills.resources.clone())
             .with_execution_segments(nomifun_agent_runtime::AgentSegmentPolicy::default())
+            .with_preactivated_tools(preactivated_tools)
             .with_context_image_input(context_image_input)
             .with_prior_task(prior_task)
             .with_patch_recovery(patch_recovery)
@@ -1028,6 +1099,15 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         request.unscoped_tool_hooks = self.resources.has_unscoped_tool_hooks();
         if let Some(port)=self.active.lock().await.as_ref().and_then(|turn|turn.voice_control.clone()) {
             request=request.with_voice_immediate_correction(port);
+        }
+        if plugin_delivery_check {
+            request = request.with_completion_check_port(Arc::new(
+                super::plugin_delivery_check::PluginDeliveryCheck::new(
+                    self.session_host.clone(),
+                    admitted.clone(),
+                    attached_plugin_tools.clone(),
+                ),
+            ));
         }
         if self.resources.mcp_resources_selected() {
             request = request.with_resource_port(self.capability_port.clone());

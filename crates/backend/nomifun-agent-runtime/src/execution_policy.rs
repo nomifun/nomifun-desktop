@@ -13,8 +13,14 @@ use crate::{AgentToolBinding, AgentToolResult};
 /// requirements and completion accounting. Explicit `update_plan`, steering,
 /// and task continuation can still activate the ledger independently.
 pub(crate) fn requires_task_ledger(binding: &AgentToolBinding) -> bool {
+    requires_task_ledger_capability(binding.capability_id.as_ref())
+}
+
+/// Capabilities whose tools require the task ledger; journaled ToolStarted
+/// events use the same list to reconstruct "this turn did ledger work".
+pub(crate) fn requires_task_ledger_capability(capability_id: &str) -> bool {
     matches!(
-        binding.capability_id.as_ref(),
+        capability_id,
         "workspace.files"
             | "workspace.vcs"
             | "workspace.process"

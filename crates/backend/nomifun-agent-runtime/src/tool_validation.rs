@@ -80,7 +80,7 @@ impl ToolArgumentValidators {
         Ok(Some(calls.iter().map(|call| {
             let issues = failures.get(&call.call_id);
             let message = if calls.len() == 1 && issues.is_some() && call.name == crate::completion::TOOL_NAME {
-                "No call in this batch was executed. Repair only the completion arguments using the current advertised schema and a fresh call ID; do not rerun settled commands or tests, reset their plan steps, or infer that earlier work disappeared. Counter issues describe the old schema before this refusal. Copy correction_counters_after_rejected_batch, including this rejected batch, then the next advertised runtime count constants; do not copy an old issue's expected count. An intentionally nonzero test still counts. For an ineligible read/search/Git ID, describe the earlier observation separately and use unverified with no evidence for current-state claims; never substitute an unrelated eligible ID. Do not repeat observations solely to repair this account unless the user explicitly requires fresh verification. This parameter error alone does not require replanning."
+                "No call in this batch was executed. Repair only the completion arguments using the current advertised schema and a fresh call ID; do not rerun settled commands or tests, reset their plan steps, or infer that earlier work disappeared. Counter issue expected values already include this rejected batch; use them (equal to correction_counters_after_rejected_batch) unchanged in the next report. An intentionally nonzero test still counts. For an ineligible read/search/Git ID, describe the earlier observation separately and use unverified with no evidence for current-state claims; never substitute an unrelated eligible ID. Do not repeat observations solely to repair this account unless the user explicitly requires fresh verification. This parameter error alone does not require replanning."
             } else {
                 "No call in this batch was executed. Correct the arguments using the advertised schema, then propose the batch with fresh call IDs. For unions, field issues describe the closest candidate variant; the entire original schema still applies. Earlier batches are unchanged; do not repeat their effects. This parameter error alone does not require replanning."
             };
@@ -91,8 +91,61 @@ impl ToolArgumentValidators {
                 "issues":issues,
                 "message":message,
             });
+            // An optional parameter supplied as "" or null is the model
+            // emitting a field it does not use; name the parameters to drop
+            // so the repair is omission, not guessing a value.
+            if let (Some(issues), Some(definition)) =
+                (issues, exposed.iter().find(|tool| tool.name == call.name))
+            {
+                let required = &definition.input_schema.0["required"];
+                let is_required = |name: &str| required.as_array().is_some_and(|list|
+                    list.iter().any(|entry| entry.as_str() == Some(name)));
+                let mut omittable = Vec::new();
+                for issue in issues.iter().filter_map(|issue| {
+                    let path = issue["parameter_path_template"].as_str()?;
+                    let name = path.strip_prefix('/')?;
+                    (!name.is_empty() && !name.contains('/')).then_some((path, name))
+                }) {
+                    let (path, name) = issue;
+                    if is_required(name) || omittable.iter().any(|seen| seen == path) { continue; }
+                    let supplied = &call.arguments.0[name];
+                    let failed_empty = supplied.as_str() == Some("")
+                        && issues.iter().any(|issue| issue["parameter_path_template"].as_str() == Some(path)
+                            && matches!(issue["schema_path"].as_str(), Some(p) if p.ends_with("/minLength") || p.ends_with("/pattern")));
+                    let failed_null = supplied.is_null()
+                        && issues.iter().any(|issue| issue["parameter_path_template"].as_str() == Some(path)
+                            && matches!(issue["schema_path"].as_str(), Some(p) if p.ends_with("/type")));
+                    if failed_empty || failed_null { omittable.push(path.to_owned()); }
+                }
+                if !omittable.is_empty() {
+                    payload["omit_optional_parameters"] = json!(omittable);
+                    payload["message"] = json!(format!(
+                        "{} Omit optional parameters you do not use; never send empty strings or null for them.",
+                        payload["message"].as_str().unwrap_or_default()));
+                }
+            }
             if let Some(counters) = &correction_counters {
                 payload["correction_counters_after_rejected_batch"] = counters.clone();
+            }
+            // The advertised counter const/enum constants predate this
+            // rejected batch; the rejection itself is counted, so a copied
+            // `expected` would still be stale. Rewrite them to the corrected
+            // totals carried beside them.
+            if calls.len() == 1 && call.name == crate::completion::TOOL_NAME
+                && let Some(counters) = &correction_counters
+                && let Some(items) = payload["issues"].as_array_mut()
+            {
+                for issue in items {
+                    let Some(path) = issue["schema_path"].as_str() else { continue };
+                    let corrected = if path.ends_with("/observed_tool_error_count/const")
+                        || path.ends_with("/observed_tool_error_count/enum") {
+                        Some(counters["observed_tool_error_count"].clone())
+                    } else if path.ends_with("/observed_command_failure_count/const")
+                        || path.ends_with("/observed_command_failure_count/enum") {
+                        Some(counters["observed_command_failure_count"].clone())
+                    } else { None };
+                    if let Some(value) = corrected { issue["expected"] = value; }
+                }
             }
             if calls.len() == 1 && call.name == crate::completion::TOOL_NAME && issues.is_some()
                 && let Some(definition) = exposed.iter().find(|tool| tool.name == call.name)
@@ -257,6 +310,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_or_null_optional_parameters_are_named_for_omission() {
+        let (plan, exposed) = fixture(json!({"type":"object","required":["path"],"properties":{
+            "path":{"type":"string"},
+            "draft_id":{"type":"string","minLength":1},
+            "plugin_id":{"type":"string"},
+            "note":{"type":"string","minLength":1}
+        }}));
+        let mut validators = ToolArgumentValidators::default();
+        let results = validators.reject_invalid_batch(&[call("open", json!({
+            "path":"a","draft_id":"","plugin_id":null,"note":"ok"
+        }))], &plan, &exposed).unwrap().unwrap();
+        let payload:Value = serde_json::from_str(&results[0].1.as_ref().unwrap().output_text()).unwrap();
+        assert_eq!(payload["omit_optional_parameters"], json!(["/draft_id","/plugin_id"]), "{payload}");
+        assert!(payload["message"].as_str().unwrap().contains(
+            "Omit optional parameters you do not use; never send empty strings or null for them."), "{payload}");
+        assert!(validators.reject_invalid_batch(&[call("fixed", json!({"path":"a","note":"x"}))],
+            &plan, &exposed).unwrap().is_none());
+    }
+
+    #[test]
     fn local_schema_references_work_and_external_references_never_read_io() {
         let (plan, exposed) = fixture(json!({"$defs":{"input":{"type":"object","required":["path"]}},"$ref":"#/$defs/input"}));
         let mut validators = ToolArgumentValidators::default();
@@ -379,7 +452,7 @@ mod tests {
         assert_eq!(value["correction_counters_after_rejected_batch"], json!({
             "observed_tool_error_count":2,"observed_command_failure_count":1
         }));
-        assert!(text.contains("including this rejected batch"));
+        assert!(text.contains("Counter issue expected values already include this rejected batch"));
         assert!(text.contains("INVALID_TOOL_ARGUMENTS"));
         assert!(text.contains("/criteria/*/evidence_call_ids/*"));
         assert!(text.contains("/observed_tool_error_count"));
@@ -391,6 +464,47 @@ mod tests {
             "observed_tool_error_count":1,"criteria":[{"disposition":"unverified","rationale":"No current file evidence"}]}));
         corrected.name = crate::completion::TOOL_NAME.into();
         assert!(validators.reject_invalid_batch(&[corrected], &AgentToolPlan::default(), &[definition]).unwrap().is_none());
+    }
+
+    #[test]
+    fn counter_rejection_issue_expected_is_already_the_corrected_total() {
+        // The rejection itself counts as a tool error, so the advertised
+        // const/enum constants are stale inside the rejection issues; they
+        // must publish the corrected totals a copy of `expected` can satisfy.
+        let mut definition = crate::completion::definition();
+        definition.input_schema.0["properties"]["observed_tool_error_count"]["const"] = json!(2);
+        definition.input_schema.0["properties"]["observed_tool_error_count"]["enum"] = json!([2]);
+        definition.input_schema.0["properties"]["observed_command_failure_count"]["const"] = json!(1);
+        definition.input_schema.0["properties"]["observed_command_failure_count"]["enum"] = json!([1]);
+        let mut stale = call("stale-report", json!({"summary":"PRIVATE_REPORT_BODY",
+            "observed_tool_error_count":1,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"PRIVATE_RATIONALE"}]}));
+        stale.name = crate::completion::TOOL_NAME.into();
+        let mut validators = ToolArgumentValidators::default();
+        let rejected = validators.reject_invalid_batch(&[stale], &AgentToolPlan::default(), &[definition.clone()])
+            .unwrap().unwrap();
+        let payload: Value = serde_json::from_str(&rejected[0].1.as_ref().unwrap().output_text()).unwrap();
+        assert_eq!(payload["correction_counters_after_rejected_batch"], json!({
+            "observed_tool_error_count":3,"observed_command_failure_count":1}));
+        let counter_issues = payload["issues"].as_array().unwrap().iter()
+            .filter(|issue| issue["schema_path"].as_str().unwrap_or_default()
+                .contains("/observed_tool_error_count/"))
+            .collect::<Vec<_>>();
+        assert!(!counter_issues.is_empty(), "counter-only rejection must still report its issues: {payload}");
+        for issue in &counter_issues {
+            assert_eq!(issue["expected"], json!(3),
+                "a copied expected must satisfy the next advertised constant: {payload}");
+        }
+        // The next advertised constant is the corrected total; copying the
+        // issue's expected repairs the account on the first retry.
+        definition.input_schema.0["properties"]["observed_tool_error_count"]["const"] = json!(3);
+        definition.input_schema.0["properties"]["observed_tool_error_count"]["enum"] = json!([3]);
+        let mut fixed = call("fresh-report", json!({"summary":"PRIVATE_REPORT_BODY",
+            "observed_tool_error_count":payload["correction_counters_after_rejected_batch"]["observed_tool_error_count"],
+            "observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"PRIVATE_RATIONALE"}]}));
+        fixed.name = crate::completion::TOOL_NAME.into();
+        assert!(validators.reject_invalid_batch(&[fixed], &AgentToolPlan::default(), &[definition]).unwrap().is_none());
     }
 
     #[test]

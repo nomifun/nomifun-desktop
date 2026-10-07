@@ -78,6 +78,10 @@ impl AdaptiveExecution {
         self.active.contains(&AgentRuntimeModule::TaskLedger)
     }
 
+    pub(crate) fn tool_loop(&self) -> bool {
+        self.active.contains(&AgentRuntimeModule::ToolLoop)
+    }
+
     pub(crate) fn tool_history(&self) -> bool {
         self.active.contains(&AgentRuntimeModule::ToolHistory)
     }

@@ -40,7 +40,6 @@ import React, {
 import { useTranslation } from 'react-i18next';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import { PLUGIN_DEVELOPMENT_MODULE } from '@/common/types/pluginDevelopment';
-import { PLUGIN_FEATURE_VISIBLE } from '@/renderer/utils/plugins/pluginFeatureAvailability';
 import { launchPluginConversation, readPluginLaunchIntent, consumePluginLaunchIntent } from '../plugins/pluginConversationLaunch';
 import type { PluginLaunchIntent } from '../plugins/pluginConversationLaunch';
 import { initialPluginDelivery } from '../plugins/pluginConversationRequest';
@@ -98,9 +97,7 @@ const GuidPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
-  const pluginIntentToken = PLUGIN_FEATURE_VISIBLE
-    ? new URLSearchParams(location.search).get('pluginIntent')
-    : null;
+  const pluginIntentToken = new URLSearchParams(location.search).get('pluginIntent');
   const [pluginLaunchError, setPluginLaunchError] = useState('');
   const [pluginLaunch, setPluginLaunch] = useState<{ intent: PluginLaunchIntent; bootstrap: string } | null>(null);
   const appliedPluginIntent = useRef<string | null>(null);

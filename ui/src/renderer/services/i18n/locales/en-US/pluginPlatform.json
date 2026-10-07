@@ -18,6 +18,7 @@
     "replyPlaceholder": "Add the missing information. Use a configured credential reference rather than entering a secret in chat.",
     "replyContinue": "Send and continue this task",
     "continueTaskPrompt": "Continue the original plugin task, complete its unmet required behavior, verification, installation and delivery checks, and retain the existing work.",
+    "continueCurrentConversationPrompt": "The plugin tool is now attached to this conversation. Call the tool for the planned current-conversation case with the planned input, check its output, then give the result; do not recreate or reinstall the plugin.",
     "approvalHint": "This plugin needs additional execution privileges. Review the actual code capabilities and permissions, then continue in this conversation.",
     "accept": "Allow this plugin to use the capabilities above",
     "approve": "Approve and continue",

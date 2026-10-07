@@ -5083,6 +5083,7 @@ export type I18nKey =
   | 'pluginPlatform.authoring.approvalHint'
   | 'pluginPlatform.authoring.approve'
   | 'pluginPlatform.authoring.continue'
+  | 'pluginPlatform.authoring.continueCurrentConversationPrompt'
   | 'pluginPlatform.authoring.continueTaskPrompt'
   | 'pluginPlatform.authoring.conversationHint'
   | 'pluginPlatform.authoring.createPrompt'

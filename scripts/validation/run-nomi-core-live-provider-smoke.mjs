@@ -23,6 +23,7 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --general-desktop-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --plugin-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --companion-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --creative-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --report .tmp-idmm-demo-report.json
@@ -71,12 +72,14 @@ const CODING_TEST_NAME = 'nomi_core_official_coding_agent_reaches_live_stepfun';
 const LONG_CODING_TEST_NAME = 'nomi_core_long_coding_reaches_live_stepfun';
 const GAME_TEST_NAME = 'nomi_core_snake_game_reaches_live_stepfun';
 const GENERAL_DESKTOP_TEST_NAME = 'nomi_core_general_desktop_reaches_live_stepfun';
+const PLUGIN_TEST_NAME = 'nomi_core_general_plugin_creation_reaches_live_stepfun';
+const PLUGIN_SUMMARY_FIELDS = ['steps', 'relays', 'protocol_rejections', 'tool_errors', 'pauses', 'approvals', 'task_continues', 'current_continues', 'plugin_tool_calls', 'list', 'open', 'read', 'plan', 'apply', 'check', 'preview', 'test_action', 'test_ui', 'install', 'inspect'];
 const COMPANION_TEST_NAME = 'nomi_core_official_companion_reaches_live_stepfun';
 const CREATIVE_TEST_NAME = 'nomi_core_official_creative_studio_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
 const IDMM_TEST_NAME = 'nomi_core_idmm_reaches_live_stepfun';
 const BEFORE_TOOL_STAGE_PHASES = ['before_tool.publish_select', 'before_tool.allow', 'before_tool.deny', 'before_tool.continuation'];
-const GLOBAL_TIMEOUT_MS = (process.argv.includes('--long-coding-smoke') ? 75 : 30) * 60 * 1000;
+const GLOBAL_TIMEOUT_MS = (process.argv.includes('--long-coding-smoke') ? 75 : process.argv.includes('--plugin-smoke') ? 60 : 30) * 60 * 1000;
 const CARGO_OUTPUT_LIMIT_BYTES = 32 * 1024 * 1024;
 const TEST_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
 const FAILURE_SENTINEL =
@@ -90,14 +93,15 @@ const codingSmoke = process.argv.includes('--coding-smoke');
 const longCodingSmoke = process.argv.includes('--long-coding-smoke');
 const gameSmoke = process.argv.includes('--game-smoke');
 const generalDesktopSmoke = process.argv.includes('--general-desktop-smoke');
+const pluginSmoke = process.argv.includes('--plugin-smoke');
 const companionSmoke = process.argv.includes('--companion-smoke');
 const creativeSmoke = process.argv.includes('--creative-smoke');
 const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
 const idmmSmoke = process.argv.includes('--idmm-smoke');
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : pluginSmoke ? PLUGIN_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : pluginSmoke ? 'general_plugin' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
@@ -340,6 +344,26 @@ function typedFailureFromOutput(output) {
   return null;
 }
 
+// Forward only the fixed counter names and bounded integers, never child text.
+function pluginSummaryFromLine(line) {
+  const prefix = 'NOMIFUN_LIVE_PLUGIN_SUMMARY ';
+  if (!line.startsWith(prefix) || line.length > 1000) return null;
+  const fields = line.slice(prefix.length).split(' ');
+  if (fields.length !== PLUGIN_SUMMARY_FIELDS.length) return null;
+  for (const [index, field] of fields.entries()) {
+    const match = field.match(/^([a-z_]+)=([0-9]{1,5})$/);
+    if (!match || match[1] !== PLUGIN_SUMMARY_FIELDS[index]) return null;
+  }
+  return fields.join(' ');
+}
+
+// Fixed-vocabulary call/pause tokens only: lowercase Action names, uppercase
+// host codes, '!' and ','. No child text can match this charset beyond them.
+function pluginFlowFromLine(line) {
+  const match = line.match(/^NOMIFUN_LIVE_PLUGIN_FLOW flow=([A-Za-z_!,]{0,1800})$/);
+  return match ? match[1] : null;
+}
+
 function selectedTestPassed(stdout, selected) {
   return stdout.split(/\r?\n/).some((line) => line === `test ${selected} ... ok`);
 }
@@ -435,7 +459,7 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--reasoning-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--plugin-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--report') return !idmmSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
@@ -448,7 +472,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, pluginSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -510,7 +534,7 @@ async function main() {
       'nomifun-app',
       '--test',
       TEST_TARGET,
-      ...(generalDesktopSmoke ? ['--features', 'browser-use,computer-use'] : []),
+      ...(generalDesktopSmoke || pluginSmoke ? ['--features', 'browser-use,computer-use'] : []),
       '--no-run',
       '--message-format=json-render-diagnostics',
     ],
@@ -682,6 +706,10 @@ async function main() {
     if (turnFailure) console.log(`live_smoke_turn_failure=${turnFailure[0].slice('NOMIFUN_LIVE_SMOKE_TURN_FAILURE '.length)}`);
     const runtimeProgress = line.match(/^NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS steps=([0-9]{1,5}) compact_calls=([0-9]{1,5}) compacted=([0-9]{1,5}) degraded=([0-9]{1,5}) reads=([0-9]{1,5}) execs=([0-9]{1,5}) writes=([0-9]{1,5}) reports=([0-9]{1,5})$/);
     if (runtimeProgress) console.log(`live_smoke_runtime_progress=${runtimeProgress[0].slice('NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS '.length)}`);
+    const pluginSummary = pluginSummaryFromLine(line);
+    if (pluginSummary) console.log(`live_smoke_plugin_summary=${pluginSummary}`);
+    const pluginFlow = pluginFlowFromLine(line);
+    if (pluginFlow !== null) console.log(`live_smoke_plugin_flow=${pluginFlow}`);
     const controlErrors = line.match(/^NOMIFUN_LIVE_SMOKE_CONTROL_ERRORS sequence=([A-Z_:,]{1,450})$/);
     if (controlErrors) console.log(`live_smoke_control_errors=${controlErrors[1]}`);
     const toolRejections = line.match(/^NOMIFUN_LIVE_SMOKE_TOOL_REJECTIONS invalid_arguments=([0-9]{1,5}) unavailable_names=([0-9]{1,5}) kernel_rejections=([0-9]{1,5}) delegations=([0-9]{1,5}) text_events=([0-9]{1,5})$/);
@@ -850,6 +878,21 @@ function runSelfTest() {
   if (!ALLOWED_MODELS.has('step-3.7-flash') || !ALLOWED_MODELS.has('step-5-preview') ||
       ['step-3.77-flash', 'step-3.7-flash\n', 'step-3.7-flash ', 'step-5-preview\n', 'step-5-preview ', '', 'https://example.invalid/v1', 'arbitrary-model'].some((model) => ALLOWED_MODELS.has(model))) {
     throw new Error('model allowlist self-test failed');
+  }
+  if (!ALLOWED_MODELS.has('step-5-preview')) throw new Error('model allowlist self-test failed');
+  const pluginSummary = PLUGIN_SUMMARY_FIELDS.map((name, index) => `${name}=${index}`).join(' ');
+  const pluginLine = `NOMIFUN_LIVE_PLUGIN_SUMMARY ${pluginSummary}`;
+  if (pluginSummaryFromLine(pluginLine) !== pluginSummary ||
+      pluginSummaryFromLine(`${pluginLine} secret=1`) !== null ||
+      pluginSummaryFromLine(pluginLine.replace('steps=0', 'steps=SECRET')) !== null ||
+      pluginSummaryFromLine(pluginLine.replace('steps=0', 'secret=0')) !== null ||
+      !selectedTestPassed(`test ${PLUGIN_TEST_NAME} ... ok`, PLUGIN_TEST_NAME)) {
+    throw new Error('plugin summary forwarding self-test failed');
+  }
+  if (pluginFlowFromLine('NOMIFUN_LIVE_PLUGIN_FLOW flow=open,plan,REPORT!REQUIREMENTS,PAUSE') !== 'open,plan,REPORT!REQUIREMENTS,PAUSE' ||
+      pluginFlowFromLine('NOMIFUN_LIVE_PLUGIN_FLOW flow=open secret') !== null ||
+      pluginFlowFromLine('NOMIFUN_LIVE_PLUGIN_FLOW flow=open:"x"') !== null) {
+    throw new Error('plugin flow forwarding self-test failed');
   }
   const scrubbed = environmentWithoutCredential({
     PATH: 'safe',

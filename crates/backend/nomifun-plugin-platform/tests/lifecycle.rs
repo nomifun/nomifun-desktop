@@ -310,6 +310,7 @@ async fn draft_and_plugin_commit_together_before_activation_and_recover_after_ca
     assert_eq!(committed.plugin_id, Some(plugin_id.clone()));
     assert_eq!(committed.base_revision, Some(1));
     assert_eq!(committed.revision, 2);
+    assert_eq!(committed.verification["edit_revision"], 2);
     assert_eq!(fixture.repository.list_mutations().await.unwrap()[0].phase, PluginMutationPhase::Committed);
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
@@ -356,6 +357,7 @@ async fn activation_rollback_restores_the_source_draft_to_the_usable_plugin_revi
     assert_eq!(source.plugin_id, Some(previous.plugin_id));
     assert_eq!(source.base_revision, Some(current.revision));
     assert_eq!(source.revision, 3, "both commit and rollback must fence stale draft writers");
+    assert_eq!(source.verification["edit_revision"], 3);
 }
 
 fn package(version: &str) -> BTreeMap<String, Vec<u8>> {
@@ -705,6 +707,7 @@ async fn committed_permanent_delete_recovery_cleans_every_owned_root_and_cache()
     assert_eq!(detached.plugin_id, None);
     assert_eq!(detached.base_revision, None);
     assert_eq!(detached.revision, 2);
+    assert_eq!(detached.verification["edit_revision"], 2);
     assert!(fixture.roots.root().join(plugin_id.as_ref()).exists());
 
     fixture.service.recover().await.unwrap();
