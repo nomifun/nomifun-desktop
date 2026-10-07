@@ -38,6 +38,16 @@ struct ContinuationInput { content:String, #[serde(default)] files:Vec<String> }
 #[serde(deny_unknown_fields)]
 struct ContinuationRequest { request:nomifun_agent_session::NativeResumeRequest, input:ContinuationInput }
 
+/// The plugin.development module itself is enabled as a contribution on this
+/// conversation's Agent. Continuation only appends owner input and resumes;
+/// it does not need every create Action allowlisted.
+fn plugin_development_enabled(
+    capabilities: &[nomifun_agent_contracts::ResolvedCapability],
+) -> bool {
+    capabilities.iter().any(|capability|
+        capability.consumption.is_contribution() && capability.capability.id.as_ref() == MODULE_ID)
+}
+
 async fn continue_with_input(
     State(state):State<super::nomi_core_session::NomiCoreAgentApiState>,
     Extension(user):Extension<CurrentUser>,axum::extract::Path(id):axum::extract::Path<String>,
@@ -55,16 +65,13 @@ async fn continue_with_input(
     if live.owner_ref != principal { return Err(AppError::Forbidden("Plugin task belongs to another owner".into()).into()); }
     let binding:AgentBindingValueDto=serde_json::from_value(serde_json::to_value(&live.agent_binding)?)?;
     let (_,_,snapshot)=state.control_plane.saved_binding_artifacts(&user.id.to_string().into(),&binding).await?;
-    let module=snapshot.content.enabled_capabilities.iter().find(|capability|
-        capability.consumption.is_contribution() && capability.capability.id.as_ref()==MODULE_ID);
-    if module.is_none() || nomifun_plugin_development::CREATE_ACTIONS.iter().any(|action|
-        !module.expect("checked module").action_allowlist.iter().any(|allowed|allowed.as_ref()==*action)) {
+    if !plugin_development_enabled(&snapshot.content.enabled_capabilities) {
         return Err(AppError::UnprocessableEntity("Plugin development is not enabled for this conversation".into()).into());
     }
     let input=super::nomi_core_session::bounded_turn_input(json!({"content":body.input.content,"files":body.input.files}))?;
     store.append_paused_native_input(&principal,&session,&body.request,
         StrictJsonValue(super::nomi_core_session::canonical_turn_input(&input)),
-        &["PLUGIN_AUTHORIZATION_REQUIRED","PLUGIN_VERIFICATION_REQUIRED","PLUGIN_DELIVERY_REQUIRED","PLUGIN_CURRENT_CONVERSATION_PENDING"],
+        &["PLUGIN_AUTHORIZATION_REQUIRED","PLUGIN_VERIFICATION_REQUIRED","PLUGIN_DELIVERY_REQUIRED","PLUGIN_CURRENT_CONVERSATION_PENDING","EXECUTION_USER_REQUESTED"],
     ).await.map_err(|error|AppError::Conflict(error.to_string()))?;
     super::nomi_core_session::native_execution_control::resume(State(state),
         Extension(nomifun_agent_control_plane::AuthenticatedOwner(user.id.to_string().into())),
@@ -155,6 +162,49 @@ impl Host {
         Ok(draft)
     }
 
+    /// An open identical to one that already created a draft for this accepted
+    /// request is a replay once the request has every draft it needs: the
+    /// admitted plugin_delivery.expected_count, or a larger planned output list.
+    /// A different open form (template, plugin_id) is a distinct request and is
+    /// never merged into an existing draft.
+    async fn replayed_open(
+        &self, owner: &str, context: &CapabilityInvocationContext,
+        source: &plugin::PluginDraftSource, request: &CreatePluginDraftRequest,
+    ) -> Result<Option<PluginDraftRecord>, String> {
+        let digest = digest_payload(request).map_err(|error| error.to_string())?;
+        let siblings: Vec<PluginDraftRecord> = self.state.repository.list_drafts(owner).await
+            .map_err(|error| error.to_string())?.into_iter()
+            .filter(|record| record.source_conversation_id.as_deref() == Some(source.conversation_id.as_str())
+                && record.source_message_id.as_deref() == Some(source.message_id.as_str()))
+            .collect();
+        let Some(recent) = identical_open_sibling(&siblings, digest.as_ref(), &source.operation_key)
+        else { return Ok(None); };
+        let planned = siblings.iter().map(|record|
+            record.verification["plan"]["outputs"].as_array().map_or(0, Vec::len))
+            .max().unwrap_or(0);
+        let required = self.admitted_output_count(context, source).await?.max(planned).max(1);
+        Ok((siblings.len() >= required).then(|| recent.clone()))
+    }
+
+    /// The accepted message's plugin_delivery.expected_count (1 without one),
+    /// read from the canonical source input of this running Turn.
+    async fn admitted_output_count(
+        &self, context: &CapabilityInvocationContext, source: &plugin::PluginDraftSource,
+    ) -> Result<usize, String> {
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(self.state.repository.pool().clone())
+            .await.map_err(|error| error.to_string())?;
+        let facts = store.native_recovery_facts(&context.agent_session_id, &context.turn_id)
+            .await.map_err(|error| error.to_string())?;
+        let payload = facts.event_payloads.get(&source.message_id)
+            .ok_or("PLUGIN_SOURCE_MISSING: the admitted request payload is unavailable")?;
+        match payload.get("plugin_delivery").filter(|value| !value.is_null()) {
+            Some(value) => Ok(usize::from(
+                serde_json::from_value::<PluginDeliveryRequirement>(value.clone())
+                    .map_err(|error| error.to_string())?.expected_count)),
+            None => Ok(1),
+        }
+    }
+
     fn changed(&self, conversation: &str, draft: &PluginDraftRecord, descriptor: Option<PluginSurfaceDescriptorDto>) {
         self.events.send_to_user(&self.owner, WebSocketMessage::new(
             "plugin.authoring.changed", json!({
@@ -168,7 +218,7 @@ impl Host {
     async fn plan(&self, owner: &str, conversation: &str, message: &str, input: Value) -> Result<Value,String> {
         let (id,fields)=draft_request(input)?;
         let mut draft=self.draft(owner,conversation,&id).await?;
-        plugin::require_draft_revision(&draft,revision(&fields)?).map_err(core_error)?;
+        plugin::require_authoring_revision(&draft,revision(&fields)?).map_err(core_error)?;
         let mut plan=fields["plan"].clone();
         nomifun_plugin_development::validate_plan(&plan)?;
         for case in plan["cases"].as_object_mut().expect("validated cases").values_mut() {
@@ -188,7 +238,7 @@ impl Host {
             }
         }
         plugin::revoke_draft_surfaces(&self.state,&draft.draft_id).await.map_err(core_error)?;
-        draft.verification=json!({"task_message_id":message,"plan":plan,"acceptance":plan["cases"]});
+        draft.verification=json!({"edit_revision":draft.revision+1,"task_message_id":message,"plan":plan});
         draft.updated_at_ms=nomifun_common::now_ms();
         let next=self.state.repository.update_draft(&draft,draft.revision).await.map_err(|error|error.to_string())?;
         self.changed(conversation,&next,None);
@@ -201,7 +251,7 @@ impl Host {
         struct Apply { draft_id: String, expected_revision: u64, files: BTreeMap<String,String>, #[serde(default)] delete: Vec<String> }
         let request: Apply = parse(input)?;
         let mut draft = self.draft(owner, conversation, &request.draft_id).await?;
-        plugin::require_draft_revision(&draft, request.expected_revision).map_err(core_error)?;
+        plugin::require_authoring_revision(&draft, request.expected_revision).map_err(core_error)?;
         if draft.verification["task_message_id"].as_str()!=Some(message) || draft.verification["plan"].is_null() {
             return Err("PLUGIN_PLAN_REQUIRED: record this request's required outputs and acceptance cases before editing".into());
         }
@@ -212,16 +262,11 @@ impl Host {
         }
         files.extend(request.files.into_iter().map(|(path,text)| (path,text.into_bytes())));
         let mut replacement = self.state.drafts.stage_exact_replacement(owner, &draft.draft_id, &files, &NeverCancel).map_err(|error| error.to_string())?;
-        let same_task = draft.verification["task_message_id"].as_str() == Some(message)
-            || (draft.verification["task_message_id"].is_null() && draft.source_message_id.as_deref() == Some(message));
-        let acceptance = if same_task {
-            draft.verification["acceptance"].as_object().cloned().unwrap_or_default()
-        } else { serde_json::Map::new() };
-        draft.verification = json!({"acceptance":acceptance,"task_message_id":message,"plan":draft.verification["plan"]});
+        draft.verification = json!({"edit_revision":draft.revision+1,"task_message_id":message,"plan":draft.verification["plan"]});
         draft.updated_at_ms = nomifun_common::now_ms();
         plugin::revoke_draft_surfaces(&self.state, &draft.draft_id).await.map_err(core_error)?;
         replacement.publish().map_err(|error| error.to_string())?;
-        let updated = match self.state.repository.update_draft(&draft, request.expected_revision).await {
+        let updated = match self.state.repository.update_draft(&draft, draft.revision).await {
             Ok(value) => { replacement.commit().map_err(|error| error.to_string())?; value },
             Err(error) => { replacement.rollback().map_err(|rollback| format!("{error}; rollback: {rollback}"))?; return Err(error.to_string()); }
         };
@@ -233,7 +278,8 @@ impl Host {
         let (id, request) = draft_request(input)?;
         let revision = revision(&request)?;
         let mut draft = self.draft(owner, conversation, &id).await?;
-        plugin::require_draft_revision(&draft, revision).map_err(core_error)?;
+        plugin::require_authoring_revision(&draft, revision).map_err(core_error)?;
+        let revision=draft.revision;
         let files = self.state.drafts.freeze(owner, &draft.draft_id).map_err(|error| error.to_string())?;
         let artifact = match self.state.artifacts.inspect_files(&files, &NeverCancel) {
             Ok(value) => value,
@@ -246,19 +292,41 @@ impl Host {
             (true,true)=>"mixed",(true,false)=>"ui",(false,true)=>"headless",_=>"invalid",
         };
         if kind!=Some(actual) { return Ok(json!({"passed":false,"stage":"requirements","draft_id":id,"revision":revision,
-            "diagnostics":[{"code":"PLUGIN_SHAPE_MISMATCH","message":"The package must implement its planned UI/Service shape"}]})); }
+            "diagnostics":[{"code":"PLUGIN_SHAPE_MISMATCH","message":format!(
+                "The package must implement its planned UI/Service shape: the plan requires '{}' but the package is '{}'",
+                kind.unwrap_or("unspecified"),actual)}]})); }
+        let mut planned_ids:Vec<&str>=plan["cases"].as_object().into_iter().flatten()
+            .filter(|(_,case)|case["kind"]=="action")
+            .filter_map(|(_,case)|case["action"].as_str()).collect();
+        planned_ids.extend(plan["current_conversation_case"]["action"].as_str());
+        let mut missing:Vec<&str>=planned_ids.iter().copied()
+            .filter(|id|!artifact.manifest.actions.contains_key(*id)).collect();
+        missing.sort_unstable(); missing.dedup();
+        if !missing.is_empty() {
+            let declared:Vec<&str>=artifact.manifest.actions.keys().map(String::as_str).collect();
+            return Ok(json!({"passed":false,"stage":"requirements","draft_id":id,"revision":revision,
+                "diagnostics":[{"code":"PLUGIN_PLANNED_ACTION_MISSING","message":format!(
+                    "The plan references action '{}' which the manifest does not declare; declared actions: {}",
+                    missing.join("', '"),if declared.is_empty(){"none".into()}else{declared.join(", ")})}]}));
+        }
         if let Some(case)=plan.get("current_conversation_case") {
             if !artifact.manifest.bindings.iter().any(|binding|
                 binding.point==nomifun_agent_contracts::PluginBindingPoint::AgentTool && binding.action==case["action"]) {
+                let bound:Vec<&str>=artifact.manifest.bindings.iter()
+                    .filter(|binding|binding.point==nomifun_agent_contracts::PluginBindingPoint::AgentTool)
+                    .map(|binding|binding.action.as_str()).collect();
                 return Ok(json!({"passed":false,"stage":"requirements","draft_id":id,"revision":revision,
-                    "diagnostics":[{"code":"PLUGIN_CURRENT_AGENT_TOOL_REQUIRED","message":"Current conversation use requires a declared agent.tool binding for the planned Action"}]}));
+                    "diagnostics":[{"code":"PLUGIN_CURRENT_AGENT_TOOL_REQUIRED","message":format!(
+                        "Current conversation use requires a declared agent.tool binding for the planned Action '{}'; agent.tool is currently bound to: {}",
+                        case["action"].as_str().unwrap_or("unspecified"),
+                        if bound.is_empty(){"none".into()}else{bound.join(", ")})}]}));
             }
         }
         draft.verification = json!({
+            "edit_revision":draft.verification["edit_revision"].as_u64().unwrap_or(draft.revision),
             "artifact_digest":artifact.artifact_digest.as_ref(),"structure_passed":true,
             "has_ui":artifact.manifest.has_ui(),"has_service":artifact.manifest.has_service(),
-            "cases":{},"runtime_ready":false,"ui_ready":false,
-            "acceptance":draft.verification["acceptance"].as_object().cloned().unwrap_or_default(),
+            "cases":{},"runtime_ready":false,
             "source_message_id":draft.source_message_id,
             "task_message_id":draft.verification["task_message_id"],
             "approval":draft.verification["approval"],
@@ -279,7 +347,9 @@ impl Host {
         let (id, mut fields) = draft_request(input)?;
         let revision = revision(&fields)?;
         let mut draft = self.draft(owner, conversation, &id).await?;
-        plugin::require_draft_revision(&draft, revision).map_err(core_error)?;
+        plugin::require_authoring_revision(&draft, revision).map_err(core_error)?;
+        let revision=draft.revision;
+        fields["expected_revision"]=json!(revision);
         let files = self.state.drafts.freeze(owner, &draft.draft_id).map_err(|error| error.to_string())?;
         let artifact = self.state.artifacts.inspect_files(&files, &NeverCancel).map_err(|error| error.to_string())?;
         let config = fields.get("config").cloned().unwrap_or_else(|| json!({}));
@@ -304,7 +374,6 @@ impl Host {
         draft.verification["runtime_ready"] = json!(true);
         draft.verification["surface"] = wire(preview.descriptor.clone())?;
         draft.verification["cases"] = json!({});
-        draft.verification["ui_ready"] = json!(false);
         draft.verification.as_object_mut().expect("verification").remove("delivery");
         draft.verification.as_object_mut().expect("verification").remove("installed_observation");
         draft.updated_at_ms = nomifun_common::now_ms();
@@ -321,17 +390,35 @@ impl Host {
         let (id, fields) = draft_request(input)?;
         let mut draft = self.draft(owner, conversation, &id).await?;
         let expected_revision = revision(&fields)?;
-        plugin::require_draft_revision(&draft, expected_revision).map_err(core_error)?;
+        plugin::require_authoring_revision(&draft, expected_revision).map_err(core_error)?;
         let artifact = self.state.artifacts.inspect_files(&self.state.drafts.freeze(owner,&draft.draft_id).map_err(|error|error.to_string())?, &NeverCancel).map_err(|error|error.to_string())?;
         if draft.verification.get("runtime_ready") != Some(&json!(true))
             || draft.verification.get("artifact_digest").and_then(Value::as_str) != Some(artifact.artifact_digest.as_ref())
         { return Err("PLUGIN_PREVIEW_REQUIRED: run the exact package first".into()); }
-        let action = string(&fields,"action")?;
-        let case = string(&fields,"case_name")?;
+        if super::plugin_authoring::installed_since_preview(&draft.verification) {
+            return Err(super::plugin_authoring::INSTALLED_PREVIEW_CLOSED.into());
+        }
+        // Install (or any newer preview/apply) revokes the draft preview
+        // Surface; only a still-registered preview session may dispatch. A
+        // failed call after install would otherwise be recorded as a failed
+        // case and permanently fail verification.
+        let surface_id=draft.verification["surface"]["surface_session_id"].as_str().unwrap_or_default();
+        let preview_live=self.state.surfaces.lock().await.get(surface_id).is_some_and(|session|
+            session.is_preview && session.draft_id.as_ref()==Some(&draft.draft_id));
+        if !preview_live {
+            return Err("PLUGIN_PREVIEW_REQUIRED: the preview is not running (install or a newer edit closes it); run check and preview again before test_action. After install, do not use test_action; the installed tool is used through current_conversation_case.".into());
+        }
+        let action = string(&fields,"action")?.to_owned();
+        let case = string(&fields,"case_name")?.to_owned();
         let restart=fields["restart"]==json!(true);
+        let mut fields=fields;
+        let planned_case=draft.verification["plan"]["cases"][case.as_str()].clone();
+        let planned=!planned_case.is_null();
+        decode_encoded_case_fields(&mut fields,&planned_case,
+            artifact.manifest.actions.get(&action).map(|declared|(&declared.input.0,&declared.output.0)));
         let mut oracle = json!({"kind":"action","action":action,"input":fields["input"],"expected_output":fields["expected_output"]});
         if restart { oracle["restart"]=json!(true); }
-        draft = super::plugin_authoring::begin_authoring_case(&self.state,&draft,case,oracle)
+        draft = super::plugin_authoring::begin_authoring_case(&self.state,&draft,&case,oracle)
             .await.map_err(core_error)?;
         let mut restart_guard=None;
         if restart {
@@ -351,7 +438,7 @@ impl Host {
         let cancellation = PluginCancellation::new();
         let _cancel_on_drop = CancelOnDrop(cancellation.clone());
         let outcome = self.state.registry.dispatch_action(
-            &plugin_action_id(&nomifun_agent_contracts::PluginId::from(id.clone()), action),
+            &plugin_action_id(&nomifun_agent_contracts::PluginId::from(id.clone()), &action),
             StrictJsonValue(fields["input"].clone()),
             PluginDispatchOptions { expected_artifact_digest:Some(artifact.artifact_digest.clone()), cancellation, call_chain:Vec::new() },
         ).await;
@@ -361,31 +448,28 @@ impl Host {
         };
         let expected = &fields["expected_output"];
         let passed = error.is_none() && &output == expected;
-        draft.verification["cases"][case] = json!({"kind":"action","action":action,"input":fields["input"],"expected_output":expected,"actual_output":output,"passed":passed,"error":error,
+        draft.verification["cases"][&case] = json!({"kind":"action","action":action,"input":fields["input"],"expected_output":expected,"actual_output":output,"passed":passed,"error":error,
             "persistence_checked":restart && passed,"state":if passed{"passed"}else{"failed"}});
         draft.updated_at_ms=nomifun_common::now_ms();
         let updated=self.state.repository.update_draft(&draft,execution_revision).await.map_err(|error|error.to_string())?;
         if let Some(guard)=&mut restart_guard { guard.retain(); }
         self.changed(conversation,&updated,None);
-        Ok(json!({"draft_id":id,"revision":updated.revision,"passed":passed,"actual_output":output,"error":error,
+        Ok(json!({"draft_id":id,"case_name":case,"planned":planned,"revision":updated.revision,"passed":passed,"actual_output":output,"error":error,
             "verification_digest":digest_payload(&updated.verification).map_err(|error|error.to_string())?.as_ref()}))
     }
 
     async fn install(&self, owner:&str, conversation:&str, turn:&str, input:Value)->Result<Value,String> {
         let (id,mut request)=draft_request(input)?;
         let draft=self.draft(owner,conversation,&id).await?;
-        plugin::require_draft_revision(&draft,revision(&request)?).map_err(core_error)?;
+        plugin::require_authoring_revision(&draft,revision(&request)?).map_err(core_error)?;
+        request["expected_revision"]=json!(draft.revision);
         let artifact=self.state.artifacts.inspect_files(&self.state.drafts.freeze(owner,&draft.draft_id).map_err(|error|error.to_string())?,&NeverCancel).map_err(|error|error.to_string())?;
         let verification_digest=string(&request,"verification_digest")?.to_owned();
         if digest_payload(&draft.verification).map_err(|error|error.to_string())?.as_ref()!=verification_digest
             || draft.verification["artifact_digest"].as_str()!=Some(artifact.artifact_digest.as_ref())
             || draft.verification["runtime_ready"]!=json!(true)
-            || (artifact.manifest.has_ui() && draft.verification["ui_ready"]!=json!(true))
         { return Err("PLUGIN_VERIFICATION_REQUIRED: the exact package has not passed its required runtime/UI checks".into()); }
-        let cases=draft.verification["cases"].as_object().ok_or("PLUGIN_BUSINESS_CHECK_REQUIRED")?;
-        if cases.is_empty() || cases.values().any(|case|case["passed"]!=json!(true))
-            || !nomifun_plugin_development::plan_evidence_complete(&draft.verification)
-            || draft.verification["acceptance"].as_object().is_some_and(|accepted|accepted.keys().any(|key|cases.get(key).is_none_or(|case|case["passed"]!=json!(true)))) {
+        if !nomifun_plugin_development::plan_evidence_complete(&draft.verification) {
             return Err("PLUGIN_BUSINESS_CHECK_REQUIRED: execute the requirement cases and repair failures".into());
         }
         request.as_object_mut().expect("object").remove("verification_digest");
@@ -432,7 +516,7 @@ impl Host {
                 published.push(json!({"point":binding.point,"action":binding.action}));
             }
             let mut probes=Vec::new();
-            for (case_name,case) in draft.verification["acceptance"].as_object().into_iter().flatten() {
+            for (case_name,case) in draft.verification["plan"]["cases"].as_object().into_iter().flatten() {
                 let Some(action)=case["action"].as_str() else {continue;};
                 if case["kind"]!=json!("action")
                     || artifact.manifest.actions.get(action).is_none_or(|action|
@@ -501,12 +585,24 @@ impl PluginDevelopmentHost for Host {
         let action=context.action_id.as_ref().strip_prefix("plugin.development/").ok_or("Unknown module action")?;
         let pause_key = format!("plugin-await:{}", nomifun_agent_contracts::digest_bytes(source.operation_key.as_bytes()).as_ref());
         let result = match action {
-            "list"=>Ok(json!({"plugins":plugin::list_plugins_owned(&self.state,owner).await.map_err(core_error)?,
-                "drafts":plugin::list_drafts_owned(&self.state,owner).await.map_err(core_error)?,
-                "credential_references":plugin::list_credential_references_owned(&self.state).await.map_err(core_error)?,"guide":GUIDE})),
+            "list"=>{
+                // Drafts bound to another conversation cannot be continued
+                // here; unscoped drafts stay listed because open adopts them.
+                let all=plugin::list_drafts_owned(&self.state,owner).await.map_err(core_error)?.drafts;
+                let other=all.iter().filter(|draft|draft.source_conversation_id.as_deref()
+                    .is_some_and(|source|source!=conversation.as_str())).count();
+                let drafts=all.into_iter().filter(|draft|!draft.source_conversation_id.as_deref()
+                    .is_some_and(|source|source!=conversation.as_str())).collect::<Vec<_>>();
+                Ok(json!({"plugins":plugin::list_plugins_owned(&self.state,owner).await.map_err(core_error)?,
+                    "drafts":drafts,"other_conversation_drafts":other,
+                    "credential_references":plugin::list_credential_references_owned(&self.state).await.map_err(core_error)?,"guide":GUIDE}))
+            },
             "open"=>{
                 if let Some(id)=input.get("draft_id").and_then(Value::as_str){
-                    let existing=plugin::draft_owned(&self.state,owner,id).await.map_err(core_error)?;
+                    let existing=plugin::draft_owned(&self.state,owner,id).await.map_err(|error|
+                        if error.status==axum::http::StatusCode::NOT_FOUND {
+                            format!("PLUGIN_DRAFT_NOT_FOUND: draft {id} does not exist. To start a new plugin call open with an empty arguments object {{}}; draft_id only reopens an existing draft returned by list.")
+                        } else { core_error(error) })?;
                     if existing.source_conversation_id.as_deref().is_some_and(|prior|prior!=conversation){
                         return Err("PLUGIN_DRAFT_SCOPE_MISMATCH: continue this working copy in its original conversation".into());
                     }
@@ -522,7 +618,19 @@ impl PluginDevelopmentHost for Host {
                     self.changed(&conversation,&current,None);
                     return wire(plugin::draft_detail(&self.state,&current).map_err(core_error)?);
                 }
-                let opened=plugin::create_draft_with_source(&self.state,owner,parse(input)?,Some(source)).await.map_err(core_error)?;
+                let plugin_id=input.get("plugin_id").and_then(Value::as_str).map(str::to_owned);
+                let request:CreatePluginDraftRequest=parse(input)?;
+                if let Some(recent)=self.replayed_open(owner,&context,&source,&request).await? {
+                    self.changed(&conversation,&recent,None);
+                    let mut detail=wire(plugin::draft_detail(&self.state,&recent).map_err(core_error)?)?;
+                    detail["notice"]=json!(format!("This request already has draft {} from the same open request; it was reopened instead of creating another. Call open again only for an additional output declared in the plan.",recent.draft_id.as_ref()));
+                    return Ok(detail);
+                }
+                let opened=plugin::create_draft_with_source(&self.state,owner,request,Some(source)).await.map_err(|error|
+                    match (&plugin_id,error.status==axum::http::StatusCode::NOT_FOUND) {
+                        (Some(id),true)=>format!("PLUGIN_NOT_FOUND: no installed plugin {id}. Omit plugin_id to create a new plugin; plugin_id only edits an installed plugin returned by list."),
+                        _=>core_error(error),
+                    })?;
                 let draft=plugin::draft_owned(&self.state,owner,&opened.summary.draft_id).await.map_err(core_error)?;
                 self.changed(&conversation,&draft,None); wire(opened)
             },
@@ -543,7 +651,13 @@ impl PluginDevelopmentHost for Host {
             "test_action"=>self.test_action(owner,&conversation,input).await,
             "test_ui"=>plugin::run_authoring_ui_test(&self.state,owner,&conversation,context.turn_id.as_ref(),input).await.map_err(core_error),
             "install"=>self.install(owner,&conversation,context.turn_id.as_ref(),input).await,
-            "inspect"=>wire(plugin::get_plugin_owned(&self.state,owner,string(&input,"plugin_id")?).await.map_err(core_error)?),
+            "inspect"=>{
+                let plugin_id=string(&input,"plugin_id")?;
+                wire(plugin::get_plugin_owned(&self.state,owner,plugin_id).await.map_err(|error|
+                    if error.status==axum::http::StatusCode::NOT_FOUND {
+                        format!("PLUGIN_NOT_FOUND: no installed plugin {plugin_id}; installed plugin ids come from list or from a successful install result.")
+                    } else { core_error(error) })?)
+            },
             "configure"=>{let(id,request)=plugin_request(input)?;wire(plugin::configure_owned(&self.state,owner,&id,parse(request)?).await.map_err(core_error)?)},
             "enable"=>{let(id,request)=plugin_request(input)?;wire(plugin::set_enabled_owned(&self.state,owner,&id,parse(request)?).await.map_err(core_error)?)},
             "export"=>{let(id,request)=plugin_request(input)?;wire(plugin::export_package_owned(&self.state,owner,&id,parse(request)?).await.map_err(core_error)?)},
@@ -581,6 +695,49 @@ impl NomiPlatformBuiltinToolSchemaResolver for SchemaResolver {
 struct CancelOnDrop(PluginCancellation);
 impl Drop for CancelOnDrop { fn drop(&mut self){self.0.cancel();} }
 fn core_error(error:plugin::PluginHttpError)->String { format!("{}: {}",error.code,error.message) }
+
+/// The draft an `open` replays into, before the request's output count is
+/// considered: the newest sibling created by an identical open request.
+/// The same tool call replayed (equal source_operation_key) is answered by
+/// create_draft_with_source's own idempotent replay, so it selects nothing.
+fn identical_open_sibling<'a>(
+    siblings: &'a [PluginDraftRecord], request_digest: &str, operation_key: &str,
+) -> Option<&'a PluginDraftRecord> {
+    if siblings.iter().any(|record| record.source_operation_key.as_deref() == Some(operation_key)) { return None; }
+    siblings.iter()
+        .filter(|record| record.source_request_digest.as_deref() == Some(request_digest))
+        .max_by_key(|record| (record.updated_at_ms, record.created_at_ms))
+}
+
+/// A JSON value supplied as an encoded string is decoded only when that keeps
+/// the oracle exact: a planned case must parse to the planned value; a
+/// supplementary case (absent from the plan) uses the declared action schema
+/// when it types the field as an object or array. Anything else stays verbatim.
+fn decode_encoded_case_fields(fields:&mut Value, planned_case:&Value, declared:Option<(&Value,&Value)>) {
+    if !planned_case.is_null() {
+        for key in ["input","expected_output"] {
+            if fields[key].is_string() && !planned_case[key].is_string()
+                && let Ok(parsed)=serde_json::from_str::<Value>(fields[key].as_str().unwrap_or_default())
+                && parsed==planned_case[key]
+            {
+                fields[key]=parsed;
+            }
+        }
+        return;
+    }
+    let Some((input,output))=declared else { return; };
+    for (key,schema) in [("input",input),("expected_output",output)] {
+        if let Some(text)=fields[key].as_str()
+            && let Some(kind)=schema["type"].as_str()
+            && matches!(kind,"object"|"array")
+            && let Ok(parsed)=serde_json::from_str::<Value>(text)
+            && (kind=="object" && parsed.is_object() || kind=="array" && parsed.is_array())
+        {
+            fields[key]=parsed;
+        }
+    }
+}
+
 fn parse<T:for<'de>Deserialize<'de>>(value:Value)->Result<T,String>{serde_json::from_value(value).map_err(|error|format!("PLUGIN_INVALID_INPUT: {error}"))}
 fn wire<T:Serialize>(value:T)->Result<Value,String>{serde_json::to_value(value).map_err(|error|error.to_string())}
 fn string<'a>(value:&'a Value,key:&str)->Result<&'a str,String>{value.get(key).and_then(Value::as_str).filter(|text|!text.is_empty()).ok_or_else(||format!("PLUGIN_INVALID_INPUT: {key} is required"))}
@@ -589,4 +746,136 @@ fn scoped_request(mut input:Value,key:&str)->Result<(String,Value),String>{let i
 fn draft_request(input:Value)->Result<(String,Value),String>{scoped_request(input,"draft_id")}
 fn plugin_request(input:Value)->Result<(String,Value),String>{scoped_request(input,"plugin_id")}
 
-const GUIDE:&str="Each deliverable is one standard nomifun.plugin/v1 package: nomifun.plugin.json; UI entrypoint must be ui/index.html; Service ESM entrypoint must be service/main.mjs; at least one is required. Use inline JSON Schema for actions and config. Manifest fields: schema,id,version,name,description,hostApi,entrypoints,actions,bindings,dataVersion,migrations,configSchema,secrets,permissions. Host creates a valid starting manifest; read it before editing. Call plan before apply: extract every requested output and required feature, link exact cases, and retain the accepted plan during repairs. Persistent data needs test_ui reopen assertions or test_action restart:true reads. All drafts for one request must declare the same output list with distinct output keys. Use only listed enabled credential_references; ask for missing information through the current conversation before planning. UI SDK: window.nomi.storage.kv.get/set/delete/compareAndSwap; storage.db.query/execute/batch; storage.files.read/write/list/delete; cache; actions.invoke; config.get. UI storage.kv.get returns the stored JSON value directly, or null when absent. storage.kv.set returns {revision}; compareAndSwap returns {applied,revision}. Service exports async activate(ctx) returning an object with async invoke(action,input) and optional deactivate. ctx exposes storage/cache/config/secrets/host/actions/signal. No fake APIs, external CDN scripts, runtime selectors or mobile layouts. Use test_ui to perform actual click/fill/text/count/reopen requirement cases on the real conversation preview; headless uses test_action on the real temporary Service. Structure/startup alone is not delivery. Install the verified revision, then inspect the installed plugin. Current desktop.files.open has no available Host owner; do not generate an implementation based on that name.";
+const GUIDE:&str="Each deliverable is one standard nomifun.plugin/v1 package: nomifun.plugin.json; UI entrypoint must be ui/index.html; Service ESM entrypoint must be service/main.mjs; at least one is required. Use inline JSON Schema for actions and config. Manifest fields: schema,id,version,name,description,hostApi,entrypoints,actions,bindings,dataVersion,migrations,configSchema,secrets,permissions. Host creates a valid starting manifest; read it before editing. Call plan before apply: extract every requested output and required feature, link exact cases, and retain the accepted plan during repairs. Persistent data needs test_ui reopen assertions or test_action restart:true reads. All drafts for one request must declare the same output list with distinct output keys. Use only listed enabled credential_references; ask for missing information through the current conversation before planning. UI SDK: window.nomi.storage.kv.get/set/delete/compareAndSwap; storage.db.query/execute/batch; storage.files.read/write/list/delete; cache; actions.invoke; config.get. UI storage.kv.get returns the stored JSON value directly, or null when absent. storage.kv.set returns {revision}; compareAndSwap returns {applied,revision}. Service exports async activate(ctx) returning an object with async invoke(action,input) and optional deactivate. ctx exposes storage/cache/config/secrets/host/actions/signal. No fake APIs, external CDN scripts, runtime selectors or mobile layouts. Use test_ui to perform actual click/fill/text/count/reopen requirement cases on the real conversation preview; headless uses test_action on the real temporary Service. Structure/startup alone is not delivery. Install the verified revision, then inspect the installed plugin. Current desktop.files.open has no available Host owner; do not generate an implementation based on that name. UI sandbox rules: ui/index.html runs in a sandboxed iframe with scripts only. localStorage, sessionStorage, indexedDB and cookies throw, alert/confirm/prompt are blocked, and <form> submission is blocked (no submit event): bind click handlers to buttons and keydown handlers for Enter instead. Persist UI data only with await window.nomi.storage.kv.get(key) and await window.nomi.storage.kv.set(key, value); the SDK is injected automatically, so do not add a script tag for it. Give every element that a test case uses a stable id or data-testid. Business cases must operate the actual user control: for a checkbox, click the input itself, not its li/row/container as a proxy. Bind the checkbox change event to update application state and await storage; stopping click propagation does not save a checkbox change. Assert completion using count with selector #todos input[type=checkbox]:checked, then reopen and repeat that assertion to prove the actual checked state persisted. Example self-contained completion case: fill #new-todo with milk; click #add; click #todos input[type=checkbox]; count #todos input[type=checkbox]:checked equals 1; reopen; count #todos input[type=checkbox]:checked equals 1. Row text, styling, or a container click alone does not prove the user-facing checkbox works. Only plan.cases are required for delivery; extra test_ui/test_action cases are diagnostic probes and can fail or change without changing the plan. Async UI lifecycle: disable controls during storage initialization and while saving; enable them only after awaited storage and rendering finish. Treat a failed initial storage.kv.get as unknown existing state. Keep mutation controls disabled, show the real error and offer retry or reopen; allow writes only after a successful read. Handle real SDK failures without adding simulated-failure switches or test-only UI branches. Keep initialization and mutations serialized so a late load cannot overwrite newer edits. All add, toggle and delete handlers that read and rewrite the same state must share one serial queue or one consistent busy guard. Set busy before the first await and disable all related controls, not only the clicked button. Compute next state without mutating current state, await persistence, then commit and render it. If saving fails, show the error, retain the original state and restore controls to that state; do not catch the error and still render(next) as if it saved. Clear busy and re-enable controls in finally after the operation settles. All add, toggle, delete and row handlers must use the same mutation entry point. Correct busy pattern: if (busy) return; busy = true; disableAll(); try { await mutation(); } catch(e) { restoreOldUi(); showError(e); } finally { busy = false; enableAll(); }. mutation is your awaitable save-and-commit operation, and the other functions are your own UI helpers. With a Promise queue, assign each new task back to chain; merely awaiting an unchanged resolved Promise does not serialize mutations. A UI handler may absorb an error after fully restoring state and displaying it; it does not need to rethrow. Example initialization: const add=document.querySelector('#add'); add.disabled=true; const todos=(await window.nomi.storage.kv.get('todos'))??[]; render(todos); add.disabled=false; render is your own UI function. Show a visible error when initialization or saving fails. The test runner waits for standard disabled/aria-disabled/inert/hidden/readonly states before interactions. test_ui semantics: click calls element.click(); fill sets the value and dispatches input and change events; text compares the element's trimmed textContent exactly; count is the number of document.querySelectorAll(selector) matches; reopen reloads the page with the same plugin storage. Every test_ui case restarts the preview with fresh storage (for an update, a fresh copy of the installed data), and that restart also resets the Service storage used by test_action. Make each UI case self-contained by creating the data it asserts on. test_action cases share one preview storage in the order you run them, so for a plugin with both UI and Service run the test_action cases first, keep each write and its restart:true read consecutive, and run the test_ui cases afterwards. Manifest reference: actions is an object keyed by action id; each action requires exactly name (string), description (string), input (JSON Schema), output (JSON Schema) and effect (\"read\", \"write\" or \"external\"). bindings is an array of {\"point\":\"agent.tool\",\"action\":\"<action id>\"} entries; agent.tool exposes the action to Agents as a tool (other points: agent.context, agent.before_model, agent.before_tool, desktop.command, desktop.event, automation.action). entrypoints holds \"ui\": \"ui/index.html\" and/or \"service\": \"service/main.mjs\" with optional \"serviceMode\": \"onDemand\" or \"continuous\"; a headless plugin has only the service entrypoint. Service invoke(action, input) receives the action id and validated input and must return a value matching that action's output schema; test_action compares expected_output with the returned value exactly. Action ids are lowercase machine identifiers: they start with a-z and contain only a-z, 0-9, '_' or '-' (at most 96 characters), for example trim_and_uppercase. Plan cases, current_conversation_case and bindings must use exactly the manifest action ids. Add current_conversation_case only when the user explicitly asks to use the new tool in this same conversation; an agent.tool binding already makes an installed action available to Agents. With current_conversation_case, the task pauses once after install while the tool is attached; when it resumes, call that tool with exactly the planned input. install closes the preview and itself checks the installed plugin and its UI: do not call test_action or test_ui after install. When the user asks to use the new tool in this conversation, put current_conversation_case {action, input, expected_output} (exactly these three fields) in the plan instead of extra test cases.";
+
+#[cfg(test)]
+mod tests {
+    use nomifun_agent_contracts::ResolvedCapability;
+
+    use super::*;
+
+    const DIGEST: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn resolved_module(consumption: Option<&str>, action_allowlist: &[&str]) -> ResolvedCapability {
+        let mut value = json!({
+            "capability": {"id": MODULE_ID},
+            "source_package": {"id": "test.package", "version": "1.0.0"},
+            "contribution_id": "capability:test",
+            "contribution_lock": {
+                "source_kind": "platform_builtin",
+                "source_identity": "test.package",
+                "contribution_id": "capability:test",
+                "contract_digest": DIGEST,
+            },
+            "resolved_source": {"source_kind": "bundled", "source_identity": "test.package"},
+            "target_artifact_digest": DIGEST,
+            "schema_digest": DIGEST,
+            "dependency_path": [MODULE_ID],
+            "required_runtime_features": [],
+            "action_allowlist": action_allowlist,
+        });
+        if let Some(consumption) = consumption {
+            value["consumption"] = json!(consumption);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// Continuation needs only the module, not every create Action: a partial
+    /// allowlist still resumes, an absent or dependency-only module fails
+    /// closed, and the check never consults budget or cleanup authority.
+    #[test]
+    fn continuation_requires_only_the_plugin_development_module() {
+        assert!(plugin_development_enabled(&[resolved_module(None, &[])]));
+        assert!(plugin_development_enabled(&[resolved_module(
+            None,
+            &["plugin.development/open"],
+        )]), "an incomplete create-action allowlist is still enabled");
+        assert!(!plugin_development_enabled(&[]));
+        assert!(!plugin_development_enabled(&[resolved_module(
+            Some("dependency"),
+            nomifun_plugin_development::CREATE_ACTIONS,
+        )]), "a dependency contribution is not the enabled module");
+    }
+
+    /// Encoded JSON strings decode only where the oracle stays exact: a
+    /// planned case must match the planned value, a supplementary case must
+    /// type the field object or array in the declared action schema.
+    #[test]
+    fn encoded_case_fields_decode_only_when_the_oracle_stays_exact() {
+        let object_schema=Some((&json!({"type":"object"}),&json!({"type":"object"})));
+        // Planned case: an equal encoded string decodes; a different one
+        // stays verbatim so the strict comparison rejects it below.
+        let planned=json!({"kind":"action","input":{"text":"  Mixed Case  "},"expected_output":{"text":"MIXED CASE"}});
+        let mut fields=json!({"input":"{\"text\":\"  Mixed Case  \"}","expected_output":"{\"text\":\"MIXED CASE\"}"});
+        decode_encoded_case_fields(&mut fields,&planned,object_schema);
+        assert_eq!(fields,json!({"input":{"text":"  Mixed Case  "},"expected_output":{"text":"MIXED CASE"}}));
+        let mut fields=json!({"input":"{\"text\":\"other\"}","expected_output":{"text":"MIXED CASE"}});
+        decode_encoded_case_fields(&mut fields,&planned,object_schema);
+        assert_eq!(fields,json!({"input":"{\"text\":\"other\"}","expected_output":{"text":"MIXED CASE"}}));
+        // A planned field that is itself a string is never decoded, even when the
+        // declared schema types it as an object: the planned oracle is that string.
+        let planned=json!({"kind":"action","input":"{\"text\":\"abc\"}","expected_output":"{}"});
+        let mut fields=json!({"input":"{\"text\":\"abc\"}","expected_output":"{}"});
+        decode_encoded_case_fields(&mut fields,&planned,object_schema);
+        assert_eq!(fields,json!({"input":"{\"text\":\"abc\"}","expected_output":"{}"}));
+        // Supplementary case: the declared object/array schema decides.
+        let mut fields=json!({"input":"{\"text\":\"abc\"}","expected_output":"{}"});
+        decode_encoded_case_fields(&mut fields,&Value::Null,object_schema);
+        assert_eq!(fields,json!({"input":{"text":"abc"},"expected_output":{}}));
+        let string_schema=Some((&json!({"type":"string"}),&json!({"type":"string"})));
+        let mut fields=json!({"input":"{\"text\":\"abc\"}","expected_output":"{}"});
+        decode_encoded_case_fields(&mut fields,&Value::Null,string_schema);
+        assert_eq!(fields,json!({"input":"{\"text\":\"abc\"}","expected_output":"{}"}));
+        let mut fields=json!({"input":"[\"a\"]","expected_output":"{}"});
+        decode_encoded_case_fields(&mut fields,&Value::Null,object_schema);
+        assert_eq!(fields,json!({"input":"[\"a\"]","expected_output":{}}),"an encoded array is not the declared object");
+        let mut fields=json!({"input":"{\"text\":\"abc\"}","expected_output":"{}"});
+        decode_encoded_case_fields(&mut fields,&Value::Null,None);
+        assert_eq!(fields,json!({"input":"{\"text\":\"abc\"}","expected_output":"{}"}));
+    }
+
+    fn draft_record(digest:&str,operation_key:&str,updated_at_ms:i64)->PluginDraftRecord {
+        PluginDraftRecord {
+            owner_user_id:"owner".into(),draft_id:uuid::Uuid::now_v7().to_string().into(),
+            revision:1,plugin_id:None,base_revision:None,name:"Working copy".into(),
+            workspace_path:String::new(),
+            source_conversation_id:Some("conversation".into()),source_message_id:Some("message".into()),
+            source_operation_key:Some(operation_key.to_owned()),
+            source_request_digest:Some(digest.to_owned()),
+            verification:json!({}),imported_context:json!({}),
+            status:nomifun_plugin_platform::PluginDraftStatus::Ready,last_error:None,
+            created_at_ms:updated_at_ms,updated_at_ms,
+        }
+    }
+
+    /// An identical open replays into the newest identical sibling; the same
+    /// tool call replayed (equal operation key) defers to
+    /// create_draft_with_source's own idempotent replay.
+    #[test]
+    fn identical_open_sibling_prefers_exact_replays_and_identical_requests() {
+        let a=draft_record("d1","k1",1);
+        let b=draft_record("d1","k2",2); let b_id=b.draft_id.clone();
+        let t=draft_record("d2","k3",3); let t_id=t.draft_id.clone();
+        let siblings=[a,b,t];
+        assert_eq!(identical_open_sibling(&siblings,"d1","k9").map(|draft|&draft.draft_id),Some(&b_id));
+        assert_eq!(identical_open_sibling(&siblings,"d2","k9").map(|draft|&draft.draft_id),Some(&t_id));
+        assert!(identical_open_sibling(&siblings,"d3","k9").is_none());
+        assert!(identical_open_sibling(&siblings,"d1","k1").is_none(),
+            "the same tool call replayed is create_draft_with_source's idempotent replay");
+    }
+
+    /// Model-facing conflicts say to reload via read; terse HTTP conflicts
+    /// keep the shared GUI message.
+    #[test]
+    fn authoring_revision_conflicts_tell_the_model_to_read_first() {
+        let draft=draft_record("d1","k1",1);
+        let error=plugin::require_authoring_revision(&draft,7).unwrap_err();
+        assert!(error.message.contains("expected_revision 7"),"{error}");
+        assert!(error.message.contains("Call read"),"{error}");
+        assert!(!error.message.contains("revision is"),
+            "the authoring message does not quote the actual revision: {error}");
+        let error=plugin::require_draft_revision(&draft,7).unwrap_err();
+        assert_eq!(error.message,"Draft revision changed");
+    }
+}

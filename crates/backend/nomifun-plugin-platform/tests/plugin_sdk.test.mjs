@@ -114,31 +114,45 @@ test('typed UI probes require the Host channel and never evaluate supplied code'
   assert.match(result.error, /Unsupported UI operation/);
 });
 
-test('UI probes observe DOM behavior while installed surfaces reject mutation tests', { timeout: 5000 }, async t => {
+async function uiHarness(t, html, globals = {}) {
   const { createRequire } = await import('node:module');
   const { pathToFileURL } = await import('node:url');
   const uiRequire = createRequire(new URL('../../../../ui/package.json', import.meta.url));
   const domRequire = createRequire(uiRequire.resolve('@happy-dom/global-registrator'));
   const { Window } = await import(pathToFileURL(domRequire.resolve('happy-dom')).href);
   const dom = new Window();
-  dom.document.body.innerHTML = '<input id="entry"><button id="add">Add</button><ul id="items"></ul>';
+  dom.document.body.innerHTML = html;
+  t.after(() => dom.happyDOM.close());
+  const state = harness(t, { preview: true, globals: {
+    document: dom.document, Event: dom.Event,
+    HTMLInputElement: dom.HTMLInputElement, HTMLTextAreaElement: dom.HTMLTextAreaElement,
+    HTMLSelectElement: dom.HTMLSelectElement, setTimeout, clearTimeout,
+    ...globals,
+  } });
+  let counter = 0;
+  async function probe(operation, selector, value) {
+    const token = String(++counter);
+    const reply = new Promise(resolve => {
+      const observe = message => {
+        if (message.type !== 'nomifun-plugin-ui-observation-v1' || message.probe_token !== token) return;
+        state.host.off('message', observe);
+        resolve(message);
+      };
+      state.host.on('message', observe);
+    });
+    state.host.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: token, operation, selector, value });
+    return reply;
+  }
+  return { dom, state, probe };
+}
+
+test('UI probes observe DOM behavior while installed surfaces reject mutation tests', { timeout: 5000 }, async t => {
+  const { dom, probe } = await uiHarness(t, '<input id="entry"><button id="add">Add</button><ul id="items"></ul>');
   dom.document.querySelector('#add').addEventListener('click', () => {
     const item = dom.document.createElement('li');
     item.textContent = dom.document.querySelector('#entry').value;
     dom.document.querySelector('#items').append(item);
   });
-  const state = harness(t, { preview: true, globals: {
-    document: dom.document, Event: dom.Event,
-    HTMLInputElement: dom.HTMLInputElement, HTMLTextAreaElement: dom.HTMLTextAreaElement,
-    HTMLSelectElement: dom.HTMLSelectElement, setTimeout, clearTimeout,
-  } });
-  let counter = 0;
-  async function probe(operation, selector, value) {
-    const token = String(++counter);
-    const reply = new Promise(resolve => state.host.once('message', resolve));
-    state.host.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: token, operation, selector, value });
-    return reply;
-  }
   assert.equal((await probe('fill', '#entry', 'Review')).value, null);
   assert.equal((await probe('click', '#add')).value, null);
   assert.equal((await probe('count', '#items li', 1)).value, 1);
@@ -148,7 +162,93 @@ test('UI probes observe DOM behavior while installed surfaces reject mutation te
   const rejected = new Promise(resolve => installed.host.once('message', resolve));
   installed.host.postMessage({ type: 'nomifun-plugin-ui-probe-v1', probe_token: 'mutation', operation: 'click', selector: '#add' });
   assert.match((await rejected).error, /Mutation tests require preview/);
-  await dom.happyDOM.close();
+});
+
+test('UI mutations wait for async storage initialization and writes to enable controls', { timeout: 5000 }, async t => {
+  const { dom, state, probe } = await uiHarness(t,
+    '<input id="entry" readonly><button id="add" disabled>Add</button><ul id="items"></ul>');
+  const entry = dom.document.querySelector('#entry');
+  const button = dom.document.querySelector('#add');
+  const items = dom.document.querySelector('#items');
+  let stored = ['Stored'];
+  let finishLoad;
+  state.host.on('message', request => {
+    if (request.target?.target !== 'kv') return;
+    if (request.target.request.operation === 'get') {
+      finishLoad = () => success(state.host, request,
+        { target: 'kv', result: { outcome: 'value', value: stored, revision: 1 } });
+    } else {
+      stored = request.target.request.value;
+      setTimeout(() => success(state.host, request,
+        { target: 'kv', result: { outcome: 'written', revision: 2 } }), 300);
+    }
+  });
+  const render = values => {
+    items.replaceChildren(...values.map(value => {
+      const item = dom.document.createElement('li'); item.textContent = value; return item;
+    }));
+  };
+  const initialization = state.api.storage.kv.get('todos').then(values => {
+    render(values); entry.readOnly = false; button.disabled = false;
+  });
+  button.addEventListener('click', async () => {
+    entry.readOnly = true; button.disabled = true;
+    const next = [...stored, entry.value];
+    await state.api.storage.kv.set('todos', next);
+    render(next); entry.value = ''; entry.readOnly = false; button.disabled = false;
+  });
+  const fillDuringLoad = probe('fill', '#entry', 'First');
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(entry.value, '', 'verification must not mutate a read-only control during initialization');
+  finishLoad();
+  await initialization;
+  assert.equal((await fillDuringLoad).error, undefined);
+  assert.equal((await probe('click', '#add')).error, undefined);
+  assert.equal((await probe('fill', '#entry', 'Second')).error, undefined);
+  assert.equal((await probe('click', '#add')).error, undefined);
+  assert.equal((await probe('count', '#items li', 3)).value, 3);
+  assert.deepEqual(stored, ['Stored', 'First', 'Second']);
+});
+
+test('UI clicks wait for a replaced disabled control and a busy ancestor', { timeout: 5000 }, async t => {
+  const { dom, probe } = await uiHarness(t, '<main aria-busy="true"><fieldset disabled><button id="add">Add</button></fieldset></main>');
+  let clicks = 0;
+  const attempted = probe('click', '#add');
+  await new Promise(resolve => setTimeout(resolve, 120));
+  const fieldset = dom.document.querySelector('fieldset');
+  const replacement = dom.document.createElement('button');
+  replacement.id = 'add'; replacement.textContent = 'Ready';
+  replacement.addEventListener('click', () => { clicks += 1; });
+  fieldset.replaceChildren(replacement);
+  fieldset.disabled = false;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(clicks, 0);
+  dom.document.querySelector('main').removeAttribute('aria-busy');
+  assert.equal((await attempted).error, undefined);
+  assert.equal(clicks, 1, 'the current enabled element must receive the click exactly once');
+});
+
+test('UI controls that remain unavailable return a bounded diagnostic without mutation', { timeout: 5000 }, async t => {
+  let now = 0;
+  const { dom, probe } = await uiHarness(t, '', {
+    Date: { now: () => now },
+    setTimeout(callback, delay) { now += delay; queueMicrotask(callback); return 0; },
+  });
+  for (const [markup, reason] of [
+    ['<button id="add" aria-disabled="true">Add</button>', 'disabled'],
+    ['<main inert><button id="add">Add</button></main>', 'inert'],
+    ['<main hidden><button id="add">Add</button></main>', 'hidden'],
+    ['<main style="display:none"><button id="add">Add</button></main>', 'hidden'],
+  ]) {
+    now = 0;
+    dom.document.body.innerHTML = markup;
+    let clicks = 0;
+    dom.document.querySelector('#add').addEventListener('click', () => { clicks += 1; });
+    const observation = await probe('click', '#add');
+    assert.equal(observation.error, 'UI element is not interactive: #add (' + reason + ')');
+    assert.equal(clicks, 0);
+    assert.equal(now, 4000);
+  }
 });
 
 function resultFor(request) {

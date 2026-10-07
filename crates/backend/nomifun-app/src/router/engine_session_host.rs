@@ -127,6 +127,53 @@ impl AdmittedEngineSession {
     }
 }
 
+/// A durable Plugin delivery gap: the gate reason plus actionable detail a
+/// same-turn settlement check can relay to the model.
+pub(super) struct PluginDeliveryGap {
+    pub reason: &'static str,
+    pub detail: String,
+    /// The planned same-conversation consumption case a resumed turn must run.
+    pub current_conversation: Option<PlannedConversationCase>,
+}
+
+/// The plan's `current_conversation_case` resolved against the delivered Plugin.
+pub(super) struct PlannedConversationCase {
+    pub plugin_id: String,
+    pub action: String,
+    pub input: serde_json::Value,
+    pub expected_output: serde_json::Value,
+}
+
+/// A managed draft this conversation owns: context data, not an obligation.
+pub(super) struct ConversationPluginDraft {
+    pub draft_id: String,
+    pub plugin_id: Option<String>,
+    pub delivered: bool,
+}
+
+/// One draft row joined with its installed Plugin for `plugin_delivery_status`.
+type PluginDeliveryRow = (
+    Option<String>,
+    String,
+    Option<String>,
+    Option<bool>,
+    Option<i64>,
+    Option<i64>,
+    String,
+);
+
+/// The durable delivery verdict for one accepted request.
+pub(super) enum PluginDeliveryState {
+    /// No draft is planned for this request; the gate has nothing to check.
+    Dormant,
+    /// At least one draft is planned for this request and every planned
+    /// output is installed, observed and, when planned, consumed in this
+    /// conversation.
+    Delivered,
+    /// A host-owned gap blocks delivery.
+    Gap(Box<PluginDeliveryGap>),
+}
+
 impl EngineSessionHost {
     pub(super) fn canonical_store(
         &self,
@@ -142,6 +189,17 @@ impl EngineSessionHost {
     pub(super) async fn plugin_delivery_pending(
         &self, receipt: &EngineTurnReceipt,
     ) -> Result<Option<&'static str>, AppError> {
+        Ok(match self.plugin_delivery_status(receipt).await? {
+            PluginDeliveryState::Gap(gap) => Some(gap.reason),
+            _ => None,
+        })
+    }
+
+    /// The same durable resolution as `plugin_delivery_pending`, plus the
+    /// actionable detail a same-turn settlement check relays to the model.
+    pub(super) async fn plugin_delivery_status(
+        &self, receipt: &EngineTurnReceipt,
+    ) -> Result<PluginDeliveryState, AppError> {
         if !receipt.belongs_to(&self.source) {
             return Err(AppError::Conflict("delivery receipt belongs to another Host".into()));
         }
@@ -151,79 +209,161 @@ impl EngineSessionHost {
         let draft_id = requirement.as_ref().and_then(|value| value.draft_id.as_deref());
         let owner = &receipt.session().principal().principal_id;
         let conversation = &receipt.session().session().conversation_id;
-        let rows: Vec<(Option<String>, String, Option<String>, Option<bool>, Option<i64>, Option<i64>)> =
+        let rows: Vec<PluginDeliveryRow> =
             sqlx::query_as(
-                "SELECT d.source_message_id, d.verification_json, p.active_artifact_digest, p.enabled, p.trashed_at_ms, p.revision FROM plugin_drafts d LEFT JOIN plugins p ON p.plugin_id = d.plugin_id AND p.owner_user_id = d.owner_user_id WHERE d.owner_user_id = ? AND d.source_conversation_id = ? AND ((? IS NOT NULL AND d.draft_id = ?) OR (? IS NULL AND (json_extract(d.verification_json, '$.task_message_id') = ? OR (? = 1 AND d.source_message_id = ?))))"
+                "SELECT d.source_message_id, d.verification_json, p.active_artifact_digest, p.enabled, p.trashed_at_ms, p.revision, d.draft_id FROM plugin_drafts d LEFT JOIN plugins p ON p.plugin_id = d.plugin_id AND p.owner_user_id = d.owner_user_id WHERE d.owner_user_id = ? AND d.source_conversation_id = ? AND ((? IS NOT NULL AND d.draft_id = ?) OR (? IS NULL AND (json_extract(d.verification_json, '$.task_message_id') = ? OR (? = 1 AND d.source_message_id = ?))))"
             ).bind(owner).bind(conversation).bind(draft_id).bind(draft_id).bind(draft_id)
                 .bind(receipt.root_message_id()).bind(requirement.is_some()).bind(receipt.root_message_id()).fetch_all(&self.pool).await
                 .map_err(|error| AppError::Internal(error.to_string()))?;
-        if rows.is_empty() && requirement.is_none() { return Ok(None); }
-        if rows.len() < requirement.as_ref().map_or(1, |value| usize::from(value.expected_count)) {
-            return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+        if rows.is_empty() && requirement.is_none() { return Ok(PluginDeliveryState::Dormant); }
+        let expected_count = requirement.as_ref().map_or(1, |value| usize::from(value.expected_count));
+        if rows.len() < expected_count {
+            let detail = if rows.is_empty() {
+                if let Some(id) = requirement.as_ref().and_then(|value| value.draft_id.as_deref()) {
+                    format!("the draft {id} named by this request does not exist in this conversation; tell the user instead of creating a substitute draft.")
+                } else {
+                    "no plugin draft exists for this request yet. Open the working draft (open with exactly {} for a new plugin, {\"plugin_id\":...} to change an installed plugin, {\"draft_id\":...} to continue an existing draft), then plan, apply, check, preview, run every planned case and install.".to_owned()
+                }
+            } else {
+                format!("this request requires {expected_count} plugin outputs but only {} drafts exist. Create the missing drafts with open (empty arguments {{}}), then plan and verify each.", rows.len())
+            };
+            return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_DELIVERY_REQUIRED", detail, current_conversation: None })));
         }
         let mut declared_outputs:Option<serde_json::Value>=None;
         let mut delivered_outputs=std::collections::BTreeSet::new();
-        for (source_message, raw, artifact, enabled, trash, revision) in rows {
+        for (source_message, raw, artifact, enabled, trash, revision, draft_id) in rows {
             let report: serde_json::Value = serde_json::from_str(&raw).map_err(|error| AppError::Internal(error.to_string()))?;
             if report["task_message_id"].as_str() != Some(receipt.root_message_id())
                 && source_message.as_deref() != Some(receipt.root_message_id()) {
-                return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_DELIVERY_REQUIRED",
+                    detail: format!("draft {draft_id} is not attached to this request; call plan on it for this request before editing."), current_conversation: None })));
             }
             // An untouched baseline is not an output. Every edited draft must
             // first acquire an immutable plan, enforced by the module Host.
             if report["plan"].is_null() { continue; }
-            if nomifun_plugin_development::validate_plan(&report["plan"]).is_err() {
-                return Ok(Some("PLUGIN_VERIFICATION_REQUIRED"));
+            if let Err(validation) = nomifun_plugin_development::validate_plan(&report["plan"]) {
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_VERIFICATION_REQUIRED",
+                    detail: format!("draft {draft_id} has an invalid plan: {validation}"), current_conversation: None })));
             }
             if declared_outputs.as_ref().is_some_and(|outputs|outputs!=&report["plan"]["outputs"])
                 || !delivered_outputs.insert(report["plan"]["output_key"].as_str().expect("validated").to_owned()) {
-                return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_DELIVERY_REQUIRED",
+                    detail: format!("draft {draft_id}: drafts for one request must declare the same outputs and each draft must use a distinct output_key."), current_conversation: None })));
             }
             declared_outputs=Some(report["plan"]["outputs"].clone());
             if report["approval"]["approved"] == serde_json::json!(false)
                 && !report["approval"]["confirmation"].is_null() {
-                return Ok(Some("PLUGIN_AUTHORIZATION_REQUIRED"));
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_AUTHORIZATION_REQUIRED",
+                    detail: format!("draft {draft_id} requires the user's approval for additional privileges before it can install."), current_conversation: None })));
             }
-            let Some(cases) = report["cases"].as_object() else { return Ok(Some("PLUGIN_VERIFICATION_REQUIRED")); };
-            if cases.is_empty() || cases.values().any(|case| case["passed"] != serde_json::json!(true))
-                || !nomifun_plugin_development::plan_evidence_complete(&report)
-                || report["structure_passed"] != serde_json::json!(true)
-                || report["runtime_ready"] != serde_json::json!(true)
-                || (report["has_ui"] == serde_json::json!(true) && report["ui_ready"] != serde_json::json!(true))
-                || report["acceptance"].as_object().is_some_and(|expected|
-                    expected.keys().any(|key| cases.get(key).is_none_or(|case| case["passed"] != serde_json::json!(true)))) {
-                return Ok(Some("PLUGIN_VERIFICATION_REQUIRED"));
+            let Some(cases) = report["cases"].as_object() else {
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_VERIFICATION_REQUIRED",
+                    detail: format!("draft {draft_id} has no recorded case results; run every planned case."), current_conversation: None })));
+            };
+            let mut missing = Vec::new();
+            if report["structure_passed"] != serde_json::json!(true) {
+                missing.push("structure diagnostics (run check)".to_owned());
+            }
+            if report["runtime_ready"] != serde_json::json!(true) {
+                missing.push("runtime readiness (run preview)".to_owned());
+            }
+            if cases.is_empty() {
+                missing.push("no planned case has run".to_owned());
+            }
+            let unpassed: std::collections::BTreeSet<String> = report["plan"]["cases"]
+                .as_object().expect("validated plan").keys()
+                .filter(|name| cases.get(*name).is_none_or(|case| case["passed"] != serde_json::json!(true)))
+                .cloned().collect();
+            if !unpassed.is_empty() {
+                missing.push(format!("accepted cases not passed: {}", unpassed.into_iter().collect::<Vec<_>>().join(", ")));
+            }
+            if !nomifun_plugin_development::plan_evidence_complete(&report) {
+                missing.push("plan evidence is incomplete".to_owned());
+            }
+            if !missing.is_empty() {
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_VERIFICATION_REQUIRED",
+                    detail: format!("draft {draft_id} verification is incomplete: {}. Fix failures with apply, then check, preview and rerun the planned cases with their exact steps.", missing.join("; ")), current_conversation: None })));
             }
             if super::plugin_authoring::verification_context(&self.pool,&report["execution"]["credential_bindings"])
                 .await.ok().as_ref() != Some(&report["context"]) {
-                return Ok(Some("PLUGIN_VERIFICATION_REQUIRED"));
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_VERIFICATION_REQUIRED",
+                    detail: format!("draft {draft_id}: the execution context changed after verification; run preview and the planned cases again."), current_conversation: None })));
             }
             let context_digest=nomifun_agent_contracts::digest_payload(&report["context"])
                 .map_err(|error|AppError::Internal(error.to_string()))?;
-            if enabled != Some(true) || trash.is_some() || artifact.is_none()
-                || report["artifact_digest"].as_str() != artifact.as_deref()
-                || report["delivery"]["artifact_digest"].as_str() != artifact.as_deref()
-                || report["delivery"]["plugin_revision"].as_i64() != revision
-                || report["installed_observation"]["artifact_digest"].as_str() != artifact.as_deref()
-                || report["installed_observation"]["plugin_revision"].as_i64() != revision
-                || report["installed_observation"]["context_digest"].as_str() != Some(context_digest.as_ref())
-                || report["delivery"]["context_digest"].as_str() != Some(context_digest.as_ref())
-                || report["installed_observation"]["observed_at_ms"].as_i64().is_none_or(|time| time <= 0)
-                || (report["has_ui"] == serde_json::json!(true)
-                    && report["installed_observation"]["ui_ready"] != serde_json::json!(true))
-                || report["delivery"]["installed_at_ms"].as_i64().is_none_or(|time| time <= 0) {
-                return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+            let installed = enabled == Some(true) && trash.is_none() && artifact.is_some()
+                && report["artifact_digest"].as_str() == artifact.as_deref()
+                && report["delivery"]["artifact_digest"].as_str() == artifact.as_deref()
+                && report["delivery"]["plugin_revision"].as_i64() == revision
+                && report["delivery"]["installed_at_ms"].as_i64().is_some_and(|time| time > 0);
+            let observed = report["installed_observation"]["artifact_digest"].as_str() == artifact.as_deref()
+                && report["installed_observation"]["plugin_revision"].as_i64() == revision
+                && report["installed_observation"]["context_digest"].as_str() == Some(context_digest.as_ref())
+                && report["delivery"]["context_digest"].as_str() == Some(context_digest.as_ref())
+                && report["installed_observation"]["observed_at_ms"].as_i64().is_some_and(|time| time > 0);
+            let ui_observed = report["has_ui"] != serde_json::json!(true)
+                || report["installed_observation"]["ui_ready"] == serde_json::json!(true);
+            if !(installed && observed && ui_observed) {
+                // install records delivery only after a matching installed
+                // observation (including UI readiness), so this branch is
+                // defensive; plugin-authored diagnostics such as ui_error
+                // stay out of relayed host feedback.
+                let detail = if !installed {
+                    format!("draft {draft_id} passed verification but is not installed; call install with the latest verification_digest (from read or the last successful test), then inspect.")
+                } else {
+                    format!("draft {draft_id}: the recorded installed check does not match the current installation; call install again with the latest verification_digest (from read), then inspect.")
+                };
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_DELIVERY_REQUIRED", detail, current_conversation: None })));
             }
             if !super::plugin_authoring::current_conversation_consumed(&self.pool,conversation,receipt.operation_id(),&report).await? {
-                return Ok(Some("PLUGIN_CURRENT_CONVERSATION_PENDING"));
+                let case = &report["plan"]["current_conversation_case"];
+                return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_CURRENT_CONVERSATION_PENDING",
+                    detail: format!("draft {draft_id} is delivered but still needs to be consumed in this conversation."),
+                    current_conversation: (!case.is_null()).then(|| PlannedConversationCase {
+                        plugin_id: report["delivery"]["plugin_id"].as_str().unwrap_or_default().to_owned(),
+                        action: case["action"].as_str().unwrap_or_default().to_owned(),
+                        input: case["input"].clone(),
+                        expected_output: case["expected_output"].clone(),
+                    }) })));
             }
         }
-        if delivered_outputs.len()<requirement.as_ref().map_or(1,|value|usize::from(value.expected_count))
+        if delivered_outputs.len() < expected_count
             || declared_outputs.as_ref().is_none_or(|outputs|outputs.as_array().expect("validated").iter()
                 .any(|output|!delivered_outputs.contains(output["key"].as_str().expect("validated")))) {
-            return Ok(Some("PLUGIN_DELIVERY_REQUIRED"));
+            let detail = match &declared_outputs {
+                Some(outputs) => {
+                    let keys: Vec<String> = outputs.as_array().expect("validated").iter()
+                        .filter(|output| !delivered_outputs.contains(output["key"].as_str().expect("validated")))
+                        .map(|output| output["key"].as_str().expect("validated").to_owned()).collect();
+                    format!("the planned outputs are not delivered yet: {}. Complete apply, check, preview, the planned cases and install for each.", keys.join(", "))
+                }
+                None => "no plugin draft has an accepted plan for this request yet; call plan on a draft for this request before editing.".to_owned(),
+            };
+            return Ok(PluginDeliveryState::Gap(Box::new(PluginDeliveryGap { reason: "PLUGIN_DELIVERY_REQUIRED", detail, current_conversation: None })));
         }
-        Ok(None)
+        Ok(PluginDeliveryState::Delivered)
+    }
+
+    /// Managed drafts this conversation owns, newest first, as host-generated
+    /// identifiers only (no model-written text). This is context only: the
+    /// completion gate covers only drafts planned for the current request, so
+    /// owning a draft never creates a delivery obligation.
+    pub(super) async fn conversation_plugin_drafts(
+        &self,
+        owner: &str,
+        conversation: &str,
+    ) -> Result<Vec<ConversationPluginDraft>, AppError> {
+        sqlx::query_as::<_, (String, Option<String>, bool)>(
+            "SELECT draft_id, plugin_id, json_extract(verification_json,'$.delivery.artifact_digest') IS NOT NULL FROM plugin_drafts WHERE owner_user_id = ? AND source_conversation_id = ? ORDER BY updated_at_ms DESC, draft_id LIMIT 32",
+        )
+        .bind(owner)
+        .bind(conversation)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(|(draft_id, plugin_id, delivered)| {
+            ConversationPluginDraft { draft_id, plugin_id, delivered }
+        }).collect())
+        .map_err(|error| AppError::Internal(error.to_string()))
     }
 
     /// Exact revision-selected Skill bytes, with inventory/hash verification.

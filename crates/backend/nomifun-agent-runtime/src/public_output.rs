@@ -1,5 +1,5 @@
-const TOOL_TAG: &str = "<tool_call>";
-const FUNCTION_TAG: &str = "<function=";
+pub(crate) const TOOL_TAG: &str = "<tool_call>";
+pub(crate) const FUNCTION_TAG: &str = "<function=";
 
 /// Keep a split protocol marker out of public output until it is classified.
 /// Native ToolCall events bypass this text-only guard and retain their normal

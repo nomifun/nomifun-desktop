@@ -1007,9 +1007,12 @@ impl EngineKernelSession {
                 action_id: binding.action_id.clone(),
             }
         });
+        // The complete frozen Plugin surface must be present; only its
+        // presentation flag follows the plan.
+        let plugin_part = self.plugin_bindings.tool_plan_presented_as(&plan)?;
         let canonical = self
             .compile_tool_plan(exposures)?
-            .merged(&self.plugin_bindings.tool_plan())
+            .merged(&plugin_part)
             .map_err(failure)?;
         if plan != canonical {
             return Err(failure(

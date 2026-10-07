@@ -48,6 +48,9 @@ pub enum AgentExecutionStopReason {
     TotalModelBudget,
     SegmentBudget,
     NoProgress,
+    /// Plugin verification stalled; an owner reply may continue this same
+    /// accepted task without granting another cumulative model allowance.
+    PluginVerificationStalled,
     ProgressLedgerFull,
     CheckpointUnavailable,
     NonQuiescentBoundary,
@@ -63,6 +66,7 @@ impl AgentExecutionStopReason {
             Self::TotalModelBudget => "EXECUTION_TOTAL_MODEL_BUDGET",
             Self::SegmentBudget => "EXECUTION_SEGMENT_BUDGET",
             Self::NoProgress => "EXECUTION_NO_PROGRESS",
+            Self::PluginVerificationStalled => "PLUGIN_VERIFICATION_REQUIRED",
             Self::ProgressLedgerFull => "EXECUTION_PROGRESS_LEDGER_FULL",
             Self::CheckpointUnavailable => "EXECUTION_CHECKPOINT_UNAVAILABLE",
             Self::NonQuiescentBoundary => "EXECUTION_NON_QUIESCENT_BOUNDARY",

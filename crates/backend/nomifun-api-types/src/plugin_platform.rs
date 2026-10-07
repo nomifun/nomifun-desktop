@@ -355,6 +355,12 @@ pub struct PluginDraftSummaryDto {
     pub base_plugin_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_id: Option<String>,
+    /// Artifact digest of the installed plugin this draft was delivered as.
+    /// Cleared by any post-delivery edit (apply/check/preview rewrite
+    /// verification), so its presence means the draft is unchanged since
+    /// delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_artifact_digest: Option<String>,
     pub display_name: String,
     pub description: String,
     pub status: PluginDraftStatusDto,

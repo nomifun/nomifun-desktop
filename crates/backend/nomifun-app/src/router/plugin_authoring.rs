@@ -16,6 +16,17 @@ use super::plugin::{self, PluginHttpError, PluginRouterState};
 fn hash(value:&Value)->String { digest_payload(value).expect("JSON value").as_ref().to_owned() }
 fn error(message:&str)->PluginHttpError { PluginHttpError::bad_request(message) }
 
+/// Install revokes the draft preview and itself checks the installed plugin
+/// and UI. A Preview case after it would strip that delivery evidence.
+pub(super) const INSTALLED_PREVIEW_CLOSED: &str = "PLUGIN_PREVIEW_REQUIRED: install already ran for this verified revision and closed its preview; install itself checks the installed plugin and its UI. After install, do not call test_action or test_ui; when the plan has a current_conversation_case, call the installed tool instead. To retry an incomplete installed check, call install again; to change the plugin, call apply, then check, preview and rerun the planned cases before installing again.";
+
+/// Install records `installed_observation` (and `delivery` on success); check,
+/// preview and apply all rebuild verification without them, so their presence
+/// means install has run since the last preview.
+pub(super) fn installed_since_preview(verification: &Value) -> bool {
+    !verification["installed_observation"].is_null() || !verification["delivery"].is_null()
+}
+
 /// Proof comes from the actual Agent dispatch and its settled result, after
 /// this exact installation. Global publications and creator preview calls do
 /// not establish consumption by the current conversation.
@@ -81,6 +92,69 @@ pub(super) async fn verification_context(
 mod credential_context_tests {
     use super::*;
     #[test]
+    fn oracle_conflict_reports_the_planned_case_and_actionable_guidance() {
+        let acceptance = json!({"required-uppercase":{"kind":"action","action":"normalize",
+            "input":{"text":"  Mixed Case  "},"expected_output":{"text":"MIXED CASE"}},
+            "read-after-restart":{"kind":"action","action":"persist","input":{},
+                "expected_output":{"value":"saved"},"restart":true}});
+        let oracle = json!({"kind":"action","action":"normalize","input":{"text":"  Mixed Case  "},
+            "expected_output":{"text":"mixed case"}});
+        let conflict = oracle_conflict(&acceptance, "required-uppercase", &oracle).unwrap();
+        assert!(conflict.contains("case 'required-uppercase' must run exactly as planned"), "{conflict}");
+        assert!(conflict.contains("\"expected_output\":{\"text\":\"MIXED CASE\"}"), "{conflict}");
+        assert!(conflict.contains("Pass every value as JSON"), "{conflict}");
+        assert!(!conflict.contains("mixed case\""), "the rejected value must not be shown: {conflict}");
+        assert!(oracle_conflict(&acceptance, "required-uppercase", &acceptance["required-uppercase"]).is_none());
+    }
+
+    #[test]
+    fn oracle_conflict_allows_a_supplementary_case_absent_from_the_plan() {
+        let acceptance = json!({"required-uppercase":{"kind":"action"},"read":{"kind":"ui"}});
+        assert!(oracle_conflict(&acceptance, "extra-check", &json!({"kind":"action"})).is_none());
+        assert!(oracle_conflict(&Value::Null, "extra-check", &json!({"kind":"action"})).is_none());
+    }
+
+    #[test]
+    fn oracle_conflict_truncates_the_planned_case_on_a_char_boundary() {
+        let wide = json!({"kind":"action","action":"a","input":{"pad":"界".repeat(1500)},"expected_output":{}});
+        let acceptance = json!({"x": wide});
+        let conflict = oracle_conflict(&acceptance, "x", &json!({"kind":"action","action":"b"})).unwrap();
+        let start = conflict.find("{").unwrap();
+        let end = conflict.find(". Pass every value as JSON").unwrap();
+        assert!(end - start <= 2048 && end - start > 2000, "{conflict}");
+    }
+
+    #[test]
+    fn ui_failure_diagnostics_include_assertion_and_interrupted_step() {
+        let steps=vec![
+            json!({"operation":"click","selector":"#add"}),
+            json!({"operation":"text","selector":"#list","value":"milk"}),
+            json!({"operation":"count","selector":"#missing","value":1}),
+        ];
+        let diagnostics=ui_case_diagnostics(&steps,&[Value::Null,json!("empty")],Some("UI element not found: #missing"));
+        assert_eq!(diagnostics[0],json!({"step_index":1,"step_number":2,"operation":"text",
+            "selector":"#list","expected":"milk","actual":"empty","reason":"assertion_mismatch"}));
+        assert_eq!(diagnostics[1]["step_index"],2);
+        assert_eq!(diagnostics[1]["reason"],"step_execution_failed");
+        assert_eq!(diagnostics[1]["error"],"UI element not found: #missing");
+        assert!(ui_case_diagnostics(&steps,&[Value::Null,json!("milk"),json!(1)],None).is_empty());
+    }
+
+    #[test]
+    fn ui_failure_diagnostics_bound_plugin_text_and_result_count() {
+        let steps=vec![json!({"operation":"text","selector":"界".repeat(500),"value":"界".repeat(2000)});8];
+        let observations=vec![json!({"untrusted":"界".repeat(2000)});8];
+        let diagnostics=ui_case_diagnostics(&steps,&observations,None);
+        assert_eq!(diagnostics.len(),4);
+        assert_eq!(diagnostics[0]["selector"].as_str().unwrap().chars().count(),257);
+        assert_eq!(diagnostics[0]["expected"].as_str().unwrap().chars().count(),1025);
+        assert_eq!(diagnostics[0]["actual"]["truncated"],true);
+        let interrupted=ui_case_diagnostics(&steps,&[],Some(&"界".repeat(2000)));
+        assert_eq!(interrupted[0]["error"].as_str().unwrap().chars().count(),1025);
+        assert_eq!(interrupted[0]["step_index"],0);
+    }
+
+    #[test]
     fn current_consumption_requires_exact_dispatch_input_and_settlement_after_install() {
         let delivery=json!({"plugin_id":"plugin-id","artifact_digest":"digest","context_digest":"context"});
         let report=json!({"delivery":delivery,"plan":{"current_conversation_case":{
@@ -103,6 +177,14 @@ mod credential_context_tests {
         events[2]["event"]["call"]["arguments"]=json!({"text":"different"});
         assert!(!consumption_evidence(&events,&report));
         assert!(!consumption_evidence(&events[2..],&report),"an installation boundary is required");
+    }
+
+    #[test]
+    fn installed_since_preview_detects_the_install_boundary() {
+        assert!(installed_since_preview(&json!({"installed_observation":{"ui_ready":false}})));
+        assert!(installed_since_preview(&json!({"delivery":{"plugin_id":"p"}})));
+        assert!(!installed_since_preview(&json!({"runtime_ready":true,"surface":{"is_preview":true}})));
+        assert!(!installed_since_preview(&json!({"installed_observation":null})));
     }
     #[tokio::test]
     async fn encrypted_credential_rotation_invalidates_context_without_exposing_values() {
@@ -355,28 +437,45 @@ pub(super) async fn details(
     }))))
 }
 
-/// Persist the immutable requirement before effects or an ephemeral UI wait.
-/// Dropping the caller leaves a failed/pending case rather than erasing it.
+/// Persist the case attempt before effects or an ephemeral UI wait. Only
+/// plan.cases defines immutable requirements; extra cases remain diagnostic.
+/// Dropping the caller leaves a failed/pending result rather than erasing it.
 pub(super) async fn begin_authoring_case(
     state: &PluginRouterState,
     draft: &PluginDraftRecord,
     case_name: &str,
     oracle: Value,
 ) -> Result<PluginDraftRecord, PluginHttpError> {
-    let prior = &draft.verification["acceptance"][case_name];
-    if !prior.is_null() && *prior != oracle {
-        return Err(PluginHttpError::conflict(
-            "PLUGIN_ORACLE_CHANGED: keep the accepted case unchanged while repairing",
-        ));
+    if let Some(conflict) = oracle_conflict(&draft.verification["plan"]["cases"], case_name, &oracle) {
+        return Err(PluginHttpError::conflict(&conflict));
     }
     let mut next = draft.clone();
-    next.verification["acceptance"][case_name] = oracle.clone();
     next.verification["cases"][case_name] = json!({
         "kind": oracle["kind"], "passed": false, "state": "running",
     });
     next.verification.as_object_mut().expect("verification object").remove("delivery");
     next.updated_at_ms = nomifun_common::now_ms();
     state.repository.update_draft(&next, draft.revision).await.map_err(Into::into)
+}
+
+/// The accepted oracle is immutable: a rerun must reproduce it exactly, so a
+/// conflict reports the planned case (compact, bounded) rather than the guess.
+/// A name absent from the plan is a supplementary case and can change while
+/// debugging; it never becomes a requirement by running it.
+fn oracle_conflict(planned_cases: &Value, case_name: &str, oracle: &Value) -> Option<String> {
+    let planned_case = &planned_cases[case_name];
+    if planned_case.is_null() || *planned_case == *oracle {
+        return None;
+    }
+    let mut planned = serde_json::to_string(planned_case).unwrap_or_else(|_| planned_case.to_string());
+    let mut end = planned.len().min(2048);
+    while !planned.is_char_boundary(end) {
+        end -= 1;
+    }
+    planned.truncate(end);
+    Some(format!(
+        "PLUGIN_ORACLE_CHANGED: case '{case_name}' must run exactly as planned: {planned}. Pass every value as JSON (objects, arrays, numbers), not as strings containing JSON."
+    ))
 }
 
 /// Check the actual installed Surface and Bridge without replaying mutations
@@ -462,6 +561,55 @@ pub(super) async fn run_installed_ui_check(
     Ok(updated)
 }
 
+fn bounded_ui_text(value: &str, max_chars: usize) -> String {
+    let mut preview: String=value.chars().take(max_chars).collect();
+    if value.chars().nth(max_chars).is_some() { preview.push('…'); }
+    preview
+}
+
+fn bounded_ui_value(value: &Value) -> Value {
+    match value {
+        Value::String(text)=>json!(bounded_ui_text(text,1024)),
+        Value::Array(_) | Value::Object(_)=>{
+            let text=value.to_string();
+            if text.chars().count()<=1024 { value.clone() }
+            else { json!({"preview":bounded_ui_text(&text,1024),"truncated":true}) }
+        },
+        _=>value.clone(),
+    }
+}
+
+/// These observations are plugin-authored tool data, never host instructions.
+/// Keep enough context for a repair without echoing an unbounded DOM result.
+fn ui_case_diagnostics(steps: &[Value], observations: &[Value], error: Option<&str>) -> Vec<Value> {
+    let mut diagnostics=Vec::new();
+    for (index,(step,actual)) in steps.iter().zip(observations).enumerate() {
+        if matches!(step["operation"].as_str(),Some("text"|"count")) && step["value"]!=*actual {
+            diagnostics.push(json!({"step_index":index,"step_number":index+1,
+                "operation":step["operation"],"selector":bounded_ui_text(step["selector"].as_str().unwrap_or(""),256),
+                "expected":bounded_ui_value(&step["value"]),"actual":bounded_ui_value(actual),"reason":"assertion_mismatch"}));
+            if diagnostics.len()==4 { break; }
+        }
+    }
+    if diagnostics.len()<4 {
+        if let Some(step)=steps.get(observations.len()) {
+            diagnostics.push(json!({"step_index":observations.len(),"step_number":observations.len()+1,
+                "operation":step["operation"],"selector":bounded_ui_text(step["selector"].as_str().unwrap_or(""),256),
+                "expected":bounded_ui_value(&step["value"]),"actual":null,
+                "reason":if error.is_some(){"step_execution_failed"}else{"missing_observation"},
+                "error":bounded_ui_text(error.unwrap_or("The preview did not return this step's observation"),1024)}));
+        } else if let Some(error)=error {
+            diagnostics.push(json!({"reason":"ui_execution_failed","error":bounded_ui_text(error,1024)}));
+        } else if observations.len()>steps.len() {
+            diagnostics.push(json!({"reason":"unexpected_observation_count","expected":steps.len(),"actual":observations.len()}));
+        }
+    }
+    if diagnostics.is_empty() && !steps.iter().any(|step|matches!(step["operation"].as_str(),Some("text"|"count"))) {
+        diagnostics.push(json!({"reason":"no_assertions","error":"A UI case requires a text or count assertion"}));
+    }
+    diagnostics
+}
+
 pub(super) async fn run_authoring_ui_test(
     state:&PluginRouterState,owner:&str,conversation:&str,turn:&str,input:Value,
 )->Result<Value,PluginHttpError>{
@@ -470,7 +618,8 @@ pub(super) async fn run_authoring_ui_test(
     struct Request {draft_id:String,expected_revision:u64,case_name:String,steps:Vec<Value>}
     let request:Request=serde_json::from_value(input).map_err(|error|PluginHttpError::bad_request(&error.to_string()))?;
     let mut draft=plugin::draft_owned(state,owner,&request.draft_id).await?;
-    plugin::require_draft_revision(&draft,request.expected_revision)?;
+    plugin::require_authoring_revision(&draft,request.expected_revision)?;
+    if installed_since_preview(&draft.verification) { return Err(error(INSTALLED_PREVIEW_CLOSED)); }
     if draft.source_conversation_id.as_deref()!=Some(conversation)
         || draft.verification["runtime_ready"]!=json!(true)
         || draft.verification["has_ui"]!=json!(true)
@@ -484,11 +633,24 @@ pub(super) async fn run_authoring_ui_test(
         }
         if ["fill","text","count"].contains(&op) && step.get("value").is_none(){return Err(error("An input or expected value is required"));}
     }
+    let planned=!draft.verification["plan"]["cases"][&request.case_name].is_null();
     let oracle=json!({"kind":"ui","steps":request.steps});
-    let descriptor:PluginSurfaceDescriptorDto=serde_json::from_value(draft.verification["surface"].clone())
-        .map_err(|_|error("UI preview descriptor is missing"))?;
-    let mut surface_guard = AuthoringSurfaceGuard::new(state, owner, &descriptor);
     draft=begin_authoring_case(state,&draft,&request.case_name,oracle).await?;
+    // Every UI case starts from fresh preview storage: revoking releases the
+    // previous session, so this preview gets its own data root and cases
+    // cannot read state earlier cases or previews left behind.
+    plugin::revoke_draft_surfaces(state,&draft.draft_id).await?;
+    let execution=&draft.verification["execution"];
+    let preview=plugin::preview_draft_owned(state,owner,&request.draft_id,
+        serde_json::from_value::<PreviewPluginDraftRequest>(json!({
+            "expected_revision":draft.revision,"config":execution["config"],
+            "access":{"permissions":execution["permissions"],"credential_bindings":execution["credential_bindings"]}
+        })).map_err(|serde_error|error(&serde_error.to_string()))?).await?;
+    let descriptor=preview.descriptor;
+    let mut surface_guard = AuthoringSurfaceGuard::new(state, owner, &descriptor);
+    draft.verification["surface"]=serde_json::to_value(&descriptor).expect("descriptor");
+    draft.updated_at_ms=nomifun_common::now_ms();
+    draft=state.repository.update_draft(&draft,draft.revision).await?;
     let execution_revision=draft.revision;
     let token=Uuid::now_v7().to_string();
     let command=UiCommand{test_token:token.clone(),draft_id:request.draft_id.clone(),descriptor:descriptor.clone(),
@@ -527,6 +689,8 @@ pub(super) async fn run_authoring_ui_test(
         }
     }
     if assertions==0 {passed=false;}
+    let diagnostics=ui_case_diagnostics(&request.steps,&response.observations,response.error.as_deref());
+    let diagnostic_error=response.error.as_deref().map(|error|bounded_ui_text(error,1024));
     // Refresh before committing; file edits/revocation invalidate a pending UI result.
     draft=plugin::draft_owned(state,owner,&request.draft_id).await?;
     plugin::require_draft_revision(&draft,execution_revision)?;
@@ -537,13 +701,13 @@ pub(super) async fn run_authoring_ui_test(
         "kind":"ui","passed":passed,"state":if passed{"passed"}else{"failed"},"steps":request.steps,"observations":response.observations,
         "error":response.error,"persistence_checked":persistence,
     });
-    draft.verification["ui_ready"]=json!(passed);
     draft.updated_at_ms=nomifun_common::now_ms();
     let updated=state.repository.update_draft(&draft,execution_revision).await?;
     surface_guard.retain();
     state.events.send_to_user(owner,WebSocketMessage::new("plugin.authoring.changed",json!({
         "conversation_id":conversation,"draft_id":request.draft_id,"revision":updated.revision,
     })));
-    Ok(json!({"draft_id":request.draft_id,"revision":updated.revision,"passed":passed,
+    Ok(json!({"draft_id":request.draft_id,"case_name":request.case_name,"planned":planned,
+        "revision":updated.revision,"passed":passed,"diagnostics":diagnostics,"error":diagnostic_error,
         "persistence_checked":persistence,"verification_digest":hash(&updated.verification)}))
 }

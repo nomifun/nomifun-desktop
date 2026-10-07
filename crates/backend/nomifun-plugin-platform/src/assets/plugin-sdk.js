@@ -301,6 +301,20 @@
 
   // Only the Host's transferred channel can request these typed observations.
   // This performs actual DOM interactions; no supplied JavaScript is evaluated.
+  function interactionBlock(element, operation) {
+    if (element.matches(':disabled') || element.closest('[aria-disabled="true"]')) return 'disabled';
+    if (operation === 'fill' && element.readOnly) return 'read-only';
+    if (element.closest('[inert]')) return 'inert';
+    if (element.closest('[aria-busy="true"]')) return 'busy';
+    if (element.closest('[hidden]')) return 'hidden';
+    const view = element.ownerDocument.defaultView;
+    for (let current = element; current && view; current = current.parentElement) {
+      const style = view.getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return 'hidden';
+    }
+    return null;
+  }
+
   async function observeUi(command) {
     const operation = command.operation;
     if (operation === 'ready') {
@@ -315,11 +329,16 @@
     if (typeof command.selector !== 'string' || command.selector.length > 4096) throw new Error('Invalid UI selector');
     let element = document.querySelector(command.selector);
     const elementDeadline = Date.now() + 4000;
-    while (!element && operation !== 'count' && Date.now() < elementDeadline) {
+    const mutation = operation === 'click' || operation === 'fill';
+    let blocked = element && mutation ? interactionBlock(element, operation) : null;
+    while ((!element || blocked) && operation !== 'count' && Date.now() < elementDeadline) {
+      if (closed) throw new Error('Plugin surface closed');
       await new Promise(resolve => setTimeout(resolve, 100));
       element = document.querySelector(command.selector);
+      blocked = element && mutation ? interactionBlock(element, operation) : null;
     }
     if (operation !== 'count' && !element) throw new Error('UI element not found: ' + command.selector);
+    if (blocked) throw new Error('UI element is not interactive: ' + command.selector + ' (' + blocked + ')');
     if (operation === 'click') {
       element.click();
       await new Promise(resolve => setTimeout(resolve, 150));

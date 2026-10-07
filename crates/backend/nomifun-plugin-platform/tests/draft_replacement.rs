@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use nomifun_agent_contracts::PluginDraftId;
 use nomifun_plugin_platform::{
-    CancellationFlag, NeverCancel, PluginDraftStore, PluginDraftStoreError,
+    CancellationFlag, NeverCancel, PluginDraftRecord, PluginDraftStatus, PluginDraftStore,
+    PluginDraftStoreError, PluginRepository, PluginRepositoryError, SqlitePluginRepository,
 };
+use serde_json::json;
 use uuid::Uuid;
 
 struct Fixture {
@@ -17,9 +19,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_owner(Uuid::now_v7().to_string())
+    }
+
+    fn with_owner(owner: String) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let store = PluginDraftStore::new(temp.path().join("drafts")).unwrap();
-        let owner = Uuid::now_v7().to_string();
         let draft_id = PluginDraftId::from(Uuid::now_v7().to_string());
         store.create(&owner, &draft_id).unwrap();
         store
@@ -162,4 +167,59 @@ fn readers_wait_for_staged_replacement_and_never_observe_a_mixed_tree() {
     drop(staged);
     assert_eq!(receive.recv_timeout(Duration::from_secs(2)).unwrap(), original);
     reader.join().unwrap();
+}
+
+#[tokio::test]
+async fn losing_edit_cas_rolls_back_to_the_winning_files_and_database_record() {
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
+    let fixture = Fixture::with_owner(owner);
+    let repository = SqlitePluginRepository::new(database.pool().clone());
+    let draft = PluginDraftRecord {
+        owner_user_id: fixture.owner.clone(), draft_id: fixture.draft_id.clone(), revision: 1,
+        plugin_id: None, base_revision: None, name: "Original".into(),
+        workspace_path: fixture.store.open(&fixture.owner, &fixture.draft_id)
+            .unwrap().to_string_lossy().into_owned(),
+        source_conversation_id: None, source_message_id: None, source_operation_key: None,
+        source_request_digest: None, verification: json!({"edit_revision": 1}),
+        imported_context: json!({}), status: PluginDraftStatus::Ready, last_error: None,
+        created_at_ms: 1, updated_at_ms: 1,
+    };
+    repository.create_draft(&draft).await.unwrap();
+
+    // Both editors read the same row and tree before either commits. Run their
+    // commits in a deterministic order to exercise the stale-editor interleaving.
+    let mut winner = repository.get_draft(&fixture.owner, &fixture.draft_id).await.unwrap().unwrap();
+    let mut loser = repository.get_draft(&fixture.owner, &fixture.draft_id).await.unwrap().unwrap();
+    let mut winning_files = fixture.snapshot();
+    let mut rejected_files = winning_files.clone();
+    winning_files.insert("ui/index.html".into(), b"accepted ui".to_vec());
+    rejected_files.insert("ui/index.html".into(), b"rejected ui".to_vec());
+    rejected_files.remove("source/obsolete.ts");
+    assert_eq!(winner.revision, loser.revision);
+
+    let mut replacement = fixture.store.stage_exact_replacement(
+        &fixture.owner, &fixture.draft_id, &winning_files, &NeverCancel,
+    ).unwrap();
+    winner.name = "Accepted".into();
+    winner.verification["edit_revision"] = json!(winner.revision + 1);
+    replacement.publish().unwrap();
+    let committed = repository.update_draft(&winner, winner.revision).await.unwrap();
+    replacement.commit().unwrap();
+
+    let mut replacement = fixture.store.stage_exact_replacement(
+        &fixture.owner, &fixture.draft_id, &rejected_files, &NeverCancel,
+    ).unwrap();
+    loser.name = "Rejected".into();
+    loser.verification["edit_revision"] = json!(loser.revision + 1);
+    replacement.publish().unwrap();
+    assert!(matches!(repository.update_draft(&loser, loser.revision).await,
+        Err(PluginRepositoryError::Conflict)));
+    replacement.rollback().unwrap();
+
+    assert_eq!(fixture.snapshot(), winning_files,
+        "a rejected replacement and deletion must restore the accepted editor's entire tree");
+    assert_eq!(repository.get_draft(&fixture.owner, &fixture.draft_id).await.unwrap().unwrap(), committed);
+    assert_eq!(committed.revision, 2);
+    assert_eq!(committed.verification["edit_revision"], json!(2));
 }
