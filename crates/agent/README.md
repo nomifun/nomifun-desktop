@@ -14,12 +14,9 @@ Current crates:
 | `nomi-tools` | Built-in tool registry. |
 | `nomi-mcp` | MCP client, config, transports, and tool proxying. |
 | `nomi-memory` | Long-term project/user memory. |
-| `nomi-agent` | Core session engine, tool execution, and Agent delegation. |
-| `nomi-cli` | Standalone `nomi` CLI. |
 | `nomi-computer` | Desktop computer-use tool implementation. |
 | `nomi-a11y` | Accessibility helpers used by computer-use flows. |
 | `nomi-browser-engine` | Self-hosted browser/CDP automation engine. |
-| `nomi-browser` | Browser-use tool layer. |
 
 ## Boundary
 

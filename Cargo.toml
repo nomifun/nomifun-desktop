@@ -361,7 +361,8 @@ opt-level = 3
 #                      appimage/deb/rpm/dmg artifacts).
 # NOT panic = "abort": the codebase relies on panic = "unwind" to isolate a
 # panicking tool from the agent process, at the catch_unwind boundaries in
-# nomi-agent/src/tool_execution.rs and apps/desktop/src/main.rs. Aborting would
+# crates/backend/nomifun-ai-agent/src/engine_sdk.rs and apps/desktop/src/main.rs.
+# Aborting would
 # turn a single tool panic into a full-process crash — a real behavior regression.
 [profile.release]
 opt-level = 3

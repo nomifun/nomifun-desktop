@@ -384,7 +384,7 @@ URL、协议或鉴权方式。
 
 > 产品使用文档：[NomiFun Portal 应用内终端指南](https://www.nomifun.com/zh/docs/guides/terminal/)
 
-在应用内 PTY 会话里运行各种 agent CLI（或独立的 `nomi` CLI）。**Claude Code、Codex、Gemini CLI** 就是这样与 NomiFun 配合使用的：真实的伪终端，CLI 自己的登录与 OAuth，自己的审批提示，没有任何一处被重新实现。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度。AutoWork 也能逐回合驱动这样的终端。
+在应用内 PTY 会话里运行各种 agent CLI。**Claude Code、Codex、Gemini CLI** 就是这样与 NomiFun 配合使用的：真实的伪终端，CLI 自己的登录与 OAuth，自己的审批提示，没有任何一处被重新实现。NomiFun 会把原生能力 —— 知识检索、需求完成、生命周期 hooks —— 经各 CLI *自己的*原生配置注入进去，从而保留完整保真度。AutoWork 也能逐回合驱动这样的终端。
 
 ### 📱 NomiFun Mobile —— 直连你的 Desktop
 
@@ -436,11 +436,11 @@ apps/
   desktop/      Tauri 2 外壳与桌面专属命令
   web/          API + SPA 的独立 web 宿主
 crates/
-  agent/        15 个 nomi-* crate：引擎、供应商、工具、MCP、skills、记忆、
-                browser/computer use，以及独立 nomi CLI
-  backend/      29 个 nomifun-* crate：应用组装、鉴权、数据库、会话、
-                MCP、知识库、需求、终端、伙伴、网关等
-  shared/       2 个跨层 crate：nomifun-net 与 nomi-redact
+  agent/        nomi-* agent 引擎 crate：供应商、工具、MCP、skills、记忆、
+                browser/computer use
+  backend/      nomifun-* 服务 crate：应用组装、鉴权、数据库、会话、
+                MCP、知识库、需求、终端等
+  shared/       agent 与 backend 共用的跨层 crate
 ui/             桌面与 web 共用的 React 19 + Vite SPA
 docs/           技术文档、用户/运维指南、架构说明
 packaging/      web 宿主的 Linux 部署支持
