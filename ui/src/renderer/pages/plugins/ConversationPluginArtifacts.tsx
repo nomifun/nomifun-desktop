@@ -61,7 +61,9 @@ export default function ConversationPluginArtifacts({ conversationId }: { conver
     try {
       await continuePluginConversation({
         conversation_id: parseConversationId(conversationId),
-        input: t('pluginPlatform.authoring.continueTaskPrompt'),
+        input: t(currentExecution?.pause?.reason === 'PLUGIN_CURRENT_CONVERSATION_PENDING'
+          ? 'pluginPlatform.authoring.continueCurrentConversationPrompt'
+          : 'pluginPlatform.authoring.continueTaskPrompt'),
         idempotency_key: `plugin-continue:${uuidv7()}`, plugin_delivery: {},
       });
       await refresh();

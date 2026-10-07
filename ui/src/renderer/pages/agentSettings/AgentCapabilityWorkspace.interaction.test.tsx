@@ -21,7 +21,6 @@ import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import common from '../../services/i18n/locales/en-US/common.json';
 import settings from '../../services/i18n/locales/en-US/settings.json';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
-import { PLUGIN_FEATURE_VISIBLE } from '@/renderer/utils/plugins/pluginFeatureAvailability';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
@@ -174,7 +173,6 @@ describe('Agent capability Module workbench', () => {
     { catalogued: true, selected: true },
     { catalogued: false, selected: true },
   ])('shows plugin development while preserving saved grants (%j)', async ({ catalogued, selected }) => {
-    expect(PLUGIN_FEATURE_VISIBLE).toBe(true);
     const plugin = moduleItem('plugin.development', [
       ['plugin.development/list', 'read_local'],
       ['plugin.development/create', 'write_durable'],

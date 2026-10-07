@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { initialPluginDelivery } from './pluginConversationRequest';
 import { launchPluginConversation, readPluginLaunchIntent, consumePluginLaunchIntent } from './pluginConversationLaunch';
 import type { NavigateFunction } from 'react-router-dom';
-import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { setBrowserStorageGeneration, initializeAgentBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 
 const bootstrap = 'Read the existing plugin and wait for my changes.';
 const intent = { version: 1 as const, token: 'intent', owner_user_id: 'owner', created_at: Date.now() };
@@ -20,6 +20,7 @@ test('new creation and a concrete edit retain the delivery obligation', () => {
 
 test('workbench detour retains the edited requirement and attachments on the same intent', async () => {
   setBrowserStorageGeneration('01900000-0000-7000-8000-000000000001');
+  initializeAgentBrowserStorageGeneration(1);
   const realFetch=globalThis.fetch;
   let destination='';
   const navigate=((path: string) => { destination=path; }) as NavigateFunction;

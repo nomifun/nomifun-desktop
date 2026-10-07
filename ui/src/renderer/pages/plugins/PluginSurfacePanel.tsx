@@ -130,7 +130,7 @@ export default function PluginSurfacePanel({
             port.current?.close(); port.current = null;
             if (!frame.current) throw new Error('Preview frame is unavailable');
             frame.current.src = frame.current.src;
-            await new Promise(resolve => setTimeout(resolve, 300));
+            if (await probe({ operation: 'ready' }) !== true) throw new Error('Reopened preview did not become ready');
             observations.push(null);
           } else observations.push(await probe(step));
         }
