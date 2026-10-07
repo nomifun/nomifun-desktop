@@ -639,7 +639,7 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged.map((message) => message.id)).toEqual(['durable-thinking-step-1', 'turn-summary']);
   });
 
-  test('history refresh preserves the current thinking phase until its canonical Turn settles', () => {
+  test('history refresh reconciles the canonical thinking phase independently of the Turn terminal', () => {
     const turnId = messageId('active-thinking-turn');
     const live = baseMessage({
       id: 'live-thinking', msg_id: 'thinking-step-1', turn_id: turnId, type: 'thinking',
@@ -647,7 +647,7 @@ describe('mergeFetchedMessagesForConversation', () => {
     });
     const persisted = baseMessage({
       id: 'saved-thinking', msg_id: 'thinking-step-1', turn_id: turnId, type: 'thinking',
-      content: { content: 'Inspect the workspace', status: 'done' },
+      content: { content: 'Inspect the workspace', status: 'thinking' },
     });
     const active = mergeFetchedMessagesForConversation([live], fetchedMessages([persisted]), live.conversation_id);
     expect(active).toHaveLength(1);
@@ -656,11 +656,11 @@ describe('mergeFetchedMessagesForConversation', () => {
 
     const combined = {
       ...persisted,
-      content: { content: 'Earlier reasoning. Inspect the workspace', status: 'done' },
+      content: { content: 'Inspect the workspace. Continue checking', status: 'thinking' },
     } as TMessage;
     const reopened = mergeFetchedMessagesForConversation([live], fetchedMessages([combined]), live.conversation_id);
     expect(reopened[0].content).toMatchObject({
-      content: 'Earlier reasoning. Inspect the workspace', status: 'thinking',
+      content: 'Inspect the workspace. Continue checking', status: 'thinking',
     });
 
     const terminal = baseMessage({
@@ -671,6 +671,64 @@ describe('mergeFetchedMessagesForConversation', () => {
       active, fetchedMessages([persisted, terminal]), live.conversation_id
     );
     expect(settled.find(message => message.type === 'thinking')?.content).toMatchObject({ status: 'done' });
+  });
+
+  test('a phase handoff from history completes equal live text while the Turn remains active', () => {
+    const turnId = messageId('handoff-thinking-turn');
+    const live = baseMessage({ id: 'live', msg_id: 'thinking-step', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect.', status: 'thinking' } });
+    const saved = { ...live, id: 'saved', content: { content: 'Inspect.', status: 'done' } } as TMessage;
+    const merged = mergeFetchedMessagesForConversation([live], fetchedMessages([saved]), live.conversation_id);
+    expect(merged[0].content).toMatchObject({ status: 'done' });
+  });
+
+  test('a live handoff cannot be reopened by an older equal reasoning snapshot', () => {
+    const turnId = messageId('handoff-thinking-turn');
+    const live = baseMessage({ id: 'live', msg_id: 'thinking-step', turn_id: turnId, type: 'thinking',
+      content: { content: 'Inspect.', status: 'done' } });
+    const saved = { ...live, id: 'saved', content: { content: 'Inspect.', status: 'thinking' } } as TMessage;
+    const queryStart = { ...live, content: { content: 'Inspect.', status: 'thinking' } } as TMessage;
+    const merged = mergeFetchedMessagesForConversation([live], fetchedMessages([saved]), live.conversation_id, [queryStart]);
+    expect(merged[0].content).toMatchObject({ status: 'done' });
+    const reopened = { ...saved, content: { content: 'Inspect. Verify.', status: 'thinking' } } as TMessage;
+    const next = mergeFetchedMessagesForConversation(merged, fetchedMessages([reopened]), live.conversation_id);
+    expect(next[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+  });
+
+  test('a bounded canonical body can settle an unchanged longer live phase after a dropped completion frame', () => {
+    const liveContent = 'x'.repeat(512 * 1024) + 'new live suffix';
+    const live = baseMessage({ id: 'live', msg_id: 'bounded-thinking-step', type: 'thinking',
+      content: { content: liveContent, status: 'thinking' } });
+    const saved = { ...live, id: 'saved', content: { content: 'x'.repeat(512 * 1024), status: 'done' } } as TMessage;
+    const merged = mergeFetchedMessagesForConversation([live], fetchedMessages([saved]), live.conversation_id, [live]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].content).toMatchObject({ content: liveContent, status: 'done' });
+  });
+
+  test('an older history completion cannot close a phase reopened during the fetch', () => {
+    const previous = baseMessage({ id: 'thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Inspect.', status: 'done' } });
+    const resumed = { ...previous, content: { content: 'Inspect.Verify.', status: 'thinking' } } as TMessage;
+    const saved = fetchedMessage({ ...previous, id: 'saved' });
+    const merged = mergeFetchedMessagesForConversation([resumed], [saved], previous.conversation_id, [previous]);
+    expect(merged[0].content).toMatchObject({ content: 'Inspect.Verify.', status: 'thinking' });
+    const unchanged = mergeFetchedMessagesForConversation(merged, [saved], previous.conversation_id, merged);
+    expect(unchanged[0].content).toMatchObject({ content: 'Inspect.Verify.', status: 'done' });
+  });
+
+  test('streamed reasoning resumes its canonical row after interleaved narration', () => {
+    const thought = baseMessage({ id: 'thought', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Inspect. ', status: 'done' } });
+    const narration = baseMessage({ id: 'narration', msg_id: 'public-step', content: { content: 'Reading the source.' } });
+    const delta = baseMessage({ id: 'delta', msg_id: 'thinking-step', type: 'thinking',
+      content: { content: 'Verify.', status: 'thinking' } });
+    const merged = composeMessageForTest(delta, [thought, narration]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0].id).toBe('thought');
+    expect(merged[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'thinking' });
+    expect(merged[1]).toBe(narration);
+    const done = { ...delta, content: { content: '', status: 'done' } } as TMessage;
+    expect(composeMessageForTest(done, merged)[0].content).toMatchObject({ content: 'Inspect. Verify.', status: 'done' });
   });
 
   test('keeps a longer streaming thinking snapshot if the fetched row is stale', () => {
@@ -1632,31 +1690,17 @@ describe('mergeThinkingStreamContent', () => {
     expect(mergeThinkingStreamContent('用户要求', '写一个贪吃蛇游戏')).toBe('用户要求写一个贪吃蛇游戏');
   });
 
-  test('replaces with cumulative chunks instead of duplicating the same paragraph', () => {
-    expect(mergeThinkingStreamContent('用户要求写一个贪吃蛇游戏', '用户要求写一个贪吃蛇游戏')).toBe(
-      '用户要求写一个贪吃蛇游戏'
-    );
-    expect(mergeThinkingStreamContent('用户要求写一个贪吃蛇游戏', '用户要求写一个贪吃蛇游戏。开始创建文件')).toBe(
-      '用户要求写一个贪吃蛇游戏。开始创建文件'
-    );
+  test('preserves repeated words from distinct typed reasoning deltas', () => {
+    expect(mergeThinkingStreamContent('Verify.', 'Verify.')).toBe('Verify.Verify.');
   });
 
-  test('treats whitespace-only formatting changes as the same cumulative snapshot', () => {
-    expect(
-      mergeThinkingStreamContent(
-        '用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动',
-        '用户要求我写一个贪吃蛇游戏，包括： 1. 游戏窗口 2. 蛇的移动'
-      )
-    ).toBe('用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动');
+  test('preserves whitespace and shared prefixes without guessing snapshot replacement', () => {
+    expect(mergeThinkingStreamContent('Inspect.\n', 'Inspect.\nCheck.')).toBe('Inspect.\nInspect.\nCheck.');
+    expect(mergeThinkingStreamContent('Inspect.', '\n\n')).toBe('Inspect.\n\n');
   });
 
-  test('ignores shorter replayed thinking snapshots after whitespace normalization', () => {
-    expect(
-      mergeThinkingStreamContent(
-        '用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动\n3. 食物生成',
-        '用户要求我写一个贪吃蛇游戏，包括： 1. 游戏窗口'
-      )
-    ).toBe('用户要求我写一个贪吃蛇游戏，包括：\n\n1. 游戏窗口\n2. 蛇的移动\n3. 食物生成');
+  test('an empty completion frame leaves the complete body intact', () => {
+    expect(mergeThinkingStreamContent('Inspect.\nVerify.', '')).toBe('Inspect.\nVerify.');
   });
 
   test('stringifies malformed thinking stream chunks instead of throwing', () => {

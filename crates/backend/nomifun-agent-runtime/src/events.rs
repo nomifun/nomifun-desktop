@@ -257,6 +257,33 @@ pub enum AgentEngineEvent {
     },
 }
 
+impl AgentEngineEvent {
+    /// Display-only reasoning lifecycle. `None` leaves the current phase alone;
+    /// `Some(None)` closes it, and `Some(Some(step))` starts or resumes that step.
+    /// Live publication and canonical history use the same typed transitions.
+    pub fn reasoning_display_transition(&self) -> Option<Option<u16>> {
+        match self {
+            Self::ReasoningDelta { step, .. } => Some(Some(*step)),
+            Self::ModelStepStarted { .. }
+            | Self::ExecutionResumed { .. }
+            | Self::OutputTextDelta { .. }
+            | Self::CompletionDelivered { .. }
+            | Self::ToolCallDelta { .. }
+            | Self::ToolCallCompleted { .. }
+            | Self::ToolStarted { .. }
+            | Self::ModelOutputTruncated { .. }
+            | Self::ModelResponseRejected { .. }
+            | Self::DeliveryReviewSuperseded { .. }
+            | Self::VoiceModelStepSuperseded { .. }
+            | Self::TurnCompleted { .. }
+            | Self::TurnCancelled { .. }
+            | Self::TurnPaused { .. }
+            | Self::TurnFailed { .. } => Some(None),
+            _ => None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait AgentEventSink: Send + Sync {
     async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError>;

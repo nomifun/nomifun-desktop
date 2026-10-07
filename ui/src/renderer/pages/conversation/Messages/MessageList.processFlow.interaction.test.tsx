@@ -8,7 +8,8 @@ import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
 import MessageList from './MessageList';
-import { MessageListProvider, MessageListLoadingProvider, useMessageLstCache, useUpdateMessageList } from './hooks';
+import { MessageListProvider, MessageListLoadingProvider, useMessageLstCache, useUpdateMessageList, useAddOrUpdateMessage } from './hooks';
+import { configService } from '@/common/config/configService';
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
 import { ipcBridge } from '@/common';
 import agentExecutionLocale from '@/renderer/services/i18n/locales/en-US/agentExecution.json';
@@ -190,6 +191,58 @@ test('a live journal only animates its current thought and preserves completed t
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
   page.rerender(view(false));
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
+});
+
+test('compact thinking resumes in its stable row after narration and a delayed old Turn cannot stop the clock', async () => {
+  const config = spyOn(configService, 'get').mockImplementation(((key: string) =>
+    key === 'chat.thinking.contentLength' ? 'compact' : undefined) as typeof configService.get);
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const thought: TMessage = { ...base, id: 'step-thought', msg_id: messageId(2), type: 'thinking',
+    created_at: Date.now() - 1000, content: { content: 'Inspect. ', status: 'thinking' } };
+  const messages: TMessage[] = [
+    { ...base, id: 'user', msg_id: turnId, type: 'text', position: 'right',
+      created_at: Date.now() - 2000, content: { content: 'Inspect the files' } },
+    thought,
+  ];
+  const StreamControls = () => {
+    const add = useAddOrUpdateMessage();
+    return <>
+      <button onClick={() => {
+        add({ ...thought, id: 'thought-done', content: { content: '', status: 'done' } });
+        add({ ...base, id: 'narration', msg_id: messageId(3), type: 'text', content: { content: 'Reading the source.' } });
+      }}>Narrate</button>
+      <button onClick={() => add({ ...thought, id: 'thought-resumed',
+        content: { content: 'Inspect. ', status: 'thinking' } })}>Resume reasoning</button>
+      <button onClick={() => add({ ...base, id: 'delayed-old', msg_id: messageId(7), turn_id: messageId(8),
+        type: 'thinking', content: { content: 'Prior task.', status: 'done' } })}>Deliver older event</button>
+    </>;
+  };
+  try {
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+      <PreviewProvider persistNamespace='compact-resumed-thought-test' subscribeGlobalOpen={false}>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true,
+          isProcessing: true, activeTurnId: turnId, activeRequestMessageId: turnId }}>
+          <MessageListProvider initialValue={messages}><MessageList /><StreamControls /></MessageListProvider>
+        </ConversationProvider>
+      </PreviewProvider>
+    </I18nextProvider></MemoryRouter>);
+    const thinking = () => page.container.querySelector('[data-thinking-process-state]')!;
+    expect(thinking().getAttribute('data-thinking-body-length')).toBe('compact');
+    expect(thinking().getAttribute('data-thinking-process-state')).toBe('running');
+    fireEvent.click(page.getByRole('button', { name: 'Narrate' }));
+    await waitFor(() => expect(thinking().getAttribute('data-thinking-process-state')).toBe('completed'));
+    fireEvent.click(page.getByRole('button', { name: 'Resume reasoning' }));
+    await waitFor(() => expect(thinking().getAttribute('data-thinking-process-state')).toBe('running'));
+    expect(page.container.querySelectorAll('[data-thinking-process-state]')).toHaveLength(1);
+    expect(thinking().getAttribute('data-thinking-process-state')).toBe('running');
+    expect(thinking().querySelector('[data-thinking-process-header]')?.textContent).toContain('Thinking...');
+    expect(thinking().querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('Inspect. Inspect.');
+    expect(page.container.querySelector('.turn-process-disclosure__item--thinking.turn-process-disclosure__item--current')).not.toBeNull();
+    fireEvent.click(page.getByRole('button', { name: 'Deliver older event' }));
+    await waitFor(() => expect(page.container.querySelectorAll('.turn-process-disclosure')).toHaveLength(2));
+    expect(page.container.querySelector('.turn-process-disclosure--live')).not.toBeNull();
+    expect(thinking().getAttribute('data-thinking-process-state')).toBe('running');
+  } finally { config.mockRestore(); }
 });
 
 test('canonical terminal metadata closes stale thinking while the session still reports processing', () => {

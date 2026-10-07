@@ -223,26 +223,16 @@ impl TurnProjection {
         // This runs only after the typed transition is recorded by the host.
         // Closing one reasoning phase does not complete the enclosing Turn;
         // its terminal remains owned by the cleanup and receipt path.
-        match &event {
-            AgentEngineEvent::ReasoningDelta { step, .. } => {
+        match event.reasoning_display_transition() {
+            Some(Some(step)) => {
                 let previous = *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner());
-                if previous.is_some_and(|previous| previous != *step) {
+                if previous.is_some_and(|previous| previous != step) {
                     self.complete_thinking();
                 }
-                *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()) = Some(*step);
+                *self.thinking_step.lock().unwrap_or_else(|e| e.into_inner()) = Some(step);
             }
-            AgentEngineEvent::ModelStepStarted { .. }
-            | AgentEngineEvent::ExecutionResumed { .. }
-            | AgentEngineEvent::OutputTextDelta { .. }
-            | AgentEngineEvent::CompletionDelivered { .. }
-            | AgentEngineEvent::ToolCallDelta { .. }
-            | AgentEngineEvent::ToolCallCompleted { .. }
-            | AgentEngineEvent::ToolStarted { .. }
-            | AgentEngineEvent::ModelOutputTruncated { .. }
-            | AgentEngineEvent::ModelResponseRejected { .. }
-            | AgentEngineEvent::DeliveryReviewSuperseded { .. }
-            | AgentEngineEvent::VoiceModelStepSuperseded {..} => self.complete_thinking(),
-            _ => {}
+            Some(None) => self.complete_thinking(),
+            None => {}
         }
         let projected = match event {
             // The host has committed the full plan. Re-read the canonical
@@ -1004,7 +994,37 @@ mod tests {
         assert_eq!(next.step, Some(2));
         assert_eq!(next.status.as_deref(), Some("thinking"));
 
-        projection.emit(AgentEngineEvent::TurnCancelled { model_steps: 2 }).await.unwrap();
+        let model_operation_id = OperationId::from("model:2");
+        let task = tokio::spawn(async {});
+        let task_id = task.id().to_string();
+        task.await.unwrap();
+        projection.emit(AgentEngineEvent::VoiceModelStepSuperseded {
+            step: 2,
+            model_operation_id: model_operation_id.clone(),
+            steering_receipt_ids: vec!["voice-steer".into()],
+            discarded_tool_call_ids: vec![],
+            cleanup: nomifun_chat_model_broker::OwnedModelCleanupReceipt {
+                operation_id: model_operation_id,
+                task_id,
+                stage: nomifun_chat_model_broker::OwnedModelCleanupStage::Producer,
+                outcome: nomifun_chat_model_broker::OwnedModelCleanupOutcome::Joined,
+            },
+        }).await.unwrap();
+        let AgentStreamEvent::Thinking(completed) = events.try_recv().unwrap() else {
+            panic!("expected withdrawn voice model step to close its reasoning");
+        };
+        assert_eq!(completed.step, Some(2));
+        assert_eq!(completed.status.as_deref(), Some("done"));
+        assert!(events.try_recv().is_err());
+        assert_eq!(state.status(), Some(ConversationStatus::Running));
+
+        projection.emit(AgentEngineEvent::ReasoningDelta { step: 3, text: "Use the corrected input".into() }).await.unwrap();
+        let AgentStreamEvent::Thinking(corrected) = events.try_recv().unwrap() else {
+            panic!("expected reasoning from the replacement model step");
+        };
+        assert_eq!(corrected.step, Some(3));
+        assert_eq!(corrected.status.as_deref(), Some("thinking"));
+        projection.emit(AgentEngineEvent::TurnCancelled { model_steps: 3 }).await.unwrap();
         assert!(events.try_recv().is_err(), "deferred terminal must not publish before the owner receipt");
         assert_eq!(state.status(), Some(ConversationStatus::Running));
     }
