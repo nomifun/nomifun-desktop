@@ -8,6 +8,7 @@ import type { IMessageToolCall } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolCall } from '@/common/chat/normalizeToolCall';
 import type { NormalizedToolStatus } from '@/common/chat/normalizeToolCall';
+import { formatToolDiagnostics, resolveToolPresentation } from '@/common/chat/toolPresentation';
 import KnowledgeSearchChip from './KnowledgeSearchChip';
 import FileChangesPanel from '@/renderer/components/base/FileChangesPanel';
 import LocalImageView from '@/renderer/components/media/LocalImageView';
@@ -17,6 +18,7 @@ import { Badge } from '@arco-design/web-react';
 import { IconDown, IconRight } from '@arco-design/web-react/icon';
 import { createTwoFilesPatch } from 'diff';
 import React, { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { BadgeProps } from '@arco-design/web-react';
 import './MessageToolDetails.css';
 
@@ -58,6 +60,7 @@ const ReplacePreview: React.FC<{ message: IMessageToolCall }> = ({ message }) =>
 };
 
 const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) => {
+  const { t, i18n } = useTranslation();
   const { name, artifacts = [] } = message.content;
   const [expanded, setExpanded] = useState(false);
 
@@ -75,7 +78,7 @@ const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) =
   }
 
   const visibleArtifacts = normalized.status === 'completed' ? artifacts : [];
-  const hasDetail = normalized.input || normalized.output || visibleArtifacts.length > 0;
+  const presentation = resolveToolPresentation(normalized, i18n.resolvedLanguage ?? i18n.language);
 
   return (
     <div className='flex flex-col'>
@@ -88,21 +91,19 @@ const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) =
           className={
             'flex-1 min-w-0' +
             (expanded ? ' break-all' : ' truncate') +
-            (hasDetail ? ' cursor-pointer hover:color-#4E5969' : '')
+            ' cursor-pointer hover:color-#4E5969'
           }
-          onClick={hasDetail ? () => setExpanded(!expanded) : undefined}
+          onClick={() => setExpanded(!expanded)}
         >
-          <span className='font-medium text-13px'>{normalized.name}</span>
-          {normalized.description && <span className='m-l-4px opacity-80 text-13px'>{normalized.description}</span>}
+          <span className='font-medium text-13px'>{presentation.title}</span>
+          {presentation.target && <span className='m-l-4px opacity-80 text-13px'>· {presentation.target}</span>}
         </span>
-        {hasDetail && (
-          <span
-            className='flex-shrink-0 cursor-pointer hover:color-#4E5969 transition-colors'
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? <IconDown style={{ fontSize: 12 }} /> : <IconRight style={{ fontSize: 12 }} />}
-          </span>
-        )}
+        <span
+          className='flex-shrink-0 cursor-pointer hover:color-#4E5969 transition-colors'
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? <IconDown style={{ fontSize: 12 }} /> : <IconRight style={{ fontSize: 12 }} />}
+        </span>
       </div>
       {visibleArtifacts.length > 0 && (
         <div className='tool-artifacts m-l-20px m-t-6px'>
@@ -127,17 +128,21 @@ const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) =
           ))}
         </div>
       )}
-      {expanded && hasDetail && (
+      {expanded && (
         <div className='tool-detail-panel m-l-20px m-t-4px'>
+          <div className='tool-detail-section'>
+            <div className='tool-detail-label'>{t('messages.toolDetailIdentity')}</div>
+            <pre className='tool-detail-content'>{formatToolDiagnostics(presentation)}</pre>
+          </div>
           {normalized.input && (
             <div className='tool-detail-section'>
-              <div className='tool-detail-label'>Input</div>
+              <div className='tool-detail-label'>{t('messages.toolDetailInput')}</div>
               <pre className='tool-detail-content'>{normalized.input}</pre>
             </div>
           )}
           {normalized.output && (
             <div className='tool-detail-section'>
-              <div className='tool-detail-label'>Output</div>
+              <div className='tool-detail-label'>{t('messages.toolDetailOutput')}</div>
               <pre className='tool-detail-content'>{normalized.output}</pre>
             </div>
           )}

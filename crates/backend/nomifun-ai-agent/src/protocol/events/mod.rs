@@ -244,6 +244,10 @@ mod tests {
     #[test]
     fn tool_call_event_roundtrip() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: tool_call::ToolCallIdentity {
+                capability_id: Some("workspace.files".into()),
+                action_id: Some("workspace.files/read".into()),
+            },
             call_id: "call-1".into(),
             name: "read_file".into(),
             args: json!({ "path": "/tmp/a.txt" }),
@@ -258,11 +262,18 @@ mod tests {
         assert_eq!(json["type"], "tool_call");
         assert_eq!(json["data"]["call_id"], "call-1");
         assert_eq!(json["data"]["status"], "running");
+        assert_eq!(json["data"]["capability_id"], "workspace.files");
+        assert_eq!(json["data"]["action_id"], "workspace.files/read");
+        let parsed: AgentStreamEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(parsed, AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: tool_call::ToolCallIdentity { action_id: Some(action), .. }, ..
+        }) if action == "workspace.files/read"));
     }
 
     #[test]
     fn tool_call_event_includes_enriched_fields() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "Glob".into(),
             args: json!({}),
@@ -283,6 +294,7 @@ mod tests {
     #[test]
     fn tool_call_retry_identity_roundtrips_and_legacy_events_default_to_none() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "nomi-call-2".into(),
             name: "nomi_delegate".into(),
             args: json!({ "strategy": "parallel" }),
@@ -330,6 +342,7 @@ mod tests {
     #[test]
     fn tool_call_event_omits_none_fields() {
         let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            identity: Default::default(),
             call_id: "call-1".into(),
             name: "Glob".into(),
             args: json!({}),

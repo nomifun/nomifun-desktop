@@ -12,6 +12,7 @@
   "toolGroupViewSteps": "View Steps",
   "toolDetailInput": "Input",
   "toolDetailOutput": "Output",
+  "toolDetailIdentity": "Call identity",
   "delegation": {
     "title": "Subagent tasks",
     "activity": "Subagents: {{status}}",

@@ -6,6 +6,7 @@
 
 import type { IMessageToolCall } from '@/common/chat/chatLib';
 import { normalizeToolCall } from '@/common/chat/normalizeToolCall';
+import { formatToolDiagnostics, resolveToolPresentation } from '@/common/chat/toolPresentation';
 import { IconDown, IconRight } from '@arco-design/web-react/icon';
 import { BookOne } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
@@ -24,11 +25,13 @@ function parseHitCount(output: string | undefined): number | null {
 }
 
 const KnowledgeSearchChip: React.FC<{ message: IMessageToolCall }> = ({ message }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = useState(false);
 
   const query = String(message.content.args?.query ?? message.content.input?.query ?? '').trim();
   const normalized = normalizeToolCall(message);
+  const presentation = resolveToolPresentation(normalized ?? { name: message.content.name },
+    i18n.resolvedLanguage ?? i18n.language);
   const output = normalized?.output;
   const status = normalized?.status;
   const count = useMemo(() => parseHitCount(output), [output]);
@@ -41,7 +44,7 @@ const KnowledgeSearchChip: React.FC<{ message: IMessageToolCall }> = ({ message 
     return null;
   })();
 
-  const canExpand = Boolean(output);
+  const canExpand = Boolean(normalized);
 
   return (
     <div className='flex flex-col'>
@@ -52,14 +55,19 @@ const KnowledgeSearchChip: React.FC<{ message: IMessageToolCall }> = ({ message 
         <span className='flex-shrink-0 inline-flex'>
           <BookOne theme='outline' size='14' fill='currentColor' />
         </span>
-        <span className='font-medium text-t-primary flex-shrink-0'>{t('knowledge.searchChip.label')}</span>
+        <span className='font-medium text-t-primary flex-shrink-0'>{presentation.title}</span>
         {query && <span className='text-t-secondary truncate'>{t('knowledge.searchChip.query', { query })}</span>}
         {statusNode && <span className='flex-shrink-0 m-l-2px'>{statusNode}</span>}
         {canExpand && <span className='flex-shrink-0 text-t-secondary'>{expanded ? <IconDown style={{ fontSize: 12 }} /> : <IconRight style={{ fontSize: 12 }} />}</span>}
       </div>
-      {expanded && output && (
+      {expanded && canExpand && (
         <div className='tool-detail-panel m-l-20px m-t-4px'>
-          <pre className='tool-detail-content'>{output}</pre>
+          <div className='tool-detail-label'>{t('messages.toolDetailIdentity')}</div>
+          <pre className='tool-detail-content'>{formatToolDiagnostics(presentation)}</pre>
+          {output && <>
+            <div className='tool-detail-label'>{t('messages.toolDetailOutput')}</div>
+            <pre className='tool-detail-content'>{output}</pre>
+          </>}
         </div>
       )}
     </div>
